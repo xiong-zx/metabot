@@ -7,12 +7,25 @@ function createLogger() {
   return logger;
 }
 
+const REGISTRY_ENV_KEYS = [
+  'METABOT_CORE_AGENT_BUS_URL',
+  'METABOT_CORE_TOKEN',
+  'METABOT_AGENT_SELF_URL',
+  'METABOT_AGENT_TALK_SECRET',
+] as const;
+
+function clearRegistryEnv() {
+  for (const k of REGISTRY_ENV_KEYS) delete process.env[k];
+}
+
 describe('PeerManager', () => {
   let manager: PeerManager;
 
   afterEach(() => {
     if (manager) manager.destroy();
     vi.restoreAllMocks();
+    vi.useRealTimers();
+    clearRegistryEnv();
   });
 
   it('initializes with empty peer bots', () => {
@@ -258,5 +271,176 @@ describe('PeerManager', () => {
 
     const bots = manager.getPeerBots();
     expect(bots[0].peerUrl).toBe('http://localhost:9200');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Registry mode (METABOT_CORE_AGENT_BUS_URL set) — discovery via central
+  // /api/agents endpoint.
+  // ---------------------------------------------------------------------------
+
+  describe('registry mode (METABOT_CORE_AGENT_BUS_URL)', () => {
+    it('self-registers on construct when registry env is configured', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
+      process.env.METABOT_AGENT_TALK_SECRET = 'self-talk-secret';
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({}),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], createLogger());
+
+      // Let the unawaited selfRegisterWithRetry() microtask run.
+      await new Promise((r) => setImmediate(r));
+
+      const registerCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents') && c[1]?.method === 'POST',
+      );
+      expect(registerCall, 'expected POST /api/agents from self-register').toBeDefined();
+      const [registerUrl, registerInit] = registerCall!;
+      expect(registerUrl).toBe('https://metabot.example.com/core/api/agents');
+      expect((registerInit as RequestInit).headers).toMatchObject({
+        'Authorization': 'Bearer core-bearer',
+        'Content-Type': 'application/json',
+      });
+      expect(JSON.parse((registerInit as RequestInit).body as string)).toEqual({
+        url: 'http://self.example:9100',
+        talkSecret: 'self-talk-secret',
+        visible: true,
+      });
+    });
+
+    it('emits POST /api/agents/heartbeat every 60s', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
+      process.env.METABOT_AGENT_TALK_SECRET = 'self-talk-secret';
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({}),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      vi.useFakeTimers();
+      manager = new PeerManager([], createLogger());
+
+      // Drain the immediate self-register POST.
+      await vi.advanceTimersByTimeAsync(0);
+      fetchMock.mockClear();
+
+      // Tick forward by the heartbeat interval.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const heartbeatCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/heartbeat'),
+      );
+      expect(heartbeatCall, 'expected POST /api/agents/heartbeat after 60s').toBeDefined();
+      const [, hbInit] = heartbeatCall!;
+      expect((hbInit as RequestInit).method).toBe('POST');
+      expect((hbInit as RequestInit).headers).toMatchObject({
+        'Authorization': 'Bearer core-bearer',
+      });
+    });
+
+    it('drives peer list from GET /api/agents response', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      // SELF_URL deliberately unset → no self-register, no heartbeat — keeps
+      // this test focused on the registry-discovery path.
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url === 'https://metabot.example.com/core/api/agents') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              agents: [
+                { botName: 'alice', url: 'http://alice:9100', talkSecret: 'sec-a', visible: true, lastSeenAt: 'now' },
+              ],
+            }),
+          });
+        }
+        // Subsequent refreshAll() will hit http://alice:9100/api/bots + /api/skills
+        if (url === 'http://alice:9100/api/bots') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              bots: [{ name: 'alice-bot', platform: 'feishu', workingDirectory: '/work/alice' }],
+            }),
+          });
+        }
+        if (url === 'http://alice:9100/api/skills') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
+        }
+        return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], createLogger());
+
+      // Drive one poll tick manually (the timer interval is 30s; we trigger
+      // the same code path directly via the private method).
+      await (manager as any).runPollTick();
+
+      const peers = manager.getPeerStatuses();
+      expect(peers.map((p) => p.name).sort()).toEqual(['alice']);
+      const alicePeer = peers.find((p) => p.name === 'alice');
+      expect(alicePeer!.url).toBe('http://alice:9100');
+      expect(alicePeer!.healthy).toBe(true);
+
+      const bots = manager.getPeerBots();
+      expect(bots).toHaveLength(1);
+      expect(bots[0].name).toBe('alice-bot');
+      expect(bots[0].peerName).toBe('alice');
+    });
+
+    it('falls back to static configs when GET /api/agents fails', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url === 'https://metabot.example.com/core/api/agents') {
+          return Promise.reject(new Error('ECONNREFUSED'));
+        }
+        if (url === 'http://static-peer:9100/api/bots') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              bots: [{ name: 'static-bot', platform: 'feishu', workingDirectory: '/work/static' }],
+            }),
+          });
+        }
+        if (url === 'http://static-peer:9100/api/skills') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
+        }
+        return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const logger = createLogger();
+      manager = new PeerManager(
+        [{ name: 'static', url: 'http://static-peer:9100' }],
+        logger,
+      );
+
+      await (manager as any).runPollTick();
+
+      // Static peer survived the failed registry fetch.
+      const peers = manager.getPeerStatuses();
+      expect(peers.map((p) => p.name)).toContain('static');
+      const staticPeer = peers.find((p) => p.name === 'static');
+      expect(staticPeer!.healthy).toBe(true);
+      expect(manager.getPeerBots().some((b) => b.name === 'static-bot')).toBe(true);
+
+      // A single warn fired for the agent-bus failure.
+      const warnCalls = (logger.warn as any).mock.calls;
+      const sawFallbackWarn = warnCalls.some((c: any[]) =>
+        typeof c[1] === 'string' && c[1].includes('agent bus unreachable'),
+      );
+      expect(sawFallbackWarn).toBe(true);
+    });
   });
 });

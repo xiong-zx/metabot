@@ -190,9 +190,12 @@ async function main() {
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);
 
-  // Initialize peer manager for cross-instance bot discovery
+  // Initialize peer manager for cross-instance bot discovery.
+  // Registry mode (env METABOT_CORE_AGENT_BUS_URL) lets the bridge boot
+  // peerManager even with zero static peers — it discovers them via the
+  // central /api/agents endpoint on the first poll tick.
   let peerManager: PeerManager | undefined;
-  if (appConfig.peers.length > 0) {
+  if (appConfig.peers.length > 0 || process.env.METABOT_CORE_AGENT_BUS_URL) {
     peerManager = new PeerManager(appConfig.peers, logger);
     await peerManager.refreshAll();
     const statuses = peerManager.getPeerStatuses();
