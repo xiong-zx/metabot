@@ -145,6 +145,28 @@ Feishu/TG/WeChat → IM Bridge → Engine Router ──┬─→ Claude Code Age
 
 The engine layer is abstracted — Kimi's event stream and Codex's JSONL stream are both translated into Claude-shaped `SDKMessage` objects, so streaming cards, tool-call tracking, MetaMemory/Scheduler/Agent Bus behave identically across all three engines.
 
+## Monorepo Layout
+
+As of 2026-05-19, MetaBot absorbed `metabot-core` into a single npm-workspaces monorepo. The bridge runtime stays at the repo root; the central-service half lives under `packages/`:
+
+```
+metabot/                       # repo root — bridge runtime (bot hosts run this under PM2)
+├── src/                       # bridge engine, stream processing, Feishu/Telegram/WeChat bridges
+├── bin/                       # CLI dispatcher (metabot / mb / mm / doubao-tts)
+├── web/                       # bridge's own browser SPA
+├── packages/                  # absorbed metabot-core
+│   ├── server/                # central HTTP backend (ECS deploy unit)
+│   ├── cli/                   # `metabot <subcommand>` feature CLI
+│   ├── web-ui/                # central SPA (Vite, served from server/static/)
+│   ├── cli-core/              # shared HTTP client building blocks
+│   ├── metamemory/            # thin client for /api/memory/*
+│   ├── skill-hub/             # thin client for /api/skills/*
+│   └── skills/                # default skill bundle source (metabot SKILL.md)
+└── docs/                      # all docs (including absorbed docs/metabot-core/)
+```
+
+The two halves communicate **only over HTTP `/api/*`** — cross-package imports are blocked by ESLint `no-restricted-imports` plus a tight `packages/server/package.json` exports lock. A bot-host `install.sh` installs only the bridge + CLI/CLI-Core dependency closure — server-only deps (fastify / react / vite / server-side better-sqlite3) are **not** pulled. Central-server deployment still uses `cd packages/server && bash deploy/install.sh` (the script uses `$PKG_DIR` and is unaffected by the source-path move).
+
 | Client | Use Case | Key Features |
 |--------|----------|-------------|
 | **Feishu/Lark** | Work, team collaboration | Streaming interactive cards, @mention routing, Wiki auto-sync |
@@ -475,18 +497,21 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 <details>
 <summary><strong>CLI Tools</strong></summary>
 
-The installer places `metabot`, `mb` in `~/.local/bin/` — available immediately. `mm` (MetaMemory CLI) and `mh` (Skill Hub CLI) ship with [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) and are installed separately.
+The installer places `metabot`, `mb` in `~/.local/bin/` — available immediately. `metabot` is the unified dispatcher: bridge process-control subcommands (`update` / `start` / `stop` / `restart` / `logs` / `status`) are handled in-script; everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
 
 ```bash
-# MetaBot management
+# MetaBot management (handled in-script by bin/metabot)
 metabot update                      # pull latest, rebuild, restart
 metabot start / stop / restart      # PM2 management
 metabot logs                        # view live logs
+metabot status                      # PM2 process status
 
-# MetaMemory (mm/mh CLIs ship with metabot-core)
-mm search "deployment guide"        # full-text search
-mm list                             # list documents
-mm folders                          # folder tree
+# Feature subcommands (forwarded to packages/cli/bin/metabot)
+metabot t5t board                   # team standup board
+metabot agents list                 # peer-bot directory
+metabot memory search "deployment guide"   # shared-memory full-text search
+metabot skills list                 # skill registry
+# Override CLI path: export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 
 # Agent Bus
 mb bots                             # list all bots
@@ -513,7 +538,7 @@ mb skills install <skill> <bot>       # install skill to a bot
 mb voice "Hello world" --play
 ```
 
-CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` in `~/.metabot/.env`. The MetaMemory CLI is configured separately; see the metabot-core README.
+CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` in `~/.metabot/.env`. MetaMemory / Skill Hub / Agents / T5T all live in central metabot-core inside this monorepo at `packages/server/`; configure `METABOT_CORE_URL` + `METABOT_CORE_TOKEN`, get a token at `<METABOT_CORE_URL>/cli`.
 
 </details>
 

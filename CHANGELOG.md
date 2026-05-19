@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Monorepo merge** — absorbed `xvirobotics/metabot-core` into this repo as an npm-workspaces monorepo under `packages/`. The central HTTP server, feature CLI, central SPA, and shared clients now live alongside the bridge runtime. Bot-host installs no longer clone a sibling repo; `metabot update` does a single pull + build. HTTP `/api/*` remains the only boundary between bridge and server halves, enforced by `package.json` exports, ESLint `no-restricted-imports`, and start-script contracts. ECS server source path moves from `~/metabot-workspace/metabot-core` to `~/metabot/packages/server`. Per-file history preserved via subtree-merge (MR !8, squash `3766982f`).
+
 ### Added
 - `install.sh`: `--dir <path>` / `-d <path>` flag to customize the install directory (priority: `--dir` > `METABOT_HOME` env > interactive prompt > `~/metabot`). Non-default paths are persisted to `~/.bashrc` / `~/.zshrc` so the `mb`/`mm`/`metabot` CLIs find the install in new shells.
 - `install.ps1`: matching `-Dir <path>` parameter on Windows; non-default paths persisted via user-level `METABOT_HOME` environment variable.

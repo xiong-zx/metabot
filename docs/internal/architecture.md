@@ -4,6 +4,40 @@
 
 The app is a TypeScript ESM project (`"type": "module"`, all imports use `.js` extensions). It connects to Feishu via WebSocket (long connection, no public IP needed) and calls Claude via the `@anthropic-ai/claude-agent-sdk`.
 
+## Monorepo Layout
+
+Since 2026-05-19, this repo is an npm-workspaces monorepo. Two tenants, one repo, one HTTP boundary:
+
+```
+metabot/                        # repo root, workspace member (= the bridge runtime)
+├── src/, bin/, web/, tests/    # bridge — runs on bot hosts under PM2
+└── packages/                   # absorbed metabot-core (subtree-merged, history preserved)
+    ├── server/                 # central HTTP backend — runs on ECS 172.31.32.2 under systemd
+    ├── cli/                    # `metabot <subcommand>` impl (Node)
+    ├── web-ui/                 # central SPA (Vite → packages/server/static/)
+    ├── cli-core/               # shared HTTP client + auth + config
+    ├── metamemory/             # /api/memory/* thin client
+    ├── skill-hub/              # /api/skills/* thin client
+    └── skills/                 # default skill bundle source
+```
+
+**Boundary rule**: bridge code (`src/`, `tests/`) MUST NOT import anything under `packages/server/`. Cross-package communication goes through HTTP `/api/*` only. The boundary is enforced by three defensive lines:
+
+1. **`packages/server/package.json` exports lock** — only `./package.json` is exported; runtime imports of server internals fail with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+2. **ESLint `no-restricted-imports`** — applied to `src/**` and `tests/**`; blocks `@xvirobotics/metabot-core-server/*` and any `../packages/server/*` relative path. Includes `import type`.
+3. **Start-script contracts** — PM2 `ecosystem.config.cjs` runs only the bridge's `dist/index.js`. ECS systemd unit runs only `/opt/metabot-core/dist/index.js` (copied from `packages/server/dist/`). Different cwds, different intents, no overlap.
+
+**Build commands**:
+- Root `npm run build` → builds the bridge web SPA, runs `tsc -b --force` across the bridge + all workspaces, and builds the central web UI.
+- `cd packages/server && npm run build && npm start` to develop the central server in isolation.
+- Bot-host `install.sh` skips workspace dependencies it doesn't need, so server-only packages (fastify / react / vite / server-side better-sqlite3) are not pulled onto bridge hosts.
+
+**Deploy paths** (operator runbook — updated after monorepo merge):
+- ECS server source path: `cd ~/metabot && bash packages/server/deploy/install.sh` (previously `~/metabot-workspace/metabot-core`).
+- The `deploy/install.sh` itself is unchanged — it operates on `$PKG_DIR` (its own cwd), so the source-path move is transparent.
+
+**History preservation**: subtree-merged via `git subtree add` WITHOUT `--squash` (see commit `06698ea`), so `git log --all -- packages/server/src/server.ts` walks back into pre-merge metabot-core history.
+
 ## Message Flow
 
 ```

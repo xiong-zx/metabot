@@ -6,6 +6,8 @@ Guidance for Claude Code (claude.ai/code) when working in this repo. Behavior + 
 
 MetaBot — a bridge service that connects IM bots (Feishu/Lark) to the Claude Code Agent SDK. Users chat with Claude Code from Feishu (including mobile), with real-time streaming updates via interactive cards. Runs Claude in `bypassPermissions` mode (or `auto` mode when running as root) since there's no terminal for interactive approval.
 
+This repo is a **monorepo**. The bridge runtime lives at the repo root (`src/`, `bin/`, `web/`, ...). The absorbed `metabot-core` half (ECS HTTP server, CLI, central SPA, shared HTTP clients, skill bundle) lives under `packages/`. The two halves communicate **only** over HTTP `/api/*` — never via in-process imports. See [docs/internal/architecture.md §Monorepo layout](docs/internal/architecture.md) for the boundary rules.
+
 Deep reference (don't paste back into context unless needed):
 - Architecture: [docs/internal/architecture.md](docs/internal/architecture.md)
 - Feishu app setup: [docs/internal/feishu-setup.md](docs/internal/feishu-setup.md)
@@ -21,28 +23,17 @@ Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
 | Name | Domain |
 |---|---|
 | `lead-architect` | Strategy, roadmap, ADRs, prioritization, cross-cutting design |
-| `backend-engineer` | Node/TS server code (`src/`) — engines, executors, bridges, APIs, skills, sync |
-| `frontend-engineer` | Web UI (`web/`), Feishu/Telegram/WeChat card builders, voice mode |
+| `backend-engineer` | Node/TS server code (`src/` for bridge, `packages/server/`, `packages/cli/`, `packages/cli-core/`, `packages/metamemory/`, `packages/skill-hub/`) — engines, executors, bridges, APIs, skills, sync |
+| `frontend-engineer` | Web UI (`web/` for bridge, `packages/web-ui/` for central SPA), Feishu/Telegram/WeChat card builders, voice mode |
 | `qa-reliability` | Tests, smoke validation, regression hunting, observability, CI health |
 
 ### Dispatch vs. do
 
-| Situation | Dispatch or do? |
-|---|---|
-| `git status`, `git log`, reading a single file to answer a Q | DO |
-| Sync `dev` after a teammate's merge (one shell command) | DO |
-| Writing/updating a memory file under `~/.claude/projects/.../memory/` | DO (orchestrator hygiene) |
-| Posting a single pre-approved PR comment | DO |
-| Editing source code in `src/` or `web/` | DISPATCH |
-| Running `npm test` / `npm run build` / `npm run lint` as your own work | DISPATCH (engineer runs it inside their PR workflow) |
-| Opening a PR | DISPATCH |
-| Merging a PR + sync `dev` | DO (one-shell op after greenlight) |
-| Designing a new feature, choosing approach | DISPATCH to `lead-architect` |
-| Verifying a teammate's PR with regression risk | DISPATCH to `qa-reliability` |
-| Pure research / one-off exploration (≤3 queries) | DO via `Glob` / `Grep` |
-| Broad codebase exploration that needs multiple rounds | DISPATCH to `Explore` ad-hoc agent |
-| External-facing actions (3rd-party PR comments, force-push, deploy) | CONFIRM with user first |
-| User explicitly says "你自己来" / "你来写" | DO |
+**DO yourself**: `git status` / `git log`, reading a single file to answer a question, syncing `dev` after a teammate merge, writing memory files, one pre-approved PR comment, merging a green PR.
+
+**DISPATCH**: any source-code edit in `src/` / `web/` / `packages/**`, running `npm test` / `npm run build` / `npm run lint` as your own work, opening a PR, designing a new feature (→ `lead-architect`), verifying a PR with regression risk (→ `qa-reliability`), broad codebase exploration that needs multiple rounds (→ `Explore` ad-hoc agent).
+
+**CONFIRM with user first** for external-facing actions (3rd-party PR comments, force-push, deploy). If the user explicitly says "你自己来" / "你来写", DO.
 
 ### How to dispatch
 
@@ -53,14 +44,14 @@ Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
 ### Definition of done — per role
 
 **lead-architect** before going idle:
-- Spec is concrete enough that an engineer can execute without follow-up questions.
+- Spec concrete enough that an engineer can execute without follow-up questions.
 - Tradeoffs and rejected alternatives stated.
-- A teammate has been dispatched, OR "design only" reported back to team-lead.
+- Teammate dispatched, OR "design only" reported back to team-lead.
 
 **backend-engineer** / **frontend-engineer** before going idle:
-- Code change committed on a feature branch off `dev`.
+- Code change committed on a feature branch off `main` (PRs target `main`; `dev` is synced after merge).
 - `npm run build && npm test && npm run lint` all green locally.
-- README.md / README_zh.md / CLAUDE.md updated when user-facing behavior, API, CLI, or architecture changed.
+- README.md / README_EN.md / CLAUDE.md updated when user-facing behavior, API, CLI, or architecture changed.
 - PR opened against `main`, CI watched; merged + `dev` synced once green.
 - Report PR URL + merge SHA back to team-lead.
 
@@ -72,9 +63,9 @@ Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
 
 ### Operational notes
 
-- **Silent-idle pattern**: teammates sometimes go idle without sending a completion message. Trust but verify — query the GitLab MR via API or check `git log` / file state directly rather than waiting on a status message. Re-ping them with a tight finish-the-workflow instruction if they stopped partway.
+- **Silent-idle pattern**: teammates sometimes go idle without sending a completion message. Trust but verify — query the GitLab MR via API or check `git log` / file state directly. Re-ping with a tight finish-the-workflow instruction if they stopped partway.
 - **Team-panel UX is broken** on SDK 0.2.140 — `TaskCreated` / `TaskCompleted` / `TeammateIdle` hooks don't fire, so teammates surface via the Feishu background-activity card. Functional, not visual. Known bug; don't debug.
-- **Peek at teammate progress** without disturbing them via `~/.claude/projects/<projDir>/<sessionId>/subagents/agent-*.{jsonl,meta.json}`.
+- **Peek at teammate progress** via `~/.claude/projects/<projDir>/<sessionId>/subagents/agent-*.{jsonl,meta.json}`.
 - **Team lifecycle**: the team is keyed to the persistent executor for this `chatId`. `/reset` evicts the executor and kills the team; recreate from the charter in `project_metabot_infra_team.md`.
 
 ### What the user expects
@@ -86,14 +77,16 @@ Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
 ## Commands
 
 ```bash
-npm run dev          # Development with tsx (hot reload)
-npm run build        # TypeScript compile + build web frontend to dist/
-npm run build:web    # Build web frontend only (Vite → dist/web/)
-npm start            # Run compiled output (dist/index.js)
-npm test             # Run tests (vitest)
-npm run lint         # ESLint check
+npm run dev          # Bridge dev with tsx (hot reload)
+npm run build        # tsc -b (root + workspaces) + build web frontend
+npm run build:web    # Build bridge web frontend only (Vite → dist/web/)
+npm start            # Run bridge compiled output (dist/index.js)
+npm test             # Run bridge + workspace tests (vitest)
+npm run lint         # ESLint check (root + workspaces, enforces HTTP-boundary rule)
 npm run format       # Prettier format
 ```
+
+Workspace-specific build/test/start (e.g. ECS server): `cd packages/server && npm run build && npm start`. Never `node packages/*/dist/...` from the bridge runtime — see boundary rules in [docs/internal/architecture.md](docs/internal/architecture.md).
 
 ## Configuration
 
@@ -102,8 +95,8 @@ Slim summary only — see [docs/internal/architecture.md](docs/internal/architec
 - **Single-bot mode** (default): `.env` with `FEISHU_APP_ID` + `FEISHU_APP_SECRET` (see `.env.example`).
 - **Multi-bot mode**: `BOTS_CONFIG=./bots.json` runs multiple bots in one process (see `bots.example.json`). When set, the `FEISHU_APP_*` env vars are ignored.
 - **PersistentClaudeExecutor** (opt-in): `METABOT_PERSISTENT_EXECUTOR=true` keeps one long-lived `query()` per `chatId` so subagents / Agent Teams / `/background` / `/goal` survive across turns. Per-bot override via `persistentExecutor` in `bots.json`. Observability at `GET /api/executors`.
-- **metabot-core central service**: MetaMemory + Skill Hub + Agents + T5T all live in [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) at `METABOT_CORE_URL` (default `https://metabot-core.xvirobotics.com`). Bearer token from `METABOT_CORE_TOKEN` env or `~/.metabot-core/token` — get one at `<METABOT_CORE_URL>/cli` (SSO + Generate). Claude reads/writes through the unified `metabot` skill (installed by `install.sh` + `metabot update`); the legacy `mm`/`mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles are gone (Phase 4 hard-consolidation).
-- **`metabot` CLI is a dual dispatcher** (`bin/metabot`). Reserved bridge process-control subcommands handled in-script: `update`/`up`, `start`, `stop`, `restart`/`rs`, `logs`/`log`, `status`/`st`, plus bare/`help`/`--help`/`-h` (combined help, no node spawned). Everything else (`t5t`/`agents`/`memory`/`skills` …) delegates to the metabot-core feature CLI via `exec node`. Resolution order: `METABOT_CORE_CLI` (explicit override) → sibling `../metabot-workspace/metabot-core/packages/cli/bin/metabot` → a `metabot-core` bin on PATH. `METABOT_CORE_URL`/`METABOT_CORE_TOKEN` are fed from the bridge `.env` only when not already exported. If unresolved, prints an actionable error + exit 1 (no node stack trace).
+- **metabot-core central service**: MetaMemory + Skill Hub + Agents + T5T live in this repo at `packages/server` (ECS deploy unit) and `packages/web-ui` (central SPA). The bridge talks to it over HTTP at `METABOT_CORE_URL` (default `https://metabot-core.xvirobotics.com`). Bearer token from `METABOT_CORE_TOKEN` env or `~/.metabot-core/token` — get one at `<METABOT_CORE_URL>/cli` (SSO + Generate). Claude reads/writes through the unified `metabot` skill (installed by `install.sh` + `metabot update`); the legacy `mm`/`mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles are gone (Phase 4 hard-consolidation).
+- **`metabot` CLI is a dual dispatcher** (`bin/metabot`). Reserved bridge process-control subcommands handled in-script: `update`/`up`, `start`, `stop`, `restart`/`rs`, `logs`/`log`, `status`/`st`, plus bare/`help`/`--help`/`-h` (combined help, no node spawned). Everything else (`t5t`/`agents`/`memory`/`skills` …) delegates to the metabot-core feature CLI via `exec node`. Resolution order: `METABOT_CORE_CLI` (explicit override) → local `packages/cli/bin/metabot`. `METABOT_CORE_URL`/`METABOT_CORE_TOKEN` are fed from the bridge `.env` only when not already exported. If unresolved, prints an actionable error + exit 1 (no node stack trace).
 
 ## Branching Strategy
 
@@ -119,7 +112,7 @@ Always develop on `dev` (or feature branches off `dev`). Never work directly on 
 For every feature or bug fix, unless the user says otherwise:
 
 1. **Build & Test** — `npm run build`, `npm test`, `npm run lint`. Fix failures before proceeding.
-2. **Update docs** — README.md, README_zh.md, CLAUDE.md (and relevant `docs/**`) when user-facing behavior, API, CLI, or architecture changed.
+2. **Update docs** — README.md, README_EN.md, CLAUDE.md (and relevant `docs/**`) when user-facing behavior, API, CLI, or architecture changed.
 3. **Commit** — descriptive commit on the current branch.
 4. **Push & MR** — push to internal GitLab `origin`; open MR against `main` via the GitLab REST API using `~/.gitlab-token` (PAT) — `POST /api/v4/projects/xvirobotics%2Fmetabot/merge_requests`.
 5. **CI** — poll `GET /api/v4/projects/.../pipelines/<id>/jobs` until all jobs are `success`.
@@ -138,22 +131,17 @@ Orchestrator memory writes are allowed — they're hygiene, not work. All files 
 
 **Folder convention — when to write each type:**
 
-- `user_*` — who the user is, role, knowledge, durable preferences. Write when you learn a new lasting fact about the user.
-- `feedback_*` — guidance the user gave (correction OR confirmation). Body must include **Why:** and **How to apply:** lines. Write after the user corrects you, or after they validate a non-obvious choice you made.
-- `project_*` — current initiatives, deadlines, stakeholders. Decay fast — keep **Why:** + **How to apply:**. Write when scope/priority/timeline changes.
-- `decision_*` — ADR-like records of why a path was chosen. **Drop one after every non-trivial PR merge** so future-you doesn't relitigate.
-- `bug_*` — non-obvious bugs with workarounds. Write when you find a footgun another agent would step on.
-- `arch_*` — load-bearing architecture facts not derivable from current code. Write when you uncover an invariant the code alone doesn't reveal.
+- `user_*` — who the user is, role, knowledge, durable preferences.
+- `feedback_*` — guidance the user gave (correction OR confirmation). Body must include **Why:** and **How to apply:** lines.
+- `project_*` — current initiatives, deadlines, stakeholders. Decay fast — keep **Why:** + **How to apply:**.
+- `decision_*` — ADR-like records of why a path was chosen. **Drop one after every non-trivial PR merge**.
+- `bug_*` — non-obvious bugs with workarounds.
+- `arch_*` — load-bearing architecture facts not derivable from current code.
 - `ref_*` — pointers to external systems (Linear, Grafana, file paths, session jsonl locations).
 
-**After every meaningful merge, run the checklist:**
-1. Did this PR fix a non-obvious bug? → `bug_*.md`
-2. Did this PR encode a decision worth preserving? → `decision_*.md`
-3. Did the user redirect priorities or reject an approach? → `feedback_*.md`
-4. Did this PR reveal a load-bearing architecture fact? → `arch_*.md`
-5. Update `MEMORY.md` with a one-line pointer to any new file.
+**After every meaningful merge, run the checklist:** non-obvious bug → `bug_*`; preserved decision → `decision_*`; user redirect → `feedback_*`; load-bearing arch fact → `arch_*`; then update `MEMORY.md` with a one-line pointer.
 
-**Deprecating stale memory**: delete the file AND remove its line from `MEMORY.md`. Don't leave dangling pointers, don't "tombstone" — just remove. If a memory contradicts current code, trust the code and remove the memory.
+**Deprecating stale memory**: delete the file AND remove its line from `MEMORY.md`. Don't tombstone. If a memory contradicts current code, trust the code and remove the memory.
 
 ## Skill-Hub Publish Triggers
 
