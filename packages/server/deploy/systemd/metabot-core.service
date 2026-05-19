@@ -1,0 +1,23 @@
+[Unit]
+Description=MetaBot Core Server (centralized memory + skill hub)
+After=network.target
+
+[Service]
+Type=simple
+User=floodsung
+WorkingDirectory=/vepfs/users/floodsung/metabot-core-data
+EnvironmentFile=-/etc/metabot-core/env
+# ExecStart is patched by install.sh to point at the installed dist/index.js
+ExecStart=/usr/bin/node /opt/metabot-core/dist/index.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/vepfs/users/floodsung/metabot-core-data
+
+[Install]
+WantedBy=multi-user.target

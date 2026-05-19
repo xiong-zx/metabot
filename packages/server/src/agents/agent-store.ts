@@ -1,0 +1,235 @@
+import * as crypto from 'node:crypto';
+import type Database from 'better-sqlite3';
+import type { Logger } from 'pino';
+
+export interface AgentRecord {
+  id: string;
+  botName: string;
+  url: string;
+  visible: boolean;
+  ownerCredentialId: string;
+  registeredAt: string;
+  lastSeenAt: string;
+}
+
+export interface RegisterInput {
+  botName: string;
+  url: string;
+  visible?: boolean;
+  ownerCredentialId: string;
+}
+
+export interface ListOptions {
+  includeHidden?: boolean;
+  now?: number;
+  ttlMs?: number;
+}
+
+export class NameSquatError extends Error {
+  constructor(botName: string) {
+    super(`agent name '${botName}' is already registered by a different credential`);
+    this.name = 'NameSquatError';
+  }
+}
+
+export class AgentNotFoundError extends Error {
+  constructor(botName: string) {
+    super(`agent '${botName}' not registered`);
+    this.name = 'AgentNotFoundError';
+  }
+}
+
+const DEFAULT_TTL_MS = 180_000;
+const STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export class AgentStore {
+  private db: Database.Database;
+  private logger: Logger;
+
+  constructor(db: Database.Database, logger: Logger) {
+    this.db = db;
+    this.logger = logger;
+    this.initSchema();
+  }
+
+  private initSchema(): void {
+    // `talk_secret` is a legacy column from the pre-token-auth era. It is
+    // retained nullable so existing rows remain readable; it is never written
+    // by new code and never returned in API responses. See
+    // [[decision-agent-bus-token-auth]] for why it was removed.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id                  TEXT PRIMARY KEY,
+        bot_name            TEXT NOT NULL UNIQUE,
+        url                 TEXT NOT NULL,
+        talk_secret         TEXT,
+        visible             INTEGER NOT NULL DEFAULT 1,
+        owner_credential_id TEXT NOT NULL,
+        registered_at       TEXT NOT NULL,
+        last_seen_at        TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS agents_visible_idx   ON agents(visible);
+      CREATE INDEX IF NOT EXISTS agents_last_seen_idx ON agents(last_seen_at);
+    `);
+  }
+
+  register(input: RegisterInput): AgentRecord {
+    const now = new Date().toISOString();
+    const visible = input.visible !== false;
+
+    const existing = this.db.prepare(
+      'SELECT id, owner_credential_id FROM agents WHERE bot_name = ?',
+    ).get(input.botName) as { id: string; owner_credential_id: string } | undefined;
+
+    if (existing) {
+      if (existing.owner_credential_id !== input.ownerCredentialId) {
+        throw new NameSquatError(input.botName);
+      }
+      this.db.prepare(`
+        UPDATE agents SET
+          url = ?, visible = ?, last_seen_at = ?
+        WHERE bot_name = ?
+      `).run(
+        input.url, visible ? 1 : 0, now, input.botName,
+      );
+      this.logger.info({ botName: input.botName }, 'agent re-registered');
+      return this.getByName(input.botName)!;
+    }
+
+    const id = crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO agents (id, bot_name, url, talk_secret, visible,
+        owner_credential_id, registered_at, last_seen_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+    `).run(
+      id, input.botName, input.url, visible ? 1 : 0,
+      input.ownerCredentialId, now, now,
+    );
+    this.logger.info({ botName: input.botName, id }, 'agent registered');
+    return this.getByName(input.botName)!;
+  }
+
+  heartbeat(botName: string, ownerCredentialId: string): string {
+    const existing = this.db.prepare(
+      'SELECT owner_credential_id FROM agents WHERE bot_name = ?',
+    ).get(botName) as { owner_credential_id: string } | undefined;
+    if (!existing) throw new AgentNotFoundError(botName);
+    if (existing.owner_credential_id !== ownerCredentialId) {
+      throw new NameSquatError(botName);
+    }
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE agents SET last_seen_at = ? WHERE bot_name = ?')
+      .run(now, botName);
+    return now;
+  }
+
+  /**
+   * Batch heartbeat — bumps last_seen_at on every botName owned by
+   * `ownerCredentialId`. Names not owned by the caller (or not registered)
+   * are silently skipped; the returned map only contains the bumped rows.
+   * Used by the bridge to refresh all its visible bots in one RPC.
+   */
+  heartbeatMany(botNames: string[], ownerCredentialId: string): Record<string, string> {
+    if (!botNames.length) return {};
+    const now = new Date().toISOString();
+    const owned = new Set(
+      (this.db.prepare(
+        `SELECT bot_name FROM agents WHERE owner_credential_id = ? AND bot_name IN (${botNames.map(() => '?').join(',')})`,
+      ).all(ownerCredentialId, ...botNames) as Array<{ bot_name: string }>)
+        .map((r) => r.bot_name),
+    );
+    if (!owned.size) return {};
+    const update = this.db.prepare('UPDATE agents SET last_seen_at = ? WHERE bot_name = ?');
+    const result: Record<string, string> = {};
+    for (const name of botNames) {
+      if (!owned.has(name)) continue;
+      update.run(now, name);
+      result[name] = now;
+    }
+    return result;
+  }
+
+  /** Returns all agent records owned by the given credential (any visibility). */
+  listOwnedBy(ownerCredentialId: string): AgentRecord[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM agents WHERE owner_credential_id = ?',
+    ).all(ownerCredentialId) as RawAgentRow[];
+    return rows.map(rowToRecord);
+  }
+
+  getByName(botName: string): AgentRecord | undefined {
+    const row = this.db.prepare('SELECT * FROM agents WHERE bot_name = ?').get(botName) as
+      | RawAgentRow
+      | undefined;
+    if (!row) return undefined;
+    return rowToRecord(row);
+  }
+
+  list(options: ListOptions = {}): AgentRecord[] {
+    const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    const now = options.now ?? Date.now();
+    const includeHidden = options.includeHidden === true;
+
+    const baseSql = includeHidden
+      ? 'SELECT * FROM agents'
+      : 'SELECT * FROM agents WHERE visible = 1';
+    const rows = this.db.prepare(`${baseSql} ORDER BY last_seen_at DESC`).all() as RawAgentRow[];
+
+    const fresh: AgentRecord[] = [];
+    for (const row of rows) {
+      const lastSeenMs = Date.parse(row.last_seen_at);
+      if (Number.isFinite(lastSeenMs) && now - lastSeenMs > ttlMs) continue;
+      fresh.push(rowToRecord(row));
+    }
+    return fresh;
+  }
+
+  setVisibility(botName: string, visible: boolean): AgentRecord {
+    const result = this.db.prepare('UPDATE agents SET visible = ? WHERE bot_name = ?')
+      .run(visible ? 1 : 0, botName);
+    if (result.changes === 0) throw new AgentNotFoundError(botName);
+    return this.getByName(botName)!;
+  }
+
+  remove(botName: string): boolean {
+    const result = this.db.prepare('DELETE FROM agents WHERE bot_name = ?').run(botName);
+    if (result.changes > 0) {
+      this.logger.info({ botName }, 'agent removed');
+      return true;
+    }
+    return false;
+  }
+
+  purgeStale(now: number = Date.now(), maxAgeMs: number = STALE_MAX_AGE_MS): number {
+    const cutoff = new Date(now - maxAgeMs).toISOString();
+    const result = this.db.prepare('DELETE FROM agents WHERE last_seen_at < ?').run(cutoff);
+    if (result.changes > 0) {
+      this.logger.info({ removed: result.changes, cutoff }, 'agents purged');
+    }
+    return result.changes as number;
+  }
+}
+
+interface RawAgentRow {
+  id: string;
+  bot_name: string;
+  url: string;
+  talk_secret: string | null;
+  visible: 0 | 1;
+  owner_credential_id: string;
+  registered_at: string;
+  last_seen_at: string;
+}
+
+function rowToRecord(row: RawAgentRow): AgentRecord {
+  return {
+    id: row.id,
+    botName: row.bot_name,
+    url: row.url,
+    visible: row.visible === 1,
+    ownerCredentialId: row.owner_credential_id,
+    registeredAt: row.registered_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}

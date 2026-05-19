@@ -1,0 +1,84 @@
+# metabot-core: dedicated front-door host `metabot-core.xvirobotics.com`.
+#
+# This is a STANDALONE host block, pure-additive: APPEND it to
+# /etc/caddy/Caddyfile alongside any existing blocks, then
+# `systemctl reload caddy`. Do NOT replace or touch any other block.
+#
+# Coexistence (P4-MR6, 2026-05-19 — domain pivot):
+#   - `metabot.xvirobotics.com` is a SHARED multi-tenant Caddy host that
+#     serves ~10 unrelated sub-handles (`/slam-video`, `/droidw-viz`,
+#     `/nav-viz`, `/nav-video`, `/pipeline`, `/seedance`, `/bp`, `/bp/api`,
+#     `/dreamfactory`, `/core`) belonging to several teams. DO NOT TOUCH
+#     that block — modifying it would wipe other teams' services on reload.
+#     The legacy `metabot.xvirobotics.com/core` sub-handle stays untouched
+#     and continues to serve old CLIs configured against that URL.
+#   - `metabot-core-ui.xvirobotics.com` remains functional through a 24h
+#     soak after Phase A cutover, then retires.
+#   - Old explicit CLI configs (`https://metabot.xvirobotics.com/core`)
+#     keep working — there is no compat alias and no breakage.
+#
+# What this host gives users (P4-MR6):
+#   - Bare-root shape on a dedicated domain: no `/core` path prefix, no
+#     dual host. SPA + API + admin all live here.
+#   - Header-based routing for two auth chains on one origin:
+#       (1) `Authorization: Bearer*` → straight to backend (CLI/bot path,
+#           no oauth2-proxy, no SSO cookie)
+#       (2) everything else            → oauth2-proxy (Feilian OIDC) → backend
+#           via `X-Forwarded-Email` (browser/SSO path)
+#   - The backend is the SAME process on 127.0.0.1:9200. oauth2-proxy for this
+#     domain listens on 127.0.0.1:**4182** (NOT 4180 — that port is owned by
+#     the existing `oauth2-proxy-mbcore.service` serving the legacy
+#     `metabot-core-ui.xvirobotics.com` host during the 24h soak). See
+#     `deploy/oauth2-proxy/oauth2-proxy-metabot-core.cfg` and the new
+#     `oauth2-proxy-metabot-core.service` systemd unit.
+#
+# Why a dedicated domain: collapses dual hosts into one front door without
+# touching the multi-tenant `metabot.xvirobotics.com`. New default for CLIs
+# is `https://metabot-core.xvirobotics.com`; pre-existing configs pinned to
+# `https://metabot.xvirobotics.com/core` continue to work via the untouched
+# multi-tenant sub-handle.
+#
+# TLS (P4-MR7, 2026-05-19 — host-reality fix): explicit `tls` paths under
+# `/etc/caddy/tls/<host>/{fullchain.pem,privkey.pem}`. Caddy auto-cert is
+# **not viable** on this host for two reasons:
+#   (1) The ECS Caddy build lacks the DNS-01 ACME module needed for the
+#       Volcengine DNS challenge.
+#   (2) The domain resolves to RFC1918 `172.31.32.2` (飞连 VPN-only), so
+#       Let's Encrypt cannot reach it via HTTP-01 / TLS-ALPN-01.
+# Cert is provisioned manually with certbot DNS-01 using the host's
+# domain-agnostic hooks at `/etc/caddy/certbot-hooks/dns01-{auth,cleanup}.sh`
+# (DO NOT new-create — they live on host and are shared with
+# `mail.xvirobotics.com` + `metabot-core-ui.xvirobotics.com`). Renewal is
+# automated by `metabot-core-cert-renew.timer` (see deploy/systemd/), which
+# fires `/usr/local/bin/certbot renew ... --deploy-hook
+# /etc/caddy/certbot-hooks/deploy.sh` — the shared deploy hook copies the
+# renewed cert into `/etc/caddy/tls/<domain>/` and reloads Caddy.
+#
+# NOTE: must use `/usr/local/bin/certbot`, NOT `/usr/bin/certbot` — the
+# /usr/bin copy on this host has a broken urllib3 import.
+#
+# Sanity-check the file after editing:
+#   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+metabot-core.xvirobotics.com {
+    tls /etc/caddy/tls/metabot-core.xvirobotics.com/fullchain.pem /etc/caddy/tls/metabot-core.xvirobotics.com/privkey.pem
+
+    # Bearer requests (CLI, bots, automation) bypass oauth2-proxy entirely and
+    # go straight to the backend. The matcher key is load-bearing: a misconfig
+    # here either 302s automation into Feilian (broken CLI) or lets browser
+    # traffic reach :9200 un-gated (security hole). Smoke BOTH directions on
+    # the live host before declaring done.
+    @bearer header Authorization Bearer*
+    reverse_proxy @bearer 127.0.0.1:9200
+
+    # Everything else (browser full-page loads, XHR without Bearer, /assets/*,
+    # /api/* called from the SPA, etc.) traverses oauth2-proxy. Unauth →
+    # 302 to Feilian for full-page loads; 401 on XHR for /api/* (via
+    # api_routes in the oauth2-proxy cfg), which the SPA catches and turns
+    # into a hard redirect.
+    #
+    # :4182 is the NEW oauth2-proxy-metabot-core.service unit (P4-MR7).
+    # :4180 is OFF-LIMITS — owned by the legacy oauth2-proxy-mbcore.service
+    # which still serves metabot-core-ui.xvirobotics.com during the 24h soak.
+    reverse_proxy 127.0.0.1:4182
+}

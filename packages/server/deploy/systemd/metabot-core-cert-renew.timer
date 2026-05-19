@@ -1,0 +1,18 @@
+# Daily renewal timer for metabot-core.xvirobotics.com Let's Encrypt cert.
+#
+# Pairs with metabot-core-cert-renew.service which calls
+# `/usr/local/bin/certbot renew --cert-name metabot-core.xvirobotics.com`.
+#
+# Install at: /etc/systemd/system/metabot-core-cert-renew.timer
+# Enable: sudo systemctl enable --now metabot-core-cert-renew.timer
+
+[Unit]
+Description=Daily renewal for metabot-core.xvirobotics.com Let's Encrypt cert
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=6h
+
+[Install]
+WantedBy=timers.target

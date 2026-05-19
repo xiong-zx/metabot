@@ -1,0 +1,19 @@
+# Renew metabot-core.xvirobotics.com cert via certbot, then sync into Caddy's
+# tls dir + reload Caddy through the shared --deploy-hook.
+#
+# Uses /usr/local/bin/certbot — the /usr/bin/certbot on this host has a broken
+# urllib3 import and will fail.
+#
+# The shared deploy hook /etc/caddy/certbot-hooks/deploy.sh copies the renewed
+# cert from /etc/letsencrypt/live/<lineage>/ into
+# /etc/caddy/tls/<lineage>/{fullchain.pem,privkey.pem} and runs
+# `systemctl reload caddy`. It's domain-agnostic — same hook serves all
+# certbot-managed Caddy hosts on this box.
+
+[Unit]
+Description=Renew metabot-core.xvirobotics.com Let's Encrypt cert via certbot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/certbot renew --cert-name metabot-core.xvirobotics.com --quiet --deploy-hook /etc/caddy/certbot-hooks/deploy.sh
+SyslogIdentifier=metabot-core-cert-renew

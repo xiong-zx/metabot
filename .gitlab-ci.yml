@@ -22,8 +22,15 @@ secret-detection:
     paths:
       - node_modules/
   script:
+    # `tsc -b` type-checks AND emits dist/ for the bridge + every composite
+    # workspace package (this is the monorepo successor to the old bare
+    # `tsc --noEmit` gate — root tsconfig is now solution-style). The package
+    # `exports` maps (e.g. cli-core's ./config → ./dist/config.js) only
+    # resolve once dist/ exists, so this MUST run before `npm test` (which
+    # exercises the workspace packages). Mirrors metabot-core's own CI shape
+    # (build → test against dist/).
     - npm ci
-    - npx tsc --noEmit
+    - npx tsc -b
     - npm test
     - npm run lint
 

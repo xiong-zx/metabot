@@ -1,0 +1,308 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { call, rawRequest, startTestServer, type ServerKit } from './helpers.js';
+
+let kit: ServerKit | undefined;
+
+afterEach(async () => {
+  await kit?.cleanup();
+  kit = undefined;
+});
+
+const WHITELISTED = 'flood-sung@xvirobotics.com';
+
+async function issueMember(k: ServerKit, name = 'cli-bot'): Promise<string> {
+  const res = await call(k.baseUrl, 'POST', '/admin/credentials/issue', k.adminToken, {
+    botName: name,
+    ownerName: name + '-owner',
+    role: 'member',
+  });
+  expect(res.status).toBe(201);
+  return res.body.token as string;
+}
+
+describe('/api/agents — routes + audit (token-auth era)', () => {
+  it('POST /api/agents creates a row; body.botName missing → falls back to cred.botName (legacy 1:1)', async () => {
+    kit = await startTestServer('agents-register');
+    const token = await issueMember(kit, 'alice-bot');
+    const res = await call(kit.baseUrl, 'POST', '/api/agents', token, {
+      url: 'http://10.0.0.1:9100',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.botName).toBe('alice-bot');
+    expect(res.body.url).toBe('http://10.0.0.1:9100');
+    expect(res.body.talkSecret).toBeUndefined();
+    expect(res.body.visible).toBe(true);
+    expect(res.body.registeredAt).toBe(res.body.lastSeenAt);
+  });
+
+  it('POST /api/agents with body.botName lets one credential own many bots', async () => {
+    kit = await startTestServer('agents-multi-bot');
+    const token = await issueMember(kit, 'bridge-cred');
+    const a = await call(kit.baseUrl, 'POST', '/api/agents', token, {
+      botName: 'feishu-alpha', url: 'http://a:9100',
+    });
+    const b = await call(kit.baseUrl, 'POST', '/api/agents', token, {
+      botName: 'telegram-beta', url: 'http://b:9100',
+    });
+    expect(a.status).toBe(201);
+    expect(b.status).toBe(201);
+    expect(a.body.botName).toBe('feishu-alpha');
+    expect(b.body.botName).toBe('telegram-beta');
+  });
+
+  it('POST /api/agents → 403 name_squat when a different cred tries an existing botName', async () => {
+    kit = await startTestServer('agents-anti-squat');
+    const tokenA = await issueMember(kit, 'cred-a');
+    const tokenB = await issueMember(kit, 'cred-b');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, {
+      botName: 'shared-name', url: 'http://a',
+    });
+    const squat = await call(kit.baseUrl, 'POST', '/api/agents', tokenB, {
+      botName: 'shared-name', url: 'http://b',
+    });
+    expect(squat.status).toBe(403);
+    expect(squat.body.error).toBe('name_squat');
+  });
+
+  it('POST /api/agents → 400 if url missing', async () => {
+    kit = await startTestServer('agents-no-url');
+    const token = await issueMember(kit);
+    const res = await call(kit.baseUrl, 'POST', '/api/agents', token, {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('url_required');
+  });
+
+  it('POST /api/agents/bulk registers every entry, returns per-entry status', async () => {
+    kit = await startTestServer('agents-bulk');
+    const token = await issueMember(kit, 'bridge-cred');
+    const res = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [
+        { botName: 'feishu-alpha', url: 'http://a:9100' },
+        { botName: 'telegram-beta', url: 'http://b:9100', visible: false },
+        { botName: 'bad-no-url' }, // missing url
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.registered).toBe(2);
+    expect(res.body.results).toEqual([
+      { botName: 'feishu-alpha', status: 201 },
+      { botName: 'telegram-beta', status: 201 },
+      { botName: 'bad-no-url', status: 400, error: 'url_required' },
+    ]);
+    // Verify with includeHidden (admin) — both registered bots present.
+    const list = await call(kit.baseUrl, 'GET', '/api/agents?includeHidden=1', kit.adminToken);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName).sort();
+    expect(names).toEqual(['feishu-alpha', 'telegram-beta']);
+  });
+
+  it('POST /api/agents/bulk → 400 when bots array missing', async () => {
+    kit = await startTestServer('agents-bulk-bad');
+    const token = await issueMember(kit);
+    const res = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('bots_array_required');
+  });
+
+  it('POST /api/agents/bulk reports name_squat per entry without failing the batch', async () => {
+    kit = await startTestServer('agents-bulk-squat');
+    const tokenA = await issueMember(kit, 'cred-a');
+    const tokenB = await issueMember(kit, 'cred-b');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, {
+      botName: 'reserved-name', url: 'http://x',
+    });
+    const res = await call(kit.baseUrl, 'POST', '/api/agents/bulk', tokenB, {
+      bots: [
+        { botName: 'reserved-name', url: 'http://y' },
+        { botName: 'fresh-name', url: 'http://z' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.registered).toBe(1);
+    expect(res.body.results).toEqual([
+      { botName: 'reserved-name', status: 403, error: 'name_squat' },
+      { botName: 'fresh-name', status: 201 },
+    ]);
+  });
+
+  it('POST /api/agents/heartbeat (legacy single, no body) bumps last_seen_at for cred.botName', async () => {
+    kit = await startTestServer('agents-heartbeat');
+    const token = await issueMember(kit, 'alice-bot');
+    const reg = await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'http://x' });
+    expect(reg.status).toBe(201);
+    const t1 = reg.body.lastSeenAt as string;
+    await new Promise((r) => setTimeout(r, 5));
+    const hb = await call(kit.baseUrl, 'POST', '/api/agents/heartbeat', token, {});
+    expect(hb.status).toBe(200);
+    expect(hb.body.ok).toBe(true);
+    expect(Date.parse(hb.body.lastSeenAt)).toBeGreaterThan(Date.parse(t1));
+  });
+
+  it('POST /api/agents/heartbeat → 404 for unregistered caller (legacy single form)', async () => {
+    kit = await startTestServer('agents-heartbeat-404');
+    const token = await issueMember(kit);
+    const hb = await call(kit.baseUrl, 'POST', '/api/agents/heartbeat', token, {});
+    expect(hb.status).toBe(404);
+    expect(hb.body.error).toBe('agent_not_registered');
+  });
+
+  it('POST /api/agents/heartbeat with botNames[] bumps every owned name and skips others', async () => {
+    kit = await startTestServer('agents-heartbeat-batch');
+    const token = await issueMember(kit, 'bridge-cred');
+    await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [
+        { botName: 'feishu-alpha', url: 'http://a' },
+        { botName: 'telegram-beta', url: 'http://b' },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const hb = await call(kit.baseUrl, 'POST', '/api/agents/heartbeat', token, {
+      botNames: ['feishu-alpha', 'telegram-beta', 'not-mine'],
+    });
+    expect(hb.status).toBe(200);
+    expect(hb.body.ok).toBe(true);
+    expect(Object.keys(hb.body.bumped).sort()).toEqual(['feishu-alpha', 'telegram-beta']);
+  });
+
+  it('GET /api/agents returns visible-only by default', async () => {
+    kit = await startTestServer('agents-list-visible');
+    const tokenA = await issueMember(kit, 'alice-bot');
+    const tokenB = await issueMember(kit, 'bob-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://a' });
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenB, { url: 'http://b', visible: false });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', tokenA);
+    expect(list.status).toBe(200);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName).sort();
+    expect(names).toEqual(['alice-bot']);
+    // No talkSecret in the response shape.
+    expect((list.body.agents as Array<Record<string, unknown>>)[0].talkSecret).toBeUndefined();
+  });
+
+  it('GET /api/agents?includeHidden=1 by admin returns hidden + visible', async () => {
+    kit = await startTestServer('agents-list-admin-incl-hidden');
+    const tokenA = await issueMember(kit, 'alice-bot');
+    const tokenB = await issueMember(kit, 'bob-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://a' });
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenB, { url: 'http://b', visible: false });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents?includeHidden=1', kit.adminToken);
+    expect(list.status).toBe(200);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName).sort();
+    expect(names).toEqual(['alice-bot', 'bob-bot']);
+  });
+
+  it('GET /api/agents?includeHidden=1 by member → 403', async () => {
+    kit = await startTestServer('agents-list-member-incl-hidden-forbidden');
+    const token = await issueMember(kit);
+    const res = await call(kit.baseUrl, 'GET', '/api/agents?includeHidden=1', token);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('include_hidden_admin_only');
+  });
+
+  it('GET /api/agents via web-identity (no Bearer, X-Forwarded-Email) → 200', async () => {
+    kit = await startTestServer('agents-web-identity', { uiAllowedEmails: [WHITELISTED] });
+    const tokenA = await issueMember(kit, 'alice-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://a' });
+    const res = await rawRequest(kit.port, 'GET', '/api/agents', { 'X-Forwarded-Email': WHITELISTED });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(Array.isArray(body.agents)).toBe(true);
+  });
+
+  it('PATCH /api/agents/:botName/visibility by owner → 200', async () => {
+    kit = await startTestServer('agents-visibility-owner');
+    const token = await issueMember(kit, 'alice-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'http://a' });
+    const res = await call(kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visibility', token, { visible: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ botName: 'alice-bot', visible: false });
+  });
+
+  it('PATCH /api/agents/:botName/visibility by another member → 403', async () => {
+    kit = await startTestServer('agents-visibility-other-member');
+    const tokenA = await issueMember(kit, 'alice-bot');
+    const tokenB = await issueMember(kit, 'bob-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://a' });
+    const res = await call(kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visibility', tokenB, { visible: false });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('agent_ownership_required');
+  });
+
+  it('PATCH /api/agents/:botName/visibility by admin → 200', async () => {
+    kit = await startTestServer('agents-visibility-admin');
+    const token = await issueMember(kit, 'alice-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'http://a' });
+    const res = await call(kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visibility', kit.adminToken, { visible: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ botName: 'alice-bot', visible: false });
+  });
+
+  it('DELETE /api/agents/:botName has same ownership semantics as PATCH', async () => {
+    kit = await startTestServer('agents-delete-ownership');
+    const tokenA = await issueMember(kit, 'alice-bot');
+    const tokenB = await issueMember(kit, 'bob-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://a' });
+    const cross = await call(kit.baseUrl, 'DELETE', '/api/agents/alice-bot', tokenB);
+    expect(cross.status).toBe(403);
+    expect(cross.body.error).toBe('agent_ownership_required');
+    const owner = await call(kit.baseUrl, 'DELETE', '/api/agents/alice-bot', tokenA);
+    expect(owner.status).toBe(200);
+    expect(owner.body).toEqual({ botName: 'alice-bot', removed: true });
+    const adminMissing = await call(kit.baseUrl, 'DELETE', '/api/agents/alice-bot', kit.adminToken);
+    expect(adminMissing.status).toBe(404);
+  });
+
+  it('GET /api/whoami returns the caller credential identity for Bearer', async () => {
+    kit = await startTestServer('whoami-bearer');
+    const token = await issueMember(kit, 'alice-bot');
+    const res = await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    expect(res.status).toBe(200);
+    expect(res.body.botName).toBe('alice-bot');
+    expect(res.body.role).toBe('member');
+    expect(res.body.authSource).toBe('bearer');
+    expect(typeof res.body.credentialId).toBe('string');
+  });
+
+  it('GET /api/whoami via web-identity reports authSource=web', async () => {
+    kit = await startTestServer('whoami-web', { uiAllowedEmails: [WHITELISTED] });
+    const res = await rawRequest(kit.port, 'GET', '/api/whoami', { 'X-Forwarded-Email': WHITELISTED });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.botName).toBe(WHITELISTED);
+    expect(body.authSource).toBe('web');
+  });
+
+  it('GET /api/whoami without auth → 401', async () => {
+    kit = await startTestServer('whoami-no-auth');
+    const res = await call(kit.baseUrl, 'GET', '/api/whoami', null);
+    expect(res.status).toBe(401);
+  });
+
+  it('audit log records register/heartbeat/list/visibility/delete/whoami with correct ops', async () => {
+    kit = await startTestServer('agents-audit');
+    const token = await issueMember(kit, 'alice-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'http://a' });
+    await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, { bots: [] });
+    await call(kit.baseUrl, 'POST', '/api/agents/heartbeat', token, {});
+    await call(kit.baseUrl, 'GET', '/api/agents', token);
+    await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    await call(kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visibility', token, { visible: false });
+    await call(kit.baseUrl, 'DELETE', '/api/agents/alice-bot', token);
+
+    await new Promise((r) => setTimeout(r, 100));
+    const auditDir = path.join(kit.dir, 'audit');
+    const files = fs.readdirSync(auditDir).filter((f) => f.endsWith('.jsonl'));
+    expect(files.length).toBeGreaterThan(0);
+    const raw = fs.readFileSync(path.join(auditDir, files[0]), 'utf-8');
+    const entries = raw.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const found = (op: string, p: string) =>
+      entries.some((e) => e.op === op && e.path === p);
+    expect(found('register', '/api/agents')).toBe(true);
+    expect(found('register', '/api/agents/bulk')).toBe(true);
+    expect(found('heartbeat', '/api/agents/heartbeat')).toBe(true);
+    expect(found('list', '/api/agents')).toBe(true);
+    expect(found('whoami', '/api/whoami')).toBe(true);
+    expect(found('visibility', '/api/agents/alice-bot/visibility')).toBe(true);
+    expect(found('delete', '/api/agents/alice-bot')).toBe(true);
+  });
+});
