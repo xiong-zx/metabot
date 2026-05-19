@@ -619,13 +619,27 @@ API_TIMEOUT_MS=600000"
   API_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
   API_PORT="9100"
   LOG_LEVEL="info"
-  META_MEMORY_URL="http://localhost:8100"
 
   # Claude executable path
   CLAUDE_PATH=""
   if command -v claude &>/dev/null; then
     CLAUDE_PATH="$(command -v claude)"
   fi
+
+  # ------ 4e: metabot-core central service ------
+  echo ""
+  echo -e "${BOLD}metabot-core central service:${NC}"
+  echo "  MetaBot delegates MetaMemory / Skill Hub / Agents / T5T to a central"
+  echo "  metabot-core service — no local DB, no embedded server."
+  prompt_input METABOT_CORE_URL "metabot-core URL" "https://metabot-core.xvirobotics.com"
+
+  echo ""
+  info "Get your personal Bearer token at ${METABOT_CORE_URL}/cli"
+  info "  1) Open the URL in your browser (sign in via your org's SSO)"
+  info "  2) Click 'Generate' on the CLI Access page"
+  info "  3) Paste the mt_... token below — or press Enter to configure later"
+  info "     (later: drop it into ${METABOT_HOME}/.env or ~/.metabot-core/token)"
+  prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
 fi
 
 # ============================================================================
@@ -669,8 +683,15 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       echo "CLAUDE_EXECUTABLE_PATH=${CLAUDE_PATH}"
     fi
     echo ""
-    echo "# MetaMemory"
-    echo "META_MEMORY_URL=${META_MEMORY_URL}"
+    echo "# metabot-core central service (MetaMemory + Skill Hub + Agents + T5T)"
+    echo "METABOT_CORE_URL=${METABOT_CORE_URL}"
+    if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
+      echo "METABOT_CORE_TOKEN=${METABOT_CORE_TOKEN}"
+    else
+      echo "# Get your token at ${METABOT_CORE_URL}/cli (sign in, click Generate)"
+      echo "# Either paste it here OR save to ~/.metabot-core/token (chmod 600)"
+      echo "# METABOT_CORE_TOKEN="
+    fi
   } > "$METABOT_HOME/.env"
   chmod 600 "$METABOT_HOME/.env"
   success ".env generated"
@@ -776,17 +797,17 @@ if [[ -d "$SKILLS_DIR/metaskill" ]]; then
   info "Removed legacy metaskill skill from $SKILLS_DIR (now opt-in — see src/skills/metaskill/)"
 fi
 
-# Install metamemory skill (bundled in src/memory/skill/)
-info "Installing metamemory skill..."
-mkdir -p "$SKILLS_DIR/metamemory"
-cp "$METABOT_HOME/src/memory/skill/SKILL.md" "$SKILLS_DIR/metamemory/SKILL.md"
-# Clean up old skill location if it exists
-if [[ -d "$HOME/.claude/skills/memory" ]]; then
-  rm -rf "$HOME/.claude/skills/memory"
-fi
-success "metamemory skill installed → $SKILLS_DIR/metamemory"
+# Clean up legacy skill bundles (Phase 4 consolidation: subsumed by unified
+# `metabot` skill that delegates memory/skills/agents/t5t to metabot-core).
+for legacy in metamemory skill-hub memory; do
+  if [[ -d "$SKILLS_DIR/$legacy" ]]; then
+    rm -rf "$SKILLS_DIR/$legacy"
+    info "Removed legacy $legacy skill (use \`metabot ${legacy/skill-hub/skills}\` instead)"
+  fi
+done
 
-# Install metabot skill (bundled in src/skills/metabot/)
+# Install metabot skill (bundled in src/skills/metabot/) — single unified skill
+# covering memory / skills / agents / t5t via the metabot-core CLI.
 info "Installing metabot skill..."
 mkdir -p "$SKILLS_DIR/metabot"
 cp "$METABOT_HOME/src/skills/metabot/SKILL.md" "$SKILLS_DIR/metabot/SKILL.md"
@@ -797,12 +818,6 @@ info "Installing voice skill..."
 mkdir -p "$SKILLS_DIR/voice"
 cp "$METABOT_HOME/src/skills/voice/SKILL.md" "$SKILLS_DIR/voice/SKILL.md"
 success "voice skill installed → $SKILLS_DIR/voice"
-
-# Install skill-hub skill (bundled in src/skills/skill-hub/)
-info "Installing skill-hub skill..."
-mkdir -p "$SKILLS_DIR/skill-hub"
-cp "$METABOT_HOME/src/skills/skill-hub/SKILL.md" "$SKILLS_DIR/skill-hub/SKILL.md"
-success "skill-hub skill installed → $SKILLS_DIR/skill-hub"
 
 # Detect Feishu bots
 HAS_FEISHU=false
@@ -893,12 +908,21 @@ fi
 if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   SKILLS_DEST="$DEPLOY_WORK_DIR/.claude/skills"
 
+  # Clean up legacy skill bundles from a previously-deployed workspace so the
+  # bot doesn't load stale skills after the Phase 4 consolidation.
+  for legacy in metamemory skill-hub; do
+    if [[ -d "$SKILLS_DEST/$legacy" ]]; then
+      rm -rf "$SKILLS_DEST/$legacy"
+      info "Removed legacy $legacy from $SKILLS_DEST"
+    fi
+  done
+
   # Copy skills (common + lark-cli skills if Feishu).
   # metaskill (agent-team generator) and metaschedule (persistent server-side
   # scheduler) are no longer installed by default — copy them from
   # $METABOT_HOME/src/skills/ if you want them. CC native CronCreate / /loop
   # already cover ad-hoc, session-scoped scheduling.
-  DEPLOY_SKILLS="metamemory metabot voice skill-hub"
+  DEPLOY_SKILLS="metabot voice"
   if [[ "$SETUP_LARK_CLI" == "true" ]]; then
     for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
       [[ -d "$SKILLS_DIR/$lark_skill" ]] && DEPLOY_SKILLS="$DEPLOY_SKILLS $lark_skill"
@@ -928,97 +952,61 @@ else
 fi
 
 # ============================================================================
-# Phase 7: MetaMemory (embedded in MetaBot)
+# Phase 7: Legacy MetaMemory cleanup (embedded MetaMemory removed in Phase 4)
 # ============================================================================
-step "Phase 7: MetaMemory"
+step "Phase 7: Legacy MetaMemory cleanup"
 
-METAMEMORY_INSTALLED=false
+info "MetaMemory is now served by metabot-core at ${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}."
+info "No local DB, no embedded server — the bridge talks to the central service via HTTP."
 
-info "MetaMemory is embedded in MetaBot (no separate server needed)."
-mkdir -p "${METABOT_HOME}/data"
-
-# Migrate existing database from standalone Python MetaMemory if found
-if [[ -f "$HOME/.metamemory-data/metamemory.db" && ! -f "$METABOT_HOME/data/metamemory.db" ]]; then
-  info "Migrating existing MetaMemory database..."
-  cp "$HOME/.metamemory-data/metamemory.db" "$METABOT_HOME/data/"
-  success "Database migrated from ~/.metamemory-data/"
-fi
-
-# Stop old standalone MetaMemory PM2 process if running
+# Stop old embedded/standalone MetaMemory PM2 process if it still exists.
 if pm2 describe metamemory &>/dev/null 2>&1; then
-  info "Stopping old standalone MetaMemory PM2 process..."
+  info "Stopping legacy MetaMemory PM2 process..."
   pm2 delete metamemory 2>/dev/null || true
-  success "Old MetaMemory process removed"
+  success "Legacy MetaMemory process removed"
 fi
 
-# Kill any process still occupying port 8100 (e.g. old Python uvicorn)
+# Free port 8100 if a stale embedded server is still listening.
 if command -v lsof &>/dev/null; then
   OLD_PID=$(lsof -ti :8100 2>/dev/null || true)
   if [[ -n "$OLD_PID" ]]; then
-    info "Killing old process on port 8100 (PID: $OLD_PID)..."
+    info "Killing leftover process on port 8100 (PID: $OLD_PID)..."
     kill "$OLD_PID" 2>/dev/null || true
     sleep 1
   fi
 fi
 
-METAMEMORY_INSTALLED=true
-success "MetaMemory will start automatically with MetaBot on port 8100"
+# Old standalone-Python MetaMemory data dir lingers harmlessly — leave it.
+if [[ -d "$HOME/.metamemory-data" ]]; then
+  info "Note: legacy ~/.metamemory-data/ left in place (safe to delete after data export)."
+fi
 
-# Install mm() shell shortcut for MetaMemory CLI
 BASH_ALIASES="$HOME/.bash_aliases"
-if ! grep -q 'mm()' "$BASH_ALIASES" 2>/dev/null; then
-  info "Installing mm() shell shortcut..."
-  cat >> "$BASH_ALIASES" << 'MMEOF'
 
-# MetaMemory shortcuts (installed by MetaBot)
-export MEMORY_URL="http://localhost:8100"
-export MEMORY_AUTH="Authorization: Bearer ${MEMORY_ADMIN_TOKEN:-${MEMORY_TOKEN:-${MEMORY_SECRET:-${API_SECRET:-changeme}}}}"
-
-mm() {
-  local cmd="${1:-help}"
-  shift 2>/dev/null
-  case "$cmd" in
-    search|s)
-      curl -s -H "$MEMORY_AUTH" "$MEMORY_URL/api/search?q=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$*'))")"
-      ;;
-    get|g)
-      curl -s -H "$MEMORY_AUTH" "$MEMORY_URL/api/documents/$1"
-      ;;
-    list|ls)
-      curl -s -H "$MEMORY_AUTH" "$MEMORY_URL/api/documents?folder_id=${1:-root}&limit=50"
-      ;;
-    folders|f)
-      curl -s -H "$MEMORY_AUTH" "$MEMORY_URL/api/folders"
-      ;;
-    create|c)
-      local title="$1"; shift
-      local content="$*"
-      curl -s -X POST "$MEMORY_URL/api/documents" \
-        -H "$MEMORY_AUTH" -H "Content-Type: application/json" \
-        -d "{\"title\":\"$title\",\"folder_id\":\"root\",\"content\":\"$content\"}"
-      ;;
-    health|h)
-      curl -s -H "$MEMORY_AUTH" "$MEMORY_URL/api/health"
-      ;;
-    *)
-      echo "mm - MetaMemory CLI"
-      echo "  mm search <query>       - Search documents"
-      echo "  mm get <doc_id>         - Get document by ID"
-      echo "  mm list [folder_id]     - List documents (default: root)"
-      echo "  mm folders              - List folder tree"
-      echo "  mm create <title> <md>  - Create a document"
-      echo "  mm health               - Health check"
-      ;;
-  esac
-}
-MMEOF
-  # Patch the actual API_SECRET into the file
-  if [[ -n "${API_SECRET:-}" ]]; then
-    sed_i "s|\${API_SECRET:-changeme}|${API_SECRET}|g" "$BASH_ALIASES"
-  fi
-  success "mm() shortcut installed"
-else
-  info "mm() shortcut already exists, skipping"
+# Strip the legacy mm() shortcut from a pre-existing ~/.bash_aliases — it
+# targets localhost:8100 which no longer exists after the Phase 4 pivot.
+# Use `metabot memory ...` instead (delegates to metabot-core).
+if [[ -f "$BASH_ALIASES" ]] && grep -q '^mm()' "$BASH_ALIASES" 2>/dev/null; then
+  info "Removing legacy mm() shortcut from $BASH_ALIASES (use \`metabot memory ...\` now)..."
+  # Delete the MetaMemory shortcuts block: from "# MetaMemory shortcuts (installed by MetaBot)"
+  # down to and including the closing "}" of mm(). Then drop the matching export lines.
+  python3 - "$BASH_ALIASES" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+pattern = re.compile(
+    r"\n?# MetaMemory shortcuts \(installed by MetaBot\)\n"
+    r"export MEMORY_URL=.*\n"
+    r"export MEMORY_AUTH=.*\n\n"
+    r"mm\(\) \{.*?\n\}\n",
+    re.DOTALL,
+)
+new = pattern.sub("", text)
+with open(path, "w") as f:
+    f.write(new)
+PYEOF
+  success "Legacy mm() shortcut removed"
 fi
 
 # Install mb() shell shortcut for MetaBot API (Agent Bus, Scheduling, Bot Management)
@@ -1125,29 +1113,44 @@ fi
 if [[ -f "$HOME/.bashrc" ]] && ! grep -q 'bash_aliases' "$HOME/.bashrc"; then
   echo -e '\n# Load bash aliases\nif [ -f ~/.bash_aliases ]; then\n    . ~/.bash_aliases\nfi' >> "$HOME/.bashrc"
 fi
-# Source it in the current shell so mm/mb work immediately after install
+# Source it in the current shell so mb works immediately after install
 source "$BASH_ALIASES" 2>/dev/null || true
 
-# Install mm/mb/metabot as standalone executables in ~/.local/bin (no source needed)
+# Install mb/metabot as standalone executables in ~/.local/bin (no source needed).
+# `mb` is the bridge inter-bot API shortcut; `metabot` is the dual dispatcher
+# that delegates memory/skills/agents/t5t to the metabot-core feature CLI.
 LOCAL_BIN="$HOME/.local/bin"
 mkdir -p "$LOCAL_BIN"
-CLI_TOOLS="mm mb metabot"
+CLI_TOOLS="mb metabot"
 for cli in $CLI_TOOLS; do
-  if [[ -f "$METABOT_HOME/bin/$cli" ]]; then
-    cp "$METABOT_HOME/bin/$cli" "$LOCAL_BIN/$cli"
-    chmod +x "$LOCAL_BIN/$cli"
+  src="$METABOT_HOME/bin/$cli"
+  dst="$LOCAL_BIN/$cli"
+  if [[ -f "$src" ]]; then
+    # Skip if $dst is already a symlink to $src (user-curated layout) — copying
+    # a file onto its own symlink target errors out with `cp: 'a' and 'b' are
+    # the same file`.
+    if [[ "$src" -ef "$dst" ]]; then
+      continue
+    fi
+    cp "$src" "$dst"
+    chmod +x "$dst"
   fi
 done
-# Clean up legacy fd CLI if present
-[[ -f "$LOCAL_BIN/fd" ]] && rm -f "$LOCAL_BIN/fd"
-# Clean up temp mbcore shim (superseded by `metabot` dispatcher)
-[[ -f "$LOCAL_BIN/mbcore" ]] && rm -f "$LOCAL_BIN/mbcore"
+# Clean up legacy CLIs: fd (old shortcut), mbcore (temp Phase 4 shim),
+# mm/mh (metabot-core feature CLIs subsumed by `metabot` dispatcher).
+for legacy_cli in fd mbcore mm mh; do
+  if [[ -f "$LOCAL_BIN/$legacy_cli" || -L "$LOCAL_BIN/$legacy_cli" ]]; then
+    # Only remove regular files / symlinks living inside ~/.local/bin — never
+    # touch system-installed binaries elsewhere on PATH.
+    rm -f "$LOCAL_BIN/$legacy_cli"
+  fi
+done
 # Ensure ~/.local/bin is in PATH (most distros include it, but not all)
 if ! echo "$PATH" | grep -q "$LOCAL_BIN"; then
   echo "export PATH=\"$LOCAL_BIN:\$PATH\"" >> "$HOME/.bashrc"
   info "Added ~/.local/bin to PATH in ~/.bashrc"
 fi
-success "mm/mb/metabot CLI tools installed to $LOCAL_BIN"
+success "mb/metabot CLI tools installed to $LOCAL_BIN"
 
 # Persist METABOT_HOME for non-default install paths so the CLI tools
 # (mm/mb/metabot) can find the install in new shell sessions. The CLIs all
@@ -1251,19 +1254,26 @@ if [[ "${SKIP_CONFIG}" == "false" ]]; then
     echo -e "  ${BOLD}Provider:${NC}       ${PROVIDER_NAME}"
   fi
 fi
-if [[ "$METAMEMORY_INSTALLED" == "true" ]]; then
-  echo -e "  ${BOLD}MetaMemory:${NC}     http://localhost:8100"
-fi
+CORE_URL_DISPLAY="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
+echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
 echo "    pm2 restart metabot       # Restart MetaBot"
 echo "    pm2 stop metabot          # Stop MetaBot"
-if [[ "$METAMEMORY_INSTALLED" == "true" ]]; then
-  echo "    mm search <query>         # Search MetaMemory"
-  echo "    mm folders                # Browse knowledge tree"
-fi
+echo "    metabot memory list       # Browse central memory (delegated to metabot-core)"
+echo "    metabot skills list       # List shared skills"
+echo "    metabot agents list       # List visible agents"
+echo "    metabot t5t board         # T5T project board"
 echo ""
+if [[ -z "${METABOT_CORE_TOKEN:-}" ]]; then
+  echo -e "  ${BOLD}metabot-core onboarding:${NC}"
+  echo "    1. Open ${CORE_URL_DISPLAY}/cli in your browser (sign in via SSO)"
+  echo "    2. Click 'Generate' to mint a personal Bearer token"
+  echo "    3. Paste it into ${METABOT_HOME}/.env as METABOT_CORE_TOKEN=mt_..."
+  echo "       (or save to ~/.metabot-core/token, chmod 600)"
+  echo ""
+fi
 if [[ "${SKIP_CONFIG}" == "false" ]]; then
   echo -e "  ${BOLD}Next Steps:${NC}"
   STEP_NUM=1

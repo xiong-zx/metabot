@@ -63,18 +63,32 @@ cmd_update() {
   info "Building..."
   npm run build
 
-  # Update CLI tools in ~/.local/bin
+  # Update CLI tools in ~/.local/bin.
+  # `mb` is the bridge inter-bot API shortcut; `metabot` is the dual
+  # dispatcher (bridge process control + delegate to metabot-core feature CLI).
+  # `mm`/`mh`/`mbcore` are Phase-4 legacy and stay removed.
   LOCAL_BIN="$HOME/.local/bin"
   if [[ -d "$LOCAL_BIN" ]]; then
     info "Updating CLI tools..."
-    for cli in mb mm metabot; do
-      if [[ -f "$METABOT_HOME/bin/$cli" ]]; then
-        cp "$METABOT_HOME/bin/$cli" "$LOCAL_BIN/$cli"
-        chmod +x "$LOCAL_BIN/$cli"
+    for cli in mb metabot; do
+      local src="$METABOT_HOME/bin/$cli"
+      local dst="$LOCAL_BIN/$cli"
+      if [[ -f "$src" ]]; then
+        # Skip when $dst already points at $src — copying a file onto its own
+        # symlink target errors out with `cp: 'a' and 'b' are the same file`.
+        if [[ "$src" -ef "$dst" ]]; then
+          continue
+        fi
+        cp "$src" "$dst"
+        chmod +x "$dst"
       fi
     done
-    # Clean up temp mbcore shim (superseded by `metabot` dispatcher)
-    [[ -f "$LOCAL_BIN/mbcore" ]] && rm -f "$LOCAL_BIN/mbcore"
+    # Clean up legacy CLIs (Phase 4 consolidation + temp shims).
+    for legacy_cli in mm mh mbcore fd; do
+      if [[ -f "$LOCAL_BIN/$legacy_cli" || -L "$LOCAL_BIN/$legacy_cli" ]]; then
+        rm -f "$LOCAL_BIN/$legacy_cli"
+      fi
+    done
     success "CLI tools updated"
   fi
 
@@ -106,16 +120,15 @@ cmd_update() {
     lark-workflow-meeting-summary
     lark-workflow-standup-report
   )
-  # metaskill / metaschedule are opt-in (not in the default list); CC native
-  # CronCreate / /loop already cover ad-hoc scheduling. Sources still ship in
-  # src/skills/* — users who want them can copy manually.
-  for skill in metamemory metabot voice skill-hub; do
+  # Phase 4 consolidation: `metamemory` and `skill-hub` skill bundles are
+  # subsumed by the unified `metabot` skill (which delegates memory/skills/
+  # agents/t5t to the metabot-core feature CLI). metaskill / metaschedule
+  # remain opt-in; sources still ship in src/skills/* for manual copy.
+  for skill in metabot voice; do
     case "$skill" in
-      metamemory) src="$METABOT_HOME/src/memory/skill" ;;
-      metabot)    src="$METABOT_HOME/src/skills/metabot" ;;
-      voice)      src="$METABOT_HOME/src/skills/voice" ;;
-      skill-hub)  src="$METABOT_HOME/src/skills/skill-hub" ;;
-      *)          src="" ;;
+      metabot) src="$METABOT_HOME/src/skills/metabot" ;;
+      voice)   src="$METABOT_HOME/src/skills/voice" ;;
+      *)       src="" ;;
     esac
     if [[ -n "$src" && -d "$src" ]]; then
       for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
@@ -123,6 +136,15 @@ cmd_update() {
         cp -r "$src/." "$dst_root/$skill/"
       done
     fi
+  done
+  # Strip legacy skill bundles (Phase 4 consolidation).
+  for legacy in metamemory skill-hub; do
+    for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+      if [[ -d "$dst_root/$legacy" ]]; then
+        rm -rf "$dst_root/$legacy"
+        info "Removed legacy $legacy skill from $dst_root (use \`metabot ${legacy/skill-hub/skills}\` instead)"
+      fi
+    done
   done
   # Clean up legacy feishu-doc skill
   if [[ -d "$SKILLS_DIR/feishu-doc" ]]; then
@@ -203,14 +225,22 @@ cmd_update() {
       local ws_codex_skills_dir="$work_dir/.codex/skills"
       mkdir -p "$ws_skills_dir" "$ws_codex_skills_dir"
 
-      # Copy common skills
-      for skill in metamemory metabot voice skill-hub; do
+      # Copy common skills (Phase 4: metamemory/skill-hub removed).
+      for skill in metabot voice; do
         if [[ -d "$SKILLS_DIR/$skill" ]]; then
           for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
             mkdir -p "$dst_root/$skill"
             cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
           done
         fi
+      done
+      # Strip legacy skill bundles from a previously-deployed workspace.
+      for legacy in metamemory skill-hub; do
+        for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+          if [[ -d "$dst_root/$legacy" ]]; then
+            rm -rf "$dst_root/$legacy"
+          fi
+        done
       done
       # Mirror opt-in skills (metaskill / metaschedule) only when present.
       for skill in metaskill metaschedule; do
@@ -263,6 +293,37 @@ cmd_update() {
   pm2 save --force 2>/dev/null || true
 
   success "MetaBot updated and restarted!"
+
+  _update_core_workspace || true
+}
+
+# Optimization: if a sibling metabot-core checkout exists, pull + build it so
+# the delegated feature CLI (`metabot t5t/agents/memory/skills`) stays in sync
+# with the central server. Best-effort — failures don't break the bridge update.
+_update_core_workspace() {
+  local core_dir="$METABOT_HOME/../metabot-workspace/metabot-core"
+  if [[ ! -d "$core_dir/.git" || ! -f "$core_dir/package.json" ]]; then
+    return 0
+  fi
+  echo ""
+  info "Updating sibling metabot-core workspace at $core_dir ..."
+  (
+    cd "$core_dir"
+    if ! git pull --ff-only; then
+      warn "metabot-core: git pull --ff-only failed (uncommitted changes?). Skipping build."
+      exit 1
+    fi
+    info "metabot-core: installing dependencies..."
+    npm install --include=dev --silent || {
+      warn "metabot-core: npm install failed."
+      exit 1
+    }
+    info "metabot-core: building..."
+    npm run build || {
+      warn "metabot-core: build failed."
+      exit 1
+    }
+  ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
 }
 
 cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
