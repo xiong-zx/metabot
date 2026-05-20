@@ -1,30 +1,30 @@
 ---
 name: voice
-description: Convert text to speech audio using mb voice CLI. Use when the user asks you to speak, say something aloud, generate audio, or produce a voice recording.
+description: Convert text to speech audio using the `metabot voice tts` CLI. Use when the user asks you to speak, say something aloud, generate audio, or produce a voice recording.
 ---
 
 ## Text-to-Speech (Voice Output)
 
-Generate MP3 audio from text using the `mb voice` CLI.
+Generate MP3 audio from text using the `metabot voice tts` CLI.
 
 ### Quick Commands
 
 ```bash
 # Generate MP3, prints file path to stdout
-mb voice "Hello, this is a test"
+metabot voice tts "Hello, this is a test"
 
 # Generate and play immediately
-mb voice "Hello" --play
+metabot voice tts "Hello" --play
 
 # Save to specific file
-mb voice "Hello" -o greeting.mp3
+metabot voice tts "Hello" -o greeting.mp3
 
 # Override provider and voice
-mb voice "Hello" --provider doubao --voice zh_female_wanqudashu_moon_bigtts
+metabot voice tts "Hello" --provider doubao --voice zh_female_wanqudashu_moon_bigtts
 
 # Pipe text (useful for long content)
-echo "Long text here" | mb voice
-echo "Long text" | mb voice -o output.mp3
+echo "Long text here" | metabot voice tts
+echo "Long text" | metabot voice tts -o output.mp3
 ```
 
 ### When to Use
@@ -58,10 +58,10 @@ echo "Long text" | mb voice -o output.mp3
 
 ### Guidelines
 
-- For short text (greetings, alerts), use inline: `mb voice "text"`
-- For longer text, pipe through stdin: `echo "..." | mb voice`
+- For short text (greetings, alerts), use inline: `metabot voice tts "text"`
+- For longer text, pipe through stdin: `echo "..." | metabot voice tts`
 - The output file is MP3 format
 - Use `--play` only when the user explicitly wants to hear the audio (it blocks until playback completes)
 - When saving files for the user, use `-o` with a descriptive filename
 - To send the audio to the user in Feishu, copy the file to the outputs directory:
-  `cp /tmp/mb-voice-xxx.mp3 /tmp/metabot-outputs/<chatId>/`
+  `cp /tmp/metabot-voice-xxx.mp3 /tmp/metabot-outputs/<chatId>/`

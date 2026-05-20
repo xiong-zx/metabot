@@ -6,7 +6,7 @@
 
 ## 多 Agent 团队
 
-前端 Bot、后端 Bot、运维 Bot，各自独立工作空间，通过 Agent 总线协作。用 `mb talk` 跨 Bot 委派任务。
+前端 Bot、后端 Bot、运维 Bot，各自独立工作空间，通过 Agent 总线协作。用 `metabot talk` 跨 Bot 委派任务。
 
 ## 自生长的组织
 

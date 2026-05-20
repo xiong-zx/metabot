@@ -17,14 +17,14 @@ mm folders              # Browse folder tree
 For full API (create with tags, update, delete), use the `/metamemory` skill.
 
 ### /metabot — Agent Bus & Bot Management
-Use the `mb` shell shortcut for quick operations:
+Use the `metabot` CLI for quick operations:
 
 ```bash
-mb bots                                    # List all bots (local + peer)
-mb talk <botName> <chatId> <prompt>        # Delegate task to a bot
-mb peers                                   # List peers and their status
-mb skills                                  # Shared skills (Skill Hub)
-mb health                                  # Health check
+metabot bots                                    # List all bots (local + peer)
+metabot talk <botName> <chatId> <prompt>        # Delegate task to a bot
+metabot peers                                   # List peers and their status
+metabot bot-skills list                         # Per-bot Skill Hub
+metabot health                                  # Health check
 ```
 
 For full API (create bots, sendCards, Skill Hub publish/install), use the `/metabot` skill.

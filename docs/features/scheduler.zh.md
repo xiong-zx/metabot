@@ -58,8 +58,8 @@ curl -X POST http://localhost:9100/api/schedule \
 ## CLI
 
 ```bash
-mb schedule list                                              # 列出全部
-mb schedule cron metabot chatId '0 8 * * 1-5' "每日报告"       # 创建 cron
-mb schedule pause <id>                                        # 暂停
-mb schedule resume <id>                                       # 恢复
+metabot schedule list                                              # 列出全部
+metabot schedule cron metabot chatId '0 8 * * 1-5' "每日报告"       # 创建 cron
+metabot schedule pause <id>                                        # 暂停
+metabot schedule resume <id>                                       # 恢复
 ```

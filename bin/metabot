@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# metabot - MetaBot management CLI
-# Usage: metabot update | start | stop | restart | logs | status
+# metabot - MetaBot CLI (single binary)
+# Three command categories:
+#   1. Bridge process control: update | start | stop | restart | logs | status
+#   2. Bridge daemon API (localhost:9100): bots | bot | talk | schedule |
+#      peers | stats | metrics | voice | bot-skills | health
+#   3. metabot-core delegation: t5t | agents | memory | skills
 
 set -euo pipefail
 
@@ -29,6 +33,23 @@ info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# --- Bridge daemon API config (Category 2): env vars > .env file > defaults ---
+# Read API_PORT / API_SECRET / METABOT_URL from $METABOT_HOME/.env without
+# clobbering values already exported in the environment.
+_load_bridge_api_config() {
+  local envf="$METABOT_HOME/.env"
+  if [[ -f "$envf" ]]; then
+    _api_port=$(sed -n 's/^API_PORT=//p' "$envf" 2>/dev/null || true)
+    _api_secret=$(sed -n 's/^API_SECRET=//p' "$envf" 2>/dev/null || true)
+    _api_url=$(sed -n 's/^METABOT_URL=//p' "$envf" 2>/dev/null || true)
+  fi
+  METABOT_URL="${METABOT_URL:-${_api_url:-http://localhost:${_api_port:-9100}}}"
+  _api_secret="${_api_secret:-${API_SECRET:-changeme}}"
+  METABOT_AUTH="Authorization: Bearer $_api_secret"
+}
+
+_json() { python3 -m json.tool 2>/dev/null || cat; }
 
 cmd_update() {
   if [[ ! -d "$METABOT_HOME/.git" ]]; then
@@ -387,15 +408,309 @@ cmd_delegate() {
   exec node "$core_cli" "$@"
 }
 
+# --- Category 2: bridge daemon API (curls the local bridge at localhost:9100) ---
+cmd_bridge_api() {
+  _load_bridge_api_config
+  local cmd="$1"; shift 2>/dev/null || true
+  case "$cmd" in
+    bots|b)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots" | _json
+      ;;
+    bot)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
+      ;;
+    talk|t)
+      local bot="$1" chat="$2"; shift 2 2>/dev/null || true
+      local prompt="$*"
+      if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${prompt:-}" ]]; then
+        echo "Usage: metabot talk [peer/]<botName> <chatId> <prompt>"
+        echo "  Examples:"
+        echo "    metabot talk mybot chat123 'fix the bug'"
+        echo "    metabot talk alice/backend-bot chat123 'deploy to staging'"
+        exit 1
+      fi
+      python3 -c "
+import json, sys
+print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': True}))
+" "$bot" "$chat" "$prompt" | \
+      curl -s -X POST "$METABOT_URL/api/talk" \
+        -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+        -d @-
+      ;;
+    schedule|sched|sc)
+      local subcmd="${1:-list}"; shift 2>/dev/null || true
+      case "$subcmd" in
+        list|ls)
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/schedule" | _json
+          ;;
+        add|a)
+          local bot="$1" chat="$2" delay="$3"; shift 3 2>/dev/null || true
+          local prompt="$*"
+          if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${delay:-}" || -z "${prompt:-}" ]]; then
+            echo "Usage: metabot schedule add <botName> <chatId> <delaySeconds> <prompt>"
+            exit 1
+          fi
+          python3 -c "
+import json, sys
+print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'delaySeconds': int(sys.argv[3]), 'prompt': sys.argv[4]}))
+" "$bot" "$chat" "$delay" "$prompt" | \
+          curl -s -X POST "$METABOT_URL/api/schedule" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d @- | _json
+          ;;
+        cron|c)
+          local bot="$1" chat="$2" cron_expr="$3"; shift 3 2>/dev/null || true
+          local prompt="$*"
+          if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${cron_expr:-}" || -z "${prompt:-}" ]]; then
+            echo "Usage: metabot schedule cron <botName> <chatId> '<cronExpr>' <prompt>"
+            echo "  Example: metabot schedule cron mybot oc_xxx '0 8 * * 1-5' Generate daily report"
+            exit 1
+          fi
+          python3 -c "
+import json, sys
+print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys.argv[3], 'prompt': sys.argv[4]}))
+" "$bot" "$chat" "$cron_expr" "$prompt" | \
+          curl -s -X POST "$METABOT_URL/api/schedule" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d @- | _json
+          ;;
+        pause|p)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule pause <id>"; exit 1; fi
+          curl -s -X POST "$METABOT_URL/api/schedule/$1/pause" -H "$METABOT_AUTH" | _json
+          ;;
+        resume|r)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule resume <id>"; exit 1; fi
+          curl -s -X POST "$METABOT_URL/api/schedule/$1/resume" -H "$METABOT_AUTH" | _json
+          ;;
+        cancel|rm)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule cancel <id>"; exit 1; fi
+          curl -s -X DELETE "$METABOT_URL/api/schedule/$1" -H "$METABOT_AUTH" | _json
+          ;;
+        *)
+          echo "metabot schedule - Task scheduling"
+          echo "  metabot schedule list                                    - List all scheduled tasks"
+          echo "  metabot schedule add <bot> <chatId> <delaySec> <prompt>  - Schedule a one-time task"
+          echo "  metabot schedule cron <bot> <chatId> '<cron>' <prompt>   - Schedule a recurring task"
+          echo "  metabot schedule pause <id>                              - Pause a recurring task"
+          echo "  metabot schedule resume <id>                             - Resume a paused task"
+          echo "  metabot schedule cancel <id>                             - Cancel a task"
+          ;;
+      esac
+      ;;
+    peers|p)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+      ;;
+    stats)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/stats" | _json
+      ;;
+    metrics|m)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/metrics"
+      ;;
+    voice|v)
+      local subcmd="${1:-help}"; shift 2>/dev/null || true
+      case "$subcmd" in
+        call|c)
+          local bot="${1:-}" chat="${2:-}"; shift 2 2>/dev/null || true
+          local _welcome=""
+          local _prompt=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -w|--welcome) _welcome="$2"; shift 2 ;;
+              *)            _prompt="${_prompt:+$_prompt }$1"; shift ;;
+            esac
+          done
+          if [[ -z "${bot:-}" || -z "${chat:-}" ]]; then
+            echo "Usage: metabot voice call <botName> <chatId> [prompt] [-w welcomeMessage]"
+            echo "  Initiates an RTC voice call. Notifies the web/iOS user,"
+            echo "  waits for the call to end, and returns the transcript."
+            echo ""
+            echo "  Options:"
+            echo "    -w, --welcome <text>  AI's opening line (what it says first)"
+            echo ""
+            echo "  Examples:"
+            echo "    metabot voice call whis chat123 'Tell user they are awesome' -w 'Flood, 你是最棒的！'"
+            echo "    metabot voice call whis chat123 -w 'Hi! I wanted to discuss the project progress.'"
+            exit 1
+          fi
+          echo "Starting voice call... (waiting for user to join and call to end)"
+          python3 -c "
+import json, sys
+p = {'botName': sys.argv[1], 'chatId': sys.argv[2]}
+if sys.argv[3]: p['prompt'] = sys.argv[3]
+if sys.argv[4]: p['welcomeMessage'] = sys.argv[4]
+print(json.dumps(p))
+" "$bot" "$chat" "${_prompt:-}" "${_welcome:-}" | \
+          curl -s -X POST "$METABOT_URL/api/rtc/voice?wait=true" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            --max-time 660 \
+            -d @- | _json
+          ;;
+        transcript|t)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot voice transcript <sessionId>"; exit 1; fi
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/rtc/transcript?sessionId=$1" | _json
+          ;;
+        list|ls)
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/rtc/sessions" | _json
+          ;;
+        config)
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/rtc/config" | _json
+          ;;
+        tts)
+          local _provider=""
+          local _voice=""
+          local _output=""
+          local _play=false
+          local _text=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              --provider|-p) _provider="$2"; shift 2 ;;
+              --voice)       _voice="$2"; shift 2 ;;
+              -o|--output)   _output="$2"; shift 2 ;;
+              --play)        _play=true; shift ;;
+              --)            shift; _text="$*"; break ;;
+              -*)            echo "Unknown flag: $1"; exit 1 ;;
+              *)             _text="$*"; break ;;
+            esac
+          done
+          if [[ -z "$_text" ]]; then
+            if [[ -t 0 ]]; then
+              echo "Usage: metabot voice tts \"text\" [--play] [-o file.mp3] [--provider doubao|openai|elevenlabs] [--voice <name>]"
+              echo "  Or pipe text: echo 'hello' | metabot voice tts"
+              exit 1
+            fi
+            _text="$(cat)"
+          fi
+          local _json_body
+          _json_body=$(python3 -c "
+import json, sys
+body = {'text': sys.argv[1]}
+if sys.argv[2]: body['provider'] = sys.argv[2]
+if sys.argv[3]: body['voice'] = sys.argv[3]
+print(json.dumps(body))
+" "$_text" "$_provider" "$_voice")
+          if [[ -z "$_output" ]]; then
+            _output="/tmp/metabot-voice-$(date +%s).mp3"
+          fi
+          local _http_code
+          _http_code=$(curl -s -w '%{http_code}' -o "$_output" \
+            -X POST "$METABOT_URL/api/tts" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d "$_json_body")
+          if [[ "$_http_code" != "200" ]]; then
+            echo "Error: TTS request failed (HTTP $_http_code)"
+            cat "$_output" 2>/dev/null
+            rm -f "$_output"
+            exit 1
+          fi
+          echo "$_output"
+          if [[ "$_play" == "true" ]]; then
+            if command -v afplay &>/dev/null; then afplay "$_output"
+            elif command -v mpv &>/dev/null; then mpv --no-video "$_output" 2>/dev/null
+            elif command -v ffplay &>/dev/null; then ffplay -nodisp -autoexit "$_output" 2>/dev/null
+            elif command -v play &>/dev/null; then play "$_output" 2>/dev/null
+            else echo "(no audio player found — install mpv, ffplay, or sox to use --play)"
+            fi
+          fi
+          ;;
+        *)
+          echo "metabot voice - Voice tools"
+          echo ""
+          echo "  RTC Voice Call:"
+          echo "    metabot voice call <bot> <chatId> [prompt] [-w opening]  - Start voice call"
+          echo "    metabot voice transcript <sessionId>     - Get call transcript"
+          echo "    metabot voice list                       - List active voice sessions"
+          echo "    metabot voice config                     - Check RTC configuration"
+          echo ""
+          echo "  Text-to-Speech:"
+          echo "    metabot voice tts \"text\" [--play] [-o f]  - Generate MP3 from text"
+          echo "    metabot voice tts \"text\" --provider doubao - Use specific TTS provider"
+          echo "    echo 'hello' | metabot voice tts           - Read from stdin"
+          ;;
+      esac
+      ;;
+    bot-skills)
+      local subcmd="${1:-list}"; shift 2>/dev/null || true
+      case "$subcmd" in
+        list|ls)
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills" | _json
+          ;;
+        search|s)
+          local query="$*"
+          if [[ -z "${query:-}" ]]; then echo "Usage: metabot bot-skills search <query>"; exit 1; fi
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills/search?q=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$query")" | _json
+          ;;
+        get|g)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot bot-skills get <name>"; exit 1; fi
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills/$1" | _json
+          ;;
+        publish|pub)
+          local bot="${1:-}" skill="${2:-}"
+          if [[ -z "$bot" || -z "$skill" ]]; then
+            echo "Usage: metabot bot-skills publish <botName> <skillName>"
+            exit 1
+          fi
+          curl -s -X POST "$METABOT_URL/api/skills/$skill/publish-from-bot" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d "{\"botName\":\"$bot\"}" | _json
+          ;;
+        install|i)
+          local skill="${1:-}" bot="${2:-}"
+          if [[ -z "$skill" || -z "$bot" ]]; then
+            echo "Usage: metabot bot-skills install <skillName> <botName>"
+            exit 1
+          fi
+          local source="${3:-local}"
+          python3 -c "
+import json, sys
+print(json.dumps({'botName': sys.argv[1], 'source': sys.argv[2]}))
+" "$bot" "$source" | \
+          curl -s -X POST "$METABOT_URL/api/skills/$skill/install" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d @- | _json
+          ;;
+        remove|rm)
+          if [[ -z "${1:-}" ]]; then echo "Usage: metabot bot-skills remove <name>"; exit 1; fi
+          curl -s -X DELETE "$METABOT_URL/api/skills/$1" -H "$METABOT_AUTH" | _json
+          ;;
+        *)
+          echo "metabot bot-skills - Per-bot Skill Hub (bridge-local skill registry)"
+          echo "  metabot bot-skills list                               - List all skills (local + peer)"
+          echo "  metabot bot-skills search <query>                     - Search skills by keyword"
+          echo "  metabot bot-skills get <name>                         - Get skill details"
+          echo "  metabot bot-skills publish <botName> <skillName>      - Publish a bot's skill to the hub"
+          echo "  metabot bot-skills install <skillName> <botName>      - Install a skill to a bot"
+          echo "  metabot bot-skills remove <name>                      - Unpublish a skill"
+          ;;
+      esac
+      ;;
+    health|h)
+      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/health" | _json
+      ;;
+  esac
+}
+
 print_help() {
-  echo -e "${BOLD}metabot${NC} - MetaBot management CLI"
+  echo -e "${BOLD}metabot${NC} - MetaBot CLI"
   echo ""
-  echo "  metabot update     Pull latest, rebuild, and restart"
-  echo "  metabot start      Start MetaBot with PM2"
-  echo "  metabot stop       Stop MetaBot"
-  echo "  metabot restart    Restart MetaBot"
-  echo "  metabot logs       View live logs (pass -n 100 etc.)"
-  echo "  metabot status     Show PM2 process status"
+  echo "  Process control:"
+  echo "    metabot update     Pull latest, rebuild, and restart"
+  echo "    metabot start      Start MetaBot with PM2"
+  echo "    metabot stop       Stop MetaBot"
+  echo "    metabot restart    Restart MetaBot"
+  echo "    metabot logs       View live logs (pass -n 100 etc.)"
+  echo "    metabot status     Show PM2 process status"
+  echo ""
+  echo "  Bridge daemon API (localhost:9100):"
+  echo "    metabot bots                       List all bots (local + peer)"
+  echo "    metabot bot <name>                 Get bot details"
+  echo "    metabot talk <bot> <chatId> <msg>  Talk to a bot (bridge /api/talk)"
+  echo "    metabot schedule …                 Task scheduling (list/add/cron/pause/resume/cancel)"
+  echo "    metabot peers                      List peers and their status"
+  echo "    metabot stats                      Cost & usage stats"
+  echo "    metabot metrics                    Prometheus metrics"
+  echo "    metabot voice …                    RTC voice call + TTS (call/transcript/list/config/tts)"
+  echo "    metabot bot-skills …               Per-bot Skill Hub (list/search/get/publish/install/remove)"
+  echo "    metabot health                     Health check"
   echo ""
   echo "  Feature subcommands (delegated to metabot-core):"
   echo "    metabot t5t … | agents … | memory … | skills …"
@@ -408,6 +723,8 @@ case "${1:-}" in
   restart|rs)   cmd_restart ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
+  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|bot-skills|health|h)
+                cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
   *)            cmd_delegate "$@" ;;
 esac

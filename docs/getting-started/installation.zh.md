@@ -53,4 +53,4 @@ npm run dev
 
 ## Windows 说明
 
-PowerShell 安装器自动检测 `winget`/`choco`/`scoop` 来安装 Node.js。CLI 工具（`mm`、`mb`、`metabot`、`fd`）通过 `.cmd` 包装器安装，需要 [Git for Windows](https://git-scm.com)（提供 Git Bash）。
+PowerShell 安装器自动检测 `winget`/`choco`/`scoop` 来安装 Node.js。`metabot` CLI（以及 `mb` 弃用兼容壳）通过 `.cmd` 包装器安装，需要 [Git for Windows](https://git-scm.com)（提供 Git Bash）。

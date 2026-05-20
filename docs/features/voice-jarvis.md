@@ -262,14 +262,14 @@ curl -X POST http://localhost:9100/api/tts \
 **CLI shortcut:**
 
 ```bash
-mb voice "Hello world"              # generate MP3, print file path
-mb voice "Hello" --play             # generate and play audio
-mb voice "Hello" -o greeting.mp3    # save to specific file
-echo "Long text" | mb voice         # read from stdin
-mb voice "Hello" --provider openai --voice nova  # override provider/voice
+metabot voice tts "Hello world"              # generate MP3, print file path
+metabot voice tts "Hello" --play             # generate and play audio
+metabot voice tts "Hello" -o greeting.mp3    # save to specific file
+echo "Long text" | metabot voice tts         # read from stdin
+metabot voice tts "Hello" --provider openai --voice nova  # override provider/voice
 ```
 
-See [mb CLI — Voice](../reference/cli-mb.md#voice) for full CLI reference.
+See [metabot CLI — Voice](../reference/cli-metabot.md#voice) for full CLI reference.
 
 ## Limitations
 

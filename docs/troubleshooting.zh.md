@@ -50,4 +50,4 @@ Bot 在群聊中仅在被 **@提及** 时响应。私聊中回复所有消息。
 :   可以。支持 Kimi、DeepSeek、GLM 等 Anthropic 兼容 API。设置 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`。
 
 **Agent 间通信是实时的吗？**
-:   目前是同步请求-响应模式，通过 Agent 总线。Agent 通过 `mb talk` 或 `/api/talk` 互相对话。异步双向协议在规划中。
+:   目前是同步请求-响应模式，通过 Agent 总线。Agent 通过 `metabot talk` 或 `/api/talk` 互相对话。异步双向协议在规划中。

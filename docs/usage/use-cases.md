@@ -6,7 +6,7 @@ Full Claude Code from your phone, bound to your project. Read, edit, run tests, 
 
 ## Multi-Agent Team
 
-Frontend bot, backend bot, infra bot, each in their own workspace, talking via the Agent Bus. Delegate tasks across bots with `mb talk`.
+Frontend bot, backend bot, infra bot, each in their own workspace, talking via the Agent Bus. Delegate tasks across bots with `metabot talk`.
 
 ## Self-Growing Organization
 

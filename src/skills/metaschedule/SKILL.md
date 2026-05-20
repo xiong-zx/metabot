@@ -12,20 +12,20 @@ description: "MetaBot's persistent server-side scheduler (cron + one-shot). Opti
 >
 > For ad-hoc, session-scoped scheduling, prefer the Claude Code native tools `CronCreate` and `/loop` instead — they're faster, in-process, and need no MetaBot server call.
 
-### Quick Commands (mb shortcut)
+### Quick Commands (metabot CLI)
 
-The `mb` shell function is pre-installed and handles auth automatically.
+The `metabot` CLI is pre-installed and handles auth automatically.
 
 ```bash
 # One-time delayed tasks
-mb schedule list                                       # List all scheduled tasks
-mb schedule add <bot> <chatId> <delaySec> <prompt>     # Schedule a one-time future task
-mb schedule cancel <id>                                # Cancel a scheduled task
+metabot schedule list                                       # List all scheduled tasks
+metabot schedule add <bot> <chatId> <delaySec> <prompt>     # Schedule a one-time future task
+metabot schedule cancel <id>                                # Cancel a scheduled task
 
 # Recurring (cron)
-mb schedule cron <bot> <chatId> '<cronExpr>' <prompt>  # Create recurring task
-mb schedule pause <id>                                 # Pause a recurring task
-mb schedule resume <id>                                # Resume a paused recurring task
+metabot schedule cron <bot> <chatId> '<cronExpr>' <prompt>  # Create recurring task
+metabot schedule pause <id>                                 # Pause a recurring task
+metabot schedule resume <id>                                # Resume a paused recurring task
 ```
 
 Cron format: `minute hour day month weekday` (5 fields). Examples:

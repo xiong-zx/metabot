@@ -53,4 +53,4 @@ npm run dev
 
 ## Windows Notes
 
-The PowerShell installer auto-detects `winget`/`choco`/`scoop` for Node.js installation. CLI tools (`mm`, `mb`, `metabot`, `fd`) are installed with `.cmd` wrappers and require [Git for Windows](https://git-scm.com) (provides Git Bash).
+The PowerShell installer auto-detects `winget`/`choco`/`scoop` for Node.js installation. The `metabot` CLI (and the `mb` deprecation wrapper) is installed with a `.cmd` wrapper and requires [Git for Windows](https://git-scm.com) (provides Git Bash).

@@ -58,10 +58,10 @@ curl -X POST http://localhost:9100/api/schedule \
 ## CLI
 
 ```bash
-mb schedule list                                              # list all
-mb schedule cron metabot chatId '0 8 * * 1-5' "daily report" # create cron
-mb schedule pause <id>                                        # pause
-mb schedule resume <id>                                       # resume
+metabot schedule list                                              # list all
+metabot schedule cron metabot chatId '0 8 * * 1-5' "daily report" # create cron
+metabot schedule pause <id>                                        # pause
+metabot schedule resume <id>                                       # resume
 ```
 
 ## Configuration

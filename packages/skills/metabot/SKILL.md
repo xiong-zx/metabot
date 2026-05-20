@@ -15,7 +15,7 @@ metabot t5t    <cmd>   # daily team status portal
 metabot help           # top-level help (also --help, -h, bare invocation)
 ```
 
-`metabot` is the **sole** binary. The legacy `mm`, `mh`, and `mb` bins were removed in P4-MR4 — any script still calling them needs to switch to the `metabot <subcommand>` form (see the migration table below).
+`metabot` is the **single** CLI binary. Beyond the four metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`bot-skills`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm` and `mh` bins were removed in P4-MR4; `mb` is now a thin deprecation wrapper that forwards to `metabot` (`mb skills` → `metabot bot-skills`). Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
 
 Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first line). Server URL is `METABOT_CORE_URL`, default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since the P4-MR6 pivot — no `/core` path prefix, no shared multi-tenant host). CLIs explicitly configured against the legacy `https://metabot.xvirobotics.com/core` keep working unchanged — the multi-tenant `/core` sub-handle is untouched.
 
@@ -152,6 +152,35 @@ metabot t5t wip <project> <evaluatorId> "<title>"
 
 The Phase 3 hard cutover stops `t5t-johor` and 301-redirects `t5t.xvirobotics.com/*` → `https://metabot-core.xvirobotics.com/t5t{uri}` (the unified portal's t5t tab). After cutover, only `metabot t5t` works — the old `t5t` Python CLI dies because its hardcoded host stops serving content directly.
 
+## `metabot` bridge-local — local bridge daemon API
+
+Separate from the metabot-core surfaces above, `metabot` also curls the **local
+bridge daemon** at `localhost:9100` (auth from `API_PORT` / `API_SECRET` in the
+bridge `.env`). These commands act on the bot process running on this host:
+
+```bash
+metabot bots                              # list all bots (local + peer)
+metabot bot <name>                        # get bot details
+metabot talk [peer/]<bot> <chatId> <msg>  # talk to a bot via the bridge /api/talk
+metabot schedule list|add|cron|pause|resume|cancel …   # task scheduler
+metabot peers                             # list peers and status
+metabot stats                             # cost & usage statistics
+metabot metrics                           # Prometheus metrics
+metabot voice call|transcript|list|config|tts …       # RTC voice call + TTS
+metabot bot-skills list|search|get|publish|install|remove …  # per-bot Skill Hub
+metabot health                            # health check
+```
+
+**`talk` — two distinct paths.** `metabot talk` (here) hits the **bridge**
+`/api/talk` on `localhost:9100` for local + peer-federated routing. `metabot
+agents talk` (above) is the **central-registry** P2P path that resolves a peer
+via the metabot-core agent bus. They are not aliases — pick by which registry
+you want.
+
+**`bot-skills` vs `skills`.** `metabot bot-skills` is the **per-bot, bridge-local**
+Skill Hub (`/api/skills` on `localhost:9100`). `metabot skills` (above) is the
+**central** metabot-core Skill Hub. Distinct registries, distinct commands.
+
 ## Env vars
 
 | Var | Purpose |
@@ -162,16 +191,24 @@ The Phase 3 hard cutover stops `t5t-johor` and 301-redirects `t5t.xvirobotics.co
 
 ## Migration from `mm` / `mh` / `mb`
 
-P4-MR4 removed the standalone `mm`, `mh`, and `mb` bins. Update any script or muscle-memory call site to the unified form:
+P4-MR4 removed the standalone `mm` and `mh` bins. `mb` is **not** removed — it
+is now a thin deprecation wrapper that forwards to `metabot` (so old `mb`
+scripts keep working, with a stderr notice). Update any script or muscle-memory
+call site to the unified form:
 
-| Old (removed) | New (canonical) |
+| Old | New (canonical) |
 |---|---|
-| `mm <cmd>` | `metabot memory <cmd>` |
-| `mh <cmd>` | `metabot skills <cmd>` |
-| `mb talk <bot> <chatId> "<msg>"` | `metabot agents talk <peer>[/<bot>] <chatId> "<msg>"` |
+| `mm <cmd>` (removed) | `metabot memory <cmd>` |
+| `mh <cmd>` (removed) | `metabot skills <cmd>` |
+| `mb skills <cmd>` (wrapper) | `metabot bot-skills <cmd>` |
+| `mb talk <bot> <chatId> "<msg>"` (wrapper) | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`) |
+| `mb bots / schedule / voice / stats / peers / metrics / health` (wrapper) | `metabot <same subcommand>` |
+| (n/a) | `metabot agents talk <peer>[/<bot>] <chatId> "<msg>"` (central-registry P2P variant) |
 | (n/a) | `metabot agents list / register / heartbeat / visible / hide` (new in the agent-bus batch) |
 | (n/a) | `metabot t5t <cmd>` (new in T5T MR5) |
 
-The wire calls are identical — only the executable name changed. If `command -v mm` (or `mh`) still resolves on your machine, you have a stale install from before P4-MR4; reinstall via the metabot skill / your dotfiles bootstrap.
+The wire calls are identical — only the executable name changed. If `command -v
+mm` (or `mh`) still resolves on your machine, you have a stale install from
+before P4-MR4; reinstall via the metabot skill / your dotfiles bootstrap.
 
 The standalone `metamemory` and `skill-hub` skill bundles were never published in this fresh metabot-core arch; the unified `metabot` skill is the single skill bundle for the whole CLI surface.

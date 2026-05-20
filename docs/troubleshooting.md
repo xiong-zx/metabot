@@ -70,4 +70,4 @@ Exception: **2-member groups** (1 user + 1 bot) are treated like DMs — no @men
 :   Yes. Any Anthropic-compatible API works (Kimi, DeepSeek, GLM, etc.). Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
 
 **Agent communication?**
-:   Currently synchronous request-response via the Agent Bus. Agents talk to each other using `mb talk` or the `/api/talk` endpoint. Async bidirectional protocols are on the roadmap.
+:   Currently synchronous request-response via the Agent Bus. Agents talk to each other using `metabot talk` or the `/api/talk` endpoint. Async bidirectional protocols are on the roadmap.

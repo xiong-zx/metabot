@@ -152,7 +152,7 @@ As of 2026-05-19, MetaBot absorbed `metabot-core` into a single npm-workspaces m
 ```
 metabot/                       # repo root — bridge runtime (bot hosts run this under PM2)
 ├── src/                       # bridge engine, stream processing, Feishu/Telegram/WeChat bridges
-├── bin/                       # CLI dispatcher (metabot / mb / mm / doubao-tts)
+├── bin/                       # CLI (metabot single entrypoint / mb deprecation shim / doubao-tts)
 ├── web/                       # bridge's own browser SPA
 ├── packages/                  # absorbed metabot-core
 │   ├── server/                # central HTTP backend (ECS deploy unit)
@@ -208,12 +208,12 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
 | **MetaMemory** | Shared knowledge store hosted by central [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) with full-text search; MetaBot reads/writes via `/api/memory/*` and auto-syncs to Feishu Wiki |
 | **IM Bridge** | Chat with any agent from Feishu, Telegram, or WeChat (including mobile). Streaming cards + tool call tracking |
-| **Agent Bus** | Agents talk to each other via `mb talk`. Create/remove bots at runtime |
-| **MetaSchedule (opt-in)** | Persistent server-side scheduler — cron + one-shot, survives restarts, exposes HTTP API + `mb schedule` CLI. Not installed by default; enable with `cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/` |
+| **Agent Bus** | Agents talk to each other via `metabot talk`. Create/remove bots at runtime |
+| **MetaSchedule (opt-in)** | Persistent server-side scheduler — cron + one-shot, survives restarts, exposes HTTP API + `metabot schedule` CLI. Not installed by default; enable with `cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/` |
 | **MetaSkill (opt-in)** | Agent factory. `/metaskill` generates portable agent teams. Not installed by default; enable with `cp -r src/skills/metaskill ~/.claude/skills/` |
 | **Feishu Lark CLI** | 200+ commands covering docs, messaging, calendar, tasks, and 8 more domains. 19 AI Agent Skills |
-| **Skill Hub** | Cross-instance skill sharing registry. `mb skills` to publish, discover, and install skills with FTS5 search |
-| **Peers** | Cross-instance bot discovery and task routing. `mb talk alice/backend-bot` routes automatically |
+| **Skill Hub** | Cross-instance skill sharing registry. `metabot bot-skills` to publish, discover, and install skills with FTS5 search |
+| **Peers** | Cross-instance bot discovery and task routing. `metabot talk alice/backend-bot` routes automatically |
 | **Voice Assistant** | Jarvis mode -- "Hey Siri, Jarvis" from AirPods for hands-free agent control |
 
 ## Quick Start
@@ -271,7 +271,7 @@ summarize the top 5 stories, and save the summary to MetaMemory.
 > Need the schedule to survive MetaBot restarts and be visible to other bots?
 > Install the opt-in `/metaschedule` skill
 > (`cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/`),
-> then use `mb schedule cron` / the HTTP API to submit jobs to MetaBot's
+> then use `metabot schedule cron` / the HTTP API to submit jobs to MetaBot's
 > persistent scheduler.
 
 ### Agent Teams — Runtime
@@ -497,29 +497,30 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 <details>
 <summary><strong>CLI Tools</strong></summary>
 
-The installer places `metabot`, `mb` in `~/.local/bin/` — available immediately. `metabot` is the unified dispatcher: bridge process-control subcommands (`update` / `start` / `stop` / `restart` / `logs` / `status`) are handled in-script; everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
+The installer places `metabot` in `~/.local/bin/` — available immediately. `metabot` is the **single CLI binary** with three command categories: (1) bridge process control (`update` / `start` / `stop` / `restart` / `logs` / `status`); (2) bridge daemon API (`bots` / `talk` / `schedule` / `peers` / `stats` / `voice` / `bot-skills` / `health`, which curl the local bridge at `localhost:9100`); (3) everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mb` command is now a thin deprecation wrapper that forwards to `metabot`; the `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
 
 ```bash
-# MetaBot management (handled in-script by bin/metabot)
+# 1. MetaBot process management (handled in-script by bin/metabot)
 metabot update                      # pull latest, rebuild, restart
 metabot start / stop / restart      # PM2 management
 metabot logs                        # view live logs
 metabot status                      # PM2 process status
 
-# Feature subcommands (forwarded to packages/cli/bin/metabot)
+# 2. Bridge daemon API (curls the local bridge at localhost:9100)
+metabot bots                        # list all bots
+metabot talk <bot> <chatId> <prompt> # talk to a bot
+metabot stats                       # cost & usage stats
+metabot voice tts "Hello world" --play  # text-to-speech
+
+# 3. Feature subcommands (forwarded to packages/cli/bin/metabot)
 metabot t5t board                   # team standup board
 metabot agents list                 # peer-bot directory
 metabot memory search "deployment guide"   # shared-memory full-text search
-metabot skills list                 # skill registry
+metabot skills list                 # skill registry (central Skill Hub)
 # Override CLI path: export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 
-# Agent Bus
-mb bots                             # list all bots
-mb talk <bot> <chatId> <prompt>     # talk to a bot
-mb stats                            # cost & usage stats
-
 # Scheduling — prefer Claude Code's native CronCreate / /loop directly in chat.
-# The persistent server-side scheduler (`mb schedule list / cron / cancel /
+# The persistent server-side scheduler (`metabot schedule list / cron / cancel /
 # pause / resume`) is exposed by the opt-in /metaschedule skill. Enable with:
 #   cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/
 
@@ -528,14 +529,11 @@ lark-cli docs +fetch --doc <feishu-url>
 lark-cli im +messages-send --chat-id oc_xxx --text "Hi"
 lark-cli calendar +agenda --as user
 
-# Skill Hub
-mb skills                             # list all skills
-mb skills search <query>              # search skills
-mb skills publish <bot> <skill>       # publish a bot's skill
-mb skills install <skill> <bot>       # install skill to a bot
-
-# Text-to-Speech
-mb voice "Hello world" --play
+# Per-bot Skill Hub (bridge-local)
+metabot bot-skills list               # list all skills
+metabot bot-skills search <query>     # search skills
+metabot bot-skills publish <bot> <skill> # publish a bot's skill
+metabot bot-skills install <skill> <bot> # install skill to a bot
 ```
 
 CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` in `~/.metabot/.env`. MetaMemory / Skill Hub / Agents / T5T all live in central metabot-core inside this monorepo at `packages/server/`; configure `METABOT_CORE_URL` + `METABOT_CORE_TOKEN`, get a token at `<METABOT_CORE_URL>/cli`.

@@ -33,10 +33,10 @@ MetaBot 把它们都解放出来。给每个 Agent 一个 **Claude Code 或 Kimi
 | **IM Bridge** | 飞书或 Telegram（含手机端）与任意 Agent 对话。带颜色状态的流式卡片。 |
 | **Web UI** | 浏览器端聊天 `/web/`，WebSocket 流式输出、电话语音模式（VAD）、MetaMemory 浏览器、明暗主题。[了解更多](features/web-ui.md) |
 | **语音助手** | 通过 iOS 快捷指令（Jarvis 模式）或 Web UI 电话模式免手语音控制。服务端 STT + TTS。[了解更多](features/voice-jarvis.md) |
-| **Agent 总线** | 9100 端口 REST API。Agent 通过 `mb talk` 互相对话。运行时创建/删除 Bot。 |
+| **Agent 总线** | 9100 端口 REST API。Agent 通过 `metabot talk` 互相对话。运行时创建/删除 Bot。 |
 | **Peers 联邦** | 跨实例 Bot 发现和任务路由。 |
 | **定时任务调度器** | 一次性延迟和周期性 cron 任务。支持时区，跨重启持久化。 |
-| **CLI 工具** | `metabot`、`mm`、`mb`、`fd` 命令，管理服务、知识库、Agent 总线和飞书文档。 |
+| **CLI 工具** | `metabot` —— 唯一的 CLI 入口，覆盖服务管理、bridge 守护进程 API 和 metabot-core 转发。 |
 
 ## 快速安装
 
