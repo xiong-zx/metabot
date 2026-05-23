@@ -35,6 +35,13 @@ export interface PeerStatus {
 export interface LocalBotEntry {
   name: string;
   visible?: boolean;
+  /**
+   * When defined, the bridge ships this on every bulk-register and pins the
+   * agent row's memory_public to it. Undefined means "leave whatever was last
+   * set (runtime toggle wins)" — server-side, omitting the field keeps the
+   * existing column value on update.
+   */
+  memoryPublic?: boolean;
 }
 
 interface PeerState {
@@ -311,6 +318,10 @@ export class PeerManager {
         botName: b.name,
         url: this.selfUrl,
         visible: b.visible !== false,
+        // Omit memoryPublic from the payload when bots.json doesn't set it,
+        // so a CLI-time `metabot memory visibility` toggle isn't clobbered by
+        // every restart. Server-side, undefined → keep existing column value.
+        ...(b.memoryPublic !== undefined ? { memoryPublic: b.memoryPublic } : {}),
       })),
     };
     const resp = await proxyFetch(`${this.agentBusUrl}/api/agents/bulk`, {

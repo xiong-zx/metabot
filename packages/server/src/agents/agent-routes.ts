@@ -21,6 +21,7 @@ function publicShape(rec: AgentRecord) {
     botName: rec.botName,
     url: rec.url,
     visible: rec.visible,
+    memoryPublic: rec.memoryPublic,
     registeredAt: rec.registeredAt,
     lastSeenAt: rec.lastSeenAt,
   };
@@ -49,12 +50,14 @@ export function registerAgent(
   const botName = resolveBotName(body, cred);
   if (!botName) return err(400, 'bot_name_required');
   const visible = body.visible === undefined ? true : !!body.visible;
+  const memoryPublic = body.memoryPublic === undefined ? undefined : !!body.memoryPublic;
 
   try {
     const rec = store.register({
       botName,
       url,
       visible,
+      memoryPublic,
       ownerCredentialId: cred.id,
     });
     return { status: 201, body: publicShape(rec) };
@@ -95,8 +98,9 @@ export function registerAgentsBulk(
       continue;
     }
     const visible = entry.visible === undefined ? true : !!entry.visible;
+    const memoryPublic = entry.memoryPublic === undefined ? undefined : !!entry.memoryPublic;
     try {
-      store.register({ botName, url, visible, ownerCredentialId: cred.id });
+      store.register({ botName, url, visible, memoryPublic, ownerCredentialId: cred.id });
       results.push({ botName, status: 201 });
       registered++;
     } catch (e) {
@@ -163,6 +167,7 @@ export function listAgents(
         url: a.url,
         host: deriveHost(a.url),
         visible: a.visible,
+        memoryPublic: a.memoryPublic,
         lastSeenAt: a.lastSeenAt,
       })),
     },
@@ -185,6 +190,33 @@ export function setAgentVisibility(
   }
   const rec = store.setVisibility(botName, body.visible);
   return { status: 200, body: { botName: rec.botName, visible: rec.visible } };
+}
+
+/**
+ * PATCH /api/agents/:botName/memory-visibility — toggle whether `metabot
+ * memory create/mkdir` auto-prefixes this bot's writes into `/shared/` (true)
+ * or `/users/` (false). Owner-credential or admin only.
+ *
+ * This does NOT move existing documents — toggling only changes the default
+ * write target. To make an old private doc public, the owner moves it via
+ * `metabot memory move`.
+ */
+export function setAgentMemoryPublic(
+  store: AgentStore,
+  botName: string,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  if (typeof body.memoryPublic !== 'boolean') {
+    return err(400, 'memory_public_required');
+  }
+  const existing = store.getByName(botName);
+  if (!existing) return err(404, 'agent_not_found');
+  if (existing.ownerCredentialId !== cred.id && cred.role !== 'admin') {
+    return err(403, 'agent_ownership_required');
+  }
+  const rec = store.setMemoryPublic(botName, body.memoryPublic);
+  return { status: 200, body: { botName: rec.botName, memoryPublic: rec.memoryPublic } };
 }
 
 export function removeAgent(

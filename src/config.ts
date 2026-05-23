@@ -27,6 +27,16 @@ export interface BotConfigBase {
    * credential controls who can register/hide them).
    */
   visible?: boolean;
+  /**
+   * Default-target for `metabot memory create/mkdir` when no explicit
+   * `--path` / `--folder` is given. When true, the CLI auto-prefixes writes
+   * into `/shared/<botName>/...` (visible to every member); when false or
+   * omitted, it stays the per-bot private `/users/<botName>/...` default.
+   * Setting this in `bots.json` is sticky — the bridge passes it on every
+   * bulk-register and overrides whatever was previously toggled via
+   * `metabot memory visibility`.
+   */
+  memoryPublic?: boolean;
   /** Agent engine. Defaults to 'claude' for backward compatibility. */
   engine?: EngineName;
   claude: {
@@ -202,6 +212,8 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
+  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  memoryPublic?: boolean;
   feishuAppId: string;
   feishuAppSecret: string;
   defaultWorkingDirectory: string;
@@ -226,6 +238,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
+    ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -250,6 +263,8 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
+  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  memoryPublic?: boolean;
   telegramBotToken: string;
   defaultWorkingDirectory: string;
   maxTurns?: number;
@@ -271,6 +286,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
+    ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -293,6 +309,8 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
+  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  memoryPublic?: boolean;
   defaultWorkingDirectory: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -312,6 +330,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
+    ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -326,6 +345,8 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   description?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
+  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  memoryPublic?: boolean;
   ilinkBaseUrl?: string;
   wechatBotToken?: string;
   defaultWorkingDirectory: string;
@@ -343,6 +364,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
+    ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),

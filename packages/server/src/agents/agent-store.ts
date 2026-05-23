@@ -7,6 +7,14 @@ export interface AgentRecord {
   botName: string;
   url: string;
   visible: boolean;
+  /**
+   * When true, the CLI defaults this bot's `metabot memory create/mkdir`
+   * writes to `/shared/<botName>/...` instead of `/users/<botName>/...`.
+   * Bot-level opt-in mirror of `bots.json` `visible` — switches the *default*
+   * write target only; existing private docs stay private, and explicit
+   * `--path` / `--folder` still wins. ACL itself is unchanged (path-based).
+   */
+  memoryPublic: boolean;
   ownerCredentialId: string;
   registeredAt: string;
   lastSeenAt: string;
@@ -16,6 +24,7 @@ export interface RegisterInput {
   botName: string;
   url: string;
   visible?: boolean;
+  memoryPublic?: boolean;
   ownerCredentialId: string;
 }
 
@@ -72,6 +81,15 @@ export class AgentStore {
       CREATE INDEX IF NOT EXISTS agents_visible_idx   ON agents(visible);
       CREATE INDEX IF NOT EXISTS agents_last_seen_idx ON agents(last_seen_at);
     `);
+
+    // Idempotent migration for `memory_public` (added 2026-05-23). `CREATE
+    // TABLE IF NOT EXISTS` does NOT add columns to pre-existing rows, so
+    // we ADD COLUMN manually and swallow the error if the column already
+    // exists. See [[bug_central_db_schema_drift_talk_secret]].
+    const cols = this.db.prepare(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'memory_public')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN memory_public INTEGER NOT NULL DEFAULT 0`);
+    }
   }
 
   register(input: RegisterInput): AgentRecord {
@@ -79,31 +97,41 @@ export class AgentStore {
     const visible = input.visible !== false;
 
     const existing = this.db.prepare(
-      'SELECT id, owner_credential_id FROM agents WHERE bot_name = ?',
-    ).get(input.botName) as { id: string; owner_credential_id: string } | undefined;
+      'SELECT id, owner_credential_id, memory_public FROM agents WHERE bot_name = ?',
+    ).get(input.botName) as
+      | { id: string; owner_credential_id: string; memory_public: 0 | 1 }
+      | undefined;
 
     if (existing) {
       if (existing.owner_credential_id !== input.ownerCredentialId) {
         throw new NameSquatError(input.botName);
       }
+      // memoryPublic only changes if the caller passed it explicitly — this
+      // lets a bot toggle it at runtime via `metabot memory visibility` and
+      // not have the next bridge re-register clobber the choice (bots.json
+      // doesn't carry it unless the user wants it baked in).
+      const memoryPublic = input.memoryPublic === undefined
+        ? existing.memory_public === 1
+        : input.memoryPublic === true;
       this.db.prepare(`
         UPDATE agents SET
-          url = ?, visible = ?, last_seen_at = ?
+          url = ?, visible = ?, memory_public = ?, last_seen_at = ?
         WHERE bot_name = ?
       `).run(
-        input.url, visible ? 1 : 0, now, input.botName,
+        input.url, visible ? 1 : 0, memoryPublic ? 1 : 0, now, input.botName,
       );
       this.logger.info({ botName: input.botName }, 'agent re-registered');
       return this.getByName(input.botName)!;
     }
 
     const id = crypto.randomUUID();
+    const memoryPublic = input.memoryPublic === true;
     this.db.prepare(`
-      INSERT INTO agents (id, bot_name, url, talk_secret, visible,
+      INSERT INTO agents (id, bot_name, url, talk_secret, visible, memory_public,
         owner_credential_id, registered_at, last_seen_at)
-      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
     `).run(
-      id, input.botName, input.url, visible ? 1 : 0,
+      id, input.botName, input.url, visible ? 1 : 0, memoryPublic ? 1 : 0,
       input.ownerCredentialId, now, now,
     );
     this.logger.info({ botName: input.botName, id }, 'agent registered');
@@ -192,6 +220,13 @@ export class AgentStore {
     return this.getByName(botName)!;
   }
 
+  setMemoryPublic(botName: string, memoryPublic: boolean): AgentRecord {
+    const result = this.db.prepare('UPDATE agents SET memory_public = ? WHERE bot_name = ?')
+      .run(memoryPublic ? 1 : 0, botName);
+    if (result.changes === 0) throw new AgentNotFoundError(botName);
+    return this.getByName(botName)!;
+  }
+
   remove(botName: string): boolean {
     const result = this.db.prepare('DELETE FROM agents WHERE bot_name = ?').run(botName);
     if (result.changes > 0) {
@@ -217,6 +252,7 @@ interface RawAgentRow {
   url: string;
   talk_secret: string | null;
   visible: 0 | 1;
+  memory_public: 0 | 1;
   owner_credential_id: string;
   registered_at: string;
   last_seen_at: string;
@@ -228,6 +264,7 @@ function rowToRecord(row: RawAgentRow): AgentRecord {
     botName: row.bot_name,
     url: row.url,
     visible: row.visible === 1,
+    memoryPublic: row.memory_public === 1,
     ownerCredentialId: row.owner_credential_id,
     registeredAt: row.registered_at,
     lastSeenAt: row.last_seen_at,

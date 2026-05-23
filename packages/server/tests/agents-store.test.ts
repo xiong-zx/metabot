@@ -199,4 +199,71 @@ describe('AgentStore', () => {
   it('initSchema is idempotent (second AgentStore against same db does not throw)', () => {
     expect(() => new AgentStore(db, pino({ level: 'silent' }))).not.toThrow();
   });
+
+  it('memoryPublic defaults to false on fresh register; honours explicit true', () => {
+    const priv = store.register({ botName: 'priv', url: 'http://x', ownerCredentialId: 'c' });
+    expect(priv.memoryPublic).toBe(false);
+    const pub = store.register({
+      botName: 'pub', url: 'http://x', memoryPublic: true, ownerCredentialId: 'c',
+    });
+    expect(pub.memoryPublic).toBe(true);
+  });
+
+  it('re-register WITHOUT memoryPublic preserves the existing value (runtime toggle stickiness)', () => {
+    store.register({ botName: 'a', url: 'http://x', ownerCredentialId: 'c' });
+    store.setMemoryPublic('a', true);
+    const r2 = store.register({ botName: 'a', url: 'http://y', ownerCredentialId: 'c' });
+    expect(r2.memoryPublic).toBe(true);
+  });
+
+  it('re-register WITH explicit memoryPublic:false clobbers the runtime toggle (bots.json pin)', () => {
+    store.register({ botName: 'a', url: 'http://x', ownerCredentialId: 'c' });
+    store.setMemoryPublic('a', true);
+    const r2 = store.register({
+      botName: 'a', url: 'http://x', memoryPublic: false, ownerCredentialId: 'c',
+    });
+    expect(r2.memoryPublic).toBe(false);
+  });
+
+  it('setMemoryPublic flips the flag; setMemoryPublic on unknown throws', () => {
+    store.register({ botName: 'a', url: 'http://x', ownerCredentialId: 'c' });
+    expect(store.setMemoryPublic('a', true).memoryPublic).toBe(true);
+    expect(store.setMemoryPublic('a', false).memoryPublic).toBe(false);
+    expect(() => store.setMemoryPublic('ghost', true)).toThrow(AgentNotFoundError);
+  });
+
+  it('memory_public column survives a pre-migration row (idempotent ADD COLUMN path)', () => {
+    // Build a DB whose agents table predates the memory_public column. The
+    // store's idempotent ALTER must add the column without losing the row.
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-store-test-legacy-'));
+    const db2 = new Database(path.join(dir2, 'central.db'));
+    try {
+      db2.pragma('journal_mode = WAL');
+      db2.exec(`
+        CREATE TABLE agents (
+          id                  TEXT PRIMARY KEY,
+          bot_name            TEXT NOT NULL UNIQUE,
+          url                 TEXT NOT NULL,
+          talk_secret         TEXT,
+          visible             INTEGER NOT NULL DEFAULT 1,
+          owner_credential_id TEXT NOT NULL,
+          registered_at       TEXT NOT NULL,
+          last_seen_at        TEXT NOT NULL
+        );
+      `);
+      const ts = new Date().toISOString();
+      db2.prepare(`
+        INSERT INTO agents (id, bot_name, url, talk_secret, visible,
+          owner_credential_id, registered_at, last_seen_at)
+        VALUES (?, ?, ?, NULL, 1, ?, ?, ?)
+      `).run('legacy-id', 'legacy-bot', 'http://l', 'cred-legacy', ts, ts);
+      const store2 = new AgentStore(db2, pino({ level: 'silent' }));
+      const rec = store2.getByName('legacy-bot');
+      expect(rec).toBeDefined();
+      expect(rec!.memoryPublic).toBe(false);
+    } finally {
+      db2.close();
+      fs.rmSync(dir2, { recursive: true, force: true });
+    }
+  });
 });

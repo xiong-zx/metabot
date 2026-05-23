@@ -67,18 +67,42 @@ function slugify(title: string): string {
 interface Whoami {
   botName: string;
   role: string;
+  /**
+   * Server returns this for member bots that have an agent-registry row.
+   * `true` flips the CLI default write target from `/users/<botName>/...`
+   * (private) to `/shared/<botName>/...` (visible to every member).
+   * Absent / `false` keeps the safe private default.
+   */
+  memoryPublic?: boolean;
 }
 
 /**
  * Resolve the caller's identity via GET /api/whoami.
  *
  * Used lazily by `create`/`mkdir` to default a write into the caller's own
- * namespace (`/users/<botName>/...`). Root is not in a member credential's
- * writableNamespaces, so without this defaulting every member write 403s.
+ * namespace (`/users/<botName>/...` or `/shared/<botName>/...` when the bot
+ * has opted into public-default via `metabot memory visibility public`). Root
+ * is not in a member credential's writableNamespaces, so without this
+ * defaulting every member write 403s.
  */
 async function whoami(cfg: Config): Promise<Whoami> {
   const body = await request<Whoami>(cfg, { path: '/api/whoami' });
   return body;
+}
+
+/**
+ * Decide the default folder prefix for `create`/`mkdir` when the caller
+ * didn't pass `--path` or `--folder`. Members → `/users/<bot>` (private) or
+ * `/shared/<bot>` (public-default). Admins fall back to root (their
+ * `writableNamespaces` already contains `/`).
+ *
+ * Exported for tests; production callers should use it via `cmdCreate` /
+ * `cmdMkdir`.
+ */
+export function defaultWritePrefix(me: Whoami): string | undefined {
+  if (me.role === 'admin') return undefined;
+  const base = me.memoryPublic ? '/shared' : '/users';
+  return `${base}/${me.botName}`;
 }
 
 // ---- Commands ----
@@ -144,8 +168,9 @@ export async function cmdCreate(cfg: Config, args: ParsedArgs): Promise<void> {
   // called when neither --folder nor --path was given.
   if (docPath === undefined && folderId === undefined) {
     const me = await whoami(cfg);
-    if (me.role !== 'admin') {
-      docPath = `/users/${me.botName}/${slugify(title)}`;
+    const prefix = defaultWritePrefix(me);
+    if (prefix !== undefined) {
+      docPath = `${prefix}/${slugify(title)}`;
     }
   }
   const body = await request(cfg, {
@@ -195,8 +220,9 @@ export async function cmdMkdir(cfg: Config, args: ParsedArgs): Promise<void> {
   // own namespace. Members can't write root; admins keep the root default.
   if (folderPath === undefined && parent_id === undefined) {
     const me = await whoami(cfg);
-    if (me.role !== 'admin') {
-      folderPath = `/users/${me.botName}/${name}`;
+    const prefix = defaultWritePrefix(me);
+    if (prefix !== undefined) {
+      folderPath = `${prefix}/${name}`;
     }
   }
   const body = await request(cfg, {
@@ -222,6 +248,35 @@ export async function cmdHealth(cfg: Config): Promise<void> {
   print(body);
 }
 
+/**
+ * `metabot memory visibility [public|private]` — read or toggle whether the
+ * calling bot's default-write path is `/shared/<bot>/...` (public) or
+ * `/users/<bot>/...` (private). With no argument, reports the current state.
+ *
+ * Auth: owner-credential of the bot (or admin). The server enforces this on
+ * PATCH /api/agents/:botName/memory-visibility.
+ */
+export async function cmdVisibility(cfg: Config, args: ParsedArgs): Promise<void> {
+  const arg = args.positional[0];
+  const me = await whoami(cfg);
+  if (!arg) {
+    const state = me.memoryPublic ? 'public' : 'private';
+    print({ botName: me.botName, memoryPublic: !!me.memoryPublic, state });
+    return;
+  }
+  if (arg !== 'public' && arg !== 'private') {
+    const err = new Error(`visibility: expected 'public' or 'private', got '${arg}'`);
+    (err as Error & { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  const body = await request(cfg, {
+    method: 'PATCH',
+    path: `/api/agents/${encodeURIComponent(me.botName)}/memory-visibility`,
+    body: { memoryPublic: arg === 'public' },
+  });
+  print(body);
+}
+
 export function printHelp(): void {
   process.stdout.write(
     `metabot memory — metabot-core memory CLI
@@ -241,6 +296,8 @@ Commands:
                               [--html | --content-type <mime>]
   mkdir <name> [parent_id]    [--path </abs/path>]
   delete <doc_id>
+  visibility [public|private] read or toggle this bot's default write target
+                              (public → /shared/<bot>/..., private → /users/<bot>/...)
   health
   help
 
@@ -258,8 +315,9 @@ Write target (create / mkdir):
   Pass --path </absolute/path> to write at an explicit path; the server
   ACL-checks it and auto-creates ancestor folders. With neither --folder
   nor --path (nor a parent_id for mkdir), the write defaults into your own
-  namespace /users/<botName>/... — members can't write root. Admins keep
-  the root default.
+  namespace — /users/<botName>/... (private) by default. Run
+  'metabot memory visibility public' to flip the default to /shared/<bot>/...
+  Admins keep the root default.
 `,
   );
 }

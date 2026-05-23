@@ -1,5 +1,6 @@
 import type { CredentialsStore } from '../auth/credentials-store.js';
 import type { Credential } from '../auth/credentials.js';
+import type { AgentStore } from '../agents/agent-store.js';
 
 export interface RouteResult {
   status: number;
@@ -83,8 +84,19 @@ export function issueWebToken(
  *
  * Open to both Bearer and web-identity (it does nothing beyond echoing
  * already-authenticated metadata — no DB writes, no token issuance).
+ *
+ * Also returns `memoryPublic` (when the caller is a member bot with an
+ * agent-registry row): the metamemory CLI consumes it to decide whether
+ * default writes auto-prefix into `/shared/<botName>/` or `/users/<botName>/`.
+ * Returns `false` when no agent row exists (bots that haven't bulk-registered
+ * yet, or admins) — that's the safe private default.
  */
-export function getWhoami(cred: Credential): RouteResult {
+export function getWhoami(cred: Credential, agentStore?: AgentStore): RouteResult {
+  let memoryPublic = false;
+  if (agentStore && cred.role !== 'admin') {
+    const rec = agentStore.getByName(cred.botName);
+    if (rec) memoryPublic = rec.memoryPublic;
+  }
   return {
     status: 200,
     body: {
@@ -93,6 +105,7 @@ export function getWhoami(cred: Credential): RouteResult {
       role: cred.role,
       authSource: cred.authSource ?? 'bearer',
       credentialId: cred.id,
+      memoryPublic,
     },
   };
 }

@@ -32,6 +32,7 @@ metabot memory get <id|path>                         # read a doc (JSON metadata
 metabot memory create "<title>" ["<content>"]        # create a doc (content also via stdin)
 metabot memory mkdir "<name>"                        # create a folder
 metabot memory update <id> [content] [--title …] [--tags a,b,c]
+metabot memory visibility [public|private]           # flip this bot's default write target
 metabot memory health
 ```
 
@@ -47,11 +48,31 @@ metabot memory mkdir "smoke-folder"   --path /users/<botName>/smoke-folder
 When `--path` is given the server ACL-checks it and auto-creates any missing
 ancestor folders. With **neither** `--path` nor `--folder` (nor a `parent_id`
 for `mkdir`), the write **defaults into your own namespace** —
-`/users/<botName>/<slug-of-title>` for `create`, `/users/<botName>/<name>` for
-`mkdir` — resolved via `GET /api/whoami`. This is the fix for the old member
-`403 forbidden`: members cannot write the root namespace, so a bare
-`create`/`mkdir` previously failed. Admin tokens keep the legacy root default.
-`--folder <id>` still targets an explicit existing folder as before.
+`/users/<botName>/<slug-of-title>` (private) for `create`,
+`/users/<botName>/<name>` for `mkdir` — resolved via `GET /api/whoami`. This
+is the fix for the old member `403 forbidden`: members cannot write the root
+namespace, so a bare `create`/`mkdir` previously failed. Admin tokens keep the
+legacy root default. `--folder <id>` still targets an explicit existing folder
+as before.
+
+**Per-bot visibility — `memoryPublic`.** Bots can flip the default-write
+target from `/users/<bot>/...` (private to that bot) to `/shared/<bot>/...`
+(readable by every member) without admin intervention:
+
+```bash
+metabot memory visibility            # prints {state: "private" | "public"}
+metabot memory visibility public     # bare create/mkdir now lands in /shared/<bot>/
+metabot memory visibility private    # back to the private default
+```
+
+This mirrors `bots.json` `visible` for agent-bus discovery — same shape, same
+"bot self-toggles, owner credential or admin only" auth model (PATCH
+`/api/agents/<botName>/memory-visibility`). It only changes the **default**
+path for *new* `create` / `mkdir` calls; explicit `--path` / `--folder` still
+win, and existing private docs stay private until you move them. To make the
+choice sticky across bridge restarts, set `memoryPublic: true` on the bot's
+entry in `bots.json` (the bridge pins the column on every bulk-register and
+overrides whatever was last toggled via CLI).
 
 ## `metabot skills` — skill registry
 

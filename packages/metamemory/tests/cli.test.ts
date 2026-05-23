@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
-import { parseArgs, resolveContentTypeFlag, cmdCreate, cmdMkdir } from '../src/commands.js';
+import { parseArgs, resolveContentTypeFlag, cmdCreate, cmdMkdir, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
 
 describe('parseArgs', () => {
   it('splits positional and flags', () => {
@@ -251,5 +251,98 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     await cmdMkdir(cfg, parseArgs(['smoke-folder']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
     expect(bodyOf(post).path).toBeUndefined();
+  });
+
+  // ---- memoryPublic auto-prefix ----
+  it('create: member with memoryPublic:true defaults into /shared/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
+    await cmdCreate(cfg, parseArgs(['Public Note', 'hello']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/shared/bot-x/public-note');
+  });
+
+  it('mkdir: member with memoryPublic:true defaults into /shared/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
+    await cmdMkdir(cfg, parseArgs(['shared-folder']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).path).toBe('/shared/bot-x/shared-folder');
+  });
+
+  it('create: --path still wins even when memoryPublic:true (explicit beats default)', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
+    await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/users/bot-x/keeping-this-private']));
+    // whoami call shouldn't happen at all when --path is set
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/keeping-this-private');
+  });
+});
+
+describe('defaultWritePrefix — pure helper', () => {
+  it('admin → undefined (root default preserved)', () => {
+    expect(defaultWritePrefix({ botName: 'a', role: 'admin' })).toBeUndefined();
+  });
+  it('member, private → /users/<bot>', () => {
+    expect(defaultWritePrefix({ botName: 'b', role: 'member' })).toBe('/users/b');
+    expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: false }))
+      .toBe('/users/b');
+  });
+  it('member, public → /shared/<bot>', () => {
+    expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: true }))
+      .toBe('/shared/b');
+  });
+});
+
+describe('cmdVisibility — read + toggle', () => {
+  const cfg = { url: 'http://x', token: 't' };
+
+  interface Call { url: string; init: RequestInit }
+
+  function stubFetch(whoami: { botName: string; role: string; memoryPublic?: boolean }, patchBody?: unknown): Call[] {
+    const calls: Call[] = [];
+    const fake = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/api/whoami')) {
+        return new Response(JSON.stringify(whoami), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(patchBody ?? { ok: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fake);
+    return calls;
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('no argument: prints current state, no PATCH', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true });
+    await cmdVisibility(cfg, parseArgs([]));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
+    expect(calls.some((c) => (c.init.method || 'GET') === 'PATCH')).toBe(false);
+  });
+
+  it('public: PATCHes /api/agents/<bot>/memory-visibility with memoryPublic:true', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member' });
+    await cmdVisibility(cfg, parseArgs(['public']));
+    const patch = calls.find((c) => (c.init.method === 'PATCH') && c.url.includes('/memory-visibility'));
+    expect(patch).toBeDefined();
+    expect(patch!.url).toContain('/api/agents/bot-x/memory-visibility');
+    expect(JSON.parse(patch!.init.body as string)).toEqual({ memoryPublic: true });
+  });
+
+  it('private: PATCHes with memoryPublic:false', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member' });
+    await cmdVisibility(cfg, parseArgs(['private']));
+    const patch = calls.find((c) => (c.init.method === 'PATCH') && c.url.includes('/memory-visibility'));
+    expect(JSON.parse(patch!.init.body as string)).toEqual({ memoryPublic: false });
+  });
+
+  it('bogus argument: throws with exitCode 2, no PATCH', async () => {
+    stubFetch({ botName: 'bot-x', role: 'member' });
+    await expect(cmdVisibility(cfg, parseArgs(['maybe'])))
+      .rejects.toMatchObject({ message: /expected 'public' or 'private'/, exitCode: 2 });
   });
 });

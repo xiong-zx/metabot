@@ -336,4 +336,87 @@ describe('/api/agents — routes + audit (token-auth era)', () => {
     expect(found('visibility', '/api/agents/alice-bot/visibility')).toBe(true);
     expect(found('delete', '/api/agents/alice-bot')).toBe(true);
   });
+
+  it('PATCH /api/agents/:botName/memory-visibility toggles memoryPublic; whoami reflects it', async () => {
+    kit = await startTestServer('agents-memory-visibility');
+    const token = await issueMember(kit, 'mv-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'http://x:9100' });
+
+    // Default — whoami should show memoryPublic:false
+    const before = await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    expect(before.status).toBe(200);
+    expect(before.body.memoryPublic).toBe(false);
+
+    // Flip on
+    const flip = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/mv-bot/memory-visibility', token, { memoryPublic: true },
+    );
+    expect(flip.status).toBe(200);
+    expect(flip.body.memoryPublic).toBe(true);
+
+    // whoami now reports true
+    const after = await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    expect(after.body.memoryPublic).toBe(true);
+
+    // /api/agents list surfaces it too
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    const row = (list.body.agents as Array<{ botName: string; memoryPublic: boolean }>).find(
+      (a) => a.botName === 'mv-bot',
+    );
+    expect(row?.memoryPublic).toBe(true);
+
+    // Flipping with bad body → 400
+    const bad = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/mv-bot/memory-visibility', token, { memoryPublic: 'yes' },
+    );
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('memory_public_required');
+  });
+
+  it('PATCH /api/agents/:botName/memory-visibility → 403 when a different cred owns the row', async () => {
+    kit = await startTestServer('agents-memory-vis-403');
+    const tokenA = await issueMember(kit, 'cred-a');
+    const tokenB = await issueMember(kit, 'cred-b');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, {
+      botName: 'shared-name', url: 'http://a',
+    });
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/shared-name/memory-visibility', tokenB, { memoryPublic: true },
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('agent_ownership_required');
+  });
+
+  it('bulk-register accepts memoryPublic; omitting it on re-register preserves the runtime toggle', async () => {
+    kit = await startTestServer('agents-bulk-memory-public');
+    const token = await issueMember(kit, 'bridge-cred');
+    // First bulk register WITH memoryPublic:true on one bot
+    await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [
+        { botName: 'alpha', url: 'http://a:9100', memoryPublic: true },
+        { botName: 'beta',  url: 'http://b:9100' },
+      ],
+    });
+    const list1 = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    const alpha1 = (list1.body.agents as Array<{ botName: string; memoryPublic: boolean }>).find(
+      (a) => a.botName === 'alpha',
+    );
+    const beta1 = (list1.body.agents as Array<{ botName: string; memoryPublic: boolean }>).find(
+      (a) => a.botName === 'beta',
+    );
+    expect(alpha1?.memoryPublic).toBe(true);
+    expect(beta1?.memoryPublic).toBe(false);
+
+    // Re-register WITHOUT memoryPublic on alpha → should keep true
+    await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [
+        { botName: 'alpha', url: 'http://a:9100' },
+      ],
+    });
+    const list2 = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    const alpha2 = (list2.body.agents as Array<{ botName: string; memoryPublic: boolean }>).find(
+      (a) => a.botName === 'alpha',
+    );
+    expect(alpha2?.memoryPublic).toBe(true);
+  });
 });

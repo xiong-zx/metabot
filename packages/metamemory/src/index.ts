@@ -11,6 +11,7 @@ import {
   cmdMkdir,
   cmdDelete,
   cmdHealth,
+  cmdVisibility,
   printHelp,
 } from './commands.js';
 
@@ -68,6 +69,10 @@ export async function main(argv: string[]): Promise<void> {
         break;
       case 'health':
         await cmdHealth(cfg);
+        break;
+      case 'visibility':
+      case 'vis':
+        await cmdVisibility(cfg, args);
         break;
       default:
         process.stderr.write(`mm: unknown command '${sub}'\n`);

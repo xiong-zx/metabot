@@ -198,10 +198,10 @@ async function main() {
   // configured in bots.json; visibility (per bot) is passed through to the
   // bulk-register call so `visible:false` rows are hidden in the registry.
   const localBotsForRegistry = [
-    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible })),
-    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible })),
-    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible })),
-    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible })),
+    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
   ];
   let peerManager: PeerManager | undefined;
   if (

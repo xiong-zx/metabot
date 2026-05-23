@@ -598,7 +598,7 @@ export function startServer(options: ServerOptions): ServerHandle {
 
       // ---- Whoami (token introspection / bridge token-verify hop) ----
       if (pathname === '/api/whoami' && method === 'GET') {
-        return jsonResult(res, webRoutes.getWhoami(cred));
+        return jsonResult(res, webRoutes.getWhoami(cred, agentStore));
       }
 
       // ---- Agent-bus routes ----
@@ -622,6 +622,12 @@ export function startServer(options: ServerOptions): ServerHandle {
         const botName = decodeURIComponent(visMatch[1]);
         const body = await parseJsonBody(req);
         return jsonResult(res, agentRoutes.setAgentVisibility(agentStore, botName, body, cred));
+      }
+      const memVisMatch = pathname.match(/^\/api\/agents\/([^/]+)\/memory-visibility$/);
+      if (memVisMatch && method === 'PATCH') {
+        const botName = decodeURIComponent(memVisMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, agentRoutes.setAgentMemoryPublic(agentStore, botName, body, cred));
       }
       if (pathname.startsWith('/api/agents/') && method === 'DELETE') {
         const botName = decodeURIComponent(pathname.slice('/api/agents/'.length));
