@@ -1,5 +1,4 @@
 import type { Credential } from '../auth/credentials.js';
-import type { CredentialsStore } from '../auth/credentials-store.js';
 import {
   AgentNotFoundError,
   AgentStore,
@@ -137,35 +136,21 @@ export function listAgents(
   store: AgentStore,
   query: URLSearchParams,
   cred: Credential,
-  credentialsStore: CredentialsStore,
 ): RouteResult {
   const includeHidden = query.get('includeHidden') === '1';
   if (includeHidden && cred.role !== 'admin') {
     return err(403, 'include_hidden_admin_only');
   }
   const agents = store.list({ includeHidden });
-  // Resolve `ownerName` once per distinct credential id; empty string is the
-  // explicit sentinel for "owner cred revoked/missing" — the agent is still
-  // listed, the UI buckets these under an "(unknown)" group.
-  const ownerNameByCredId = new Map<string, string>();
   return {
     status: 200,
     body: {
-      agents: agents.map((a) => {
-        let ownerName = ownerNameByCredId.get(a.ownerCredentialId);
-        if (ownerName === undefined) {
-          const owner = credentialsStore.findById(a.ownerCredentialId);
-          ownerName = owner?.ownerName ?? '';
-          ownerNameByCredId.set(a.ownerCredentialId, ownerName);
-        }
-        return {
-          botName: a.botName,
-          url: a.url,
-          visible: a.visible,
-          lastSeenAt: a.lastSeenAt,
-          ownerName,
-        };
-      }),
+      agents: agents.map((a) => ({
+        botName: a.botName,
+        url: a.url,
+        visible: a.visible,
+        lastSeenAt: a.lastSeenAt,
+      })),
     },
   };
 }

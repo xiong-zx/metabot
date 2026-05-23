@@ -615,7 +615,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, agentRoutes.heartbeat(agentStore, body, cred));
       }
       if (pathname === '/api/agents' && method === 'GET') {
-        return jsonResult(res, agentRoutes.listAgents(agentStore, query, cred, credentialsStore));
+        return jsonResult(res, agentRoutes.listAgents(agentStore, query, cred));
       }
       const visMatch = pathname.match(/^\/api\/agents\/([^/]+)\/visibility$/);
       if (visMatch && method === 'PATCH') {

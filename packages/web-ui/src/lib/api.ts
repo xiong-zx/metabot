@@ -196,7 +196,6 @@ export interface AgentSummary {
   url: string;
   visible: boolean;
   lastSeenAt: string;
-  ownerName: string;
 }
 
 // ---- self-service web token (mirror of packages/server/src/web/web-routes.ts) ----
