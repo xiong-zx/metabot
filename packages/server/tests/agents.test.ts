@@ -179,6 +179,37 @@ describe('/api/agents — routes + audit (token-auth era)', () => {
     expect((list.body.agents as Array<Record<string, unknown>>)[0].talkSecret).toBeUndefined();
   });
 
+  it('GET /api/agents derives host from url for each agent (different hosts → different host fields)', async () => {
+    kit = await startTestServer('agents-list-host-derived');
+    const tokenA = await issueMember(kit, 'alice-bot');
+    const tokenB = await issueMember(kit, 'bob-bot');
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenA, { url: 'http://172.31.32.2:9100' });
+    await call(kit.baseUrl, 'POST', '/api/agents', tokenB, { url: 'http://localhost:9100' });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', tokenA);
+    expect(list.status).toBe(200);
+    const byName: Record<string, string> = {};
+    for (const a of list.body.agents as Array<{ botName: string; host: string }>) {
+      byName[a.botName] = a.host;
+    }
+    expect(byName['alice-bot']).toBe('172.31.32.2');
+    expect(byName['bob-bot']).toBe('localhost');
+  });
+
+  it('GET /api/agents falls back to raw url when hostname is unparseable (no 500)', async () => {
+    kit = await startTestServer('agents-list-host-fallback');
+    const token = await issueMember(kit, 'malformed-bot');
+    // `not a url` is not a valid absolute URL → new URL() throws → fall back
+    // to the raw string. Stored verbatim; no schema validation rejects it.
+    await call(kit.baseUrl, 'POST', '/api/agents', token, { url: 'not a url' });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    expect(list.status).toBe(200);
+    const rec = (list.body.agents as Array<{ botName: string; host: string; url: string }>)
+      .find((a) => a.botName === 'malformed-bot');
+    expect(rec).toBeDefined();
+    expect(rec!.host).toBe('not a url');
+    expect(rec!.url).toBe('not a url');
+  });
+
   it('GET /api/agents?includeHidden=1 by admin returns hidden + visible', async () => {
     kit = await startTestServer('agents-list-admin-incl-hidden');
     const tokenA = await issueMember(kit, 'alice-bot');

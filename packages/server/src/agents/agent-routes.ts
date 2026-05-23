@@ -132,6 +132,19 @@ export function heartbeat(
   }
 }
 
+// Derive the host the agent advertises itself on. The web UI groups agents
+// by this value, so callers see "all bots on 172.31.32.2" vs "all bots on
+// localhost" rather than a flat list. Falls back to the raw url string when
+// parsing throws (malformed URL stored against expectation) so the list call
+// never 500s on a single bad row.
+function deriveHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
 export function listAgents(
   store: AgentStore,
   query: URLSearchParams,
@@ -148,6 +161,7 @@ export function listAgents(
       agents: agents.map((a) => ({
         botName: a.botName,
         url: a.url,
+        host: deriveHost(a.url),
         visible: a.visible,
         lastSeenAt: a.lastSeenAt,
       })),

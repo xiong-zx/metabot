@@ -194,6 +194,7 @@ export interface FeedbackRequest {
 export interface AgentSummary {
   botName: string;
   url: string;
+  host: string;
   visible: boolean;
   lastSeenAt: string;
 }
