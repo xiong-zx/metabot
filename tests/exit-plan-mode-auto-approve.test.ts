@@ -1,92 +1,81 @@
 import { describe, it, expect } from 'vitest';
+import { makeCanUseTool } from '../src/engines/claude/exit-plan-mode.js';
 import { PersistentClaudeExecutor } from '../src/engines/claude/persistent-executor.js';
 
 /**
- * Claude Code TUI gates ExitPlanMode behind an interactive "Approve plan"
- * prompt; the SDK keeps the agent in plan mode until the prompt is
- * answered, even under `permissionMode: 'bypassPermissions'`. MetaBot has
- * no Feishu-side equivalent of that prompt, so without a hook the agent
- * would hang the moment it tried to leave plan mode.
+ * Outside a sub-agent context, the native ExitPlanMode tool's
+ * checkPermissions returns `{behavior: "ask", message: "Exit plan mode?"}`
+ * even under `permissionMode: 'bypassPermissions'`. The SDK routes that
+ * "ask" through the can_use_tool control_request, NOT through PreToolUse
+ * hooks ("PreToolUse hook denies bypass canUseTool" — sdk.d.ts) — so the
+ * earlier PreToolUse-based fix logged "auto-approving" but never actually
+ * unblocked the gate; the bridge got back an is_error tool_result and the
+ * agent stayed in plan mode.
  *
- * The fix: a PreToolUse hook with matcher `ExitPlanMode` that returns
- * `permissionDecision: 'allow'` synchronously, mirroring the auto-approve
- * posture of the rest of the bridge.
+ * The fix: wire `canUseTool` on the SDK query options, which IS the
+ * channel the "ask" lands on.
  */
 
+const collected: { level: string; obj: unknown; msg?: string }[] = [];
 const mockLogger = {
-  debug: () => {}, info: () => {}, warn: () => {}, error: () => {},
+  debug: () => {},
+  info: (obj: unknown, msg?: string) => { collected.push({ level: 'info', obj, msg }); },
+  warn: (obj: unknown, msg?: string) => { collected.push({ level: 'warn', obj, msg }); },
+  error: () => {},
 } as any;
 
-function makeExec(): PersistentClaudeExecutor {
-  return new PersistentClaudeExecutor({
-    cwd: '/tmp',
-    logger: mockLogger,
-    idleTimeoutMs: 0,
-  });
-}
-
-describe('PersistentClaudeExecutor ExitPlanMode auto-approve hook', () => {
-  function getExitPlanModeHook(exec: PersistentClaudeExecutor) {
-    const hooks = (exec as any).buildHooks();
-    const entry = hooks.PreToolUse.find((e: any) => e.matcher === 'ExitPlanMode');
-    expect(entry, 'PreToolUse entry for ExitPlanMode must be registered').toBeDefined();
-    return entry.hooks[0] as (input: any) => Promise<Record<string, unknown>>;
-  }
-
-  it('returns permissionDecision=allow without touching tool_input', async () => {
-    const exec = makeExec();
-    const hook = getExitPlanModeHook(exec);
-
-    const result = await hook({
-      hook_event_name: 'PreToolUse',
-      tool_name: 'ExitPlanMode',
-      tool_use_id: 'toolu_plan_1',
-      tool_input: { plan: '1. read files\n2. write code' },
-    });
-
-    expect(result).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-      },
-    });
+describe('makeCanUseTool (ExitPlanMode auto-approve)', () => {
+  it('returns behavior=allow for ExitPlanMode and logs the toolUseID', async () => {
+    collected.length = 0;
+    const canUseTool = makeCanUseTool(mockLogger);
+    const result = await canUseTool('ExitPlanMode', { plan: 'p' }, { toolUseID: 'toolu_plan_1' });
+    expect(result).toEqual({ behavior: 'allow' });
+    const info = collected.find((c) => c.level === 'info');
+    expect(info?.msg).toBe('canUseTool: auto-approving ExitPlanMode');
+    expect((info?.obj as any).toolUseId).toBe('toolu_plan_1');
   });
 
-  it('resolves synchronously (does not pause for user input)', async () => {
-    const exec = makeExec();
-    const hook = getExitPlanModeHook(exec);
+  it('allows non-ExitPlanMode tools too (safety net) and logs a warning', async () => {
+    collected.length = 0;
+    const canUseTool = makeCanUseTool(mockLogger);
+    const result = await canUseTool('Bash', { command: 'ls' }, { toolUseID: 'toolu_bash_1' });
+    expect(result).toEqual({ behavior: 'allow' });
+    const warn = collected.find((c) => c.level === 'warn');
+    expect(warn?.msg).toContain('unexpected ask under bypassPermissions');
+    expect((warn?.obj as any).toolName).toBe('Bash');
+  });
 
+  it('resolves synchronously (the SDK waits on this — must not block)', async () => {
+    const canUseTool = makeCanUseTool(mockLogger);
     let resolved = false;
-    const p = hook({
-      hook_event_name: 'PreToolUse',
-      tool_name: 'ExitPlanMode',
-      tool_use_id: 'toolu_plan_2',
-      tool_input: { plan: 'plan body' },
-    }).then((r) => { resolved = true; return r; });
-
-    // The AskUserQuestion hook would still be pending here (waiting on the
-    // bridge). Auto-approve must complete in the same microtask tick.
+    const p = canUseTool('ExitPlanMode', {}, { toolUseID: 'toolu_plan_2' }).then((r) => {
+      resolved = true;
+      return r;
+    });
     await Promise.resolve();
     await Promise.resolve();
     expect(resolved).toBe(true);
     await p;
   });
+});
 
-  it('does not register a pending resolver (only AskUserQuestion uses that map)', async () => {
-    const exec = makeExec();
-    const hook = getExitPlanModeHook(exec);
-
-    await hook({
-      hook_event_name: 'PreToolUse',
-      tool_name: 'ExitPlanMode',
-      tool_use_id: 'toolu_plan_3',
-      tool_input: { plan: 'plan body' },
+describe('PersistentClaudeExecutor wires canUseTool / drops PreToolUse ExitPlanMode entry', () => {
+  function makeExec(): PersistentClaudeExecutor {
+    return new PersistentClaudeExecutor({
+      cwd: '/tmp',
+      logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as any,
+      idleTimeoutMs: 0,
     });
+  }
 
-    expect((exec as any).pendingQuestionResolvers.size).toBe(0);
+  it('does NOT register a PreToolUse entry for ExitPlanMode (the old hook is dead)', () => {
+    const exec = makeExec();
+    const hooks = (exec as any).buildHooks();
+    const exitEntry = hooks.PreToolUse.find((e: any) => e.matcher === 'ExitPlanMode');
+    expect(exitEntry, 'PreToolUse ExitPlanMode hook must be removed — the gate is on canUseTool now').toBeUndefined();
   });
 
-  it('AskUserQuestion entry still lives at PreToolUse[0] (no ordering regression)', () => {
+  it('keeps AskUserQuestion entry at PreToolUse[0] (no ordering regression)', () => {
     const exec = makeExec();
     const hooks = (exec as any).buildHooks();
     expect(hooks.PreToolUse[0].matcher).toBe('AskUserQuestion');

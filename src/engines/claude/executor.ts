@@ -7,6 +7,7 @@ import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import { makeCanUseTool } from './exit-plan-mode.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -515,35 +516,19 @@ export class ClaudeExecutor {
       };
     };
 
-    // ExitPlanMode PreToolUse hook — Claude Code TUI shows an interactive
-    // "Approve plan" prompt that flips the agent out of plan mode. MetaBot
-    // has no such UI on the Feishu side, so without intervention the SDK's
-    // plan-approval gate would hold the agent in plan mode indefinitely
-    // even under `permissionMode: 'bypassPermissions'`. Auto-allow here is
-    // consistent with MetaBot's autonomous posture; the bridge still ships
-    // the plan body to the user as a separate card (sendPlanContent), so
-    // they see what was decided before implementation continues.
-    const exitPlanModeHook = async (
-      input: { hook_event_name: string; tool_name: string; tool_input: unknown; tool_use_id: string },
-    ): Promise<Record<string, unknown>> => {
-      logger.info({ toolUseId: input.tool_use_id }, 'ClaudeExecutor: auto-approving ExitPlanMode');
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-        },
-      };
-    };
+    // ExitPlanMode: the native tool's checkPermissions returns
+    // `{behavior: "ask", message: "Exit plan mode?"}` even under
+    // bypassPermissions, and that "ask" routes through the can_use_tool
+    // control_request — NOT through PreToolUse hooks. We auto-allow via
+    // canUseTool; the bridge still ships the plan body to the user as a
+    // separate card (StreamProcessor + sendPlanContent).
+    queryOptions.canUseTool = makeCanUseTool(this.logger);
 
     queryOptions.hooks = {
       PreToolUse: [
         {
           matcher: 'AskUserQuestion',
           hooks: [askUserQuestionHook as any],
-        },
-        {
-          matcher: 'ExitPlanMode',
-          hooks: [exitPlanModeHook as any],
         },
       ],
       TaskCreated: [{ hooks: [teamObserverHook('task_created') as any] }],
