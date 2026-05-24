@@ -56,23 +56,25 @@ legacy root default. `--folder <id>` still targets an explicit existing folder
 as before.
 
 **Per-bot visibility — `memoryPublic`.** Bots can flip the default-write
-target from `/users/<bot>/...` (private to that bot) to `/shared/<bot>/...`
-(readable by every member) without admin intervention:
+target from `/shared/<bot>/...` (public — every member can read) to
+`/users/<bot>/...` (private to that bot) without admin intervention.
+Default for newly-registered bots is **public** (`memoryPublic: true`):
 
 ```bash
-metabot memory visibility            # prints {state: "private" | "public"}
-metabot memory visibility public     # bare create/mkdir now lands in /shared/<bot>/
-metabot memory visibility private    # back to the private default
+metabot memory visibility            # prints {state: "public" | "private"}
+metabot memory visibility public     # bare create/mkdir lands in /shared/<bot>/  (default)
+metabot memory visibility private    # bare create/mkdir lands in /users/<bot>/
 ```
 
-This mirrors `bots.json` `visible` for agent-bus discovery — same shape, same
-"bot self-toggles, owner credential or admin only" auth model (PATCH
+Same shape and auth model as `bots.json` `visible` for agent-bus discovery
+("bot self-toggles, owner credential or admin only" — PATCH
 `/api/agents/<botName>/memory-visibility`). It only changes the **default**
 path for *new* `create` / `mkdir` calls; explicit `--path` / `--folder` still
-win, and existing private docs stay private until you move them. To make the
-choice sticky across bridge restarts, set `memoryPublic: true` on the bot's
-entry in `bots.json` (the bridge pins the column on every bulk-register and
-overrides whatever was last toggled via CLI).
+win, and existing docs stay where they are until you move them. To pin the
+choice across bridge restarts, set `memoryPublic: true|false` on the bot's
+entry in `bots.json` — the bridge re-asserts the column on every bulk-register
+and overrides whatever was last toggled via CLI. Omitting the field in
+bots.json leaves CLI toggles sticky.
 
 ## `metabot skills` — skill registry
 

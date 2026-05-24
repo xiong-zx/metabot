@@ -200,20 +200,20 @@ describe('AgentStore', () => {
     expect(() => new AgentStore(db, pino({ level: 'silent' }))).not.toThrow();
   });
 
-  it('memoryPublic defaults to false on fresh register; honours explicit true', () => {
-    const priv = store.register({ botName: 'priv', url: 'http://x', ownerCredentialId: 'c' });
-    expect(priv.memoryPublic).toBe(false);
-    const pub = store.register({
-      botName: 'pub', url: 'http://x', memoryPublic: true, ownerCredentialId: 'c',
-    });
+  it('memoryPublic defaults to true on fresh register; honours explicit false', () => {
+    const pub = store.register({ botName: 'pub', url: 'http://x', ownerCredentialId: 'c' });
     expect(pub.memoryPublic).toBe(true);
+    const priv = store.register({
+      botName: 'priv', url: 'http://x', memoryPublic: false, ownerCredentialId: 'c',
+    });
+    expect(priv.memoryPublic).toBe(false);
   });
 
   it('re-register WITHOUT memoryPublic preserves the existing value (runtime toggle stickiness)', () => {
     store.register({ botName: 'a', url: 'http://x', ownerCredentialId: 'c' });
-    store.setMemoryPublic('a', true);
+    store.setMemoryPublic('a', false);
     const r2 = store.register({ botName: 'a', url: 'http://y', ownerCredentialId: 'c' });
-    expect(r2.memoryPublic).toBe(true);
+    expect(r2.memoryPublic).toBe(false);
   });
 
   it('re-register WITH explicit memoryPublic:false clobbers the runtime toggle (bots.json pin)', () => {
@@ -260,7 +260,8 @@ describe('AgentStore', () => {
       const store2 = new AgentStore(db2, pino({ level: 'silent' }));
       const rec = store2.getByName('legacy-bot');
       expect(rec).toBeDefined();
-      expect(rec!.memoryPublic).toBe(false);
+      // ALTER ADD COLUMN ... DEFAULT 1 backfills the pre-existing row to true.
+      expect(rec!.memoryPublic).toBe(true);
     } finally {
       db2.close();
       fs.rmSync(dir2, { recursive: true, force: true });

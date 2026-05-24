@@ -29,12 +29,14 @@ export interface BotConfigBase {
   visible?: boolean;
   /**
    * Default-target for `metabot memory create/mkdir` when no explicit
-   * `--path` / `--folder` is given. When true, the CLI auto-prefixes writes
-   * into `/shared/<botName>/...` (visible to every member); when false or
-   * omitted, it stays the per-bot private `/users/<botName>/...` default.
-   * Setting this in `bots.json` is sticky — the bridge passes it on every
-   * bulk-register and overrides whatever was previously toggled via
-   * `metabot memory visibility`.
+   * `--path` / `--folder` is given. When true (default), the CLI
+   * auto-prefixes writes into `/shared/<botName>/...` (visible to every
+   * member); when false, it falls back to the per-bot private
+   * `/users/<botName>/...` location. Omitting the field in bots.json
+   * leaves the server-side value sticky — `metabot memory visibility`
+   * CLI toggles are preserved across bridge restarts. Setting an explicit
+   * value in bots.json pins it and the bridge re-asserts it on every
+   * bulk-register.
    */
   memoryPublic?: boolean;
   /** Agent engine. Defaults to 'claude' for backward compatibility. */
@@ -212,7 +214,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
-  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
   memoryPublic?: boolean;
   feishuAppId: string;
   feishuAppSecret: string;
@@ -263,7 +265,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
-  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
   memoryPublic?: boolean;
   telegramBotToken: string;
   defaultWorkingDirectory: string;
@@ -309,7 +311,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   ttsVoice?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
-  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
   memoryPublic?: boolean;
   defaultWorkingDirectory: string;
   maxTurns?: number;
@@ -345,7 +347,7 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   description?: string;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
-  /** See BotConfigBase.memoryPublic — defaults to false if omitted. */
+  /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
   memoryPublic?: boolean;
   ilinkBaseUrl?: string;
   wechatBotToken?: string;

@@ -88,7 +88,7 @@ export class AgentStore {
     // exists. See [[bug_central_db_schema_drift_talk_secret]].
     const cols = this.db.prepare(`PRAGMA table_info(agents)`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'memory_public')) {
-      this.db.exec(`ALTER TABLE agents ADD COLUMN memory_public INTEGER NOT NULL DEFAULT 0`);
+      this.db.exec(`ALTER TABLE agents ADD COLUMN memory_public INTEGER NOT NULL DEFAULT 1`);
     }
   }
 
@@ -125,7 +125,7 @@ export class AgentStore {
     }
 
     const id = crypto.randomUUID();
-    const memoryPublic = input.memoryPublic === true;
+    const memoryPublic = input.memoryPublic !== false;
     this.db.prepare(`
       INSERT INTO agents (id, bot_name, url, talk_secret, visible, memory_public,
         owner_credential_id, registered_at, last_seen_at)

@@ -205,12 +205,12 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
-  it('create: bare invocation by a member defaults into /users/<botName>', async () => {
+  it('create: bare invocation by a member defaults into /shared/<botName> (public-default)', async () => {
     const calls = stubFetch({ botName: 'bot-x', role: 'member' });
     await cmdCreate(cfg, parseArgs(['Smoke Test CLI', 'hello']));
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-test-cli');
+    expect(bodyOf(post).path).toBe('/shared/bot-x/smoke-test-cli');
   });
 
   it('create: bare invocation by an admin keeps the root default (no path)', async () => {
@@ -238,12 +238,12 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
-  it('mkdir: bare invocation by a member defaults into /users/<botName>', async () => {
+  it('mkdir: bare invocation by a member defaults into /shared/<botName> (public-default)', async () => {
     const calls = stubFetch({ botName: 'bot-x', role: 'member' });
     await cmdMkdir(cfg, parseArgs(['smoke-folder']));
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
-    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-folder');
+    expect(bodyOf(post).path).toBe('/shared/bot-x/smoke-folder');
   });
 
   it('mkdir: bare invocation by an admin keeps the root default (no path)', async () => {
@@ -254,27 +254,34 @@ describe('cmdCreate / cmdMkdir — write target', () => {
   });
 
   // ---- memoryPublic auto-prefix ----
-  it('create: member with memoryPublic:true defaults into /shared/<botName>', async () => {
+  it('create: member with memoryPublic:false opts out into /users/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+    await cmdCreate(cfg, parseArgs(['Private Note', 'hello']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/private-note');
+  });
+
+  it('mkdir: member with memoryPublic:false opts out into /users/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+    await cmdMkdir(cfg, parseArgs(['private-folder']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/private-folder');
+  });
+
+  it('create: explicit memoryPublic:true also lands in /shared/<botName>', async () => {
     const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
     await cmdCreate(cfg, parseArgs(['Public Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
     expect(bodyOf(post).path).toBe('/shared/bot-x/public-note');
   });
 
-  it('mkdir: member with memoryPublic:true defaults into /shared/<botName>', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
-    await cmdMkdir(cfg, parseArgs(['shared-folder']));
-    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
-    expect(bodyOf(post).path).toBe('/shared/bot-x/shared-folder');
-  });
-
-  it('create: --path still wins even when memoryPublic:true (explicit beats default)', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
-    await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/users/bot-x/keeping-this-private']));
+  it('create: --path still wins even when memoryPublic:false (explicit beats default)', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+    await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/shared/bot-x/forcing-shared']));
     // whoami call shouldn't happen at all when --path is set
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/users/bot-x/keeping-this-private');
+    expect(bodyOf(post).path).toBe('/shared/bot-x/forcing-shared');
   });
 });
 
@@ -282,12 +289,12 @@ describe('defaultWritePrefix — pure helper', () => {
   it('admin → undefined (root default preserved)', () => {
     expect(defaultWritePrefix({ botName: 'a', role: 'admin' })).toBeUndefined();
   });
-  it('member, private → /users/<bot>', () => {
-    expect(defaultWritePrefix({ botName: 'b', role: 'member' })).toBe('/users/b');
+  it('member, private (explicit false) → /users/<bot>', () => {
     expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: false }))
       .toBe('/users/b');
   });
-  it('member, public → /shared/<bot>', () => {
+  it('member, public (default / explicit true / undefined) → /shared/<bot>', () => {
+    expect(defaultWritePrefix({ botName: 'b', role: 'member' })).toBe('/shared/b');
     expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: true }))
       .toBe('/shared/b');
   });

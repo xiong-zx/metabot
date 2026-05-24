@@ -69,9 +69,11 @@ interface Whoami {
   role: string;
   /**
    * Server returns this for member bots that have an agent-registry row.
-   * `true` flips the CLI default write target from `/users/<botName>/...`
-   * (private) to `/shared/<botName>/...` (visible to every member).
-   * Absent / `false` keeps the safe private default.
+   * `true` (default for newly-registered bots) means the CLI auto-prefixes
+   * writes into `/shared/<botName>/...` (visible to every member). `false`
+   * opts out into the per-bot private `/users/<botName>/...` namespace.
+   * Absent is treated as `true` (matching server default) so brand-new
+   * bots that haven't gone through whoami yet still land in /shared.
    */
   memoryPublic?: boolean;
 }
@@ -92,16 +94,20 @@ async function whoami(cfg: Config): Promise<Whoami> {
 
 /**
  * Decide the default folder prefix for `create`/`mkdir` when the caller
- * didn't pass `--path` or `--folder`. Members → `/users/<bot>` (private) or
- * `/shared/<bot>` (public-default). Admins fall back to root (their
- * `writableNamespaces` already contains `/`).
+ * didn't pass `--path` or `--folder`. Members → `/shared/<bot>` (default,
+ * cross-bot readable) or `/users/<bot>` (private when the bot opted out
+ * via `metabot memory visibility private` or `memoryPublic: false` in
+ * bots.json). Admins fall back to root (their `writableNamespaces` already
+ * contains `/`). Undefined `memoryPublic` is treated as the server-side
+ * default (true) so brand-new bots that haven't gone through whoami yet
+ * still land in /shared.
  *
  * Exported for tests; production callers should use it via `cmdCreate` /
  * `cmdMkdir`.
  */
 export function defaultWritePrefix(me: Whoami): string | undefined {
   if (me.role === 'admin') return undefined;
-  const base = me.memoryPublic ? '/shared' : '/users';
+  const base = me.memoryPublic === false ? '/users' : '/shared';
   return `${base}/${me.botName}`;
 }
 
@@ -260,8 +266,11 @@ export async function cmdVisibility(cfg: Config, args: ParsedArgs): Promise<void
   const arg = args.positional[0];
   const me = await whoami(cfg);
   if (!arg) {
-    const state = me.memoryPublic ? 'public' : 'private';
-    print({ botName: me.botName, memoryPublic: !!me.memoryPublic, state });
+    // Mirror defaultWritePrefix: undefined memoryPublic is treated as the
+    // server-side default (public-by-default).
+    const isPublic = me.memoryPublic !== false;
+    const state = isPublic ? 'public' : 'private';
+    print({ botName: me.botName, memoryPublic: isPublic, state });
     return;
   }
   if (arg !== 'public' && arg !== 'private') {
@@ -315,9 +324,9 @@ Write target (create / mkdir):
   Pass --path </absolute/path> to write at an explicit path; the server
   ACL-checks it and auto-creates ancestor folders. With neither --folder
   nor --path (nor a parent_id for mkdir), the write defaults into your own
-  namespace — /users/<botName>/... (private) by default. Run
-  'metabot memory visibility public' to flip the default to /shared/<bot>/...
-  Admins keep the root default.
+  namespace — /shared/<botName>/... (public, default) so other bots can
+  read it. Run 'metabot memory visibility private' to opt out into
+  /users/<bot>/... (only the owner bot reads). Admins keep the root default.
 `,
   );
 }
