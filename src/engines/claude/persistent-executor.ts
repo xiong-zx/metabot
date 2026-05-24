@@ -740,11 +740,37 @@ export class PersistentClaudeExecutor extends EventEmitter {
       };
     };
 
+    // ExitPlanMode PreToolUse hook — Claude Code TUI shows an interactive
+    // "Approve plan" prompt that flips the agent out of plan mode. MetaBot
+    // has no such UI on the Feishu side, so without intervention the SDK's
+    // plan-approval gate would hold the agent in plan mode indefinitely
+    // even under `permissionMode: 'bypassPermissions'`. Auto-allow here is
+    // consistent with MetaBot's autonomous posture; the bridge still ships
+    // the plan body to the user as a separate card (sendPlanContent), so
+    // they see what was decided before implementation continues.
+    const exitPlanModeHook = async (
+      input: { hook_event_name: string; tool_name: string; tool_input: unknown; tool_use_id: string },
+    ): Promise<Record<string, unknown>> => {
+      log.info({ toolUseId: input.tool_use_id }, 'PersistentExecutor: auto-approving ExitPlanMode');
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      };
+    };
+
     return {
-      PreToolUse: [{
-        matcher: 'AskUserQuestion',
-        hooks: [askUserQuestionHook as any],
-      }],
+      PreToolUse: [
+        {
+          matcher: 'AskUserQuestion',
+          hooks: [askUserQuestionHook as any],
+        },
+        {
+          matcher: 'ExitPlanMode',
+          hooks: [exitPlanModeHook as any],
+        },
+      ],
       TaskCreated: [{ hooks: [teamObserver('task_created') as any] }],
       TaskCompleted: [{ hooks: [teamObserver('task_completed') as any] }],
       TeammateIdle: [{ hooks: [teamObserver('teammate_idle') as any] }],
