@@ -389,6 +389,8 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 | `maxTurns` / `maxBudgetUsd` | No | unlimited | Execution limits |
 | `model` | No | SDK default | Claude model |
 | `apiKey` | No | — | Anthropic API key (leave unset for dynamic auth via cc-switch) |
+| `visible` | No | `true` | Whether this bot is visible to other bots / Agent Bus and reachable via `metabot talk`. Re-asserted from `bots.json` on every bridge bulk-register (not sticky) |
+| `memoryPublic` | No | `true` | Default target for `metabot memory create/mkdir` when no `--path` is given: `true` = `/shared/<bot>` (readable by everyone), `false` = `/users/<bot>` (private). Explicit `--path` always wins. Omitting the field preserves the last `metabot memory visibility` CLI toggle (sticky) |
 
 </details>
 
@@ -516,6 +518,8 @@ metabot voice tts "Hello world" --play  # text-to-speech
 metabot t5t board                   # team standup board
 metabot agents list                 # peer-bot directory
 metabot memory search "deployment guide"   # shared-memory full-text search
+metabot memory visibility           # show whether this bot writes to /shared/<bot> or /users/<bot> by default
+metabot memory visibility private   # switch to private (default writes land in /users/<bot>, owner-only)
 metabot skills list                 # skill registry (central Skill Hub)
 # Override CLI path: export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 

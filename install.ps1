@@ -860,6 +860,7 @@ Write-Host "    pm2 logs metabot          # View MetaBot logs"
 Write-Host "    pm2 restart metabot       # Restart MetaBot"
 Write-Host "    pm2 stop metabot          # Stop MetaBot"
 Write-Host "    metabot memory search ... # Search MetaMemory (via metabot-core)"
+Write-Host "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 
 Write-Host ""
 if (-not $SkipConfig) {

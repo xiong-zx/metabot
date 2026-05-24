@@ -386,6 +386,8 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | `maxTurns` / `maxBudgetUsd` | 否 | 不限 | 执行限制 |
 | `model` | 否 | SDK 默认 | Claude 模型 |
 | `apiKey` | 否 | — | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
+| `visible` | 否 | `true` | Bot 是否对其他 bot / Agent Bus 可见，可被 `metabot talk` 触达。每次 bridge bulk-register 都按 bots.json 回写（不 sticky）|
+| `memoryPublic` | 否 | `true` | `metabot memory create/mkdir` 不带 `--path` 时的默认落点：`true` = `/shared/<bot>`（其他人可读），`false` = `/users/<bot>`（私有）。显式传 `--path` 永远以传入为准。bots.json 不写则保留 `metabot memory visibility` CLI 上次设置（sticky）|
 
 </details>
 
@@ -513,6 +515,8 @@ metabot voice tts "你好世界" --play  # 文字转语音
 metabot t5t board                   # 团队日报看板
 metabot agents list                 # 对端 Bot 通讯录
 metabot memory search "部署指南"     # 共享记忆全文搜索
+metabot memory visibility           # 查看当前 bot 默认写 public 还是 private
+metabot memory visibility private   # 切到 private（默认写 /users/<bot>，仅自己可读）
 metabot skills list                 # 技能仓库（中心 Skill Hub）
 # 覆盖 metabot-core CLI 路径：export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 
