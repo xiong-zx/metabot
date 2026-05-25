@@ -25,6 +25,13 @@ export interface AgentRecord {
    * "no match" so legacy state can't grant accidental access.
    */
   ownerName: string;
+  /**
+   * Per-user allowlist: when `visible=false`, these named owners can still
+   * see the bot via `listAgents`. Stored as a JSON array of `ownerName`
+   * strings. Empty array (the default) means only the owner sees a hidden
+   * bot. Ignored when `visible=true` (a public bot is public to all).
+   */
+  visibleToOwners: string[];
   registeredAt: string;
   lastSeenAt: string;
 }
@@ -126,6 +133,14 @@ export class AgentStore {
              )
         `);
       }
+    }
+
+    // Idempotent migration for `visible_to_owners` (added 2026-05-25). JSON
+    // array of `ownerName`s that can see this bot even when `visible=0`.
+    // Default `[]` keeps every existing row behaving identically to the
+    // bot-level visibility model.
+    if (!cols.some((c) => c.name === 'visible_to_owners')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN visible_to_owners TEXT NOT NULL DEFAULT '[]'`);
     }
   }
 
@@ -267,6 +282,18 @@ export class AgentStore {
     return this.getByName(botName)!;
   }
 
+  /**
+   * Replace the allowlist with `owners`. Caller is responsible for filtering
+   * out empty strings and de-duping if they care — store accepts the array
+   * verbatim. Returns the post-update record.
+   */
+  setVisibleToOwners(botName: string, owners: string[]): AgentRecord {
+    const result = this.db.prepare('UPDATE agents SET visible_to_owners = ? WHERE bot_name = ?')
+      .run(JSON.stringify(owners), botName);
+    if (result.changes === 0) throw new AgentNotFoundError(botName);
+    return this.getByName(botName)!;
+  }
+
   remove(botName: string): boolean {
     const result = this.db.prepare('DELETE FROM agents WHERE bot_name = ?').run(botName);
     if (result.changes > 0) {
@@ -295,6 +322,7 @@ interface RawAgentRow {
   memory_public: 0 | 1;
   owner_credential_id: string;
   owner_name: string | null;
+  visible_to_owners: string | null;
   registered_at: string;
   last_seen_at: string;
 }
@@ -308,7 +336,18 @@ function rowToRecord(row: RawAgentRow): AgentRecord {
     memoryPublic: row.memory_public === 1,
     ownerCredentialId: row.owner_credential_id,
     ownerName: row.owner_name || '',
+    visibleToOwners: parseOwnerList(row.visible_to_owners),
     registeredAt: row.registered_at,
     lastSeenAt: row.last_seen_at,
   };
+}
+
+function parseOwnerList(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
 }

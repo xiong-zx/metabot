@@ -221,6 +221,117 @@ describe('/api/agents — routes + audit (token-auth era)', () => {
     expect(names).not.toContain('alice-secret');
   });
 
+  it('PATCH /api/agents/:botName/visible-to-owners — allowlisted user sees hidden bot, others don\'t', async () => {
+    kit = await startTestServer('agents-allowlist-share');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    const bobTok = await issueMemberWithOwner(kit, 'bob-bot', 'bob');
+    const carolTok = await issueMemberWithOwner(kit, 'carol-bot', 'carol');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-hidden', url: 'http://a:9100', visible: false,
+    });
+    // Initially bob can't see it.
+    const before = await call(kit.baseUrl, 'GET', '/api/agents', bobTok);
+    expect((before.body.agents as Array<{ botName: string }>).map((a) => a.botName))
+      .not.toContain('alice-hidden');
+    // Alice shares with bob.
+    const share = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/alice-hidden/visible-to-owners', aliceTok,
+      { owners: ['bob'] },
+    );
+    expect(share.status).toBe(200);
+    expect(share.body).toEqual({ botName: 'alice-hidden', visibleToOwners: ['bob'] });
+    // Bob can now see it.
+    const bobList = await call(kit.baseUrl, 'GET', '/api/agents', bobTok);
+    const bobNames = (bobList.body.agents as Array<{ botName: string }>).map((a) => a.botName);
+    expect(bobNames).toContain('alice-hidden');
+    // Carol still can't.
+    const carolList = await call(kit.baseUrl, 'GET', '/api/agents', carolTok);
+    const carolNames = (carolList.body.agents as Array<{ botName: string }>).map((a) => a.botName);
+    expect(carolNames).not.toContain('alice-hidden');
+  });
+
+  it('PATCH /api/agents/:botName/visible-to-owners by another member → 403', async () => {
+    kit = await startTestServer('agents-allowlist-other-member');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    const bobTok = await issueMemberWithOwner(kit, 'bob-bot', 'bob');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-bot', url: 'http://a:9100',
+    });
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visible-to-owners', bobTok,
+      { owners: ['carol'] },
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('agent_ownership_required');
+  });
+
+  it('PATCH /api/agents/:botName/visible-to-owners by admin → 200', async () => {
+    kit = await startTestServer('agents-allowlist-admin');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-bot', url: 'http://a:9100', visible: false,
+    });
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visible-to-owners', kit.adminToken,
+      { owners: ['external'] },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.visibleToOwners).toEqual(['external']);
+  });
+
+  it('PATCH /api/agents/:botName/visible-to-owners → 400 when owners not an array', async () => {
+    kit = await startTestServer('agents-allowlist-bad-body');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-bot', url: 'http://a:9100',
+    });
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visible-to-owners', aliceTok,
+      { owners: 'bob' },
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('owners_required');
+  });
+
+  it('PATCH /api/agents/:botName/visible-to-owners de-dups and trims', async () => {
+    kit = await startTestServer('agents-allowlist-dedup');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-bot', url: 'http://a:9100', visible: false,
+    });
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/alice-bot/visible-to-owners', aliceTok,
+      { owners: ['bob', '  bob  ', 'carol', '', 'bob'] },
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.visibleToOwners).toEqual(['bob', 'carol']);
+  });
+
+  it('PATCH /api/agents/:botName/visible-to-owners → 404 when bot not registered', async () => {
+    kit = await startTestServer('agents-allowlist-404');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    const res = await call(
+      kit.baseUrl, 'PATCH', '/api/agents/nonexistent/visible-to-owners', aliceTok,
+      { owners: ['bob'] },
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('agent_not_found');
+  });
+
+  it('GET /api/agents — allowlist is ignored when bot is public (visible:true)', async () => {
+    kit = await startTestServer('agents-allowlist-noop-when-public');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    const bobTok = await issueMemberWithOwner(kit, 'bob-bot', 'bob');
+    // Bot is public AND has an empty allowlist — bob should see it because
+    // it's public, not because of the allowlist.
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-public', url: 'http://a:9100', visible: true,
+    });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', bobTok);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName);
+    expect(names).toContain('alice-public');
+  });
+
   it('GET /api/agents derives host from url for each agent (different hosts → different host fields)', async () => {
     kit = await startTestServer('agents-list-host-derived');
     const tokenA = await issueMember(kit, 'alice-bot');

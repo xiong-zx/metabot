@@ -629,6 +629,12 @@ export function startServer(options: ServerOptions): ServerHandle {
         const body = await parseJsonBody(req);
         return jsonResult(res, agentRoutes.setAgentMemoryPublic(agentStore, botName, body, cred));
       }
+      const vtoMatch = pathname.match(/^\/api\/agents\/([^/]+)\/visible-to-owners$/);
+      if (vtoMatch && method === 'PATCH') {
+        const botName = decodeURIComponent(vtoMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, agentRoutes.setAgentVisibleToOwners(agentStore, botName, body, cred));
+      }
       if (pathname.startsWith('/api/agents/') && method === 'DELETE') {
         const botName = decodeURIComponent(pathname.slice('/api/agents/'.length));
         return jsonResult(res, agentRoutes.removeAgent(agentStore, botName, cred));
