@@ -22,6 +22,7 @@ function publicShape(rec: AgentRecord) {
     url: rec.url,
     visible: rec.visible,
     memoryPublic: rec.memoryPublic,
+    visibleToOwners: rec.visibleToOwners,
     registeredAt: rec.registeredAt,
     lastSeenAt: rec.lastSeenAt,
   };
@@ -168,11 +169,15 @@ export function listAgents(
   // is a member. The legacy `visible = 1` SQL pre-filter at the store level
   // would have hidden the caller's own bots from their other-machine cred.
   const all = store.list({ includeHidden: true });
-  const visibleToCaller = (a: { visible: boolean; ownerName: string }): boolean => {
+  const visibleToCaller = (a: { visible: boolean; ownerName: string; visibleToOwners: string[] }): boolean => {
     if (includeHidden) return true; // admin-only, already gated above
     if (cred.role === 'admin') return true;
     if (a.visible) return true;
-    return !!cred.ownerName && a.ownerName === cred.ownerName;
+    if (!cred.ownerName) return false;
+    if (a.ownerName === cred.ownerName) return true;
+    // Per-user allowlist — owner-side opt-in. Only consulted when the bot
+    // is hidden (`visible=false`) so it never *narrows* a public bot.
+    return a.visibleToOwners.includes(cred.ownerName);
   };
   const agents = all.filter(visibleToCaller);
   return {
@@ -184,6 +189,7 @@ export function listAgents(
         host: deriveHost(a.url),
         visible: a.visible,
         memoryPublic: a.memoryPublic,
+        visibleToOwners: a.visibleToOwners,
         lastSeenAt: a.lastSeenAt,
       })),
     },
@@ -206,6 +212,37 @@ export function setAgentVisibility(
   }
   const rec = store.setVisibility(botName, body.visible);
   return { status: 200, body: { botName: rec.botName, visible: rec.visible } };
+}
+
+/**
+ * PATCH /api/agents/:botName/visible-to-owners — replace the per-user
+ * allowlist with the supplied array. Body `{ owners: string[] }`. Owner-
+ * credential or admin only. Empty array clears the allowlist.
+ *
+ * Pairs with `visible:false`: setting an allowlist on a `visible:true` bot
+ * is allowed but has no effect — a public bot is visible to everyone.
+ */
+export function setAgentVisibleToOwners(
+  store: AgentStore,
+  botName: string,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  const raw = body.owners;
+  if (!Array.isArray(raw) || raw.some((x) => typeof x !== 'string')) {
+    return err(400, 'owners_required');
+  }
+  const owners = (raw as string[]).map((s) => s.trim()).filter(Boolean);
+  // De-dup while preserving caller-supplied order.
+  const seen = new Set<string>();
+  const deduped = owners.filter((o) => (seen.has(o) ? false : (seen.add(o), true)));
+  const existing = store.getByName(botName);
+  if (!existing) return err(404, 'agent_not_found');
+  if (existing.ownerCredentialId !== cred.id && cred.role !== 'admin') {
+    return err(403, 'agent_ownership_required');
+  }
+  const rec = store.setVisibleToOwners(botName, deduped);
+  return { status: 200, body: { botName: rec.botName, visibleToOwners: rec.visibleToOwners } };
 }
 
 /**

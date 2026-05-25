@@ -93,6 +93,7 @@ interface AgentRow {
   botName: string;
   url: string;
   visible: boolean;
+  visibleToOwners?: string[];
   lastSeenAt: string;
 }
 
@@ -115,6 +116,10 @@ Subcommands:
                                         (botName, role, authSource).
   visible <botName>                     Mark <botName> visible (must own or be admin)
   hide    <botName>                     Mark <botName> hidden  (must own or be admin)
+  share   <botName> <ownerName>         Add <ownerName> to <botName>'s per-user allowlist.
+                                        Only takes effect when the bot is hidden.
+  unshare <botName> <ownerName>         Remove <ownerName> from the allowlist.
+  shared  <botName>                     Print <botName>'s current allowlist.
   talk <peer>[/<bot>] <chatId> "<msg>"  Send a message to a peer's bot via its /api/talk.
                                         Auth: this command forwards your own
                                         METABOT_CORE_TOKEN; the peer bridge verifies it
@@ -180,6 +185,64 @@ async function cmdSetVisibility(args: string[], visible: boolean): Promise<void>
   print(resp);
 }
 
+async function readAllowlist(cfg: BusConfig, botName: string): Promise<string[]> {
+  // No dedicated GET endpoint — pull /api/agents and find the row. The list
+  // route already includes `visibleToOwners` for rows visible to the caller.
+  const list = await busRequest<ListResponse>(cfg, 'GET', '/api/agents');
+  const row = (list.agents || []).find((a) => a.botName === botName);
+  if (!row) throw new Error(`metabot agents: '${botName}' not found in registry (or not visible to you)`);
+  return row.visibleToOwners || [];
+}
+
+async function cmdShare(args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const botName = positional[0];
+  const ownerName = positional[1];
+  if (!botName || !ownerName) {
+    throw new Error('metabot agents share: <botName> <ownerName> required');
+  }
+  const cfg = loadBusConfig();
+  const current = await readAllowlist(cfg, botName);
+  if (current.includes(ownerName)) {
+    print({ botName, visibleToOwners: current, unchanged: true });
+    return;
+  }
+  const next = [...current, ownerName];
+  const resp = await busRequest(
+    cfg, 'PATCH', `/api/agents/${encodeURIComponent(botName)}/visible-to-owners`, { owners: next },
+  );
+  print(resp);
+}
+
+async function cmdUnshare(args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const botName = positional[0];
+  const ownerName = positional[1];
+  if (!botName || !ownerName) {
+    throw new Error('metabot agents unshare: <botName> <ownerName> required');
+  }
+  const cfg = loadBusConfig();
+  const current = await readAllowlist(cfg, botName);
+  if (!current.includes(ownerName)) {
+    print({ botName, visibleToOwners: current, unchanged: true });
+    return;
+  }
+  const next = current.filter((o) => o !== ownerName);
+  const resp = await busRequest(
+    cfg, 'PATCH', `/api/agents/${encodeURIComponent(botName)}/visible-to-owners`, { owners: next },
+  );
+  print(resp);
+}
+
+async function cmdShared(args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const botName = positional[0];
+  if (!botName) throw new Error('metabot agents shared: <botName> required');
+  const cfg = loadBusConfig();
+  const current = await readAllowlist(cfg, botName);
+  print({ botName, visibleToOwners: current });
+}
+
 async function cmdTalk(args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const target = positional[0];
@@ -243,6 +306,12 @@ export async function run(args: string[]): Promise<void> {
       return cmdSetVisibility(rest, true);
     case 'hide':
       return cmdSetVisibility(rest, false);
+    case 'share':
+      return cmdShare(rest);
+    case 'unshare':
+      return cmdUnshare(rest);
+    case 'shared':
+      return cmdShared(rest);
     case 'talk':
       return cmdTalk(rest);
     default:
