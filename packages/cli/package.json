@@ -14,6 +14,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "pack:standalone": "bash scripts/pack.sh",
     "test": "vitest run",
     "test:watch": "vitest"
   },

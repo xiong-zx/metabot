@@ -122,6 +122,8 @@ const STATIC_MIME: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.woff2': 'font/woff2',
   '.json': 'application/json; charset=utf-8',
+  '.sh': 'text/x-shellscript; charset=utf-8',
+  '.tgz': 'application/gzip',
 };
 
 function hasTraversal(pathname: string): boolean {
@@ -410,6 +412,30 @@ export function startServer(options: ServerOptions): ServerHandle {
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       });
       res.end();
+      return;
+    }
+
+    // Anonymous CLI distribution endpoints. Self-hosted internal install:
+    //   curl -fsSL <host>/cli/install.sh | METABOT_CORE_TOKEN=... bash
+    // The tarball + script are built by `packages/cli/scripts/pack.sh` into
+    // `packages/server/static/cli/` and rsynced to /opt/metabot-core/static/
+    // by deploy/install.sh. Reachable on every host (UI + bare API) and
+    // intentionally bypass auth — the host already sits behind 飞连 VPN, and
+    // the tarball carries no secrets (tokens are user-supplied at install
+    // time, not embedded).
+    if (
+      method === 'GET'
+      && (pathname === '/cli/install.sh' || pathname === '/cli/latest.tgz')
+    ) {
+      const rel = pathname.replace(/^\/+/, '');
+      const abs = path.resolve(path.join(STATIC_DIR, rel));
+      if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {
+        jsonResponse(res, 400, { error: 'bad_path' });
+        return;
+      }
+      if (!serveStaticFile(res, abs, false)) {
+        jsonResponse(res, 404, { error: 'cli_not_installed' });
+      }
       return;
     }
 

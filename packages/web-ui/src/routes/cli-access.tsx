@@ -12,11 +12,13 @@ export function CliAccess() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedInstall, setCopiedInstall] = useState(false);
 
   async function generate() {
     setBusy(true);
     setErr(null);
     setCopied(false);
+    setCopiedInstall(false);
     try {
       const res = await api.issueWebToken();
       setIssued(res);
@@ -32,6 +34,10 @@ export function CliAccess() {
     ? `METABOT_CORE_URL=${CLI_ROOT_URL}\nMETABOT_CORE_TOKEN=${issued.token}`
     : '';
 
+  const installCmd = issued
+    ? `curl -fsSL ${CLI_ROOT_URL}/cli/install.sh | METABOT_CORE_TOKEN=${issued.token} bash`
+    : '';
+
   async function copyEnv() {
     if (!envBlock) return;
     try {
@@ -40,6 +46,17 @@ export function CliAccess() {
       setTimeout(() => setCopied(false), 1800);
     } catch {
       setCopied(false);
+    }
+  }
+
+  async function copyInstall() {
+    if (!installCmd) return;
+    try {
+      await navigator.clipboard.writeText(installCmd);
+      setCopiedInstall(true);
+      setTimeout(() => setCopiedInstall(false), 1800);
+    } catch {
+      setCopiedInstall(false);
     }
   }
 
@@ -95,6 +112,21 @@ export function CliAccess() {
                 </button>
               </div>
               <pre className="env-block">{envBlock}</pre>
+
+              <div className="env-block-head" style={{ marginTop: 18 }}>
+                <span className="kicker">一键安装（仅 CLI）</span>
+                <button className="btn secondary" onClick={copyInstall}>
+                  {copiedInstall ? 'copied' : 'copy'}
+                </button>
+              </div>
+              <pre className="env-block">{installCmd}</pre>
+              <div className="cli-access-meta" style={{ marginBottom: 12 }}>
+                <span style={{ color: 'var(--bone-300)', fontSize: 11 }}>
+                  仅内网（飞连 VPN）；token 会出现在 shell 历史里，需要换可随时点
+                  上方 regenerate；要求 node ≥ 20。
+                </span>
+              </div>
+
               <div className="cli-access-meta">
                 <span><span className="key">identity</span> {issued.botName}</span>
                 <span><span className="key">credential</span> <code>{issued.credentialId}</code></span>
