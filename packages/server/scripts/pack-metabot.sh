@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Pack the metabot bot-host runtime into a tarball + publish the bootstrap
+# installer script. Output lands under `packages/server/static/install/`,
+# which the server's deploy/install.sh rsyncs to /opt/metabot-core/static/.
+# The tarball + script are served anonymously at
+# `<host>/install/{install.sh,latest.tgz}` (see server.ts /install route).
+#
+# What ships in the tarball:
+#   - bin/, install.sh, ecosystem.config.cjs, tsconfig*.json
+#   - package.json + package-lock.json (root workspace manifests)
+#   - src/                              (engine + workspace skill sources)
+#   - packages/cli, cli-core, metamemory, skill-hub  (4 bot-host workspaces)
+#   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
+#
+# What does NOT ship (central-only / build artifacts / user state):
+#   - packages/server, packages/web-ui
+#   - node_modules, dist, *.tsbuildinfo, coverage
+#   - .git, .github, .codex
+#   - .env, bots.json, logs/, data/   (never committed — naturally absent)
+#
+# Implementation note: we drive tar directly (no rsync staging) so CI runners
+# without rsync still work. `tar --exclude` patterns recurse into every named
+# include path, giving the same effect as rsync staging.
+#
+# Output is atomic (`*.new` → rename) so a mid-deploy rsync can't catch a
+# half-written tarball.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SERVER_PKG_DIR/../.." && pwd)"
+SERVER_STATIC_DIR="$SERVER_PKG_DIR/static/install"
+BOOTSTRAP_SRC="$SERVER_PKG_DIR/install/bootstrap.sh"
+
+TARBALL_NAME="latest.tgz"
+BOOTSTRAP_NAME="install.sh"
+
+VERSION="$(node -e "process.stdout.write(require('$REPO_ROOT/package.json').version)")"
+
+# Patterns excluded from every recursive include. Mirrors what rsync staging
+# used to skip; tar applies these globally regardless of which include path
+# is being walked.
+TAR_EXCLUDES=(
+  '--exclude=.git'
+  '--exclude=.github'
+  '--exclude=.codex'
+  '--exclude=node_modules'
+  '--exclude=dist'
+  '--exclude=*.tsbuildinfo'
+  '--exclude=coverage'
+  '--exclude=.DS_Store'
+  '--exclude=*.log'
+)
+
+# Explicit include list — only these paths get into the tarball.
+# packages/server + packages/web-ui are intentionally OMITTED (central-only).
+# packages/skills/metabot/ is required for Phase 6 SKILL_SENTINEL check.
+INCLUDES=(
+  'bin'
+  'install.sh'
+  'ecosystem.config.cjs'
+  'package.json'
+  'package-lock.json'
+  'tsconfig.json'
+  'tsconfig.bridge.json'
+  'src'
+  'packages/cli'
+  'packages/cli-core'
+  'packages/metamemory'
+  'packages/skill-hub'
+  'packages/skills'
+  'CLAUDE.md'
+  'LICENSE'
+  'README.md'
+)
+
+# Filter to paths that actually exist. tar would error on a missing positional
+# argument, and a missing optional file (e.g. LICENSE not yet checked in)
+# shouldn't break the build.
+PRESENT_INCLUDES=()
+for rel in "${INCLUDES[@]}"; do
+  if [[ -e "$REPO_ROOT/$rel" ]]; then
+    PRESENT_INCLUDES+=("$rel")
+  else
+    echo "    (skipping missing: $rel)" >&2
+  fi
+done
+
+# install.sh and the metabot SKILL bundle are load-bearing — if either is
+# missing, the bootstrap → install.sh → Phase 6 chain will explode on the
+# bot host. Fail loud here instead.
+for required in 'install.sh' 'packages/skills/metabot/SKILL.md'; do
+  if [[ ! -e "$REPO_ROOT/$required" ]]; then
+    echo "error: required path missing from repo: $required" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$SERVER_STATIC_DIR"
+
+echo "==> Writing $SERVER_STATIC_DIR/$TARBALL_NAME (atomic)"
+# Sort+mtime flags produce a deterministic tarball — easier diffs across
+# builds and avoids spurious rsync churn on the deploy host. -C anchors all
+# include paths to the repo root.
+tar --sort=name \
+    --owner=0 --group=0 --numeric-owner \
+    --mtime='UTC 2026-01-01' \
+    "${TAR_EXCLUDES[@]}" \
+    -czf "$SERVER_STATIC_DIR/$TARBALL_NAME.new" \
+    -C "$REPO_ROOT" \
+    "${PRESENT_INCLUDES[@]}"
+
+# Post-pack sanity: confirm SKILL_SENTINEL actually landed in the tarball.
+# Catches cases where an --exclude pattern accidentally swallowed it.
+# Post-pack sanity: confirm SKILL_SENTINEL actually landed in the tarball.
+# Catches cases where an --exclude pattern accidentally swallowed it.
+#
+# We snapshot the listing to a variable instead of piping `tar tzf | grep -q`:
+# under `set -o pipefail`, an early-exiting `grep -q` sends SIGPIPE upstream
+# and the pipeline fails even though the match succeeded. Classic footgun.
+TARBALL_LISTING="$(tar tzf "$SERVER_STATIC_DIR/$TARBALL_NAME.new")"
+if ! grep -Eq '^(\./)?packages/skills/metabot/SKILL\.md$' <<<"$TARBALL_LISTING"; then
+  echo "error: packed tarball is missing packages/skills/metabot/SKILL.md" >&2
+  rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
+  exit 1
+fi
+
+mv "$SERVER_STATIC_DIR/$TARBALL_NAME.new" "$SERVER_STATIC_DIR/$TARBALL_NAME"
+
+echo "==> Publishing bootstrap $SERVER_STATIC_DIR/$BOOTSTRAP_NAME (atomic)"
+if [[ ! -f "$BOOTSTRAP_SRC" ]]; then
+  echo "error: bootstrap source missing at $BOOTSTRAP_SRC" >&2
+  exit 1
+fi
+cp "$BOOTSTRAP_SRC" "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME.new"
+chmod +x "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME.new"
+mv "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME.new" "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME"
+
+SIZE="$(ls -lh "$SERVER_STATIC_DIR/$TARBALL_NAME" | awk '{print $5}')"
+echo "==> Done. metabot bot-host runtime v$VERSION → $SERVER_STATIC_DIR/$TARBALL_NAME ($SIZE)"

@@ -326,7 +326,15 @@ fi
 # ============================================================================
 step "Phase 2: Setting up MetaBot at ${METABOT_HOME}"
 
-if [[ -d "$METABOT_HOME/.git" ]]; then
+if [[ "${METABOT_SKIP_GIT:-0}" == "1" ]]; then
+  # Set by the metabot-core bootstrap (packages/server/install/bootstrap.sh),
+  # which downloads + extracts the bot-host tarball into $METABOT_HOME before
+  # exec'ing this script. The git clone/pull phase is unnecessary in that
+  # mode (no remote — refresh model is to re-run the bootstrap). The Phase 6
+  # SKILL_SENTINEL check still catches a corrupt/incomplete extraction.
+  info "Pre-staged from tarball (METABOT_SKIP_GIT=1), skipping git phase."
+  cd "$METABOT_HOME"
+elif [[ -d "$METABOT_HOME/.git" ]]; then
   info "Existing installation found, pulling latest..."
   cd "$METABOT_HOME"
   OLD_HEAD="$(git rev-parse HEAD)"

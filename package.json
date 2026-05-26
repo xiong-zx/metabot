@@ -13,7 +13,7 @@
     "packages/web-ui"
   ],
   "scripts": {
-    "build": "npm run build:web && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli",
+    "build": "npm run build:web && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
     "build:bridge": "tsc -p tsconfig.bridge.json",
     "build:web": "cd web && npm install --include=dev && ./node_modules/.bin/vite build",
     "build:packages": "npm run build --workspaces --if-present",

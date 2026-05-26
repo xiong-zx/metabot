@@ -53,8 +53,17 @@ _json() { python3 -m json.tool 2>/dev/null || cat; }
 
 cmd_update() {
   if [[ ! -d "$METABOT_HOME/.git" ]]; then
+    # Tarball-mode install (no remote to git-pull from): re-run the
+    # metabot-core bootstrap, which re-downloads latest.tgz and delegates
+    # back to install.sh. The bootstrap preserves .env / bots.json / logs.
+    if [[ -f "$METABOT_HOME/install.sh" ]]; then
+      local core_url="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
+      info "Tarball install detected at $METABOT_HOME — re-running bootstrap from $core_url"
+      exec bash -c "curl -fsSL '$core_url/install/install.sh' | METABOT_HOME='$METABOT_HOME' bash"
+    fi
     error "MetaBot not found at $METABOT_HOME"
-    echo "  Run the installer first: curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash"
+    echo "  Run the installer first:"
+    echo "    curl -fsSL https://metabot-core.xvirobotics.com/install/install.sh | bash"
     exit 1
   fi
 

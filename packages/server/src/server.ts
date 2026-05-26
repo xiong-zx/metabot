@@ -449,6 +449,30 @@ export function startServer(options: ServerOptions): ServerHandle {
       return;
     }
 
+    // Anonymous metabot bot-host distribution endpoints. Internal-network
+    // one-liner installer for the full bridge bot (not just the CLI):
+    //   curl -fsSL <host>/install/install.sh | bash
+    // Built by `packages/server/scripts/pack-metabot.sh` into
+    // `packages/server/static/install/{install.sh,latest.tgz}` and rsynced
+    // to /opt/metabot-core/static/ by deploy/install.sh. Same auth model as
+    // /cli/* — anonymous behind 飞连 VPN, no embedded secrets (Feishu/Telegram
+    // credentials are prompted by install.sh at install time).
+    if (
+      method === 'GET'
+      && (pathname === '/install/install.sh' || pathname === '/install/latest.tgz')
+    ) {
+      const rel = pathname.replace(/^\/+/, '');
+      const abs = path.resolve(path.join(STATIC_DIR, rel));
+      if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {
+        jsonResponse(res, 400, { error: 'bad_path' });
+        return;
+      }
+      if (!serveStaticFile(res, abs, false)) {
+        jsonResponse(res, 404, { error: 'install_not_built' });
+      }
+      return;
+    }
+
     // Host-based dispatch for the Web UI. Only GET on the configured UI host
     // and only for non-API/non-admin paths falls through to static serving.
     // /health and /api/manifest stay accessible on the UI host (handled below).
