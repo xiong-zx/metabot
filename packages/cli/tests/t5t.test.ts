@@ -218,6 +218,73 @@ describe('metabot t5t — argv parsing + dispatch', () => {
     expect(url).toBe('https://example.test/core/api/t5t/cli/project/my%20proj');
   });
 
+  it('top5 add posts {project, text} to /api/t5t/cli/topfive', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    process.env.METABOT_CORE_URL = 'https://example.test/core';
+    const fetchMock = mockOk({ itemId: 'p-tf-1', status: 'open' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['top5', 'my-proj', 'add', 'fix the deploy script']);
+
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).toBe('https://example.test/core/api/t5t/cli/topfive');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({
+      project: 'my-proj',
+      text: 'fix the deploy script',
+    });
+  });
+
+  it('top5 done|reopen|remove posts {project, itemId, status}', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    process.env.METABOT_CORE_URL = 'https://example.test/core';
+    const fetchMock = mockOk({ itemId: 'p-tf-1', status: 'done' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['top5', 'my-proj', 'done', 'p-tf-1']);
+    await mod.run(['top5', 'my-proj', 'reopen', 'p-tf-1']);
+    await mod.run(['top5', 'my-proj', 'remove', 'p-tf-1']);
+
+    const calls = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls;
+    expect(JSON.parse(String(calls[0]![1].body)).status).toBe('done');
+    expect(JSON.parse(String(calls[1]![1].body)).status).toBe('open');
+    expect(JSON.parse(String(calls[2]![1].body)).status).toBe('removed');
+  });
+
+  it('top5 list reads project detail and prints topFive', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    process.env.METABOT_CORE_URL = 'https://example.test/core';
+    const fetchMock = mockOk({
+      project: { slug: 'my-proj' },
+      entries: [],
+      feedback: [],
+      wipBoard: [],
+      topFive: [{ itemId: 'my-proj-tf-1', text: 'fix deploy', status: 'open' }],
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['top5', 'my-proj', 'list']);
+
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).toBe('https://example.test/core/api/t5t/cli/project/my-proj');
+    expect(init.method).toBe('GET');
+  });
+
+  it('top5 rejects unknown action', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    vi.stubGlobal('fetch', mockOk({}));
+    const mod = await importFresh();
+    await expect(
+      mod.run(['top5', 'my-proj', 'pivot', 'fix']),
+    ).rejects.toThrow(/unknown action 'pivot'/);
+  });
+
   it('unknown subcommand prints to stderr and exits 2', async () => {
     process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);

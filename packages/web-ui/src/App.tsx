@@ -23,6 +23,9 @@ function Brand() {
 }
 
 const SIDEBAR_STATE_KEY = 'metabot-core:sidebar-collapsed';
+const THEME_STATE_KEY = 'metabot-core:theme';
+
+type Theme = 'dark' | 'light';
 
 function readSidebarCollapsed(): boolean {
   try {
@@ -30,6 +33,30 @@ function readSidebarCollapsed(): boolean {
   } catch {
     return false;
   }
+}
+
+function readTheme(): Theme {
+  try {
+    return localStorage.getItem(THEME_STATE_KEY) === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
+}
+
+function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) {
+  const next: Theme = theme === 'dark' ? 'light' : 'dark';
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      onClick={onToggle}
+      title={`switch to ${next} mode  ( t )`}
+      aria-label={`switch to ${next} mode`}
+      aria-pressed={theme === 'light'}
+    >
+      {theme === 'dark' ? '☾' : '☀'}
+    </button>
+  );
 }
 
 function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
@@ -96,6 +123,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readSidebarCollapsed);
+  const [theme, setTheme] = useState<Theme>(readTheme);
 
   const toggleSidebar = () => {
     setSidebarCollapsed((cur) => {
@@ -104,6 +132,18 @@ function Shell({ children }: { children: React.ReactNode }) {
       return next;
     });
   };
+
+  const toggleTheme = () => {
+    setTheme((cur) => {
+      const next: Theme = cur === 'dark' ? 'light' : 'dark';
+      try { localStorage.setItem(THEME_STATE_KEY, next); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     let live = true;
@@ -119,6 +159,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   // global shortcuts:
   //   '/'  focus search input
   //   '['  toggle sidebar
+  //   't'  toggle light/dark theme
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = document.activeElement?.tagName;
@@ -129,6 +170,9 @@ function Shell({ children }: { children: React.ReactNode }) {
       } else if (e.key === '[' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         toggleSidebar();
+      } else if (e.key === 't' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        toggleTheme();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -150,6 +194,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/t5t">t5t</NavLink>
           <NavLink to="/agents">agents</NavLink>
           <NavLink to="/cli">cli</NavLink>
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
           <a className="signout" href="/oauth2/sign_out" title="end 飞连 SSO session">
             sign out
           </a>

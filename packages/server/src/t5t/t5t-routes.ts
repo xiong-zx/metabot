@@ -13,6 +13,7 @@ import {
   parseCliFeedback,
   parseCliGoal,
   parseCliPush,
+  parseCliTopFive,
   parseCliWip,
 } from './contracts.js';
 import { requireOwner } from './owner-auth.js';
@@ -93,12 +94,14 @@ export function getProject(
     }
   }
   const wipBoard = store.computeWipBoard(decoded);
+  const topFive = store.listTopFiveItems(decoded);
 
   const body: ProjectDetailResponse = {
     project,
     entries,
     feedback,
     wipBoard,
+    topFive,
   };
   return { status: 200, body };
 }
@@ -277,6 +280,42 @@ export function postCliWip(
       cred,
     ),
   );
+}
+
+/**
+ * POST /api/t5t/topfive (web) and POST /api/t5t/cli/topfive (CLI) — append a
+ * top-five todo item. Owner-gated on `project`. Body shape: `{ project, text?,
+ * itemId?, status? }`. Without `itemId` a new item is created (text required);
+ * with `itemId` the existing item's status / text is updated.
+ */
+export function postTopFive(
+  store: T5tStore,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  const parsed = parseCliTopFive(body);
+  if (isValidationError(parsed)) return err(parsed.status, parsed.error);
+  const gate = ownerGate(store, parsed.project, cred);
+  if (gate) return gate;
+  return guarded(() =>
+    store.appendTopFive(
+      {
+        project: parsed.project,
+        text: parsed.text,
+        itemId: parsed.itemId,
+        status: parsed.status,
+      },
+      cred,
+    ),
+  );
+}
+
+export function postCliTopFive(
+  store: T5tStore,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  return postTopFive(store, body, cred);
 }
 
 export function postCliFeedback(

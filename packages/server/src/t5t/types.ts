@@ -8,6 +8,7 @@
 
 export type ProjectStatus = 'green' | 'yellow' | 'red' | 'killed' | 'unknown';
 export type WipStatus = 'queued' | 'doing' | 'done';
+export type TopFiveStatus = 'open' | 'done' | 'removed';
 export type AnomalyReason =
   | 'no_owner'
   | 'stale'
@@ -43,6 +44,18 @@ export interface Bottleneck {
   bottleneckId: string;
   text: string;
   cleared: boolean;
+  author: string;
+  authorCanonical: string;
+  replaces: string | null;
+  createdAt: string;
+  docId: string;
+}
+
+export interface TopFiveItem {
+  project: string;
+  itemId: string;
+  text: string;
+  status: TopFiveStatus;
   author: string;
   authorCanonical: string;
   replaces: string | null;
@@ -124,6 +137,7 @@ export interface ProjectDetailResponse {
   entries: T5TEntry[];
   feedback: FeedbackEntry[];
   wipBoard: WIPBoardColumn[];
+  topFive: TopFiveItem[];
 }
 
 export interface WhoamiResponse {

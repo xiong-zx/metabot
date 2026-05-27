@@ -84,9 +84,22 @@ export interface StatusResponse {
   anomalies: T5tAnomaly[];
 }
 
+export interface T5tTopFiveItem {
+  project: string;
+  itemId: string;
+  text: string;
+  status: 'open' | 'done' | 'removed';
+  author: string;
+  authorCanonical: string;
+  replaces: string | null;
+  createdAt: string;
+  docId: string;
+}
+
 export interface ProjectDetailResponse {
   project: T5tProject;
   entries: T5tEntry[];
   feedback: unknown[];
   wipBoard: unknown[];
+  topFive: T5tTopFiveItem[];
 }

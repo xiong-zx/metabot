@@ -218,13 +218,17 @@ metabot t5t bottleneck <project> "<text>"      # owner-only ; pass --clear to re
 metabot t5t wip <project> <evaluatorId> "<title>"
                                                # owner-only
 metabot t5t kill <project>                     # owner-only ; soft-kill (append-only status=killed)
+metabot t5t top5 <project> add "<text>"        # owner-only ; add a Top-5 todo item
+metabot t5t top5 <project> done|reopen|remove <itemId>
+                                               # owner-only ; flip status of an existing item
+metabot t5t top5 <project> list                # show the current Top-5 items
 ```
 
 **Routes.** Every subcommand calls `/api/t5t/cli/*` (Bearer-only; web identity is excluded by the server). See `packages/server/src/t5t/t5t-routes.ts` for the exact shapes.
 
 **Auth.** Uses the same `METABOT_CORE_TOKEN` env / `~/.metabot-core/token` file as `metabot memory` and `metabot agents`. No separate `~/.t5t/credentials` (the Python `t5t` CLI's auth file) is read or honored.
 
-**Owner-auth.** `goal` / `evaluator` / `bottleneck` / `wip` are gated by project ownership: only the project's `leaderEmail` or an email listed in `allowedUsers` (admin tokens always pass). The server's deny-by-default contract means a project with *empty* `leaderEmail` AND *empty* `allowedUsers` rejects all writes — even from the project's original author. If you hit `owner_required` on a project you created, the leader was never seeded — fix via an admin token or by `push`ing the first entry under that slug (push auto-creates the project with the caller as leader).
+**Owner-auth.** `goal` / `evaluator` / `bottleneck` / `wip` / `kill` / `top5` are gated by project ownership: only the project's `leaderEmail` or an email listed in `allowedUsers` (admin tokens always pass). The server's deny-by-default contract means a project with *empty* `leaderEmail` AND *empty* `allowedUsers` rejects all writes — even from the project's original author. If you hit `owner_required` on a project you created, the leader was never seeded — fix via an admin token or by `push`ing the first entry under that slug (push auto-creates the project with the caller as leader).
 
 **Auto-creation on push.** `metabot t5t push <new-slug> ...` creates the project with `leaderEmail = <your botName/email>`. The other write paths (`goal/evaluator/bottleneck/wip`) require the project to already exist; they 404 otherwise.
 

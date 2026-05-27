@@ -120,6 +120,20 @@ export interface WIPItem {
   docId: string;
 }
 
+export type TopFiveStatus = 'open' | 'done' | 'removed';
+
+export interface TopFiveItem {
+  project: string;
+  itemId: string;
+  text: string;
+  status: TopFiveStatus;
+  author: string;
+  authorCanonical: string;
+  replaces: string | null;
+  createdAt: string;
+  docId: string;
+}
+
 export interface ProjectSummary {
   slug: string;
   name: string;
@@ -181,6 +195,14 @@ export interface ProjectDetailResponse {
   entries: T5TEntry[];
   feedback: FeedbackEntry[];
   wipBoard: WIPBoardColumn[];
+  topFive: TopFiveItem[];
+}
+
+export interface TopFiveRequest {
+  project: string;
+  text?: string;
+  itemId?: string;
+  status?: TopFiveStatus;
 }
 
 export interface FeedbackRequest {
@@ -336,5 +358,11 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
+    }),
+  postT5tTopFive: (body: TopFiveRequest) =>
+    request<TopFiveItem>('/api/t5t/topfive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     }),
 };

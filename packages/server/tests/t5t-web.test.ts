@@ -226,6 +226,76 @@ describe('t5t web routes — MR2', () => {
     expect(JSON.parse(res.body).error).toBe('owner_required');
   });
 
+  it('POST /api/t5t/topfive as web-identity leader → 200; getProject includes topFive[]', async () => {
+    kit = await startTestServer('t5t-topfive-web-leader', { uiAllowedEmails: [WEB_EMAIL] });
+    seedProject(kit, { slug: 'tfp', leaderEmail: WEB_EMAIL });
+    const res = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/topfive',
+      { 'X-Forwarded-Email': WEB_EMAIL, 'Content-Type': 'application/json' },
+      JSON.stringify({ project: 'tfp', text: 'first hot todo' }),
+    );
+    expect(res.status).toBe(200);
+    const created = JSON.parse(res.body);
+    expect(created.itemId).toBe('tfp-tf-1');
+    expect(created.status).toBe('open');
+    expect(created.author).toBe(WEB_EMAIL);
+
+    const detail = await rawRequest(kit.port, 'GET', '/api/t5t/projects/tfp', {
+      'X-Forwarded-Email': WEB_EMAIL,
+    });
+    expect(detail.status).toBe(200);
+    const body = JSON.parse(detail.body);
+    expect(Array.isArray(body.topFive)).toBe(true);
+    expect(body.topFive.length).toBe(1);
+    expect(body.topFive[0].text).toBe('first hot todo');
+  });
+
+  it('POST /api/t5t/topfive as non-leader web-identity → 403 owner_required', async () => {
+    const intruder = 'intruder@xvirobotics.com';
+    kit = await startTestServer('t5t-topfive-web-403', {
+      uiAllowedEmails: [WEB_EMAIL, intruder],
+    });
+    seedProject(kit, { slug: 'tfp2', leaderEmail: WEB_EMAIL });
+    const res = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/topfive',
+      { 'X-Forwarded-Email': intruder, 'Content-Type': 'application/json' },
+      JSON.stringify({ project: 'tfp2', text: 'try to add' }),
+    );
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe('owner_required');
+  });
+
+  it('POST /api/t5t/topfive flip status=done by itemId → 200, list reflects done', async () => {
+    kit = await startTestServer('t5t-topfive-flip', { uiAllowedEmails: [WEB_EMAIL] });
+    seedProject(kit, { slug: 'tfp3', leaderEmail: WEB_EMAIL });
+    const add = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/topfive',
+      { 'X-Forwarded-Email': WEB_EMAIL, 'Content-Type': 'application/json' },
+      JSON.stringify({ project: 'tfp3', text: 'fix the build' }),
+    );
+    expect(add.status).toBe(200);
+    const itemId = JSON.parse(add.body).itemId;
+    const flip = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/topfive',
+      { 'X-Forwarded-Email': WEB_EMAIL, 'Content-Type': 'application/json' },
+      JSON.stringify({ project: 'tfp3', itemId, status: 'done' }),
+    );
+    expect(flip.status).toBe(200);
+    expect(JSON.parse(flip.body).status).toBe('done');
+    const detail = await rawRequest(kit.port, 'GET', '/api/t5t/projects/tfp3', {
+      'X-Forwarded-Email': WEB_EMAIL,
+    });
+    expect(JSON.parse(detail.body).topFive[0].status).toBe('done');
+  });
+
   it('anomaly classification: project that has never been pushed shows in anomalies[] with reason:stale', async () => {
     kit = await startTestServer('t5t-stale', { uiAllowedEmails: [WEB_EMAIL] });
     const store = kit.handle.t5tStore;

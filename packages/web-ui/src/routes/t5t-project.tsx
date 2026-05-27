@@ -6,6 +6,7 @@ import { StatusPill } from '../components/t5t/StatusPill';
 import { GoalBanner } from '../components/t5t/GoalBanner';
 import { EvaluatorPanel } from '../components/t5t/EvaluatorPanel';
 import { BottleneckCallout } from '../components/t5t/BottleneckCallout';
+import { TopFiveList } from '../components/t5t/TopFiveList';
 import { VerticalWIPBoard } from '../components/t5t/VerticalWIPBoard';
 import { T5TTimeline } from '../components/t5t/T5TTimeline';
 import { FeedbackThread } from '../components/t5t/FeedbackThread';
@@ -130,6 +131,11 @@ export function T5tProject() {
 
             <GoalBanner goal={detail.project.goal} slug={detail.project.slug} />
             <BottleneckCallout bottleneck={detail.project.bottleneck} />
+            <TopFiveList
+              items={detail.topFive}
+              project={detail.project.slug}
+              onChanged={refresh}
+            />
 
             <div className="t5t-cols">
               <div className="t5t-grid">

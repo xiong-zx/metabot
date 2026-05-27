@@ -9,6 +9,7 @@ export interface T5tFolderIds {
   evaluators: string;
   bottlenecks: string;
   wip: string;
+  topfive: string;
 }
 
 const ENV_KEYS = {
@@ -19,6 +20,7 @@ const ENV_KEYS = {
   evaluators: 'T5T_FOLDER_EVALUATORS',
   bottlenecks: 'T5T_FOLDER_BOTTLENECKS',
   wip: 'T5T_FOLDER_WIP',
+  topfive: 'T5T_FOLDER_TOPFIVE',
 } as const;
 
 type T5tFolderKey = keyof T5tFolderIds;

@@ -12,6 +12,9 @@
  *   metabot t5t evaluator <project> add|remove <email>
  *   metabot t5t bottleneck <project> "<text>"
  *   metabot t5t wip <project> <evaluatorId> "<title>"
+ *   metabot t5t top5 <project> add "<text>"
+ *   metabot t5t top5 <project> done|reopen|remove <itemId>
+ *   metabot t5t top5 <project> list
  *
  * Auth: `METABOT_CORE_TOKEN` env or `~/.metabot-core/token` (resolved by
  * `cli-core`'s `loadConfig`). Owner-auth errors (`owner_required`) surface
@@ -46,6 +49,9 @@ Subcommands:
   bottleneck <project> "<text>"                  Set the current bottleneck            (owner-auth)
   wip <project> <evaluatorId> "<title>"          Add a WIP item under an evaluator col (owner-auth)
   kill <project>                                 Mark a project as killed              (owner-auth)
+  top5 <project> add "<text>"                    Add a Top-5 todo item                 (owner-auth)
+  top5 <project> done|reopen|remove <itemId>     Flip status of an existing Top-5 item (owner-auth)
+  top5 <project> list                            List the current Top-5 items
 
 Env:
   METABOT_CORE_URL    metabot-core base URL (default https://metabot-core.xvirobotics.com)
@@ -173,6 +179,40 @@ async function cmdKill(client: T5tClient, args: string[]): Promise<void> {
   print(resp);
 }
 
+async function cmdTopFive(client: T5tClient, args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const project = need('<project>', positional[0]);
+  const action = (positional[1] || '').trim();
+  if (!action) {
+    throw new Error(
+      `metabot t5t top5: action required (add|done|reopen|remove|list)`,
+    );
+  }
+  if (action === 'list') {
+    const detail = await client.get<ProjectDetailResponse>(
+      `/api/t5t/cli/project/${encodeURIComponent(project)}`,
+    );
+    print({ topFive: detail.topFive });
+    return;
+  }
+  if (action === 'add') {
+    const text = need('"<text>"', positional[2]);
+    const resp = await client.post('/api/t5t/cli/topfive', { project, text });
+    print(resp);
+    return;
+  }
+  if (action === 'done' || action === 'reopen' || action === 'remove') {
+    const itemId = need('<itemId>', positional[2]);
+    const status = action === 'done' ? 'done' : action === 'reopen' ? 'open' : 'removed';
+    const resp = await client.post('/api/t5t/cli/topfive', { project, itemId, status });
+    print(resp);
+    return;
+  }
+  throw new Error(
+    `metabot t5t top5: unknown action '${action}' (expected add|done|reopen|remove|list)`,
+  );
+}
+
 async function cmdWip(client: T5tClient, args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const project = need('<project>', positional[0]);
@@ -222,6 +262,8 @@ export async function run(argv: string[]): Promise<void> {
       return cmdWip(client, rest);
     case 'kill':
       return cmdKill(client, rest);
+    case 'top5':
+      return cmdTopFive(client, rest);
     default:
       process.stderr.write(`metabot t5t: unknown subcommand '${sub}'\n\n`);
       process.stdout.write(usage());

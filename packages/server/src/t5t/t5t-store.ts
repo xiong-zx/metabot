@@ -12,6 +12,8 @@ import type {
   ProjectCreateInput,
   ProjectSummary,
   T5TEntry,
+  TopFiveItem,
+  TopFiveStatus,
   WIPBoardColumn,
   WIPItem,
   WipStatus,
@@ -99,6 +101,19 @@ interface WipDoc {
   appendSeq: number;
 }
 
+interface TopFiveDoc {
+  kind: 'topfive';
+  project: string;
+  itemId: string;
+  text: string;
+  status: TopFiveStatus;
+  author: string;
+  authorCanonical: string;
+  replaces: string | null;
+  createdAt: string;
+  appendSeq: number;
+}
+
 interface EntryDoc {
   kind: 't5t';
   entryId: string;
@@ -161,6 +176,13 @@ export interface AppendWipInput {
   description: string;
   status?: WipStatus;
   wipId?: string;
+}
+
+export interface AppendTopFiveInput {
+  project: string;
+  text?: string;
+  itemId?: string;
+  status?: TopFiveStatus;
 }
 
 /**
@@ -523,6 +545,88 @@ export class T5tStore {
       evaluator: ev,
       items: items.filter((w) => w.evaluatorId === ev.evaluatorId),
     }));
+  }
+
+  // ---- read: top-five ----
+
+  listTopFiveItems(slug: string): TopFiveItem[] {
+    const byItemId = new Map<string, TopFiveDoc & { docId: string }>();
+    for (const doc of this.loadDocs<TopFiveDoc>(this.folderIds.topfive, 'topfive')) {
+      if (doc.payload.project !== slug) continue;
+      const cur = byItemId.get(doc.payload.itemId);
+      if (!cur || isNewer(doc.payload, cur)) {
+        byItemId.set(doc.payload.itemId, { ...doc.payload, docId: doc.docId });
+      }
+    }
+    const docs = [...byItemId.values()].filter((d) => d.status !== 'removed');
+    const statusOrder: Record<TopFiveStatus, number> = { open: 0, done: 1, removed: 2 };
+    docs.sort((a, b) => {
+      const sa = statusOrder[a.status] ?? 9;
+      const sb = statusOrder[b.status] ?? 9;
+      if (sa !== sb) return sa - sb;
+      if (a.createdAt !== b.createdAt) return b.createdAt.localeCompare(a.createdAt);
+      return b.appendSeq - a.appendSeq;
+    });
+    return docs.map((d) => topFiveDocToTopFive(d, d.docId));
+  }
+
+  getTopFiveById(itemId: string): TopFiveItem | null {
+    let latest: TopFiveDoc | null = null;
+    let latestId = '';
+    for (const doc of this.loadDocs<TopFiveDoc>(this.folderIds.topfive, 'topfive')) {
+      if (doc.payload.itemId !== itemId) continue;
+      if (!latest || isNewer(doc.payload, latest)) {
+        latest = doc.payload;
+        latestId = doc.docId;
+      }
+    }
+    return latest ? topFiveDocToTopFive(latest, latestId) : null;
+  }
+
+  appendTopFive(input: AppendTopFiveInput, cred: Credential): TopFiveItem {
+    if (!input.project) throw httpErr(400, 'project_required');
+    const status: TopFiveStatus = input.status || 'open';
+    if (!['open', 'done', 'removed'].includes(status)) {
+      throw httpErr(400, 'invalid_topfive_status');
+    }
+    const createdAt = nowISO();
+    let finalId: string;
+    let targetProject: string;
+    let replaces: string | null;
+    let text: string;
+    if (input.itemId) {
+      const prev = this.getTopFiveById(input.itemId);
+      if (!prev) throw httpErr(404, 'topfive_not_found');
+      finalId = input.itemId;
+      targetProject = prev.project;
+      replaces = prev.docId;
+      text = (input.text ?? '').trim() || prev.text;
+    } else {
+      const trimmed = (input.text ?? '').trim();
+      if (!trimmed) throw httpErr(400, 'text_required');
+      const seq = this.nextSeq(this.folderIds.topfive, `${input.project}-tf-`);
+      finalId = `${input.project}-tf-${seq}`;
+      targetProject = input.project;
+      replaces = null;
+      text = trimmed;
+    }
+    const title = input.itemId ? `${finalId}-t${shortStamp()}` : finalId;
+    const payload: TopFiveDoc = {
+      kind: 'topfive',
+      project: targetProject,
+      itemId: finalId,
+      text,
+      status,
+      author: cred.botName,
+      authorCanonical: cred.botName,
+      replaces,
+      createdAt,
+      appendSeq: 0,
+    };
+    const docId = this.createDoc(this.folderIds.topfive, title, payload, [
+      't5t-topfive', targetProject, cred.botName,
+    ], cred);
+    return topFiveDocToTopFive(payload, docId);
   }
 
   // ---- read: entries ----
@@ -962,6 +1066,20 @@ function wipDocToWip(d: WipDoc, docId: string): WIPItem {
     evaluatorId: d.evaluatorId,
     wipId: d.wipId,
     description: d.description,
+    status: d.status,
+    author: d.author,
+    authorCanonical: d.authorCanonical,
+    replaces: d.replaces ?? null,
+    createdAt: d.createdAt,
+    docId,
+  };
+}
+
+function topFiveDocToTopFive(d: TopFiveDoc, docId: string): TopFiveItem {
+  return {
+    project: d.project,
+    itemId: d.itemId,
+    text: d.text,
     status: d.status,
     author: d.author,
     authorCanonical: d.authorCanonical,

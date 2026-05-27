@@ -233,6 +233,7 @@ function isWebReadableRoute(method: string, pathname: string): boolean {
  */
 function isWebWritableRoute(method: string, pathname: string): boolean {
   if (method === 'POST' && pathname === '/api/t5t/feedback') return true;
+  if (method === 'POST' && pathname === '/api/t5t/topfive') return true;
   if (method === 'POST' && pathname === '/api/web/issue-token') return true;
   // Project kill (soft-kill via append-only doc) — owner-auth enforced at the
   // route layer. Matches the shape `POST /api/t5t/projects/:slug/kill`.
@@ -324,6 +325,8 @@ function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname === '/api/t5t/cli/evaluator' && method === 'POST') return 'evaluator';
   if (pathname === '/api/t5t/cli/bottleneck' && method === 'POST') return 'bottleneck';
   if (pathname === '/api/t5t/cli/wip' && method === 'POST') return 'wip';
+  if (pathname === '/api/t5t/topfive' && method === 'POST') return 'topfive';
+  if (pathname === '/api/t5t/cli/topfive' && method === 'POST') return 'topfive';
   if (pathname === '/api/t5t/cli/kill' && method === 'POST') return 'kill';
   if (
     method === 'POST'
@@ -761,6 +764,10 @@ export function startServer(options: ServerOptions): ServerHandle {
         const body = await parseJsonBody(req);
         return jsonResult(res, t5tRoutes.postFeedback(t5tStore, body, cred));
       }
+      if (pathname === '/api/t5t/topfive' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, t5tRoutes.postTopFive(t5tStore, body, cred));
+      }
 
       // ---- T5T CLI routes (Bearer-only) ----
       // Web-identity is already excluded by the structural fork above
@@ -785,6 +792,10 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/t5t/cli/wip' && method === 'POST') {
         const body = await parseJsonBody(req);
         return jsonResult(res, t5tRoutes.postCliWip(t5tStore, body, cred));
+      }
+      if (pathname === '/api/t5t/cli/topfive' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, t5tRoutes.postCliTopFive(t5tStore, body, cred));
       }
       if (pathname === '/api/t5t/cli/kill' && method === 'POST') {
         const body = await parseJsonBody(req);

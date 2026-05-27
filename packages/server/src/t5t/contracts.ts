@@ -1,4 +1,4 @@
-import type { WipStatus } from './types.js';
+import type { TopFiveStatus, WipStatus } from './types.js';
 
 /**
  * Pure request-body validators for the `/api/t5t/cli/*` write surface.
@@ -163,6 +163,38 @@ export function parseCliWip(
     status,
     wipId: optStr(body, 'wipId'),
   };
+}
+
+export interface CliTopFiveBody {
+  project: string;
+  text?: string;
+  itemId?: string;
+  status?: TopFiveStatus;
+}
+
+const TOPFIVE_STATUSES: readonly TopFiveStatus[] = ['open', 'done', 'removed'];
+
+export function parseCliTopFive(
+  body: Record<string, unknown>,
+): CliTopFiveBody | ValidationError {
+  const project = reqStr(body, 'project');
+  if (isValidationError(project)) return project;
+  const itemId = optStr(body, 'itemId');
+  const text = optStr(body, 'text');
+  if (!itemId && !text) {
+    return { status: 400, error: 'text_required' };
+  }
+  let status: TopFiveStatus | undefined;
+  if (body.status !== undefined) {
+    if (
+      typeof body.status !== 'string'
+      || !TOPFIVE_STATUSES.includes(body.status as TopFiveStatus)
+    ) {
+      return { status: 400, error: 'invalid_topfive_status' };
+    }
+    status = body.status as TopFiveStatus;
+  }
+  return { project, text, itemId, status };
 }
 
 export interface CliFeedbackBody {

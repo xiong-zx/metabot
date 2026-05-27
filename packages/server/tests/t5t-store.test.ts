@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe('T5tStore — folder auto-create', () => {
-  it('creates all 7 t5t folders under /t5t/ when env is empty', () => {
+  it('creates all 8 t5t folders under /t5t/ when env is empty', () => {
     expect(memory.findFolderByPath('/t5t/projects')).not.toBeNull();
     expect(memory.findFolderByPath('/t5t/entries')).not.toBeNull();
     expect(memory.findFolderByPath('/t5t/feedback')).not.toBeNull();
@@ -56,6 +56,7 @@ describe('T5tStore — folder auto-create', () => {
     expect(memory.findFolderByPath('/t5t/evaluators')).not.toBeNull();
     expect(memory.findFolderByPath('/t5t/bottlenecks')).not.toBeNull();
     expect(memory.findFolderByPath('/t5t/wip')).not.toBeNull();
+    expect(memory.findFolderByPath('/t5t/topfive')).not.toBeNull();
   });
 
   it('honours T5T_FOLDER_* env vars when they point to existing folder ids', () => {
@@ -318,6 +319,72 @@ describe('T5tStore — anomalies', () => {
       (a) => a.project === 'unblocked' && a.reason === 'stale_bottleneck',
     );
     expect(sb).toBeUndefined();
+  });
+});
+
+describe('T5tStore — top-five items', () => {
+  it('appendTopFive without itemId creates a sequenced new item with status=open', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'p' }, cred);
+    const a = store.appendTopFive({ project: 'p', text: 'ship dark mode' }, cred);
+    expect(a.itemId).toBe('p-tf-1');
+    expect(a.status).toBe('open');
+    expect(a.replaces).toBeNull();
+    expect(a.text).toBe('ship dark mode');
+    const b = store.appendTopFive({ project: 'p', text: 'kill the flaky test' }, cred);
+    expect(b.itemId).toBe('p-tf-2');
+    expect(b.replaces).toBeNull();
+  });
+
+  it('appendTopFive with itemId flips status and links replaces=prev.docId', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'p' }, cred);
+    const a = store.appendTopFive({ project: 'p', text: 'first thing' }, cred);
+    const done = store.appendTopFive({
+      project: 'p', itemId: a.itemId, status: 'done',
+    }, cred);
+    expect(done.itemId).toBe(a.itemId);
+    expect(done.status).toBe('done');
+    expect(done.replaces).toBe(a.docId);
+    expect(done.text).toBe('first thing'); // preserved when text omitted
+  });
+
+  it('listTopFiveItems filters status=removed and orders open-before-done', async () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'p' }, cred);
+    const a = store.appendTopFive({ project: 'p', text: 'a' }, cred);
+    await new Promise((r) => setTimeout(r, 3));
+    const b = store.appendTopFive({ project: 'p', text: 'b' }, cred);
+    await new Promise((r) => setTimeout(r, 3));
+    const c = store.appendTopFive({ project: 'p', text: 'c' }, cred);
+    // Mark `a` done, `b` removed.
+    store.appendTopFive({ project: 'p', itemId: a.itemId, status: 'done' }, cred);
+    store.appendTopFive({ project: 'p', itemId: b.itemId, status: 'removed' }, cred);
+    const items = store.listTopFiveItems('p');
+    expect(items.map((i) => i.itemId)).toEqual([c.itemId, a.itemId]);
+    expect(items[0].status).toBe('open');
+    expect(items[1].status).toBe('done');
+  });
+
+  it('appendTopFive without itemId or text rejects with 400', () => {
+    const cred = mkCred('ameng');
+    expect(() => store.appendTopFive({ project: 'p' }, cred)).toThrow(/text_required/);
+  });
+
+  it('appendTopFive with unknown itemId returns 404 topfive_not_found', () => {
+    const cred = mkCred('ameng');
+    expect(() => store.appendTopFive({
+      project: 'p', itemId: 'p-tf-999', status: 'done',
+    }, cred)).toThrow(/topfive_not_found/);
+  });
+
+  it('getTopFiveById returns the latest doc per itemId', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'p' }, cred);
+    const a = store.appendTopFive({ project: 'p', text: 'one' }, cred);
+    store.appendTopFive({ project: 'p', itemId: a.itemId, status: 'done' }, cred);
+    const latest = store.getTopFiveById(a.itemId);
+    expect(latest?.status).toBe('done');
   });
 });
 

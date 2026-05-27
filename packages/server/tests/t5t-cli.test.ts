@@ -229,6 +229,46 @@ describe('t5t CLI routes — MR3', () => {
     expect(res.body.error).toBe('project_required');
   });
 
+  it('POST /cli/topfive as leader Bearer → 200; flip status=done by itemId → done', async () => {
+    kit = await startTestServer('t5t-cli-topfive');
+    const me = 'tf-owner@xvirobotics.com';
+    const token = await issueMember(kit, me);
+    await call(kit.baseUrl, 'POST', '/api/t5t/cli/push', token, {
+      project: 'tf-cli', items: ['boot'],
+    });
+    const add = await call(kit.baseUrl, 'POST', '/api/t5t/cli/topfive', token, {
+      project: 'tf-cli', text: 'fix the deploy script',
+    });
+    expect(add.status).toBe(200);
+    expect(add.body.itemId).toBe('tf-cli-tf-1');
+    expect(add.body.status).toBe('open');
+
+    const flip = await call(kit.baseUrl, 'POST', '/api/t5t/cli/topfive', token, {
+      project: 'tf-cli', itemId: add.body.itemId, status: 'done',
+    });
+    expect(flip.status).toBe(200);
+    expect(flip.body.status).toBe('done');
+
+    const detail = await call(kit.baseUrl, 'GET', '/api/t5t/cli/project/tf-cli', token);
+    expect(detail.status).toBe(200);
+    expect(detail.body.topFive[0].status).toBe('done');
+  });
+
+  it('POST /cli/topfive as non-leader → 403 owner_required', async () => {
+    kit = await startTestServer('t5t-cli-topfive-403');
+    const leader = 'leader@xvirobotics.com';
+    kit.handle.t5tStore.appendProject(
+      { slug: 'tf-prot', name: 'P', leaderEmail: leader },
+      { botName: 'seed', role: 'admin' } as never,
+    );
+    const intruderToken = await issueMember(kit, 'intruder@xvirobotics.com');
+    const res = await call(kit.baseUrl, 'POST', '/api/t5t/cli/topfive', intruderToken, {
+      project: 'tf-prot', text: 'sneaky',
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('owner_required');
+  });
+
   it('contract validation: missing required field → 400 before any store write', async () => {
     kit = await startTestServer('t5t-cli-validation');
     const token = await issueMember(kit, 'val@xvirobotics.com');
