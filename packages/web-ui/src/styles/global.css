@@ -1490,12 +1490,92 @@ a:hover { border-bottom-color: var(--phosphor); }
   line-height: 1.55;
 }
 
-/* responsive guardrail (not polish) */
+/* -------- responsive -------- */
+
+/* tablet / narrow desktop: single column, sidebar folds to a scrollable bar */
 @media (max-width: 900px) {
   .main { grid-template-columns: 1fr; }
-  .sidebar { border-right: 0; border-bottom: 1px solid var(--hairline); max-height: 220px; }
-  .skill-detail { grid-template-columns: 1fr; }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--hairline); max-height: 240px; }
+  .skill-detail { grid-template-columns: 1fr; gap: 28px; }
   .skill-side { border-left: 0; border-top: 1px solid var(--hairline); padding-left: 0; padding-top: 18px; }
-  .top-bar { grid-template-columns: 1fr; gap: 10px; }
-  .t5t-cols { grid-template-columns: 1fr; }
+  .top-bar { grid-template-columns: 1fr; gap: 12px; }
+  .search-bar { justify-self: stretch; max-width: none; }
+  .t5t-cols { grid-template-columns: 1fr; gap: 24px; }
+  .content { padding: 24px 24px 72px; }
+  .shell.sidebar-collapsed .content { padding-left: 24px; padding-right: 24px; }
+}
+
+/* phone: real mobile polish — stacked chrome, drawer sidebar, reflowed rows */
+@media (max-width: 640px) {
+  /* never let a wide child force horizontal scroll of the whole page */
+  html { -webkit-text-size-adjust: 100%; }
+  .shell { overflow-x: hidden; }
+
+  /* top bar: brand-row / search / nav stacked, tighter padding */
+  .top-bar { padding: 10px 14px; gap: 10px; }
+  .brand .tag { display: none; }            /* drop secondary label to save width */
+
+  /* nav becomes a horizontally-scrollable strip with bigger touch targets */
+  .actions {
+    gap: 2px;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    margin: 0 -14px;                        /* bleed to the screen edges */
+    padding: 2px 14px;
+  }
+  .actions::-webkit-scrollbar { display: none; }
+  .actions a,
+  .actions .signout {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+  .actions .signout { border-left: 0; padding-left: 10px; }
+  .theme-toggle { flex: 0 0 auto; }
+
+  /* meta bar wraps instead of overflowing */
+  .meta-bar { flex-wrap: wrap; gap: 6px 14px; padding: 6px 14px; font-size: 9px; }
+
+  /* sidebar defaults collapsed on phones (App.tsx); when opened it's a
+     scrollable drawer above the content, not a fixed-height stub */
+  .sidebar { max-height: 60vh; padding: 14px 0; }
+
+  /* content goes edge-to-edge with comfortable padding */
+  .content,
+  .shell.sidebar-collapsed .content { padding: 18px 14px 56px; max-width: none; }
+
+  .page-head { flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 18px; }
+  .page-head h1 { font-size: 20px; }
+
+  /* dense list rows reflow: drop the index gutter, let the title wrap */
+  .doc-row { grid-template-columns: 1fr auto; column-gap: 12px; row-gap: 2px; }
+  .doc-row .idx { display: none; }
+  .doc-row .title { font-size: 13.5px; flex-wrap: wrap; }
+
+  /* project rows stack title over meta */
+  .t5t-proj { grid-template-columns: 1fr; gap: 4px; }
+
+  /* oversized display type shrinks on phones */
+  .t5t-goal p { font-size: 19px; }
+  .t5t-bottleneck p { font-size: 14px; }
+
+  /* multi-column card grids collapse to one column */
+  .t5t-wip-cols,
+  .t5t-anomalies { grid-template-columns: 1fr; }
+
+  /* wide registry table scrolls horizontally instead of overflowing the page */
+  .agents-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* fatter tap targets for the icon toggles */
+  .sidebar-toggle,
+  .theme-toggle { width: 34px; height: 34px; }
+}
+
+/* small phones: trim the largest type a touch more */
+@media (max-width: 400px) {
+  .brand .name { font-size: 12px; letter-spacing: 0.12em; }
+  .page-head h1 { font-size: 18px; }
+  .t5t-goal p { font-size: 17px; }
 }

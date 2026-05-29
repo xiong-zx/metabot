@@ -29,7 +29,19 @@ type Theme = 'dark' | 'light';
 
 function readSidebarCollapsed(): boolean {
   try {
-    return localStorage.getItem(SIDEBAR_STATE_KEY) === '1';
+    const stored = localStorage.getItem(SIDEBAR_STATE_KEY);
+    if (stored === '1') return true;
+    if (stored === '0') return false;
+  } catch {
+    return false;
+  }
+  // No stored preference yet: collapse by default on phone-width screens so the
+  // content — not the nav tree — owns the first screen on mobile. Desktop keeps
+  // the sidebar open. Once the user toggles it, their choice is remembered.
+  try {
+    return typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(max-width: 640px)').matches;
   } catch {
     return false;
   }
