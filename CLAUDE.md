@@ -66,6 +66,35 @@ lark-cli base records list ...                           # Query bitable
 
 19 AI Agent Skills are installed (lark-doc, lark-im, lark-calendar, lark-sheets, lark-base, lark-task, lark-drive, lark-mail, lark-wiki, etc.) providing structured guidance for each domain. Claude/Kimi discover these under `.claude/skills`; Codex discovers the mirrored copies under `.codex/skills`.
 
+## Agent Harness — The Loop（默认工作循环）
+
+你不是孤立的 agent，而是 MetaBot 体系的一员。4 大组件是你的「外脑 + 协作神经」：**T5T**（进展跟踪）、**Meta Memory**（知识沉淀）、**Skill Hub**（经验复用）、**Agent Bus**（同事协作）。每接一个任务，按这 5 步走：
+
+```
+   Goal ──→ Plan/Push ──→ Milestone ──→ Lesson ──→ Delegate
+    T5T       T5T          Memory        Skill      Agent Bus
+    (要)      (推)          (沉)          (升)        (派)
+```
+
+1. **Goal · T5T** — 进项目先 `metabot t5t board` / `t5t projects show <slug>` 看上下文。目标 / 评判标准 / 优先级**任何一项不清就找主人问，别自己猜**。拿到答复立即 `t5t push` + `t5t goal` + `t5t evaluator add <email>`。
+2. **Plan/Push · T5T** — 自己拆任务自己干，但**每完成一阶段、每改方向、每卡住一次都 `metabot t5t push`**；卡点用 `t5t bottleneck` 显式化。你沉默 = 别人无法帮你解锁。
+3. **Milestone · Memory** — 关键决策 / 实验结果 / 架构图 / 复盘 → `metabot memory create "<title>" --html`（或短内容直传）。文件名 kebab-case，描述具体到能被搜出来。
+4. **Lesson · Skill** — 提炼出「以后遇到 X 都该这么做」的可复用 SOP / protocol / 模板 → `metabot skills publish`，**必须写清 when-to-use**。Skill 是写给别人用的，笔记本走 Memory。
+5. **Delegate · Agent Bus** — 看不懂 / 做不动 / 需要专业领域 → `metabot bots` 看谁在，`metabot talk <bot> <chatId> "<自包含的任务描述 + 约束 + 产出格式 + 优先级>"`，**等回执并整合**。
+
+| 你刚刚 …                    | 该用哪个                              |
+| --------------------------- | ------------------------------------- |
+| 状态变了 / 进展 / 卡点      | `metabot t5t push` / `bottleneck`     |
+| 做完里程碑、有数据 / 图     | `metabot memory create --html`        |
+| 总结出可复用方法 / SOP      | `metabot skills publish`（写 when-to-use） |
+| 别人比你更擅长这块          | `metabot talk <bot> <chat> "..."`     |
+| 目标 / 评判标准不清         | 问主人 → 写 `t5t goal` + `evaluator`  |
+
+**反模式（别这样）：** 闷头干一周不更新 T5T｜没目标就开工｜可复用经验只写在 chat 里｜什么都自己扛｜里程碑只发一句「做完了」｜写 Skill 不写 when-to-use。
+
+> 核心区分：**T5T = 我在做什么**（短、可见、状态流）｜**Memory = 为什么这么做**（长、沉淀）｜**Skill = 下次都该怎么做**（给别人用）｜**Agent Bus = 我搞不定，谁来**。
+> 完整 drop-in 版 + HTML one-pager 在 central memory：`metabot memory get 05a558c6-b206-493c-b9ca-04d6c4840a3a`（Markdown）/ `ab55624e-c07c-4df9-a182-3d5f06041a8b`（HTML）。
+
 ## Guidelines
 
 - **Search before creating** — always check if a file or document already exists before creating new ones.
