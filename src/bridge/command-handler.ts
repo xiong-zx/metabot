@@ -336,7 +336,8 @@ export class CommandHandler {
     if (normalized === 'list' || normalized === 'ls') {
       const active = session.model || botDefault;
       const claudeModels = [
-        { id: 'claude-opus-4-7', label: 'Opus 4.7', note: 'Most capable · 200k context' },
+        { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'Most capable · 1M context default · 128k max output' },
+        { id: 'claude-opus-4-7', label: 'Opus 4.7', note: '200k context' },
         { id: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)', note: '1M context window' },
         { id: 'claude-opus-4-6', label: 'Opus 4.6', note: '200k context' },
         { id: 'claude-opus-4-6[1m]', label: 'Opus 4.6 (1M)', note: '1M context window' },
@@ -373,7 +374,7 @@ export class CommandHandler {
       }
       lines.push('');
       if (activeEngine === 'claude') {
-        lines.push('_Tip: append `[1m]` to a model name to enable the 1M context window. Only Opus 4.7/4.6 and Sonnet 4.6 support it._');
+        lines.push('_Tip: Opus 4.8 uses 1M context by default. For Opus 4.7/4.6 and Sonnet 4.6, append `[1m]` to enable the 1M context window._');
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
       } else {
@@ -423,7 +424,7 @@ export class CommandHandler {
   private exampleModelsForEngine(engine: EngineName): string {
     switch (engine) {
       case 'claude':
-        return '`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
+        return '`claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
       case 'kimi':
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':
