@@ -9,25 +9,39 @@ describe('apply1MContextSettings', () => {
     expect(q.env).toBeUndefined();
   });
 
-  it('sets CLAUDE_CODE_DISABLE_1M_CONTEXT=1 when model lacks [1m]', () => {
-    const q: Record<string, unknown> = { model: 'claude-opus-4-7' };
+  it('caps the auto-compact window to 200k when model lacks [1m]', () => {
+    const q: Record<string, unknown> = { model: 'claude-opus-4-8' };
     apply1MContextSettings(q);
     expect(q.betas).toBeUndefined();
-    expect((q.env as Record<string, string>).CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
+    const env = q.env as Record<string, string>;
+    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000');
   });
 
-  it('preserves pre-existing env entries when adding the disable flag', () => {
+  it('does NOT cap the auto-compact window when [1m] is requested', () => {
+    const q: Record<string, unknown> = { model: 'claude-opus-4-8[1m]' };
+    apply1MContextSettings(q);
+    expect(q.env).toBeUndefined();
+  });
+
+  it('preserves pre-existing env entries when adding the cap flags', () => {
     const q: Record<string, unknown> = {
       model: 'claude-sonnet-4-6',
       env: { FOO: 'bar' },
     };
     apply1MContextSettings(q);
-    expect(q.env).toEqual({ FOO: 'bar', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+    expect(q.env).toEqual({
+      FOO: 'bar',
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
+    });
   });
 
   it('handles undefined model as "lacks [1m]"', () => {
     const q: Record<string, unknown> = {};
     apply1MContextSettings(q);
-    expect((q.env as Record<string, string>).CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
+    const env = q.env as Record<string, string>;
+    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000');
   });
 });

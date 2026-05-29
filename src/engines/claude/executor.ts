@@ -45,6 +45,7 @@ const CLAUDE_ENV_PASSTHROUGH = new Set([
   'CLAUDE_CODE_SIMPLE',                   // --bare equivalent
   'CLAUDE_CODE_DISABLE_AUTO_MEMORY',      // toggle auto-memory (project patterns/learnings)
   'CLAUDE_CODE_DISABLE_1M_CONTEXT',       // opt out of Max-tier silent 1M context upgrade
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',      // hard-cap the auto-compact window (keeps non-[1m] models at 200k)
 ]);
 
 /**
@@ -173,27 +174,44 @@ export interface ApiContext {
  *     to the API. Belt-and-braces for API-key auth modes where the SDK
  *     may not auto-infer the beta from the suffix alone.
  *
- *   - Without `[1m]`: set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in the
- *     spawn env. The Claude CLI silently auto-enables 1M context for
- *     Max-tier OAuth subscriptions on models that support it (opus-4-8,
- *     opus-4-7, opus-4-6, sonnet-4-6) — billing all tokens at 2× once a
- *     request crosses 200K, even though the user didn't request 1M. This
- *     env var is the binary's opt-out switch. (MetaBot's spawn handler
- *     merges `queryOptions.env` on top of `process.env`, so we only need
- *     to set the override key.) Opus 4.8 ships with 1M as the API default,
- *     but MetaBot keeps it at 200k for consistency with the other models —
- *     append `[1m]` to opt in.
+ *   - Without `[1m]`: keep the model at the standard 200K window. We set
+ *     two env vars in the spawn env:
+ *       • `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` — the binary's opt-out switch
+ *         for the silent Max-tier 1M upgrade (opus-4-8, opus-4-7, opus-4-6,
+ *         sonnet-4-6), which otherwise bills all tokens at 2× past 200K.
+ *       • `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` — caps the auto-compact
+ *         window. The CLI's window resolver takes `min(modelWindow, configured)`,
+ *         so on 1M-capable auth this forces auto-compaction to fire near 200K
+ *         (≈ window − 13K) instead of ~987K. NOTE: on auth where the model
+ *         already reports a 200K window (e.g. a proxy that doesn't grant the
+ *         1M tier — verified for opus-4-8 via teamclaude.xvirobotics.com),
+ *         this is a no-op, since min(200K, 200K) = 200K. It's a defensive
+ *         guard for the day this bot runs on 1M-capable auth. Pushing the
+ *         window *above* the model's reported size isn't possible here: the
+ *         only upward override is `DISABLE_COMPACT + CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
+ *         which turns auto-compaction off entirely. Value must stay within
+ *         the binary's 100K–1M bounds.
+ *     (MetaBot's spawn handler merges `queryOptions.env` on top of
+ *     `process.env`, so we only need to set the override keys. Both keys are
+ *     in CLAUDE_ENV_PASSTHROUGH so the CLAUDE* env filter doesn't strip them.)
+ *     Append `[1m]` to opt back in to the full 1M window.
  *
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.
  */
+export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
+
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;
   if (model?.includes('[1m]')) {
     queryOptions.betas = ['context-1m-2025-08-07'];
   } else {
     const existingEnv = (queryOptions.env as Record<string, string> | undefined) ?? {};
-    queryOptions.env = { ...existingEnv, CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' };
+    queryOptions.env = {
+      ...existingEnv,
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: DEFAULT_AUTO_COMPACT_WINDOW,
+    };
   }
 }
 
