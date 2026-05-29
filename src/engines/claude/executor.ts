@@ -168,20 +168,21 @@ export interface ApiContext {
 /**
  * Apply 1M-context settings based on the effective model name in `queryOptions.model`:
  *
- *   - With `[1m]` suffix (e.g. `claude-opus-4-7[1m]`, irrelevant for opus-4-8 which is 1M by default): set the matching
+ *   - With `[1m]` suffix (e.g. `claude-opus-4-7[1m]`): set the matching
  *     `betas` flag. The SDK strips the suffix and forwards the beta header
  *     to the API. Belt-and-braces for API-key auth modes where the SDK
  *     may not auto-infer the beta from the suffix alone.
  *
  *   - Without `[1m]`: set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in the
  *     spawn env. The Claude CLI silently auto-enables 1M context for
- *     Max-tier OAuth subscriptions on models that support it (opus-4-7,
- *     opus-4-6, sonnet-4-6) — billing every request at 2× rate even
- *     though the user didn't request 1M. This env var is the binary's
- *     opt-out switch. (MetaBot's spawn handler merges `queryOptions.env`
- *     on top of `process.env`, so we only need to set the override key.)
- *     Note: opus-4-8 defaults to 1M context on the Claude API, so the
- *     `[1m]` suffix and the disable-flag are both no-ops for it.
+ *     Max-tier OAuth subscriptions on models that support it (opus-4-8,
+ *     opus-4-7, opus-4-6, sonnet-4-6) — billing all tokens at 2× once a
+ *     request crosses 200K, even though the user didn't request 1M. This
+ *     env var is the binary's opt-out switch. (MetaBot's spawn handler
+ *     merges `queryOptions.env` on top of `process.env`, so we only need
+ *     to set the override key.) Opus 4.8 ships with 1M as the API default,
+ *     but MetaBot keeps it at 200k for consistency with the other models —
+ *     append `[1m]` to opt in.
  *
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.

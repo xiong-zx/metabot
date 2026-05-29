@@ -467,7 +467,7 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 | `/metaskill ...` | Generate agent teams, agents, or skills (opt-in skill — not installed by default) |
 | `/help` | Show help |
 
-> **Model switching**: Each session can pick its own model. Default is `claude-opus-4-8` (1M context by default). For Opus 4.7/4.6 and Sonnet 4.6, append `[1m]` to the model name to enable the 1M context window, e.g. `/model claude-opus-4-7[1m]`. OAuth/Pro-Max users must use this suffix on those older models — the SDK silently drops beta headers under that auth mode.
+> **Model switching**: Each session can pick its own model; default is `claude-opus-4-8`. All models default to 200k context; append `[1m]` to the model name to enable the 1M context window (supported by Opus 4.8/4.7/4.6 and Sonnet 4.6), e.g. `/model claude-opus-4-8[1m]`. OAuth/Pro-Max users must use this suffix — the SDK silently drops beta headers under that auth mode. Note: 1M is billed the same as 200k while context stays under 200K, but all tokens jump to 2× once a request crosses 200K — which is why the default stays at 200k.
 > **Codex skills**: Slash invocations like `/<skill> ...` are auto-rewritten to Codex's `$<skill> ...` form whenever the active session runs on Codex.
 
 <details>
