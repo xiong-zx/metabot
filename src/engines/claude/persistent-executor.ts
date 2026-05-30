@@ -155,6 +155,14 @@ export interface PersistentExecutorOptions {
   maxRestartAttempts?: number;
   /** Spontaneous-message ring buffer cap. Older entries dropped. Default 1000. */
   spontaneousBufferLimit?: number;
+  /**
+   * Max time abort() waits for the backend to emit the interrupted turn's
+   * terminal `result` before force-clearing activeTurn. The backend should
+   * always produce one (SDK natively; PTY synthesizes it in interrupt()); this
+   * is the safety net that keeps a missing result from wedging all future
+   * turns. Default 8000ms.
+   */
+  abortDrainTimeoutMs?: number;
   /** Called on every Agent Teams hook fire (TaskCreated/TaskCompleted/TeammateIdle). */
   onTeamEvent?: (event: TeamEvent) => void;
   /**
@@ -554,7 +562,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       } catch (err) {
         this.options.logger.warn({ err, turnId }, 'PersistentExecutor: interrupt() threw');
       }
-      await turn.drainPromise;
+      await this.drainWithTimeout(turn);
       this.options.logger.debug({ turnId }, 'PersistentExecutor: turn aborted (drained)');
       this.emit('turn-aborted', turnId);
     };
@@ -614,7 +622,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       } catch (err) {
         this.options.logger.warn({ err, turnId }, 'PersistentExecutor: interrupt() threw (continuation)');
       }
-      await turn.drainPromise;
+      await this.drainWithTimeout(turn);
       this.options.logger.debug({ turnId }, 'PersistentExecutor: continuation turn aborted');
       this.emit('turn-aborted', turnId);
     };
@@ -632,6 +640,42 @@ export class PersistentClaudeExecutor extends EventEmitter {
       },
       finish: () => { void abort(); },
     };
+  }
+
+  /**
+   * Await a detached turn's drainPromise, but never hang forever. The drain
+   * resolves when consumeLoop observes the turn's terminal `result`. Every
+   * backend is *supposed* to produce one after interrupt() (SDK does natively;
+   * PTY synthesizes it in ptyQuery.interrupt()), but if any path fails to, the
+   * old unbounded `await turn.drainPromise` would leave activeTurn pinned and
+   * wedge ALL future turns with "turn <id> is in flight" (blank Feishu replies).
+   * On timeout we force-clear activeTurn so the chat self-heals — the next user
+   * message starts a fresh turn instead of being rejected.
+   */
+  private async drainWithTimeout(turn: ActiveTurn, ms = this.options.abortDrainTimeoutMs ?? 8_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), ms);
+      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+    });
+    try {
+      const outcome = await Promise.race([
+        (turn.drainPromise ?? Promise.resolve()).then(() => 'drained' as const),
+        timeout,
+      ]);
+      if (outcome === 'timeout') {
+        this.options.logger.warn(
+          { turnId: turn.id },
+          'PersistentExecutor: drain timed out after interrupt — force-clearing activeTurn',
+        );
+        turn.completed = true;
+        turn.drainResolve?.();
+        if (this.activeTurn === turn) this.activeTurn = null;
+        this.armIdleTimer();
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Drain spontaneous messages that arrived between turns. */

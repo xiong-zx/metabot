@@ -383,6 +383,28 @@ export const ptyQuery = (args: {
       }
     }
     if (session) await session.interrupt();
+    // ESC + Ctrl-C cancels the in-flight model turn but, unlike a clean turn
+    // end, fires NO Stop hook — and unlike a crash, the process stays alive, so
+    // handleSessionExit never runs either. That means NO terminal `result` would
+    // ever be synthesized for an interrupted turn. The persistent executor's
+    // abort() awaits a drainPromise that only resolves when consumeLoop sees a
+    // `result`; without one, activeTurn is never cleared and the NEXT user
+    // message wedges with "turn <id> is in flight" (blank reply in Feishu).
+    // Synthesize the terminal result here, guarded by turnInFlight so we never
+    // double-emit against the Stop-hook path (mirrors handleSessionExit).
+    if (turnInFlight && !disposed) {
+      turnInFlight = false;
+      logger.info('ptyQuery: turn interrupted — synthesizing terminal result');
+      out.enqueue(
+        synthesizeResult({
+          sessionId,
+          isError: true,
+          resultText: 'turn interrupted',
+          model: lastUsage.model,
+          usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+        }),
+      );
+    }
   }
 
   async function dispose(): Promise<void> {
