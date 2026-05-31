@@ -341,8 +341,10 @@ export const ptyQuery = (args: {
    * single mid-redraw frame doesn't re-fire).
    */
   async function runInteractiveMenuWatcher(): Promise<void> {
-    let armed = true;
-    let absent = 0;
+    let armed = true;          // ExitPlanMode: one hand-off per menu appearance
+    let absent = 0;            // consecutive polls with no interactive menu
+    let lastAskSig: string | null = null; // signature of the AUQ question last surfaced
+    let reviewSubmitted = false;           // pressed Enter on the AUQ review screen
     while (!disposed) {
       await sleep(EXITPLAN_WATCH_POLL_MS);
       if (disposed) break;
@@ -351,23 +353,44 @@ export const ptyQuery = (args: {
       try { tail = session.snapshot().slice(-EXITPLAN_SNAPSHOT_TAIL); } catch { continue; }
 
       const planMenu = isExitPlanMenu(tail);
-      // AskUserQuestion is parsed from the clean screen grid, not the append-log.
-      let ask: { questions: unknown[] } | null = null;
-      if (!planMenu) {
-        try { ask = parseAskMenuFromScreen(session.screen()) as { questions: unknown[] } | null; }
-        catch { ask = null; }
+
+      // AskUserQuestion is read from the CLEAN screen grid (its tool_use isn't in
+      // the jsonl while the menu blocks). A multi-question call renders ONE tab
+      // at a time and ends on a "Review your answers / Submit answers" screen, so
+      // we surface each sub-question as its own card (keyed by a content
+      // signature) and press Enter on the review screen to submit.
+      let screen = '';
+      if (!planMenu) { try { screen = session.screen(); } catch { screen = ''; } }
+      const sqScreen = screen.toLowerCase().replace(/\s+/g, '');
+      const reviewScreen =
+        sqScreen.includes('readytosubmityouranswers') || sqScreen.includes('reviewyouranswers');
+      const ask = (!planMenu && !reviewScreen)
+        ? (parseAskMenuFromScreen(screen) as { questions: Array<Record<string, unknown>> } | null)
+        : null;
+
+      // AUQ review screen: all sub-questions answered → submit (default is
+      // "1. Submit answers"). Press once per review appearance.
+      if (reviewScreen) {
+        absent = 0;
+        if (!reviewSubmitted) {
+          reviewSubmitted = true;
+          logger.info('ptyQuery: AskUserQuestion review screen — submitting answers (Enter)');
+          try { session.sendKeys('\r'); } catch { /* ignore */ }
+        }
+        continue;
       }
+      reviewSubmitted = false;
 
       if (!planMenu && !ask) {
-        // Re-arm only after the menu has been gone for 2 consecutive polls.
-        if (++absent >= 2) armed = true;
+        // No interactive menu on screen. Re-arm after 2 clean polls.
+        if (++absent >= 2) { armed = true; lastAskSig = null; }
         continue;
       }
       absent = 0;
-      if (!armed) continue;
-      armed = false;
 
       if (planMenu) {
+        if (!armed) continue;
+        armed = false;
         // The ExitPlanMode tool_use line isn't flushed to the jsonl while the
         // menu blocks, so do NOT gate on it. Read the plan body from the on-
         // screen plan file (written before the menu); fall back to the jsonl.
@@ -380,11 +403,13 @@ export const ptyQuery = (args: {
         continue;
       }
 
-      // AskUserQuestion: structure parsed from the screen (real toolUseId isn't
-      // in the jsonl yet → synthesize one; the card + reply route by it).
+      // AskUserQuestion sub-question. Surface it once; re-surface only when the
+      // question CHANGES (the TUI advanced to the next tab after an answer).
+      const sig = JSON.stringify(ask!.questions[0] ?? {});
+      if (sig === lastAskSig) continue;
+      lastAskSig = sig;
       const toolUseId = `askq-screen-${randomUUID()}`;
-      const qCount = ask?.questions.length ?? 0;
-      logger.info({ toolUseId, questionCount: qCount }, 'ptyQuery: AskUserQuestion menu detected on screen — surfacing question');
+      logger.info({ toolUseId }, 'ptyQuery: AskUserQuestion menu detected on screen — surfacing question');
       void handleInteractiveTool({ name: 'AskUserQuestion', toolUseId, input: ask });
     }
   }
