@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { isKeepPlanning } from '../src/engines/claude/persistent-executor.js';
-import { driveInteractiveTool } from '../src/engines/claude/pty/interactive-driver.js';
+import { driveInteractiveTool, isExitPlanMenu } from '../src/engines/claude/pty/interactive-driver.js';
 import type {
   PtyClaudeSession,
   PtyInteractiveResponse,
@@ -60,8 +60,7 @@ describe('driveInteractiveTool — ExitPlanMode', () => {
     expect(keys).toEqual(['\x1b']);
   });
 
-  it('presses the bypass-permissions digit to proceed on approve', async () => {
-    // Menu rendered with the proceed option as digit 2.
+  it('presses the bypass-permissions digit to proceed on approve (legacy menu)', async () => {
     const menu = [
       'Would you like to proceed?',
       '1. Yes',
@@ -72,5 +71,34 @@ describe('driveInteractiveTool — ExitPlanMode', () => {
     const response: PtyInteractiveResponse = { kind: 'approve' };
     await driveInteractiveTool({ session, tool: exitPlanTool, response, logger });
     expect(keys).toEqual(['2']);
+  });
+
+  it('proceeds on the current claude 2.1.x menu ("Ready to code?" + auto-accept edits)', async () => {
+    const menu = [
+      'Ready to code?',
+      '1. Yes, auto-accept edits',
+      '2. Yes, manually approve edits',
+      '3. No, keep planning',
+    ].join('\n');
+    const { session, keys } = fakeSession(menu);
+    const response: PtyInteractiveResponse = { kind: 'approve' };
+    await driveInteractiveTool({ session, tool: exitPlanTool, response, logger });
+    // Picks the first "Yes" that is not "manually approve" → auto-accept edits (digit 1).
+    expect(keys).toEqual(['1']);
+  });
+});
+
+describe('isExitPlanMenu', () => {
+  it('detects the current claude 2.1.x plan menu regardless of title', () => {
+    expect(isExitPlanMenu('Ready to code?\n 1. Yes, auto-accept edits\n 3. No, keep planning')).toBe(true);
+  });
+  it('detects the legacy "Would you like to proceed?" menu', () => {
+    expect(isExitPlanMenu('Would you like to proceed?\n 2. Yes, and bypass permissions\n 3. No, keep planning')).toBe(true);
+  });
+  it('does NOT fire on plan body text that merely mentions planning', () => {
+    expect(isExitPlanMenu('The plan: keep planning the migration in phases.')).toBe(false);
+  });
+  it('does NOT fire on an unrelated screen', () => {
+    expect(isExitPlanMenu('some normal assistant output with no menu')).toBe(false);
   });
 });

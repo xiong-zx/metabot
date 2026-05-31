@@ -104,7 +104,7 @@ async function approveExitPlanMode(session: PtyClaudeSession, logger: Logger): P
   // the persistent footer ("bypass permissions on ..."), which would false-fire.
   const ready = await waitForScreen(
     session,
-    (t) => squish(t).includes('wouldyouliketoproceed'),
+    (t) => isExitPlanMenu(t),
     EXITPLAN_MENU_WAIT_MS,
   );
   if (!ready) {
@@ -329,4 +329,26 @@ export function matchOptionIndex(options: string[], answer: string): number {
 /** Lowercase + strip all whitespace (the ANSI strip glues words together). */
 function squish(s: string): string {
   return s.toLowerCase().replace(/\s+/g, '');
+}
+
+/**
+ * Detect the ExitPlanMode approval menu on a (raw) screen tail.
+ *
+ * The menu TITLE varies by claude version ("Ready to code?" in 2.1.x,
+ * "Would you like to proceed?" earlier), so we key off the stable, plan-menu-
+ * specific OPTION text "No, keep planning" combined with one of the "Yes"
+ * proceed options. That pairing never appears in plan body text or other
+ * permission menus, so it's a false-positive-safe signal. Exported + reused by
+ * both the driver and the pty-query screen watcher so they agree on one signal.
+ */
+export function isExitPlanMenu(tail: string): boolean {
+  const s = squish(tail);
+  if (!s.includes('keepplanning')) return false;
+  return (
+    s.includes('auto-acceptedits') ||
+    s.includes('manuallyapproveedits') ||
+    s.includes('bypasspermissions') ||
+    s.includes('readytocode') ||
+    s.includes('wouldyouliketoproceed')
+  );
 }
