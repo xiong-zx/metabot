@@ -328,6 +328,31 @@ export const ptyQuery = (args: {
         return;
       }
       await driveInteractiveTool({ session, tool, response, logger });
+
+      // "Keep planning" Esc-cancels the ExitPlanMode tool (there is no "No,
+      // keep planning" option in claude 2.1.x — only "Tell Claude what to
+      // change"). claude marks "[Request interrupted by user for tool use]"
+      // and returns to the prompt idle WITHOUT firing the Stop hook, so no
+      // terminal `result` is emitted and the bridge would keep this turn
+      // "running" forever — queueing the user's follow-up feedback instead of
+      // sending it. Synthesize a terminal result to close the turn cleanly
+      // (claude stays alive in plan mode; the next message revises the plan).
+      if (tool.name === 'ExitPlanMode' && response.kind === 'cancel' && turnInFlight && !disposed) {
+        await sleep(500); // let claude's interrupt line land first
+        if (turnInFlight && !disposed) {
+          logger.info('ptyQuery: keep-planning — synthesizing terminal result to end turn');
+          turnInFlight = false;
+          const usage = { ...lastUsage };
+          lastUsage = {};
+          out.enqueue(
+            synthesizeResult({
+              sessionId,
+              model: usage.model,
+              usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+            }),
+          );
+        }
+      }
     } catch (err) {
       logger.warn({ err, tool: tool.name }, 'ptyQuery: interactive tool handling failed');
     }
