@@ -42,7 +42,7 @@ import { createPtyClaudeSession } from './pty-session.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
-import { driveInteractiveTool } from './interactive-driver.js';
+import { driveInteractiveTool, isExitPlanMenu } from './interactive-driver.js';
 
 /** Tool names the TUI renders as a blocking menu we must drive via keystrokes. */
 const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
@@ -55,11 +55,6 @@ const EXITPLAN_WATCH_POLL_MS = 250;
 const EXITPLAN_SNAPSHOT_TAIL = 4000;
 /** Tail bytes of the jsonl we read to recover the latest ExitPlanMode tool_use. */
 const EXITPLAN_JSONL_TAIL = 1024 * 1024;
-
-/** Lowercase + strip whitespace (the TUI snapshot glues words together). */
-function squish(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, '');
-}
 
 /**
  * Recover the most recent ExitPlanMode tool_use from a session jsonl by reading
@@ -327,17 +322,25 @@ export const ptyQuery = (args: {
    */
   async function runExitPlanWatcher(): Promise<void> {
     let armed = true;
+    let loggedMissing = false;
     while (!disposed) {
       await sleep(EXITPLAN_WATCH_POLL_MS);
       if (disposed) break;
       if (!session || !options.onInteractiveTool) continue;
       let tail: string;
       try { tail = session.snapshot().slice(-EXITPLAN_SNAPSHOT_TAIL); } catch { continue; }
-      const menuVisible = squish(tail).includes('wouldyouliketoproceed');
-      if (!menuVisible) { armed = true; continue; }
+      if (!isExitPlanMenu(tail)) { armed = true; loggedMissing = false; continue; }
       if (!armed) continue;
       const found = readLatestExitPlan(session.jsonlPath);
-      if (!found) continue; // line not flushed yet — retry next poll (armed stays true)
+      if (!found) {
+        // Menu is on screen but the tool_use line isn't readable from the jsonl
+        // yet (newline not flushed). Retry next poll; armed stays true.
+        if (!loggedMissing) {
+          logger.info('ptyQuery: ExitPlanMode menu visible but tool_use not yet in jsonl — retrying');
+          loggedMissing = true;
+        }
+        continue;
+      }
       armed = false;
       if (handledInteractive.has(found.toolUseId)) continue; // scanner already handled it
       handledInteractive.add(found.toolUseId);
