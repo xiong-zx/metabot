@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { readLatestExitPlan, readPlanFromScreen, readLatestInteractive } from '../src/engines/claude/pty/pty-query.js';
+import { readLatestExitPlan, readPlanFromScreen } from '../src/engines/claude/pty/pty-query.js';
 
 /**
  * readLatestExitPlan is the crux of the "ExitPlanMode card appears only after
@@ -88,41 +88,3 @@ describe('readPlanFromScreen', () => {
   });
 });
 
-describe('readLatestInteractive', () => {
-  const ask = (id: string, questions: unknown) =>
-    assistant([{ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions } }]);
-
-  it('recovers an AskUserQuestion record (with its structured input)', () => {
-    const questions = [{ question: 'Color?', header: 'Color', options: [{ label: 'Red' }] }];
-    fs.writeFileSync(file, textMsg('thinking') + '\n' + ask('toolu_q', questions));
-    expect(readLatestInteractive(file)).toEqual({
-      name: 'AskUserQuestion',
-      toolUseId: 'toolu_q',
-      input: { questions },
-    });
-  });
-
-  it('recovers an ExitPlanMode record too (shared with the plan path)', () => {
-    fs.writeFileSync(file, exitPlan('toolu_p', '# plan'));
-    expect(readLatestInteractive(file)).toEqual({
-      name: 'ExitPlanMode',
-      toolUseId: 'toolu_p',
-      input: { plan: '# plan' },
-    });
-  });
-
-  it('returns the LATEST interactive tool_use across both kinds', () => {
-    fs.writeFileSync(file, [exitPlan('p1', 'old'), textMsg('mid'), ask('q2', [])].join('\n') + '\n');
-    expect(readLatestInteractive(file)?.toolUseId).toBe('q2');
-  });
-
-  it('recovers a trailing record with NO terminating newline', () => {
-    fs.writeFileSync(file, textMsg('x') + '\n' + ask('toolu_tail', []));
-    expect(readLatestInteractive(file)?.toolUseId).toBe('toolu_tail');
-  });
-
-  it('ignores non-interactive tool_use and returns null', () => {
-    fs.writeFileSync(file, assistant([{ type: 'tool_use', id: 'b', name: 'Bash', input: {} }]));
-    expect(readLatestInteractive(file)).toBeNull();
-  });
-});

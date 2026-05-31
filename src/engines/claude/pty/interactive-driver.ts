@@ -398,21 +398,6 @@ function squish(s: string): string {
  * by both the driver and the pty-query screen watcher so they agree on one
  * signal.
  */
-/**
- * Detect the AskUserQuestion menu on a (raw) screen tail. Like the plan menu we
- * detect it STRUCTURALLY — a numbered selection menu — confirmed by the
- * AskUserQuestion-specific "Enter to select" affordance the TUI always renders
- * for it, and explicitly NOT the plan-approval menu. The full question
- * structure (multi-question tabs, multiSelect, option descriptions) is read
- * from the jsonl tool_use record, not scraped here — this only triggers the
- * card the moment the menu appears, so it never depends on a late jsonl flush.
- */
-export function isAskMenu(tail: string): boolean {
-  if (!parseSelectionMenu(tail)) return false;
-  if (isExitPlanMenu(tail)) return false; // plan menu, not AskUserQuestion
-  return squish(tail).includes('entertoselect');
-}
-
 export function isExitPlanMenu(tail: string): boolean {
   if (!parseSelectionMenu(tail)) return false; // no numbered menu on screen
   // Primary signal: the plan file path claude renders on a plan-approval menu.

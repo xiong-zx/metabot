@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { isKeepPlanning } from '../src/engines/claude/persistent-executor.js';
-import { driveInteractiveTool, isExitPlanMenu, isAskMenu } from '../src/engines/claude/pty/interactive-driver.js';
+import { driveInteractiveTool, isExitPlanMenu } from '../src/engines/claude/pty/interactive-driver.js';
 import type {
   PtyClaudeSession,
   PtyInteractiveResponse,
@@ -137,20 +137,3 @@ describe('isExitPlanMenu', () => {
   });
 });
 
-describe('isAskMenu', () => {
-  it('detects an AskUserQuestion menu (numbered options + "Enter to select")', () => {
-    const menu = ['Which color do you prefer?', '❯ 1. Red', '  2. Blue', '  3. Type something', 'Enter to select'].join('\n');
-    expect(isAskMenu(menu)).toBe(true);
-  });
-  it('does NOT fire on the plan-approval menu', () => {
-    const menu = ['Would you like to proceed?', '❯ 1. Yes, and bypass permissions', '  2. No', 'Enter to select'].join('\n');
-    expect(isAskMenu(menu)).toBe(false); // that's the plan menu
-    expect(isExitPlanMenu(menu)).toBe(true);
-  });
-  it('does NOT fire without the "Enter to select" affordance', () => {
-    expect(isAskMenu('Which color?\n❯ 1. Red\n  2. Blue')).toBe(false);
-  });
-  it('does NOT fire on a screen with no numbered menu', () => {
-    expect(isAskMenu('Enter to select a thing later. No options yet.')).toBe(false);
-  });
-});
