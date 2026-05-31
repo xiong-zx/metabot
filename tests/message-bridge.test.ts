@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  MessageBridge,
   isStaleSessionError,
   normalizePromptForEngine,
   extractSpontaneousSnippet,
@@ -7,6 +8,67 @@ import {
   resolvePersistentExecutorEnvDefault,
 } from '../src/bridge/message-bridge.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
+import type { BotConfigBase } from '../src/config.js';
+import type { CardState } from '../src/types.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const mockLogger = {
+  debug: () => {}, info: () => {}, warn: () => {}, error: () => {},
+  child: () => mockLogger,
+} as any;
+
+function makeConfig(): BotConfigBase {
+  return {
+    name: 'test-bot',
+    engine: 'claude',
+    claude: {
+      defaultWorkingDirectory: '/tmp',
+      maxTurns: undefined,
+      maxBudgetUsd: undefined,
+      model: undefined,
+      apiKey: undefined,
+      outputsBaseDir: '/tmp/metabot-test-outputs',
+      downloadsDir: '/tmp/metabot-test-downloads',
+      backend: 'pty',
+    },
+    persistentExecutor: { enabled: true },
+  };
+}
+
+function makeSender() {
+  const sent: Array<{ chatId: string; state: CardState }> = [];
+  const updated: Array<{ messageId: string; state: CardState }> = [];
+  const sender = {
+    sent,
+    updated,
+    async sendCard(chatId: string, state: CardState) {
+      sent.push({ chatId, state });
+      return `msg-${sent.length}`;
+    },
+    async updateCard(messageId: string, state: CardState) {
+      updated.push({ messageId, state });
+      return true;
+    },
+    async sendQuestionCard(chatId: string, state: CardState) {
+      sent.push({ chatId, state });
+      return `qmsg-${sent.length}`;
+    },
+    async updateQuestionCard(messageId: string, state: CardState) {
+      updated.push({ messageId, state });
+      return true;
+    },
+    async sendTextNotice() {},
+    async sendText() {},
+    async sendImageFile() { return true; },
+    async sendLocalFile() { return true; },
+    async downloadImage() { return false; },
+    async downloadFile() { return false; },
+  };
+  return sender;
+}
 
 describe('isStaleSessionError', () => {
   it('matches the GitHub issue error text', () => {
@@ -56,6 +118,76 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('hello /metaskill', 'codex')).toBe('hello /metaskill');
     expect(normalizePromptForEngine('/bad/path', 'codex')).toBe('/bad/path');
+  });
+});
+
+describe('MessageBridge between-turn questions', () => {
+  it('advances multi-question cards and resolves only after the last answer', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const resolved: Array<{ toolUseId: string; answers: Record<string, string> }> = [];
+    bridge.persistentRegistry = {
+      peek: () => ({
+        resolveQuestion: (toolUseId: string, answers: Record<string, string>) => {
+          resolved.push({ toolUseId, answers });
+        },
+      }),
+    };
+
+    await bridge.handleBetweenTurnQuestion('chat-1', {
+      toolUseId: 'toolu_multi',
+      questions: [
+        {
+          question: 'Pick a color',
+          header: 'Color',
+          options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }],
+          multiSelect: false,
+        },
+        {
+          question: 'Why?',
+          header: 'Reason',
+          options: [],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    expect(sender.sent[0].state.userPrompt).toBe('Question (1/2)');
+    expect(sender.sent[0].state.pendingQuestion?.questions[0].question).toBe('Pick a color');
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '1',
+    });
+
+    expect(resolved).toEqual([]);
+    expect(sender.updated.at(-1)?.state.userPrompt).toBe('Question (2/2)');
+    expect(sender.updated.at(-1)?.state.responseText).toBe('> **Reply:** Red');
+    expect(sender.updated.at(-1)?.state.pendingQuestion?.questions[0].question).toBe('Why?');
+
+    await bridge.handleMessage({
+      messageId: 'm2',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'Because it is visible',
+    });
+
+    expect(resolved).toEqual([
+      {
+        toolUseId: 'toolu_multi',
+        answers: {
+          'Pick a color': 'Red',
+          'Why?': 'Because it is visible',
+        },
+      },
+    ]);
+    expect(sender.updated.at(-1)?.state.status).toBe('complete');
+    expect(sender.updated.at(-1)?.state.responseText).toBe('> **Reply:** Red, Because it is visible');
   });
 });
 

@@ -185,10 +185,6 @@ export const ptyQuery = (args: {
   let turnInFlight = false;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
-  // Interactive tool_use ids we've already started driving, so a re-read of the
-  // same jsonl record never double-fires the keystroke handler.
-  const handledInteractive = new Set<string>();
-
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
   let appendSystemPrompt: string | undefined;
   const sp = options.systemPrompt;

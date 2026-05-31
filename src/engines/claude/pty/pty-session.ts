@@ -320,11 +320,13 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
    * SGR/cursor/OSC escapes are removed so simple text regexes work.
    */
   snapshot(): string {
+    /* eslint-disable no-control-regex -- stripping ANSI/control bytes from PTY output is intentional here */
     return this.ring
       .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
       .replace(/\x1b[()][AB0]/g, '')
       .replace(/\x1b\][^\x07]*\x07/g, '')
       .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+    /* eslint-enable no-control-regex */
   }
 
   /**

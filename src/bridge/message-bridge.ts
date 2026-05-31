@@ -300,13 +300,16 @@ export class MessageBridge {
    * user turn — which then blocks for 6 minutes on the still-hanging hook.
    *
    * Single in-flight slot per chatId. If a second between-turn question
-   * fires while one is still pending, the later one wins — the older
-   * resolver hangs until its 6-minute timeout (rare in practice).
+   * fires while one is still pending, the later one wins and the older card
+   * is finalized so the user's next reply cannot answer stale UI.
    */
   private pendingBetweenTurnQuestions = new Map<string, {
     toolUseId: string;
     questions: PendingQuestion['questions'];
     cardMessageId: string;
+    currentQuestionIndex: number;
+    collectedAnswers: Record<string, string>;
+    timeoutId?: ReturnType<typeof setTimeout>;
   }>();
   /**
    * Pending client-side slash-command picker (e.g. bare `/effort`). Unlike a
@@ -472,6 +475,13 @@ export class MessageBridge {
     const task = this.runningTasks.get(chatId);
     if (!task) return;
     if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
+    this.cancelPendingBetweenTurnQuestion(chatId, {
+      status: 'error',
+      userPrompt: 'Question',
+      responseText: '_Task stopped before answer received_',
+      toolCalls: [],
+      errorMessage: 'Task was stopped',
+    });
     // Finalize any in-flight question card so the user doesn't see buttons
     // that go nowhere after the task is gone.
     if (task.questionCardMessageId) {
@@ -569,10 +579,8 @@ export class MessageBridge {
         // Between-turn question whose resolver is now dead — flush the
         // question card to an error state and drop the bookkeeping so the
         // user's next message isn't intercepted as the answer.
-        const q = this.pendingBetweenTurnQuestions.get(chatId);
-        if (q) {
-          this.pendingBetweenTurnQuestions.delete(chatId);
-          void this.finalizeBetweenTurnQuestionCard(q.cardMessageId, {
+        if (this.pendingBetweenTurnQuestions.has(chatId)) {
+          this.cancelPendingBetweenTurnQuestion(chatId, {
             status: 'error',
             userPrompt: 'Question',
             responseText: '_Question canceled — agent session ended._',
@@ -675,27 +683,18 @@ export class MessageBridge {
         toolCalls: [],
       });
       this.pendingBetweenTurnQuestions.delete(chatId);
+      if (existing.timeoutId) clearTimeout(existing.timeoutId);
     }
 
-    // Show only the first question on the card (matches runOneTurn — the
-    // bridge surfaces one sub-question at a time, advancing the card on
-    // each typed reply). Multi-question case is logged below; the existing
-    // bridge code path doesn't support advancing between-turn sub-questions
-    // yet, so we route only the first answer and short-circuit the rest.
-    if (payload.questions.length > 1) {
-      this.logger.warn(
-        { chatId, toolUseId: payload.toolUseId, total: payload.questions.length },
-        'between-turn AskUserQuestion has multiple sub-questions; only the first will be displayed and routed',
-      );
-    }
     const displayQuestion: PendingQuestion = {
       toolUseId: payload.toolUseId,
       questions: [payload.questions[0]],
     };
+    const progress = payload.questions.length > 1 ? ` (1/${payload.questions.length})` : '';
 
     const card: CardState = {
       status: 'waiting_for_input',
-      userPrompt: '(between-turn question)',
+      userPrompt: progress ? `Question${progress}` : 'Question',
       responseText: '',
       toolCalls: [],
       pendingQuestion: displayQuestion,
@@ -720,6 +719,11 @@ export class MessageBridge {
       toolUseId: payload.toolUseId,
       questions: payload.questions,
       cardMessageId,
+      currentQuestionIndex: 0,
+      collectedAnswers: {},
+      timeoutId: setTimeout(() => {
+        this.autoAnswerBetweenTurnQuestion(chatId);
+      }, QUESTION_TIMEOUT_MS),
     });
     this.logger.info(
       { chatId, toolUseId: payload.toolUseId, cardMessageId },
@@ -746,6 +750,68 @@ export class MessageBridge {
     }
   }
 
+  private cancelPendingBetweenTurnQuestion(chatId: string, state: CardState): void {
+    const pending = this.pendingBetweenTurnQuestions.get(chatId);
+    if (!pending) return;
+    this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
+    void this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, state);
+  }
+
+  private parseQuestionAnswer(
+    text: string,
+    question: PendingQuestion['questions'][number],
+  ): string {
+    const trimmed = text.trim();
+    if (!question.multiSelect) {
+      const num = parseInt(trimmed, 10);
+      if (Number.isFinite(num) && num >= 1 && num <= question.options.length) {
+        return question.options[num - 1].label;
+      }
+      return trimmed;
+    }
+
+    const selected = trimmed
+      .split(/[,\s，、]+/)
+      .map((part) => parseInt(part, 10))
+      .filter((num) => Number.isFinite(num) && num >= 1 && num <= question.options.length)
+      .map((num) => question.options[num - 1].label);
+    return selected.length > 0 ? Array.from(new Set(selected)).join(', ') : trimmed;
+  }
+
+  private autoAnswerBetweenTurnQuestion(chatId: string): void {
+    const pending = this.pendingBetweenTurnQuestions.get(chatId);
+    if (!pending) return;
+
+    this.logger.warn({ chatId, toolUseId: pending.toolUseId }, 'between-turn question timeout, auto-answering remaining questions');
+    this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
+
+    for (let i = pending.currentQuestionIndex; i < pending.questions.length; i++) {
+      const question = pending.questions[i];
+      if (!pending.collectedAnswers[question.question]) {
+        pending.collectedAnswers[question.question] = '用户未及时回复，请自行判断继续';
+      }
+    }
+
+    const executor = this.persistentRegistry?.peek(chatId);
+    if (executor) {
+      try {
+        executor.resolveQuestion(pending.toolUseId, pending.collectedAnswers);
+      } catch (err) {
+        this.logger.error({ err, chatId, toolUseId: pending.toolUseId }, 'MessageBridge: timeout resolveQuestion threw');
+      }
+    }
+
+    void this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+      status: 'error',
+      userPrompt: 'Question',
+      responseText: '_用户未及时回复，已自动跳过_',
+      toolCalls: [],
+      errorMessage: 'Timed out waiting for answer',
+    });
+  }
+
   /**
    * Treat the user's typed reply as the answer to a pending between-turn
    * question. Routes through {@link PersistentClaudeExecutor.resolveQuestion}
@@ -765,23 +831,36 @@ export class MessageBridge {
     }
 
     const trimmed = text.trim();
-    const firstQ = pending.questions[0];
-    let answerText: string;
-    const num = parseInt(trimmed, 10);
-    if (Number.isFinite(num) && num >= 1 && num <= firstQ.options.length) {
-      answerText = firstQ.options[num - 1].label;
-    } else {
-      answerText = trimmed;
-    }
+    const currentQ = pending.questions[pending.currentQuestionIndex];
+    if (!currentQ) return true;
+    const answerText = this.parseQuestionAnswer(trimmed, currentQ);
 
     // Key by `question` text (NOT header) — required by the SDK's
     // AskUserQuestionOutput schema. See handleAnswer for the long-form
     // comment on the same gotcha.
-    const answers: Record<string, string> = { [firstQ.question]: answerText };
-    // For multi-sub-question between-turn calls (rare; logged on arrival),
-    // synthesize empty answers for the rest so the hook still resolves.
-    for (let i = 1; i < pending.questions.length; i++) {
-      answers[pending.questions[i].question] = '';
+    pending.collectedAnswers[currentQ.question] = answerText;
+
+    if (pending.currentQuestionIndex + 1 < pending.questions.length) {
+      pending.currentQuestionIndex++;
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+      pending.timeoutId = setTimeout(() => {
+        this.autoAnswerBetweenTurnQuestion(chatId);
+      }, QUESTION_TIMEOUT_MS);
+
+      const nextQ = pending.questions[pending.currentQuestionIndex];
+      const displayQuestion: PendingQuestion = {
+        toolUseId: pending.toolUseId,
+        questions: [nextQ],
+      };
+      const progress = ` (${pending.currentQuestionIndex + 1}/${pending.questions.length})`;
+      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+        status: 'waiting_for_input',
+        userPrompt: `Question${progress}`,
+        responseText: `> **Reply:** ${answerText}`,
+        toolCalls: [],
+        pendingQuestion: displayQuestion,
+      });
+      return true;
     }
 
     const executor = this.persistentRegistry?.peek(chatId);
@@ -801,8 +880,9 @@ export class MessageBridge {
     }
 
     this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
     try {
-      executor.resolveQuestion(pending.toolUseId, answers);
+      executor.resolveQuestion(pending.toolUseId, pending.collectedAnswers);
     } catch (err) {
       this.logger.error({ err, chatId, toolUseId: pending.toolUseId }, 'MessageBridge: resolveQuestion threw');
     }
@@ -814,7 +894,7 @@ export class MessageBridge {
     await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
       status: 'complete',
       userPrompt: 'Question',
-      responseText: `> **Reply:** ${answerText}`,
+      responseText: `> **Reply:** ${Object.values(pending.collectedAnswers).join(', ')}`,
       toolCalls: [],
     });
     return true;
