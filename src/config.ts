@@ -28,15 +28,15 @@ export interface BotConfigBase {
    */
   visible?: boolean;
   /**
-   * Default-target for `metabot memory create/mkdir` when no explicit
-   * `--path` / `--folder` is given. When true (default), the CLI
-   * auto-prefixes writes into `/shared/<botName>/...` (visible to every
-   * member); when false, it falls back to the per-bot private
-   * `/users/<botName>/...` location. Omitting the field in bots.json
-   * leaves the server-side value sticky — `metabot memory visibility`
-   * CLI toggles are preserved across bridge restarts. Setting an explicit
-   * value in bots.json pins it and the bridge re-asserts it on every
-   * bulk-register.
+   * Default shared flag for `metabot memory create` when no explicit
+   * `--share` / `--no-share` is given. When true (default), new docs are
+   * cross-bot readable (`shared:true`); when false, new docs are private to
+   * the author's namespace (`shared:false`). The write path still defaults to
+   * the caller's own `/users/...` namespace unless `--path` / `--folder` is
+   * explicitly passed. Omitting the field in bots.json leaves the server-side
+   * value sticky — `metabot memory visibility` CLI toggles are preserved
+   * across bridge restarts. Setting an explicit value in bots.json pins it and
+   * the bridge re-asserts it on every bulk-register.
    */
   memoryPublic?: boolean;
   /** Agent engine. Defaults to 'claude' for backward compatibility. */
