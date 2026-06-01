@@ -13,7 +13,8 @@ This workspace is managed by **MetaBot** — an AI assistant accessible via Feis
 metabot memory search <query>                   # Full-text search
 metabot memory get <id|path>                    # Read a doc
 metabot memory list [folder_id]                 # Browse the tree
-metabot memory create "<title>" "<content>"     # Create a doc
+metabot memory create "<title>" "<content>" --share --tags team,sop
+metabot memory share <doc_id> on                # Make an existing doc visible
 
 # Skill hub
 metabot skills list                             # List published skills
@@ -69,6 +70,6 @@ lark-cli base records list ...                           # Query bitable
 ## Guidelines
 
 - **Search before creating** — always check if a file or document already exists before creating new ones.
-- **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ...` so future sessions can benefit.
+- **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ... --share --tags ...` so future sessions can benefit. Meta Memory read visibility is document-level: use `--share` on create/update, or `metabot memory share <doc_id> on` for an existing doc. Tags are for discovery and should describe audience/topic such as `team`, `sop`, `metabot`, or `public`.
 - **Output files** — when generating files the user needs (images, PDFs, reports), copy them to the outputs directory provided in the system prompt so they get sent to the chat automatically.
 - **Be concise in chat** — responses appear as Feishu/Telegram cards with limited space. Keep answers focused and use markdown formatting.

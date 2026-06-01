@@ -44,8 +44,9 @@ mm folders                          # 文件夹树
 mm path /projects/my-doc            # 按路径获取文档
 
 # 写
-echo '# 笔记' | mm create "标题" --folder ID --tags "dev"
-echo '# 更新内容' | mm update DOC_ID
+echo '# 笔记' | metabot memory create "标题" --share --tags "dev,team"
+echo '# 更新内容' | metabot memory update DOC_ID --share --tags "dev,team"
+metabot memory share DOC_ID on       # 让已有文档跨 bot 可读
 mm mkdir "new-folder"               # 创建文件夹
 mm delete DOC_ID                    # 删除文档
 ```

@@ -45,8 +45,9 @@ mm folders                          # folder tree
 mm path /projects/my-doc            # get doc by path
 
 # Write
-echo '# Notes' | mm create "Title" --folder ID --tags "dev"
-echo '# Updated' | mm update DOC_ID
+echo '# Notes' | metabot memory create "Title" --share --tags "dev,team"
+echo '# Updated' | metabot memory update DOC_ID --share --tags "dev,team"
+metabot memory share DOC_ID on       # make an existing doc cross-bot readable
 mm mkdir "new-folder"               # create folder
 mm delete DOC_ID                    # delete document
 ```

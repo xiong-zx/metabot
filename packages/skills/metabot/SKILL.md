@@ -30,10 +30,12 @@ Most-used:
 metabot memory list [folder_id]                      # browse the tree
 metabot memory search "<query>"                      # full-text search
 metabot memory get <id|path>                         # read a doc (JSON metadata + content)
-metabot memory create "<title>" ["<content>"]        # create a doc (content also via stdin)
+metabot memory create "<title>" ["<content>"] --share --tags a,b
+metabot memory create "<title>" ["<html>"] --share --html --tags docs
 metabot memory mkdir "<name>"                        # create a folder
-metabot memory update <id> [content] [--title …] [--tags a,b,c]
-metabot memory visibility [public|private]           # flip this bot's default write target
+metabot memory update <id> [content] [--title …] [--tags a,b,c] [--share|--no-share]
+metabot memory share <id> [on|off]                   # toggle one doc's cross-bot visibility
+metabot memory visibility [public|private]           # default shared flag for new docs
 metabot memory health
 ```
 
@@ -49,33 +51,46 @@ metabot memory mkdir "smoke-folder"   --path /users/<botName>/smoke-folder
 When `--path` is given the server ACL-checks it and auto-creates any missing
 ancestor folders. With **neither** `--path` nor `--folder` (nor a `parent_id`
 for `mkdir`), the write **defaults into your own namespace** —
-`/users/<botName>/<slug-of-title>` (private) for `create`,
+`/users/<botName>/<slug-of-title>` for `create`,
 `/users/<botName>/<name>` for `mkdir` — resolved via `GET /api/whoami`. This
 is the fix for the old member `403 forbidden`: members cannot write the root
 namespace, so a bare `create`/`mkdir` previously failed. Admin tokens keep the
 legacy root default. `--folder <id>` still targets an explicit existing folder
 as before.
 
-**Per-bot visibility — `memoryPublic`.** Bots can flip the default-write
-target from `/shared/<bot>/...` (public — every member can read) to
-`/users/<bot>/...` (private to that bot) without admin intervention.
+**Read visibility is document-level.** A document's cross-bot visibility is
+controlled by its `shared` flag, not by the path. Use `--share` when creating
+team-visible memory; use `--no-share` for private notes. Tags are for search
+and discovery, not ACL, but they should still describe audience and topic:
+
+```bash
+metabot memory create "Runbook" "$CONTENT" --share --tags team,runbook
+metabot memory create "Landing page" "$HTML" --share --html --tags metabot,tutorial
+metabot memory update <doc_id> --share --tags metabot,public
+metabot memory share <doc_id> on
+```
+
+**Per-bot default visibility — `memoryPublic`.** Bots can flip the default
+`shared` value for new documents without admin intervention. `public` means
+new docs default to `shared:true`; `private` means new docs default to
+`shared:false`. Explicit `--share` / `--no-share` on create/update always wins.
 Default for newly-registered bots is **public** (`memoryPublic: true`):
 
 ```bash
 metabot memory visibility            # prints {state: "public" | "private"}
-metabot memory visibility public     # bare create/mkdir lands in /shared/<bot>/  (default)
-metabot memory visibility private    # bare create/mkdir lands in /users/<bot>/
+metabot memory visibility public     # new docs default shared:true
+metabot memory visibility private    # new docs default shared:false
 ```
 
 Same shape and auth model as `bots.json` `visible` for agent-bus discovery
 ("bot self-toggles, owner credential or admin only" — PATCH
-`/api/agents/<botName>/memory-visibility`). It only changes the **default**
-path for *new* `create` / `mkdir` calls; explicit `--path` / `--folder` still
-win, and existing docs stay where they are until you move them. To pin the
-choice across bridge restarts, set `memoryPublic: true|false` on the bot's
-entry in `bots.json` — the bridge re-asserts the column on every bulk-register
-and overrides whatever was last toggled via CLI. Omitting the field in
-bots.json leaves CLI toggles sticky.
+`/api/agents/<botName>/memory-visibility`). It only changes the default
+`shared` value for *new* documents; existing docs are unchanged until you run
+`metabot memory share <doc_id> on|off` or `metabot memory update <doc_id>
+--share|--no-share`. To pin the choice across bridge restarts, set
+`memoryPublic: true|false` on the bot's entry in `bots.json` — the bridge
+re-asserts the column on every bulk-register and overrides whatever was last
+toggled via CLI. Omitting the field in bots.json leaves CLI toggles sticky.
 
 ## `metabot skills` — skill registry
 
