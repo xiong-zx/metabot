@@ -42,7 +42,7 @@
       "feishuAppSecret": "secret4",
       "defaultWorkingDirectory": "/home/user/project-delta",
       "codex": {
-        "model": "gpt-5.4-codex",
+        "model": "gpt-5.5",
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
       }

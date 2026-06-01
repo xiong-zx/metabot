@@ -141,7 +141,7 @@ export function BotManageDialog({ mode, bot, onClose }: BotManageDialogProps) {
                 className={styles.input}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder={engine === 'codex' ? 'gpt-5.4-codex' : engine === 'kimi' ? 'kimi-for-coding' : 'claude-opus-4-8'}
+                placeholder={engine === 'codex' ? 'gpt-5.5' : engine === 'kimi' ? 'kimi-for-coding' : 'claude-opus-4-8'}
               />
             </label>
             <label className={styles.field}>

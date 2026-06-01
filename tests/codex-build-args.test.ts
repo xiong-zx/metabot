@@ -39,9 +39,9 @@ describe('buildCodexArgs', () => {
 
   it('passes model and profile when provided', () => {
     const cfg: CodexBotConfig = { profile: 'staging' };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, 'gpt-5.4-codex');
+    const args = buildCodexArgs(cfg, cwd, prompt, undefined, 'gpt-5.5');
     expect(args).toContain('-m');
-    expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.4-codex');
+    expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.5');
     expect(args).toContain('-p');
     expect(args[args.indexOf('-p') + 1]).toBe('staging');
   });

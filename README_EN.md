@@ -76,7 +76,7 @@ MetaBot isn't locked to one vendor — all three top AI coding agents ship with 
 ```json
 { "name": "bulma", "engine": "kimi",   "kimi": { "thinking": true } }
 { "name": "goku",  "engine": "claude" }
-{ "name": "vegeta", "engine": "codex", "codex": { "model": "gpt-5.4-codex" } }
+{ "name": "vegeta", "engine": "codex", "codex": { "model": "gpt-5.5" } }
 ```
 
 Codex support uses the local `codex exec --json` CLI and resumes chat sessions with `codex exec resume`. Authenticate once with `codex login` (or configure your Codex API key/profile) before starting MetaBot. MetaBot translates Feishu slash-skill invocations like `/<skill> ...` into Codex's explicit `$<skill> ...` skill syntax (e.g. once `/metaschedule` is installed, Codex receives `$metaschedule ...`).

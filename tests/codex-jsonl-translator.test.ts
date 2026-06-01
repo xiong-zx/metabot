@@ -41,7 +41,7 @@ describe('Codex JSONL translator', () => {
       { type: 'turn.completed', usage: { input_tokens: 23111, cached_input_tokens: 12800, output_tokens: 70 } },
     ];
 
-    const state = createCodexTranslatorState({ model: 'gpt-5.4-codex', contextWindow: 400000 });
+    const state = createCodexTranslatorState({ model: 'gpt-5.5', contextWindow: 400000 });
     const processor = new StreamProcessor('Run pwd');
 
     let cardState = processor.processMessage({ type: 'system' });
@@ -55,7 +55,7 @@ describe('Codex JSONL translator', () => {
     expect(cardState.status).toBe('complete');
     expect(cardState.responseText).toBe('DONE');
     expect(cardState.toolCalls).toEqual([{ name: 'Bash', detail: '`/bin/zsh -lc pwd`', status: 'done' }]);
-    expect(cardState.model).toBe('gpt-5.4-codex');
+    expect(cardState.model).toBe('gpt-5.5');
     expect(cardState.totalTokens).toBe(23181);
     expect(cardState.contextWindow).toBe(400000);
   });

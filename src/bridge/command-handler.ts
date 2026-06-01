@@ -371,8 +371,8 @@ export class CommandHandler {
         { id: 'kimi-k2', label: 'Kimi K2', note: 'Legacy coding model' },
       ];
       const codexModels = [
-        { id: 'gpt-5.4-codex', label: 'GPT-5.4 Codex', note: 'Recommended Codex coding model' },
-        { id: 'gpt-5.4', label: 'GPT-5.4', note: 'General flagship model' },
+        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Recommended Codex model for ChatGPT subscription users' },
+        { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Codex coding model, when available in your Codex account' },
         { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
       const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : claudeModels;
@@ -536,7 +536,7 @@ export class CommandHandler {
       case 'kimi':
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':
-        return '`gpt-5.4-codex`, `gpt-5.4`, `gpt-5.2-codex`';
+        return '`gpt-5.5`, `gpt-5.5-codex`, `gpt-5.2-codex`';
     }
   }
 
