@@ -393,6 +393,81 @@ npm_install_global() {
   npm install -g "$@" 2>/dev/null || sudo -n npm install -g "$@" 2>/dev/null || sudo npm install -g "$@"
 }
 
+codex_config_has_features_table() {
+  local config="$1"
+  [[ -f "$config" ]] && grep -Eq '^[[:space:]]*\[features\][[:space:]]*$' "$config"
+}
+
+codex_config_feature_is_set() {
+  local config="$1"
+  local key="$2"
+  [[ -f "$config" ]] || return 1
+  awk -v key="$key" '
+    /^[[:space:]]*\[features\][[:space:]]*$/ { in_features=1; next }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_features=0 }
+    in_features && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' "$config"
+}
+
+codex_config_set_feature_default() {
+  local config="$1"
+  local key="$2"
+  local value="$3"
+
+  if codex_config_feature_is_set "$config" "$key"; then
+    return 0
+  fi
+
+  if ! codex_config_has_features_table "$config"; then
+    {
+      echo ""
+      echo "[features]"
+      echo "${key} = ${value}"
+    } >> "$config"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    /^[[:space:]]*\[features\][[:space:]]*$/ {
+      in_features=1
+      print
+      next
+    }
+    in_features && /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      if (!inserted) {
+        print key " = " value
+        inserted=1
+      }
+      in_features=0
+    }
+    { print }
+    END {
+      if (in_features && !inserted) {
+        print key " = " value
+      }
+    }
+  ' "$config" > "$tmp"
+  mv "$tmp" "$config"
+}
+
+ensure_codex_agent_defaults() {
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
+  local config="$codex_home/config.toml"
+  mkdir -p "$codex_home/skills" "$codex_home/memories" "$codex_home/agents"
+  touch "$config"
+  chmod 600 "$config" 2>/dev/null || true
+
+  codex_config_set_feature_default "$config" "multi_agent" "true"
+  codex_config_set_feature_default "$config" "memories" "true"
+  codex_config_set_feature_default "$config" "guardian_approval" "true"
+  codex_config_set_feature_default "$config" "prevent_idle_sleep" "true"
+
+  success "Codex agent defaults ensured in $config (multi_agent, memories, guardian_approval, prevent_idle_sleep)"
+}
+
 if ! command -v pm2 &>/dev/null; then
   info "Installing PM2 globally..."
   npm_install_global pm2
@@ -505,7 +580,9 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
         warn "MetaBot will still be configured — install Codex + run 'codex login' before starting."
       fi
     fi
+    ensure_codex_agent_defaults
     info "After install, run 'codex login' in a separate terminal to authenticate (or set OPENAI_API_KEY / configure a profile in ~/.codex/config.toml)."
+    info "Codex memories and multi-agent defaults are enabled in ~/.codex/config.toml; use 'codex features list' to inspect."
     info "Note: Codex runs with approvalPolicy='never' and sandbox='workspace-write' by default — interactive tool approvals are not surfaced to IM."
     # Skip the Claude provider prompt entirely for Codex — it has its own auth.
     AUTH_CHOICE="codex"
@@ -693,6 +770,12 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       echo "# CODEX_EXECUTABLE_PATH="
       echo "# CODEX_APPROVAL_POLICY=never"
       echo "# CODEX_SANDBOX=workspace-write"
+      echo "# install.sh also ensures ~/.codex/config.toml contains:"
+      echo "#   [features]"
+      echo "#   multi_agent = true"
+      echo "#   memories = true"
+      echo "#   guardian_approval = true"
+      echo "#   prevent_idle_sleep = true"
     elif [[ -n "${CLAUDE_AUTH_ENV_LINES:-}" ]]; then
       echo "$CLAUDE_AUTH_ENV_LINES"
     fi

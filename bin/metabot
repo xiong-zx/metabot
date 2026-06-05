@@ -614,24 +614,94 @@ check("voice_defaults", voice_ok, "voice_defaults_missing" if not voice_ok else 
       voice_default)
 
 codex_path = env("CODEX_EXECUTABLE_PATH") or shutil.which("codex")
+codex_home = Path(env("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+codex_config = codex_home / "config.toml"
+
+def parse_codex_feature_list(output):
+    features = {}
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("Usage:") or line.startswith("Commands:"):
+            continue
+        parts = line.split()
+        if len(parts) < 3 or parts[-1] not in ("true", "false"):
+            continue
+        name = parts[0]
+        stage = " ".join(parts[1:-1])
+        features[name] = {"stage": stage, "enabled": parts[-1] == "true"}
+    return features
+
+def count_codex_mcp_servers(config_path):
+    if not config_path.exists():
+        return 0
+    count = 0
+    for raw in config_path.read_text(errors="ignore").splitlines():
+        if raw.strip().startswith("[mcp_servers."):
+            count += 1
+    return count
+
 codex_data = {
     "executable": codex_path,
     "hasOpenAIKey": bool(env("OPENAI_API_KEY")),
     "hasCodexApiKey": bool(env("CODEX_API_KEY")),
     "baseUrl": env("CODEX_BASE_URL") or env("OPENAI_BASE_URL"),
     "model": env("CODEX_MODEL"),
-    "configTomlExists": (Path.home() / ".codex" / "config.toml").exists(),
+    "codexHome": str(codex_home),
+    "configTomlExists": codex_config.exists(),
+    "skillsDirExists": (codex_home / "skills").is_dir(),
+    "agentsDirExists": (codex_home / "agents").is_dir(),
+    "memoriesDirExists": (codex_home / "memories").is_dir(),
+    "memoryDbExists": bool(list(codex_home.glob("memories_*.sqlite"))),
+    "mcpServerCount": count_codex_mcp_servers(codex_config),
 }
 codex_ok = bool(codex_path)
 if codex_path:
     v = run([codex_path, "--version"], timeout=3)
     codex_data["versionOk"] = v["ok"]
     codex_data["version"] = v["stdout"] or v["stderr"]
+    features_result = run([codex_path, "features", "list"], timeout=5)
+    codex_data["featuresListOk"] = features_result["ok"]
+    if features_result["ok"]:
+        features = parse_codex_feature_list(features_result["stdout"])
+        important_features = [
+            "multi_agent",
+            "memories",
+            "plugins",
+            "hooks",
+            "browser_use",
+            "computer_use",
+            "image_generation",
+            "guardian_approval",
+            "prevent_idle_sleep",
+        ]
+        codex_data["features"] = {name: features.get(name) for name in important_features if name in features}
 check("codex_cli", codex_ok, "codex_missing" if not codex_ok else "ok",
       "Codex executable found." if codex_ok else "Codex executable not found.",
       "Install Codex CLI or set CODEX_EXECUTABLE_PATH.",
       False,
       codex_data)
+
+codex_features = codex_data.get("features", {})
+required_codex_features = ["multi_agent", "memories"]
+missing_codex_features = [
+    name for name in required_codex_features
+    if not codex_features.get(name, {}).get("enabled")
+]
+codex_agent_features_ok = bool(codex_path) and not missing_codex_features and codex_data["skillsDirExists"] and (codex_data["memoriesDirExists"] or codex_data["memoryDbExists"])
+check("codex_agent_features", codex_agent_features_ok,
+      "codex_agent_features_missing" if not codex_agent_features_ok else "ok",
+      "Codex multi-agent, memories, skills, and memory storage are ready." if codex_agent_features_ok else "Codex agent features are missing or disabled.",
+      "Run install.sh with Codex selected, or add [features] multi_agent=true and memories=true to ~/.codex/config.toml; ensure ~/.codex/skills and ~/.codex/memories exist.",
+      False,
+      {
+          "requiredFeatures": required_codex_features,
+          "missingFeatures": missing_codex_features,
+          "skillsDirExists": codex_data["skillsDirExists"],
+          "agentsDirExists": codex_data["agentsDirExists"],
+          "memoriesDirExists": codex_data["memoriesDirExists"],
+          "memoryDbExists": codex_data["memoryDbExists"],
+          "mcpServerCount": codex_data["mcpServerCount"],
+      })
 
 team_base = None
 for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
