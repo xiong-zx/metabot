@@ -70,4 +70,25 @@ describe('metabot doctor command', () => {
     expect(source).toContain('doctor)       shift; cmd_doctor "$@" ;;');
     expect(source).toContain('"schemaVersion": 1');
   });
+
+  it('checks Codex agent feature readiness', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('parse_codex_feature_list');
+    expect(source).toContain('codex_agent_features');
+    expect(source).toContain('"multi_agent"');
+    expect(source).toContain('"memories"');
+    expect(source).toContain('"skillsDirExists"');
+    expect(source).toContain('"mcpServerCount"');
+  });
+});
+
+describe('Codex install defaults', () => {
+  it('initializes Codex multi-agent and memory defaults for Codex installs', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+    expect(source).toContain('ensure_codex_agent_defaults()');
+    expect(source).toContain('codex_config_set_feature_default "$config" "multi_agent" "true"');
+    expect(source).toContain('codex_config_set_feature_default "$config" "memories" "true"');
+    expect(source).toContain('codex_config_set_feature_default "$config" "guardian_approval" "true"');
+    expect(source).toContain('mkdir -p "$codex_home/skills" "$codex_home/memories" "$codex_home/agents"');
+  });
 });
