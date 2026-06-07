@@ -1,6 +1,6 @@
 # MetaBot Agent Teams Rollout Guide
 
-Draft status: ready to publish after the Agent Teams feature branch lands.
+Publication status: checked in as internal release/announcement material and published to Meta Memory.
 
 ## Publish Targets
 
