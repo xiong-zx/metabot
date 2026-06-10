@@ -64,6 +64,20 @@ interface PeerState {
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const FETCH_TIMEOUT_MS = 5_000;
 const TASK_FORWARD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Parse METABOT_ALLOWED_PEER_CIDRS (comma/space-separated CIDRs). When set, a
+ * forward target's resolved literal IPv4 host must additionally fall inside one
+ * of these ranges. Empty/unset → no CIDR constraint (the known-peer allowlist
+ * is still enforced). Invalid entries are silently dropped.
+ */
+function parseAllowedPeerCidrs(raw: string | undefined): string[] {
+  if (!raw || !raw.trim()) return [];
+  return raw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const REGISTER_RETRY_INITIAL_MS = 1_000;
 const REGISTER_RETRY_MAX_MS = 30_000;
@@ -212,10 +226,22 @@ export class PeerManager {
   /** Names that successfully landed in the registry (heartbeat targets). */
   private registeredBotNames: Set<string> = new Set();
   private agentBusFailureCount = 0;
+  /**
+   * Optional CIDR allowlist for forward targets (METABOT_ALLOWED_PEER_CIDRS).
+   * Empty = no CIDR constraint; the known-peer allowlist is always enforced.
+   */
+  private allowedPeerCidrs: string[];
 
   constructor(configs: PeerConfig[], localBots: LocalBotEntry[], logger: Logger) {
     this.logger = logger.child({ module: 'peers' });
     this.localBots = localBots;
+    this.allowedPeerCidrs = parseAllowedPeerCidrs(process.env.METABOT_ALLOWED_PEER_CIDRS);
+    if (this.allowedPeerCidrs.length > 0) {
+      this.logger.info(
+        { allowedPeerCidrs: this.allowedPeerCidrs },
+        'peer forward CIDR allowlist active (METABOT_ALLOWED_PEER_CIDRS)',
+      );
+    }
 
     for (const config of configs) {
       const normalizedUrl = config.url.replace(/\/+$/, '');
@@ -679,8 +705,66 @@ export class PeerManager {
     return undefined;
   }
 
+  /**
+   * Set of normalized peer URLs currently in our map. These are the only
+   * targets forwardTask is allowed to reach — every entry got here either from
+   * a static config (bots.json/env/addPeer) or from a refreshPeer-verified
+   * agent-bus discovery, so an attacker can't point a forward at an arbitrary
+   * internal service (e.g. http://localhost:6379) just by poisoning the bus.
+   */
+  private knownPeerUrls(): Set<string> {
+    const urls = new Set<string>();
+    for (const state of this.peers.values()) {
+      urls.add(state.config.url.replace(/\/+$/, ''));
+    }
+    return urls;
+  }
+
+  /**
+   * Gate a forward target before we open a connection to it. Two layers:
+   *  1. The normalized URL MUST be a known peer (present in this.peers). This is
+   *     the primary SSRF defense — we never forward to a URL we didn't discover.
+   *  2. When METABOT_ALLOWED_PEER_CIDRS is set and the host is a literal IPv4,
+   *     it must additionally fall inside one of the configured CIDRs.
+   * Returns a reason string when rejected, or undefined when allowed.
+   */
+  private rejectForwardTarget(peerUrl: string): string | undefined {
+    const normalized = peerUrl.replace(/\/+$/, '');
+    if (!this.knownPeerUrls().has(normalized)) {
+      return 'target is not a known/verified peer';
+    }
+    if (this.allowedPeerCidrs.length > 0) {
+      let host: string;
+      try {
+        host = new URL(normalized).hostname;
+      } catch {
+        return 'target URL is unparseable';
+      }
+      // Only enforce CIDR on literal IPv4 hosts; hostnames are left to the
+      // known-peer check above (we don't resolve DNS here).
+      const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+      if (isIpv4 && !this.allowedPeerCidrs.some((cidr) => cidrContains(cidr, host))) {
+        return 'target IP is outside METABOT_ALLOWED_PEER_CIDRS';
+      }
+    }
+    return undefined;
+  }
+
   /** Forward a task request to a peer. Adds X-MetaBot-Origin header to prevent loops. */
   async forwardTask(peer: PeerConfig, body: object): Promise<object> {
+    const rejection = this.rejectForwardTarget(peer.url);
+    if (rejection) {
+      let host = peer.url;
+      try {
+        host = new URL(peer.url).host;
+      } catch { /* keep raw url in log */ }
+      this.logger.warn(
+        { peerName: peer.name, peerUrl: peer.url, targetHost: host, reason: rejection },
+        'refusing to forward task to unverified/disallowed peer target (possible SSRF)',
+      );
+      throw new Error(`Refusing to forward to peer "${peer.name}": ${rejection}`);
+    }
+
     const url = `${peer.url}/api/talk`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

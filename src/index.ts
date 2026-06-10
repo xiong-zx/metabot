@@ -337,7 +337,7 @@ async function main() {
   });
 
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     logger.info('Shutting down...');
     scheduler.destroy();
     if (peerManager) {
@@ -348,17 +348,23 @@ async function main() {
       docSync.destroy();
     }
     sessionRegistry.close();
+    const teardowns: Promise<void>[] = [];
     for (const handle of feishuHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
     }
     for (const handle of telegramHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
       handle.bot.stop();
     }
     for (const handle of wechatHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
       handle.stop();
     }
+    // Cap teardown wait so a hung executor can't block exit indefinitely
+    await Promise.race([
+      Promise.allSettled(teardowns),
+      new Promise((resolve) => setTimeout(resolve, 15_000)),
+    ]);
     process.exit(0);
   };
 

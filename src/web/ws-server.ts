@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { BotRegistry, BotInfo } from '../api/bot-registry.js';
 import type { Logger } from '../utils/logger.js';
@@ -11,6 +12,22 @@ import { ChatSubscriptionManager } from './chat-subscriptions.js';
 import { GroupManager, type ChatGroup } from './group-manager.js';
 import { StreamingASRSession, createStreamingASRSession, isStreamingASRAvailable } from '../api/streaming-asr.js';
 import type { SessionRegistry, SessionRecord, SessionMessage } from '../session/session-registry.js';
+
+// ─── Timing-safe secret comparison ─────────────────────────────────────────
+
+/**
+ * Constant-time comparison of two secrets. Both inputs are hashed with SHA-256
+ * first so the comparison runs over fixed-length (32-byte) buffers — this both
+ * equalizes length (crypto.timingSafeEqual throws on length mismatch) and stops
+ * the comparison itself from leaking the secret length via timing. Returns false
+ * for any nullish input.
+ */
+export function timingSafeStrEqual(a: string | undefined | null, b: string | undefined | null): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 // ─── Client → Server messages ──────────────────────────────────────────────
 
@@ -144,7 +161,7 @@ export function setupWebSocketServer(
     // Auth via ?token=SECRET query parameter (if secret is configured)
     if (secret) {
       const token = url.searchParams.get('token');
-      if (token !== secret) {
+      if (!timingSafeStrEqual(token, secret)) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         wsLogger.warn('WebSocket connection rejected: invalid token');

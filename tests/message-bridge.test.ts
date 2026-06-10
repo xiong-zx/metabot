@@ -328,6 +328,59 @@ describe('MessageBridge between-turn questions', () => {
   });
 });
 
+describe('MessageBridge chatId cleanup (memory leak guard)', () => {
+  it('sweepStaleChatIdEntries evicts only entries older than the TTL', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const now = Date.now();
+    const TTL = 24 * 60 * 60 * 1000;
+
+    bridge.recentQuestionCard.set('stale', { cardMessageId: 'old', at: now - TTL - 1000 });
+    bridge.recentQuestionCard.set('fresh', { cardMessageId: 'new', at: now });
+
+    bridge.sweepStaleChatIdEntries();
+
+    expect(bridge.recentQuestionCard.has('stale')).toBe(false);
+    expect(bridge.recentQuestionCard.has('fresh')).toBe(true);
+
+    bridge.destroy();
+  });
+
+  it('destroy() clears all per-chat bookkeeping and the cleanup timer', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.recentQuestionCard.set('chat-1', { cardMessageId: 'm', at: Date.now() });
+    bridge.exitPlanCardsShown.add('chat-1');
+    bridge.spontaneousSubscribed.add('chat-1');
+    bridge.messageQueues.set('chat-1', []);
+    const clearedTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const bufTimer = setTimeout(() => {}, 60_000);
+    bridge.spontaneousBuffers.set('chat-1', { teamState: { teammates: [], tasks: [] }, snippets: [], timer: bufTimer });
+    const qTimer = setTimeout(() => {}, 60_000);
+    bridge.pendingBetweenTurnQuestions.set('chat-1', {
+      toolUseId: 't', questions: [], cardMessageId: 'm', currentQuestionIndex: 0,
+      collectedAnswers: {}, timeoutId: qTimer,
+    });
+
+    expect(bridge.chatIdCleanupTimer).toBeDefined();
+
+    bridge.destroy();
+
+    expect(bridge.recentQuestionCard.size).toBe(0);
+    expect(bridge.exitPlanCardsShown.size).toBe(0);
+    expect(bridge.spontaneousSubscribed.size).toBe(0);
+    expect(bridge.spontaneousBuffers.size).toBe(0);
+    expect(bridge.pendingBetweenTurnQuestions.size).toBe(0);
+    expect(bridge.messageQueues.size).toBe(0);
+    expect(bridge.chatIdCleanupTimer).toBeUndefined();
+
+    clearTimeout(bufTimer);
+    clearTimeout(qTimer);
+    void clearedTimers;
+  });
+});
+
 /**
  * Spontaneous-card helpers — extracted so the snippet generator and card
  * title are unit-testable without booting a real MessageBridge.

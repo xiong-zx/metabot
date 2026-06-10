@@ -10,7 +10,8 @@ import type { DocSync } from '../sync/doc-sync.js';
 import type { PeerManager } from './peer-manager.js';
 
 import { AsyncTaskStore } from './async-task-store.js';
-import { setupWebSocketServer, serveStaticFiles, type WebSocketHandle } from '../web/ws-server.js';
+import { setupWebSocketServer, serveStaticFiles, timingSafeStrEqual, type WebSocketHandle } from '../web/ws-server.js';
+import { rateLimiterFromEnv, resolveClientIp } from './request-rate-limiter.js';
 import { IntentRouter } from './intent-router.js';
 import { CircuitBreaker } from './circuit-breaker.js';
 import { BudgetManager } from './budget-manager.js';
@@ -146,6 +147,12 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   const ws: { handle?: WebSocketHandle } = {};
 
+  // Per-IP in-memory rate limiter (global ceiling + failed-auth backoff).
+  // Configurable via METABOT_RATE_LIMIT_MAX / METABOT_RATE_LIMIT_AUTH_FAILS,
+  // disabled via METABOT_RATE_LIMIT_DISABLED=1.
+  const rateLimiter = rateLimiterFromEnv();
+  rateLimiter.startSweep();
+
   // Build route context (shared across all route handlers)
   const ctx: RouteContext = {
     registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient,
@@ -183,6 +190,23 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     const method = req.method || 'GET';
     const url = req.url || '/';
 
+    // Resolve the client IP. We default to socket.remoteAddress because this
+    // bridge is typically NOT behind a trusted reverse proxy; X-Forwarded-For is
+    // only honoured when METABOT_TRUST_PROXY=1 (see resolveClientIp).
+    const clientIp = resolveClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for']);
+
+    // Rate limiting (global per-IP ceiling + failed-auth backoff). GET
+    // /api/health is exempt so liveness/readiness probes are never throttled.
+    const isHealthProbe = method === 'GET' && url === '/api/health';
+    if (!isHealthProbe) {
+      const decision = rateLimiter.check(clientIp);
+      if (decision) {
+        res.setHeader('Retry-After', String(decision.retryAfterSec));
+        jsonResponse(res, decision.status, { error: 'Too Many Requests', reason: decision.reason });
+        return;
+      }
+    }
+
     // Auth check (exempt /web/, /api/files/).
     //
     // /api/talk and /api/tasks routes accept dual auth: the local secret
@@ -190,31 +214,82 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // metabot-core `GET /api/whoami` validates (cross-bridge peer calls,
     // `metabot talk` from any user with a metabot-core token). Every other
     // API stays single-secret.
-    if (secret && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
+    // GET /api/health is exempt: it returns only minimal liveness info (see
+    // handler below) so probes/load-balancers can hit it without a secret.
+    const isPublicHealth = method === 'GET' && url === '/api/health';
+    if (secret && !isPublicHealth && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
+      const bearer = typeof auth === 'string' && /^Bearer\s+/i.test(auth)
+        ? auth.replace(/^Bearer\s+/i, '')
+        : undefined;
       const urlToken = url.includes('token=')
         ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token')
         : null;
-      const localOk = auth === `Bearer ${secret}` || urlToken === secret;
+      // Timing-safe comparison so the secret can't be recovered byte-by-byte.
+      const localOk = timingSafeStrEqual(bearer, secret) || timingSafeStrEqual(urlToken, secret);
+
+      const rejectUnauthorized = () => {
+        // Count this as a failed auth attempt; trips the per-IP lockout once the
+        // threshold is crossed. The next request from this IP will see 429.
+        rateLimiter.recordAuthFailure(clientIp);
+        jsonResponse(res, 401, { error: 'Unauthorized' });
+      };
 
       if (!localOk) {
         const canCrossVerify = isCrossVerifyRoute(method, url) && typeof auth === 'string' && /^Bearer\s+/i.test(auth);
         if (!canCrossVerify) {
-          jsonResponse(res, 401, { error: 'Unauthorized' });
+          rejectUnauthorized();
           return;
         }
         const verified = await verifyBearerViaMetabotCore(auth!, logger);
         if (!verified) {
-          jsonResponse(res, 401, { error: 'Unauthorized' });
+          rejectUnauthorized();
           return;
         }
       }
+      // Successful auth — clear any accumulated failed-auth counter so a
+      // legitimate client is never throttled by the backoff guard.
+      rateLimiter.recordAuthSuccess(clientIp);
     }
 
     try {
-      // GET /api/health — always handled here (lightweight)
+      // GET /api/health — minimal, unauthenticated-safe liveness probe.
+      // Deliberately returns ONLY status + uptime so an unauthenticated caller
+      // (deploy/k8s probe, or anyone if no api.secret is set) can't enumerate
+      // peer count, peer health, or peer URLs for reconnaissance. Detailed
+      // topology lives behind the authenticated /api/status route.
       if (method === 'GET' && url === '/api/health') {
+        jsonResponse(res, 200, {
+          status: 'ok',
+          uptime: Math.floor((Date.now() - startTime) / 1000),
+        });
+        return;
+      }
+
+      // GET /api/status — same diagnostics that /api/health used to leak, but
+      // gated by the auth check above (local secret or cross-verified Bearer).
+      if (method === 'GET' && url === '/api/status') {
         const peerStatuses = peerManager?.getPeerStatuses() ?? [];
+
+        // Process memory (MB). rss = total resident set, heapUsed = V8 heap in use.
+        const mem = process.memoryUsage();
+        const toMb = (bytes: number) => Math.round((bytes / 1024 / 1024) * 10) / 10;
+
+        // Executor-pool stats: reachable here via the same per-bot persistent
+        // registry the /api/executors route uses — no new plumbing required.
+        // We expose only aggregate counts (total + active turns), not per-chat
+        // detail, to keep /api/status lightweight.
+        let executorTotal = 0;
+        let executorActive = 0;
+        for (const bot of registry.listRegistered()) {
+          const reg = bot.bridge.getPersistentRegistry?.();
+          if (!reg) continue;
+          for (const e of reg.list()) {
+            executorTotal++;
+            if (e.hasActiveTurn) executorActive++;
+          }
+        }
+
         jsonResponse(res, 200, {
           status: 'ok',
           uptime: Math.floor((Date.now() - startTime) / 1000),
@@ -224,6 +299,9 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           peersHealthy: peerStatuses.filter((p) => p.healthy).length,
           scheduledTasks: scheduler.taskCount(),
           recurringTasks: scheduler.recurringTaskCount(),
+          memory: { rssMb: toMb(mem.rss), heapUsedMb: toMb(mem.heapUsed) },
+          executors: { total: executorTotal, active: executorActive },
+          rateLimit: { trackedIps: rateLimiter.size() },
         });
         return;
       }
@@ -267,6 +345,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   server.on('close', () => {
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
+    rateLimiter.stopSweep();
   });
 
   return server;

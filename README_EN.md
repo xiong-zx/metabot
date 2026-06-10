@@ -475,7 +475,8 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/health` | Health check |
+| `GET` | `/api/health` | Health check (no auth required) — returns `{ status, uptime }` only |
+| `GET` | `/api/status` | Rich status: bots, peers, scheduled/recurring tasks (auth required) |
 | `GET` | `/api/bots` | List bots (local + peer) |
 | `POST` | `/api/bots` | Create bot at runtime |
 | `DELETE` | `/api/bots/:name` | Remove bot |

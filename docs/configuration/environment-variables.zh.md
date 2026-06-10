@@ -74,6 +74,7 @@
 | `METABOT_PEER_SECRETS` | — | 逗号分隔的 peer secret（位置对应） |
 | `METABOT_PEER_NAMES` | 自动 | 逗号分隔的 peer 名称 |
 | `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | peer 拉取间隔 |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | 可选的逗号/空格分隔 IPv4 CIDR 白名单。设置后，任务转发仅允许目标 peer 的字面 IPv4 地址落在指定范围内。基于主机名的 peer 仍受已知 peer 白名单约束，但不受 CIDR 过滤。不设置 = 无 CIDR 约束。示例：`10.0.0.0/8,192.168.0.0/16` |
 
 ## 远程访问
 

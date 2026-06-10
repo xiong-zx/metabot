@@ -74,6 +74,7 @@ Falls back to the first Feishu bot's credentials if not set.
 | `METABOT_PEER_SECRETS` | — | Comma-separated peer secrets (positional match) |
 | `METABOT_PEER_NAMES` | auto | Comma-separated peer names |
 | `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | Peer poll interval |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | Optional comma/space-separated IPv4 CIDR allowlist. When set, task forwarding only targets peers whose literal-IPv4 host falls inside one of these ranges. Hostname-based peers are still gated by the known-peer allowlist but are not CIDR-filtered. Unset = no CIDR constraint. Example: `10.0.0.0/8,192.168.0.0/16` |
 
 ## Remote Access
 

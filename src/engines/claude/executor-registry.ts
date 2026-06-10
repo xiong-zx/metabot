@@ -10,6 +10,18 @@
  *   - Each executor self-shuts after `idleTimeoutMs` of silence
  *   - Unhealthy executors (closed / crashed) are auto-replaced on next acquire
  *   - Registry removes executors from its map when their 'closed' event fires
+ *
+ * Crash recovery (registry-level):
+ *   The executor self-restarts on transient SDK/PTY stream errors (capped, see
+ *   PersistentClaudeExecutor.maybeRestart). When that budget is exhausted it
+ *   ends in 'closed' having emitted 'crashed' first. Rather than discard the
+ *   pool slot immediately — which would lose all Agent-Team teammates and any
+ *   in-progress work, and route the next acquire to a vanilla fresh executor —
+ *   the registry KEEPS the crashed entry parked in the pool (its last sessionId
+ *   captured for resume) and respawns it on the next acquire / between-turn
+ *   attempt, with its own exponential backoff and a respawn cap. Only after the
+ *   registry-level respawn budget is exhausted is the entry truly removed
+ *   (delete + 'executor-removed').
  */
 
 import { EventEmitter } from 'node:events';
@@ -23,6 +35,15 @@ import {
 
 const DEFAULT_MAX_CONCURRENT_PER_BOT = 20;
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+/** Registry-level crash respawn backoff + cap (separate from the executor's
+ *  own in-process restart budget). Applied when a crashed entry is respawned
+ *  on a later acquire. */
+const DEFAULT_RESPAWN_BACKOFF_BASE_MS = 500;
+const DEFAULT_RESPAWN_BACKOFF_MAX_MS = 30 * 1000;
+const DEFAULT_MAX_RESPAWN_ATTEMPTS = 3;
+/** Reset the respawn counter once a respawned executor has stayed healthy this
+ *  long, so a single bad patch doesn't permanently burn the budget. */
+const RESPAWN_COUNTER_RESET_MS = 5 * 60 * 1000;
 
 export interface RegistryOptions {
   logger: Logger;
@@ -36,6 +57,12 @@ export interface RegistryOptions {
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
   backend?: 'sdk' | 'pty';
+  /**
+   * Max registry-level respawns of a crashed executor before its pool slot is
+   * truly removed. Distinct from the executor's own in-process restart cap.
+   * Default 3.
+   */
+  maxRespawnAttempts?: number;
 }
 
 /**
@@ -66,6 +93,35 @@ interface PoolEntry {
    * respawned — see {@link ExecutorRegistry.acquire}.
    */
   model?: string;
+  /**
+   * Per-acquire options this entry was last spawned with. Captured so a crashed
+   * entry can be respawned (resuming its session) without the caller having to
+   * re-supply cwd / onTeamEvent / apiContext / outputsDir.
+   */
+  acquireOpts: AcquireOptions;
+  /**
+   * True once the executor has emitted 'crashed' and its in-process restart
+   * budget is exhausted (terminal 'closed' after a crash). A crashed entry is
+   * KEPT in the pool (not deleted) so the next acquire can respawn it with the
+   * last sessionId, preserving teammates / in-progress work.
+   */
+  crashed: boolean;
+  /**
+   * True once the executor emitted 'crashed' at least once during its life,
+   * regardless of whether it later self-recovered. The terminal 'closed'
+   * handler reads this to distinguish a crash-exhausted close (park slot for
+   * respawn) from a clean idle/graceful close (remove slot). Reset to false on
+   * each respawn so a recovered-then-cleanly-closed executor isn't mis-parked.
+   */
+  crashedFlagSeen?: boolean;
+  /** Last sessionId observed before the crash, used as resume target. */
+  resumeSessionId?: string;
+  /** Registry-level respawn attempts spent on this slot since last reset. */
+  respawnAttempts: number;
+  /** Wall-clock floor before the next respawn is allowed (backoff gate). */
+  nextRespawnAt: number;
+  /** When the executor last became healthy (used to reset respawnAttempts). */
+  healthySince: number;
 }
 
 export class ExecutorRegistry extends EventEmitter {
@@ -131,10 +187,25 @@ export class ExecutorRegistry extends EventEmitter {
           'ExecutorRegistry: model changed — respawning executor',
         );
         await this.release(chatId, 'model-change');
+      } else if (existing.crashed && existing.model === effectiveModel) {
+        // Crashed slot — respawn in place (resuming the captured session) so
+        // teammates / in-progress work survive. Honors backoff + respawn cap;
+        // returns the live executor on success, or undefined once the budget
+        // is exhausted (slot removed) — fall through to fresh create then.
+        const respawned = await this.respawnCrashed(chatId, existing, opts);
+        if (respawned) {
+          this.executors.delete(chatId);
+          this.executors.set(chatId, existing); // bump LRU
+          return respawned;
+        }
       } else {
-        // Unhealthy — drop from map (will recreate below)
-        this.opts.logger.info({ chatId, state }, 'ExecutorRegistry: replacing unhealthy executor');
+        // Unhealthy (clean close, or crashed under a different model) — drop
+        // from map (will recreate below). If the slot was a parked crash, the
+        // 'closed' listener intentionally left it in place, so emit removal
+        // here to keep bridge bookkeeping (spontaneous subs etc.) in sync.
+        this.opts.logger.info({ chatId, state, crashed: existing.crashed }, 'ExecutorRegistry: replacing unhealthy executor');
         this.executors.delete(chatId);
+        if (existing.crashed) this.emit('executor-removed', chatId);
       }
     }
 
@@ -151,9 +222,43 @@ export class ExecutorRegistry extends EventEmitter {
     }
 
     // Create + start
+    const entry: PoolEntry = {
+      executor: undefined as unknown as PersistentClaudeExecutor, // set by spawnExecutor
+      chatId,
+      model: effectiveModel,
+      acquireOpts: opts,
+      crashed: false,
+      resumeSessionId: opts.resumeSessionId,
+      respawnAttempts: 0,
+      nextRespawnAt: 0,
+      healthySince: Date.now(),
+    };
+    const executor = this.buildExecutor(chatId, entry, opts, effectiveModel, opts.resumeSessionId);
+    await executor.start();
+    entry.executor = executor;
+    entry.healthySince = Date.now();
+    this.executors.set(chatId, entry);
+    this.opts.logger.info({ chatId, poolSize: this.executors.size }, 'ExecutorRegistry: acquired new executor');
+    this.emit('executor-added', chatId);
+    return executor;
+  }
+
+  /**
+   * Construct a {@link PersistentClaudeExecutor} for `entry` and wire its
+   * lifecycle listeners (crash parking + close cleanup). Shared by the
+   * fresh-create path in {@link acquire} and the {@link respawnCrashed} path.
+   * Does NOT call start() — the caller awaits that so it can surface failures.
+   */
+  private buildExecutor(
+    chatId: string,
+    entry: PoolEntry,
+    opts: AcquireOptions,
+    effectiveModel: string | undefined,
+    resumeSessionId: string | undefined,
+  ): PersistentClaudeExecutor {
     const execOpts: PersistentExecutorOptions = {
       cwd: opts.cwd,
-      resumeSessionId: opts.resumeSessionId,
+      resumeSessionId,
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
       logger: this.opts.logger,
@@ -164,19 +269,139 @@ export class ExecutorRegistry extends EventEmitter {
       backend: this.opts.backend,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
-    // Auto-cleanup when executor closes for any reason
+    // Remember the last live sessionId so a crash-respawn can resume it even
+    // if the SDK forked the sessionId mid-life.
+    executor.on('crashed', () => {
+      const cur = this.executors.get(chatId);
+      if (!cur || cur.executor !== executor) return;
+      const sid = executor.getSessionId();
+      if (sid) cur.resumeSessionId = sid;
+    });
+    // Auto-cleanup when executor closes for any reason. A crash-exhausted
+    // executor ('crashed' emitted earlier + now terminal 'closed') is KEPT in
+    // the pool as a parked slot so the next acquire can respawn it with resume;
+    // a clean close (idle / shutdown / stream-end) is removed immediately.
     executor.once('closed', () => {
       const cur = this.executors.get(chatId);
-      if (cur && cur.executor === executor) {
-        this.executors.delete(chatId);
-        this.opts.logger.info({ chatId }, 'ExecutorRegistry: executor closed, removed from pool');
-        this.emit('executor-removed', chatId);
+      if (!cur || cur.executor !== executor) return;
+      const sid = executor.getSessionId();
+      if (sid) cur.resumeSessionId = sid;
+      const maxRespawn = this.opts.maxRespawnAttempts ?? DEFAULT_MAX_RESPAWN_ATTEMPTS;
+      const crashExhausted =
+        cur.executor.getState() === 'closed' &&
+        // 'crashed' was emitted before this terminal close
+        cur.crashedFlagSeen === true &&
+        cur.respawnAttempts < maxRespawn &&
+        !this.shuttingDown;
+      if (crashExhausted) {
+        cur.crashed = true;
+        cur.nextRespawnAt = Date.now() + this.respawnBackoffMs(cur.respawnAttempts);
+        this.opts.logger.warn(
+          { chatId, respawnAttempts: cur.respawnAttempts, resumeSessionId: cur.resumeSessionId },
+          'ExecutorRegistry: executor crashed — parking slot for respawn on next acquire',
+        );
+        // Slot stays in the pool; no 'executor-removed' so bridge keeps its
+        // spontaneous subscription / between-turn bookkeeping for the respawn.
+        return;
       }
+      this.executors.delete(chatId);
+      this.opts.logger.info({ chatId }, 'ExecutorRegistry: executor closed, removed from pool');
+      this.emit('executor-removed', chatId);
     });
-    await executor.start();
-    this.executors.set(chatId, { executor, chatId, model: effectiveModel });
-    this.opts.logger.info({ chatId, poolSize: this.executors.size }, 'ExecutorRegistry: acquired new executor');
-    this.emit('executor-added', chatId);
+    // Track that a crash happened at all (distinct from clean close), so the
+    // 'closed' handler can tell a crash-exhausted close from an idle/graceful one.
+    executor.on('crashed', () => {
+      const cur = this.executors.get(chatId);
+      if (cur && cur.executor === executor) cur.crashedFlagSeen = true;
+    });
+    // The executor self-recovered a transient crash in-process (restarting →
+    // ready). Clear the crash flag so a LATER clean close (idle/shutdown) is
+    // treated as graceful and the slot is removed — not mistakenly parked for
+    // respawn on the strength of a crash it already recovered from.
+    executor.on('restarted', () => {
+      const cur = this.executors.get(chatId);
+      if (!cur || cur.executor !== executor) return;
+      cur.crashedFlagSeen = false;
+      cur.healthySince = Date.now();
+      const sid = executor.getSessionId();
+      if (sid) cur.resumeSessionId = sid;
+    });
+    return executor;
+  }
+
+  private respawnBackoffMs(attempt: number): number {
+    const base = DEFAULT_RESPAWN_BACKOFF_BASE_MS * Math.pow(2, attempt);
+    return Math.min(base, DEFAULT_RESPAWN_BACKOFF_MAX_MS);
+  }
+
+  /**
+   * Respawn a parked crashed entry in place, resuming its captured sessionId so
+   * teammates / in-progress work survive. Returns the live executor on success,
+   * or undefined when the respawn budget is exhausted / backoff not yet elapsed
+   * with no budget left — in which case the slot is removed and the caller
+   * falls back to a fresh create.
+   *
+   * Backoff: respawn is gated by `entry.nextRespawnAt`. If a caller arrives
+   * before the gate, we still respawn (waiting would block the user's turn);
+   * the gate primarily spaces out the attempt-count accounting and is honored
+   * on a best-effort basis via a short bounded wait.
+   */
+  private async respawnCrashed(
+    chatId: string,
+    entry: PoolEntry,
+    opts: AcquireOptions,
+  ): Promise<PersistentClaudeExecutor | undefined> {
+    const maxRespawn = this.opts.maxRespawnAttempts ?? DEFAULT_MAX_RESPAWN_ATTEMPTS;
+    if (entry.respawnAttempts >= maxRespawn) {
+      this.opts.logger.error(
+        { chatId, respawnAttempts: entry.respawnAttempts, max: maxRespawn },
+        'ExecutorRegistry: crash respawn budget exhausted — removing slot',
+      );
+      this.executors.delete(chatId);
+      this.emit('executor-removed', chatId);
+      return undefined;
+    }
+    // Best-effort backoff: wait out the remaining gate, bounded so a user turn
+    // never stalls longer than the max backoff.
+    const waitMs = Math.min(
+      Math.max(0, entry.nextRespawnAt - Date.now()),
+      DEFAULT_RESPAWN_BACKOFF_MAX_MS,
+    );
+    if (waitMs > 0) {
+      await new Promise<void>((r) => setTimeout(r, waitMs));
+    }
+    const effectiveModel = opts.model ?? this.opts.defaultModel;
+    entry.respawnAttempts++;
+    const resume = entry.resumeSessionId ?? opts.resumeSessionId;
+    this.opts.logger.info(
+      { chatId, attempt: entry.respawnAttempts, resume },
+      'ExecutorRegistry: respawning crashed executor (resume)',
+    );
+    // Refresh the captured opts (cwd/onTeamEvent/apiContext are stable per chat,
+    // but the latest acquire's callbacks should win).
+    entry.acquireOpts = opts;
+    entry.model = effectiveModel;
+    entry.crashed = false;
+    entry.crashedFlagSeen = false;
+    const executor = this.buildExecutor(chatId, entry, opts, effectiveModel, resume);
+    try {
+      await executor.start();
+    } catch (err) {
+      this.opts.logger.error({ err, chatId }, 'ExecutorRegistry: crash respawn start() failed');
+      // Re-park (or remove if now exhausted) and let the caller fall back.
+      if (entry.respawnAttempts >= maxRespawn) {
+        this.executors.delete(chatId);
+        this.emit('executor-removed', chatId);
+      } else {
+        entry.crashed = true;
+        entry.nextRespawnAt = Date.now() + this.respawnBackoffMs(entry.respawnAttempts);
+      }
+      return undefined;
+    }
+    entry.executor = executor;
+    entry.healthySince = Date.now();
+    this.opts.logger.info({ chatId, attempt: entry.respawnAttempts }, 'ExecutorRegistry: crashed executor respawned');
+    this.emit('executor-respawned', chatId);
     return executor;
   }
 

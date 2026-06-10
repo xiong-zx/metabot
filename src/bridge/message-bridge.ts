@@ -68,6 +68,17 @@ const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
 const QUESTION_CARD_REUSE_MS = 30 * 1000;
 
 /**
+ * Safety-net cleanup for per-chat between-turn bookkeeping that is normally
+ * freed on the `executor-removed` event. A periodic sweep evicts entries
+ * older than {@link CHATID_ENTRY_TTL_MS} so that, even if an executor-removed
+ * event is ever missed (or a chat only ever uses the legacy non-persistent
+ * path), the {@link MessageBridge.recentQuestionCard} map cannot grow without
+ * bound over a long-running process.
+ */
+const CHATID_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // sweep hourly
+const CHATID_ENTRY_TTL_MS = 24 * 60 * 60 * 1000; // evict entries unused for 24h
+
+/**
  * Default for the persistent-executor pool when no per-bot `persistentExecutor.enabled`
  * is set. Default: ON (since 2026-05-13). Opt out with
  * `METABOT_PERSISTENT_EXECUTOR=false` (or `=0`) in the env.
@@ -241,6 +252,12 @@ export class MessageBridge {
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
   private agentTeamStore?: AgentTeamStore;
+  /**
+   * Periodic sweep that evicts stale per-chat between-turn bookkeeping as a
+   * safety net behind the event-driven `executor-removed` cleanup. Cleared in
+   * {@link destroy}. Unref'd so it never keeps the process alive on its own.
+   */
+  private chatIdCleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private config: BotConfigBase,
@@ -296,6 +313,35 @@ export class MessageBridge {
       prepareSessionForExecution: this.prepareSessionForExecution.bind(this),
       runOneTurn: this.runOneTurn.bind(this),
     });
+
+    // Safety-net sweep for per-chat between-turn bookkeeping. The primary
+    // cleanup is event-driven (executor-removed); this only catches entries
+    // an event somehow missed, so an hourly sweep is plenty.
+    this.chatIdCleanupTimer = setInterval(() => {
+      this.sweepStaleChatIdEntries();
+    }, CHATID_CLEANUP_INTERVAL_MS);
+    this.chatIdCleanupTimer.unref?.();
+  }
+
+  /**
+   * Evict per-chat between-turn bookkeeping that hasn't been touched within
+   * {@link CHATID_ENTRY_TTL_MS}. Only {@link recentQuestionCard} carries a
+   * timestamp, so it's the one swept on a TTL; the other structures are freed
+   * synchronously by their own completion paths and the `executor-removed`
+   * handler. Runs on the {@link chatIdCleanupTimer} interval.
+   */
+  private sweepStaleChatIdEntries(): void {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [chatId, entry] of this.recentQuestionCard) {
+      if (now - entry.at > CHATID_ENTRY_TTL_MS) {
+        this.recentQuestionCard.delete(chatId);
+        evicted++;
+      }
+    }
+    if (evicted > 0) {
+      this.logger.info({ evicted, remaining: this.recentQuestionCard.size }, 'MessageBridge: swept stale chatId entries');
+    }
   }
 
   /** Emit an activity event if a listener is registered. */
@@ -543,6 +589,14 @@ export class MessageBridge {
             toolCalls: [],
           });
         }
+        // Drop the remaining per-chat between-turn bookkeeping. These Maps/Set
+        // are keyed by chatId but lack their own delete-on-completion path for
+        // every code branch (e.g. a superseded ExitPlanMode never reaches the
+        // drainSdkHandledTools delete), so they'd otherwise grow without bound
+        // as chats churn. The executor going away is the authoritative "this
+        // chat's between-turn state is dead" signal — clear it here.
+        this.recentQuestionCard.delete(chatId);
+        this.exitPlanCardsShown.delete(chatId);
       });
       this.logger.info(
         {
@@ -2839,7 +2893,13 @@ export class MessageBridge {
     }
   }
 
-  destroy(): void {
+  /**
+   * Synchronous teardown of timers / buffers / in-flight tasks, returning the
+   * promise for the inherently-async part (persistent executor release). Both
+   * {@link destroy} (fire-and-forget) and {@link destroyAsync} (awaited) share
+   * this so the cleanup body lives in one place.
+   */
+  private teardownSync(): Promise<void> {
     for (const [, batch] of this.pendingBatches) {
       clearTimeout(batch.timerId);
     }
@@ -2860,13 +2920,57 @@ export class MessageBridge {
       this.logger.info({ chatId }, 'Aborted continuation task during shutdown');
     }
     this.continuationTasks.clear();
-    this.sessionManager.destroy();
-    // Tear down persistent executors (Stage 2). Fire-and-forget so destroy()
-    // stays sync — registry.shutdownAll waits for clean SDK process exit
-    // internally and is idempotent.
-    if (this.persistentRegistry) {
-      void this.persistentRegistry.shutdownAll('bridge-destroy');
+    // Stop the periodic chatId cleanup sweep.
+    if (this.chatIdCleanupTimer) {
+      clearInterval(this.chatIdCleanupTimer);
+      this.chatIdCleanupTimer = undefined;
     }
+    // Clear pending spontaneous-activity buffers (each holds a live coalesce
+    // timer) so neither the timers nor the accumulated state leak past shutdown.
+    for (const [, buf] of this.spontaneousBuffers) {
+      clearTimeout(buf.timer);
+    }
+    this.spontaneousBuffers.clear();
+    this.spontaneousSubscribed.clear();
+    // Clear any in-flight between-turn question timers + the per-chat card
+    // bookkeeping maps that are otherwise only freed on executor-removed.
+    for (const [, pending] of this.pendingBetweenTurnQuestions) {
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+    }
+    this.pendingBetweenTurnQuestions.clear();
+    this.recentQuestionCard.clear();
+    this.exitPlanCardsShown.clear();
+    this.messageQueues.clear();
+    this.sessionManager.destroy();
+    // Tear down persistent executors (Stage 2). This is the one inherently
+    // async step: registry.shutdownAll awaits clean SDK/PTY process exit and
+    // flushes per-executor buffers. Return its promise so an awaiting caller
+    // (destroyAsync) can let in-flight teardown finish before the process
+    // exits; the legacy sync destroy() fire-and-forgets it.
+    if (this.persistentRegistry) {
+      return this.persistentRegistry.shutdownAll('bridge-destroy');
+    }
+    return Promise.resolve();
+  }
+
+  /**
+   * Synchronous destroy (legacy). Clears all timers/buffers/tasks immediately
+   * and kicks off persistent-executor shutdown without awaiting it. Prefer
+   * {@link destroyAsync} on the real shutdown path so in-flight executor
+   * teardown isn't dropped by a fast process.exit().
+   */
+  destroy(): void {
+    void this.teardownSync();
+  }
+
+  /**
+   * Async destroy. Runs the same synchronous teardown, then awaits the
+   * inherently-async persistent-executor release so callers can guarantee
+   * in-flight work is flushed before exiting the process. Idempotent and safe
+   * to call in place of {@link destroy}.
+   */
+  async destroyAsync(): Promise<void> {
+    await this.teardownSync();
   }
 }
 

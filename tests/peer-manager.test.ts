@@ -226,14 +226,19 @@ describe('PeerManager', () => {
     expect(manager.findBotOnPeer('bob', 'bot-a')).toBeUndefined();
   });
 
-  it('forwardTask sends POST with X-MetaBot-Origin header', async () => {
+  it('forwardTask sends POST with X-MetaBot-Origin header (known peer)', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ success: true, responseText: 'done' }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    manager = new PeerManager([], [], createLogger());
+    // Peer must be in the known-peer map for forwardTask to allow it.
+    manager = new PeerManager(
+      [{ name: 'alice', url: 'http://localhost:9200', secret: 'sec' }],
+      [],
+      createLogger(),
+    );
 
     const result = await manager.forwardTask(
       { name: 'alice', url: 'http://localhost:9200', secret: 'sec' },
@@ -251,6 +256,73 @@ describe('PeerManager', () => {
         }),
       }),
     );
+  });
+
+  it('forwardTask refuses an unknown (unverified) target — SSRF guard', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // No peers configured: a poisoned agent-bus URL pointing at an internal
+    // service must be rejected before any connection is opened.
+    manager = new PeerManager([], [], createLogger());
+
+    await expect(
+      manager.forwardTask(
+        { name: 'evil', url: 'http://localhost:6379' },
+        { botName: 'x', chatId: 'c', prompt: 'p' },
+      ),
+    ).rejects.toThrow(/not a known\/verified peer/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('forwardTask enforces METABOT_ALLOWED_PEER_CIDRS for literal IP targets', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    process.env.METABOT_ALLOWED_PEER_CIDRS = '172.31.0.0/16';
+    // Peer is "known" (in the map) but its IP is outside the allowed CIDR.
+    manager = new PeerManager(
+      [{ name: 'bob', url: 'http://10.0.0.5:9100' }],
+      [],
+      createLogger(),
+    );
+
+    await expect(
+      manager.forwardTask(
+        { name: 'bob', url: 'http://10.0.0.5:9100' },
+        { botName: 'x', chatId: 'c', prompt: 'p' },
+      ),
+    ).rejects.toThrow(/METABOT_ALLOWED_PEER_CIDRS/);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    delete process.env.METABOT_ALLOWED_PEER_CIDRS;
+  });
+
+  it('forwardTask allows an in-CIDR known peer when METABOT_ALLOWED_PEER_CIDRS is set', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    process.env.METABOT_ALLOWED_PEER_CIDRS = '172.31.0.0/16';
+    manager = new PeerManager(
+      [{ name: 'carol', url: 'http://172.31.4.7:9100' }],
+      [],
+      createLogger(),
+    );
+
+    const result = await manager.forwardTask(
+      { name: 'carol', url: 'http://172.31.4.7:9100' },
+      { botName: 'x', chatId: 'c', prompt: 'p' },
+    );
+    expect(result).toEqual({ success: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://172.31.4.7:9100/api/talk',
+      expect.objectContaining({ method: 'POST' }),
+    );
+
+    delete process.env.METABOT_ALLOWED_PEER_CIDRS;
   });
 
   it('sends auth header when peer has secret', async () => {

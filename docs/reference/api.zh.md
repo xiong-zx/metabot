@@ -14,11 +14,12 @@ Authorization: Bearer <API_SECRET>
 
 ### 健康与信息
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/health` | 健康检查（含 Bot 数、peer 状态） |
-| `GET` | `/api/stats` | 费用与使用统计（按 Bot/用户） |
-| `GET` | `/api/metrics` | Prometheus 监控指标 |
+| 方法 | 路径 | 需要认证 | 说明 |
+|------|------|----------|------|
+| `GET` | `/api/health` | 否 | 健康检查 — 仅返回 `{ status, uptime }` |
+| `GET` | `/api/status` | 是 | 详细状态：Bot 数、peer 数量、定时/周期任务 |
+| `GET` | `/api/stats` | 是 | 费用与使用统计（按 Bot/用户） |
+| `GET` | `/api/metrics` | 是 | Prometheus 监控指标 |
 
 ### Bot 管理
 

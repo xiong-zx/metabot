@@ -14,11 +14,12 @@ Authorization: Bearer <API_SECRET>
 
 ### Health & Info
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Health check (includes bot count, peer status) |
-| `GET` | `/api/stats` | Cost & usage stats (per-bot, per-user) |
-| `GET` | `/api/metrics` | Prometheus metrics endpoint |
+| Method | Path | Auth required | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/health` | No | Health check — returns `{ status, uptime }` only |
+| `GET` | `/api/status` | Yes | Rich status: bots, peer counts, scheduled/recurring tasks |
+| `GET` | `/api/stats` | Yes | Cost & usage stats (per-bot, per-user) |
+| `GET` | `/api/metrics` | Yes | Prometheus metrics endpoint |
 
 ### Bots
 
