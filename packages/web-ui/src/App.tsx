@@ -8,6 +8,7 @@ import { Search } from './routes/search';
 import { T5tBoard } from './routes/t5t-board';
 import { T5tProject } from './routes/t5t-project';
 import { AgentsList } from './routes/agents';
+import { Chat } from './routes/chat';
 import { UsersMemory } from './routes/users-memory';
 import { CliAccess } from './routes/cli-access';
 
@@ -179,6 +180,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/skills">skills</NavLink>
           <NavLink to="/t5t">t5t</NavLink>
           <NavLink to="/agents">agents</NavLink>
+          <NavLink to="/chat">chat</NavLink>
           <NavLink to="/cli">cli</NavLink>
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
           <a className="signout" href="/oauth2/sign_out" title="end 飞连 SSO session">
@@ -203,6 +205,7 @@ export default function App() {
         <Route path="/t5t/:slug" element={<T5tProject />} />
         <Route path="/users" element={<UsersMemory />} />
         <Route path="/agents" element={<AgentsList />} />
+        <Route path="/chat" element={<Chat />} />
         <Route path="/cli" element={<CliAccess />} />
         <Route path="/search" element={<Search />} />
         <Route path="*" element={<div className="content state">404 · no such route</div>} />

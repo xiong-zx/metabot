@@ -26,6 +26,8 @@ import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
   jsonResponse,
+  acceptCoreChatRun,
+  handleCoreChatRoutes,
   handleVoiceRoutes,
   handleFileRoutes,
   handleTeamRoutes,
@@ -36,6 +38,7 @@ import {
   handleSessionRoutes,
   handleExecutorRoutes,
   handleAgentTeamRoutes,
+  parseCoreChatRunRequest,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
 
@@ -167,6 +170,50 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     agentTeamSupervisor,
   };
 
+  if (peerManager) {
+    peerManager.setRelayHandler(async (message) => {
+      const parsedContent = parseRelayContent(message.content);
+      if (parsedContent && parsedContent.type === 'core-chat-run') {
+        const payload = typeof parsedContent.request === 'object' && parsedContent.request !== null
+          ? parsedContent.request as Record<string, unknown>
+          : parsedContent;
+        const parsed = parseCoreChatRunRequest(payload);
+        if (!parsed.request) {
+          logger.warn({ messageId: message.id, targetBot: message.targetBot, error: parsed.error }, 'invalid core-chat relay payload');
+          return;
+        }
+        const accepted = acceptCoreChatRun(ctx, parsed.request);
+        if (accepted.status >= 400) {
+          logger.warn({ messageId: message.id, targetBot: message.targetBot, status: accepted.status, body: accepted.body }, 'core-chat relay rejected');
+        }
+        return;
+      }
+
+      const botName = typeof parsedContent?.botName === 'string' && parsedContent.botName
+        ? parsedContent.botName
+        : message.targetBot;
+      const prompt = typeof parsedContent?.prompt === 'string' && parsedContent.prompt
+        ? parsedContent.prompt
+        : (typeof parsedContent?.content === 'string' && parsedContent.content ? parsedContent.content : message.content);
+      const chatId = typeof parsedContent?.chatId === 'string' && parsedContent.chatId
+        ? parsedContent.chatId
+        : (message.chatId || `agent-inbox-${botName}`);
+      const sendCards = typeof parsedContent?.sendCards === 'boolean' ? parsedContent.sendCards : true;
+      const bot = registry.get(botName);
+      if (!bot) {
+        logger.warn({ messageId: message.id, botName, targetBot: message.targetBot }, 'relay inbox target bot not found locally');
+        return;
+      }
+      logger.info({ messageId: message.id, botName, chatId, fromBot: message.fromBot, fromOwner: message.fromOwner }, 'executing relay inbox talk message');
+      await bot.bridge.executeApiTask({
+        prompt,
+        chatId,
+        userId: message.fromBot || message.fromOwner || 'agent-bus',
+        sendCards,
+      });
+    });
+  }
+
   for (const bot of registry.listRegistered()) {
     bot.bridge.setAgentTeamStore(agentTeamStore);
   }
@@ -174,6 +221,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   // Route handlers in priority order
   const routeHandlers = [
+    handleCoreChatRoutes,
     handleVoiceRoutes,
     handleFileRoutes,
     handleTeamRoutes,
@@ -226,7 +274,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token')
         : null;
       // Timing-safe comparison so the secret can't be recovered byte-by-byte.
-      const localOk = timingSafeStrEqual(bearer, secret) || timingSafeStrEqual(urlToken, secret);
+      const localOk = timingSafeStrEqual(bearer, secret)
+        || timingSafeStrEqual(urlToken, secret);
 
       const rejectUnauthorized = () => {
         // Count this as a failed auth attempt; trips the per-IP lockout once the
@@ -349,6 +398,17 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   });
 
   return server;
+}
+
+function parseRelayContent(content: string): Record<string, any> | undefined {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('{')) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, any> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function watchAgentTeamsConfig(options: {

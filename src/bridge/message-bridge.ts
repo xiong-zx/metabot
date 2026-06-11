@@ -127,6 +127,8 @@ export interface ApiTaskOptions {
   maxTurns?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
   model?: string;
+  /** Override engine for this API task without changing the chat's IM session default. */
+  engine?: EngineName;
   /** Override allowed tools for this task (empty array = no tools). */
   allowedTools?: string[];
   /** Called on every card state update (streaming). `final` is true on the last update. */
@@ -355,9 +357,7 @@ export class MessageBridge {
    * configured engine. Executors are cached per-engine so repeated turns
    * on the same engine don't re-instantiate the SDK wrapper.
    */
-  private executorForChat(chatId: string): Executor {
-    const session = this.sessionManager.getSession(chatId);
-    const name: EngineName = session.engine ?? resolveEngineName(this.config);
+  private executorForEngine(chatId: string, name: EngineName): Executor {
     let entry = this.engineCache.get(name);
     if (!entry) {
       const engine = createEngine(this.config, this.logger, name);
@@ -390,6 +390,33 @@ export class MessageBridge {
       this.logger.info(
         { chatId, modelEngine: session.modelEngine, engine: engineName },
         'Clearing model override from a different engine',
+      );
+      this.sessionManager.setSessionModel(chatId, undefined);
+    }
+
+    return {
+      session: this.sessionManager.getSession(chatId),
+      engineName,
+    };
+  }
+
+  private prepareSessionForApiExecution(chatId: string, overrideEngine?: EngineName) {
+    if (!overrideEngine) return this.prepareSessionForExecution(chatId);
+    const session = this.sessionManager.getSession(chatId);
+    const engineName = overrideEngine;
+
+    if (session.sessionId && session.sessionIdEngine && session.sessionIdEngine !== engineName) {
+      this.logger.info(
+        { chatId, sessionIdEngine: session.sessionIdEngine, engine: engineName },
+        'Clearing API session id from a different engine',
+      );
+      this.sessionManager.resetSession(chatId);
+    }
+
+    if (session.model && session.modelEngine && session.modelEngine !== engineName) {
+      this.logger.info(
+        { chatId, modelEngine: session.modelEngine, engine: engineName },
+        'Clearing API model override from a different engine',
       );
       this.sessionManager.setSessionModel(chatId, undefined);
     }
@@ -1271,7 +1298,7 @@ export class MessageBridge {
    * This is the **single chokepoint** for spawning a turn — initial-turn paths
    * AND every retry path (stale-session / context-overflow / catch) must call
    * this method. Previously, the 5 retry sites bypassed
-   * {@link getOrCreateRegistry} and went straight to {@link executorForChat}
+   * {@link getOrCreateRegistry} and went straight to the chat executor
    * even in persistent mode. The result: the persistent process kept running
    * with its stale resume-sessionId mapping while the user's new turn happened
    * in a separate one-off subprocess. Teammates / /goal / /background that
@@ -1334,7 +1361,7 @@ export class MessageBridge {
       return exec.nextTurn(opts.prompt) as unknown as ExecutionHandle;
     }
 
-    return this.executorForChat(chatId).startExecution({
+    return this.executorForEngine(chatId, engineName).startExecution({
       prompt: opts.prompt,
       cwd: opts.cwd,
       sessionId: opts.freshSession ? undefined : session.sessionId,
@@ -2465,7 +2492,7 @@ export class MessageBridge {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
     }
 
-    const { session, engineName } = this.prepareSessionForExecution(chatId);
+    const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
 

@@ -44,6 +44,18 @@ export interface LocalBotEntry {
   memoryPublic?: boolean;
 }
 
+export interface RelayInboxMessage {
+  id: string;
+  targetBot: string;
+  chatId: string;
+  fromBot: string | null;
+  fromOwner: string;
+  content: string;
+  enqueuedAt: string;
+}
+
+export type RelayInboxHandler = (message: RelayInboxMessage) => Promise<void>;
+
 interface PeerState {
   config: PeerConfig;
   healthy: boolean;
@@ -79,6 +91,9 @@ function parseAllowedPeerCidrs(raw: string | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 const HEARTBEAT_INTERVAL_MS = 60_000;
+const RELAY_POLL_WAIT_SECONDS = 60;
+const RELAY_POLL_TIMEOUT_MS = 70_000;
+const RELAY_POLL_RETRY_MS = 3_000;
 const REGISTER_RETRY_INITIAL_MS = 1_000;
 const REGISTER_RETRY_MAX_MS = 30_000;
 const AGENT_BUS_FAIL_LOG_THRESHOLD = 3;
@@ -225,6 +240,8 @@ export class PeerManager {
   private localBots: LocalBotEntry[] = [];
   /** Names that successfully landed in the registry (heartbeat targets). */
   private registeredBotNames: Set<string> = new Set();
+  private relayHandler?: RelayInboxHandler;
+  private relayPollers: Map<string, AbortController> = new Map();
   private agentBusFailureCount = 0;
   /**
    * Optional CIDR allowlist for forward targets (METABOT_ALLOWED_PEER_CIDRS).
@@ -306,7 +323,7 @@ export class PeerManager {
       }
       if (this.localBots.length === 0) {
         this.logger.warn(
-          { agentBusUrl: this.agentBusUrl, selfUrl: this.selfUrl },
+          { agentBusUrl: this.agentBusUrl },
           'Registry mode enabled but no local bots configured — bulk register will be skipped',
         );
       } else {
@@ -335,6 +352,11 @@ export class PeerManager {
       }, interval);
       this.pollTimer.unref();
     }
+  }
+
+  setRelayHandler(handler: RelayInboxHandler): void {
+    this.relayHandler = handler;
+    this.syncRelayPollers();
   }
 
   /**
@@ -406,7 +428,7 @@ export class PeerManager {
    * (server returns them in `results[i].status === 403`).
    */
   private async postBulkRegister(): Promise<{ registered: number }> {
-    if (!this.agentBusUrl || !this.selfUrl || this.localBots.length === 0) {
+    if (!this.agentBusUrl || this.localBots.length === 0) {
       return { registered: 0 };
     }
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -414,7 +436,7 @@ export class PeerManager {
     const payload = {
       bots: this.localBots.map((b) => ({
         botName: b.name,
-        url: this.selfUrl,
+        url: process.env.METABOT_AGENT_RELAY === 'false' ? this.selfUrl : 'inbox:',
         visible: b.visible !== false,
         // Omit memoryPublic from the payload when bots.json doesn't set it,
         // so a CLI-time `metabot memory visibility` toggle isn't clobbered by
@@ -438,6 +460,7 @@ export class PeerManager {
     this.registeredBotNames = new Set(
       (data.results || []).filter((r) => r.status === 201 || r.status === 200).map((r) => r.botName),
     );
+    this.syncRelayPollers();
     for (const r of data.results || []) {
       if (r.status >= 400) {
         this.logger.warn(
@@ -491,6 +514,29 @@ export class PeerManager {
       const newConfig: PeerConfig = { name: entry.botName, url: normalizedUrl };
       const prev = this.peers.get(entry.botName);
       const unchanged = prev && prev.config.url === normalizedUrl;
+      if (normalizedUrl === 'inbox:') {
+        next.set(
+          entry.botName,
+          unchanged
+            ? { ...prev, healthy: true, lastChecked: Date.now(), lastHealthy: Date.now(), error: undefined }
+            : {
+                config: newConfig,
+                healthy: true,
+                lastChecked: Date.now(),
+                lastHealthy: Date.now(),
+                bots: [{
+                  name: entry.botName,
+                  platform: 'agent-bus',
+                  engine: 'claude',
+                  workingDirectory: '',
+                  peerUrl: 'inbox:',
+                  peerName: entry.botName,
+                }],
+                skills: [],
+              },
+        );
+        continue;
+      }
       next.set(
         entry.botName,
         unchanged
@@ -549,14 +595,13 @@ export class PeerManager {
   }
 
   /**
-   * Pick the outbound Authorization for a cross-bridge call. In registry mode
-   * we always use the caller's metabot-core token — the peer verifies it via
-   * `GET /api/whoami`. In static-peer-only mode we fall back to the legacy
-   * per-peer shared secret.
+   * Pick the outbound Authorization for a cross-bridge call. Explicit static
+   * peer secrets take precedence because older/private bridges may not verify
+   * metabot-core bearer tokens. Registry-discovered peers fall back to the
+   * caller's metabot-core token.
    */
   private resolveOutboundAuth(peer: PeerConfig): string | undefined {
-    if (this.agentBusUrl) return this.agentBusToken;
-    return peer.secret;
+    return peer.secret || this.agentBusToken;
   }
 
   async refreshAll(): Promise<void> {
@@ -568,6 +613,23 @@ export class PeerManager {
 
   private async refreshPeer(state: PeerState): Promise<void> {
     const { config } = state;
+    if (config.url === 'inbox:') {
+      state.healthy = true;
+      state.lastChecked = Date.now();
+      state.lastHealthy = Date.now();
+      state.error = undefined;
+      if (state.bots.length === 0) {
+        state.bots = [{
+          name: config.name,
+          platform: 'agent-bus',
+          engine: 'claude',
+          workingDirectory: '',
+          peerUrl: 'inbox:',
+          peerName: config.name,
+        }];
+      }
+      return;
+    }
     const headers: Record<string, string> = {
       'X-MetaBot-Origin': 'peer',
     };
@@ -752,6 +814,9 @@ export class PeerManager {
 
   /** Forward a task request to a peer. Adds X-MetaBot-Origin header to prevent loops. */
   async forwardTask(peer: PeerConfig, body: object): Promise<object> {
+    if (peer.url === 'inbox:') {
+      return this.enqueueRelayTask(peer, body);
+    }
     const rejection = this.rejectForwardTarget(peer.url);
     if (rejection) {
       let host = peer.url;
@@ -783,6 +848,92 @@ export class PeerManager {
     });
 
     return (await response.json()) as object;
+  }
+
+  private async enqueueRelayTask(peer: PeerConfig, body: any): Promise<object> {
+    if (!this.agentBusUrl) throw new Error('agent bus URL is not configured');
+    const prompt = typeof body?.prompt === 'string'
+      ? body.prompt
+      : (typeof body?.content === 'string' ? body.content : '');
+    if (!prompt) throw new Error('relay task prompt is required');
+    const chatId = typeof body?.chatId === 'string' ? body.chatId : '';
+    const targetBot = typeof body?.botName === 'string' && body.botName ? body.botName : peer.name;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.agentBusToken) headers['Authorization'] = `Bearer ${this.agentBusToken}`;
+    const resp = await proxyFetch(`${this.agentBusUrl}/api/inbox/${encodeURIComponent(targetBot)}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        chatId,
+        content: JSON.stringify({
+          type: 'talk',
+          botName: targetBot,
+          chatId,
+          prompt,
+          sendCards: body?.sendCards,
+        }),
+      }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    const data = (await resp.json().catch(() => ({}))) as object;
+    if (!resp.ok) {
+      throw new Error(`core inbox enqueue failed with HTTP ${resp.status}`);
+    }
+    return { accepted: true, relay: 'inbox', ...data };
+  }
+
+  private syncRelayPollers(): void {
+    if (!this.agentBusUrl || !this.relayHandler || !this.agentBusToken) return;
+    for (const botName of this.registeredBotNames) {
+      if (this.relayPollers.has(botName)) continue;
+      const controller = new AbortController();
+      this.relayPollers.set(botName, controller);
+      void this.runRelayPollLoop(botName, controller).catch((err) => {
+        this.logger.warn({ err: err?.message, botName }, 'relay inbox poll loop stopped');
+      });
+    }
+    for (const [botName, controller] of this.relayPollers) {
+      if (!this.registeredBotNames.has(botName)) {
+        controller.abort();
+        this.relayPollers.delete(botName);
+      }
+    }
+  }
+
+  private async runRelayPollLoop(botName: string, controller: AbortController): Promise<void> {
+    while (!controller.signal.aborted) {
+      try {
+        const message = await this.pollRelayInbox(botName, controller.signal);
+        if (message && this.relayHandler) {
+          await this.relayHandler(message);
+        }
+      } catch (err: any) {
+        if (controller.signal.aborted) return;
+        this.logger.warn({ err: err?.message, botName }, 'relay inbox poll failed');
+        await new Promise((resolve) => setTimeout(resolve, RELAY_POLL_RETRY_MS));
+      }
+    }
+  }
+
+  private async pollRelayInbox(botName: string, signal: AbortSignal): Promise<RelayInboxMessage | undefined> {
+    if (!this.agentBusUrl || !this.agentBusToken) return undefined;
+    const resp = await proxyFetch(
+      `${this.agentBusUrl}/api/inbox/${encodeURIComponent(botName)}/poll?wait=${RELAY_POLL_WAIT_SECONDS}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.agentBusToken}`,
+        },
+        body: JSON.stringify({ wait: RELAY_POLL_WAIT_SECONDS }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(RELAY_POLL_TIMEOUT_MS)]),
+      },
+    );
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    const data = (await resp.json()) as { message?: RelayInboxMessage | null };
+    return data.message ?? undefined;
   }
 
   /** Return all cached skills from healthy peers. */
@@ -848,5 +999,9 @@ export class PeerManager {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
+    for (const controller of this.relayPollers.values()) {
+      controller.abort();
+    }
+    this.relayPollers.clear();
   }
 }

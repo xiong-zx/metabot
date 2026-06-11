@@ -317,7 +317,7 @@ async function cmdTalk(args: string[]): Promise<void> {
   const res = await fetch(peerUrl, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ botName, chatId, content }),
+    body: JSON.stringify({ botName, chatId, prompt: content, content }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

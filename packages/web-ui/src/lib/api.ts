@@ -218,7 +218,112 @@ export interface AgentSummary {
   url: string;
   host: string;
   visible: boolean;
+  ownerName?: string;
   lastSeenAt: string;
+}
+
+export interface WhoamiResponse {
+  botName: string;
+  ownerName: string;
+  role: string;
+  authSource: string;
+  credentialId: string;
+  memoryPublic: boolean;
+}
+
+// ---- chat ----
+
+export type ChatConversationKind = 'dm' | 'group';
+export type ChatParticipantKind = 'user' | 'agent';
+export type ChatMessageKind = 'user' | 'assistant' | 'system';
+export type ChatRunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_user'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+export interface ChatParticipant {
+  conversationId: string;
+  kind: ChatParticipantKind;
+  ref: string;
+  displayName: string;
+  addedBy: string;
+  addedAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversationId: string;
+  kind: ChatMessageKind;
+  senderKind: ChatParticipantKind;
+  senderRef: string;
+  senderDisplayName: string;
+  content: string;
+  mentionedAgentRefs: string[];
+  runId: string | null;
+  createdAt: string;
+}
+
+export interface ChatRunEvent {
+  id?: string;
+  runId: string;
+  seq: number;
+  kind?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | string;
+  type?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | string;
+  payload?: unknown;
+  payloadJson?: unknown;
+  createdAt: string;
+}
+
+export interface ChatRun {
+  id: string;
+  conversationId: string;
+  triggerMessageId: string | null;
+  targetAgentRef: string;
+  engine?: string | null;
+  model?: string | null;
+  status: ChatRunStatus;
+  updatedAt: string;
+  createdAt?: string;
+  completedAt?: string | null;
+  error?: string | null;
+  events?: ChatRunEvent[];
+}
+
+export interface ChatConversation {
+  id: string;
+  kind: ChatConversationKind;
+  title: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string | null;
+  participants: ChatParticipant[];
+  lastMessage: ChatMessage | null;
+  unreadCount: number;
+}
+
+export interface PostChatMessageResponse {
+  message: ChatMessage;
+  agentTriggers: string[];
+  runsCreated: number;
+  runs?: ChatRun[];
+  runEvents?: ChatRunEvent[];
+}
+
+export interface ChatParticipantInput {
+  kind: ChatParticipantKind;
+  ref: string;
+  displayName?: string;
+}
+
+export interface ChatParticipantSearchResult {
+  kind: ChatParticipantKind;
+  ref: string;
+  displayName: string;
+  source: 'exact' | 'known' | 'agent' | string;
 }
 
 // ---- self-service web token (mirror of packages/server/src/web/web-routes.ts) ----
@@ -336,6 +441,76 @@ export const api = {
     request<{ skills: SkillSearchResult[] }>(`/api/skills/search?q=${encodeURIComponent(q)}`),
 
   listAgents: () => request<{ agents: AgentSummary[] }>('/api/agents'),
+  whoami: () => request<WhoamiResponse>('/api/whoami'),
+
+  listChatConversations: () =>
+    request<{ conversations: ChatConversation[] }>('/api/chat/conversations'),
+  getChatConversation: (id: string) =>
+    request<ChatConversation>(`/api/chat/conversations/${encodeURIComponent(id)}`),
+  createChatConversation: (
+    kind: ChatConversationKind,
+    title: string | undefined,
+    participants: ChatParticipantInput[],
+  ) =>
+    request<ChatConversation>('/api/chat/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, title, participants }),
+    }),
+  findOrCreateAgentDm: (botName: string) =>
+    request<ChatConversation>('/api/chat/conversations/agent-dm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botName }),
+    }),
+  addChatParticipant: (conversationId: string, participant: ChatParticipantInput) =>
+    request<ChatParticipant>(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}/participants`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(participant),
+      },
+    ),
+  searchChatParticipants: (q: string, limit = 12) =>
+    request<{ participants: ChatParticipantSearchResult[] }>(
+      `/api/chat/participants/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+  listChatRuns: (conversationId: string) =>
+    request<{ runs: ChatRun[] }>(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}/runs`,
+    ),
+  listChatRunEvents: (runId: string) =>
+    request<{ events: ChatRunEvent[] }>(
+      `/api/chat/runs/${encodeURIComponent(runId)}/events`,
+    ),
+  listChatMessages: (conversationId: string, limit = 80) =>
+    request<{ messages: ChatMessage[] }>(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}`,
+    ),
+  postChatMessage: (
+    conversationId: string,
+    content: string,
+    mentionedAgentRefs: string[],
+    options?: { engine?: string; model?: string },
+  ) =>
+    request<PostChatMessageResponse>(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, mentionedAgentRefs, ...options }),
+      },
+    ),
+  markChatRead: (conversationId: string, messageId: string | null) =>
+    request<{ conversationId: string; userRef: string; lastReadMessageId: string | null; lastReadAt: string }>(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}/read`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId }),
+      },
+    ),
 
   issueWebToken: () =>
     request<IssueTokenResponse>('/api/web/issue-token', {

@@ -10,6 +10,7 @@ import { MemoryStore, ALLOWED_CONTENT_TYPES } from './memory/memory-store.js';
 import { SkillStore } from './skills/skill-store.js';
 import { AgentStore } from './agents/agent-store.js';
 import { InboxStore } from './agents/inbox-store.js';
+import { ChatStore } from './chat/chat-store.js';
 import { T5tStore } from './t5t/t5t-store.js';
 import { loadT5tFolderIds } from './t5t/folder-ids.js';
 import { AuditLog, createDefaultAuditLog, type AuditOp } from './observability/audit-log.js';
@@ -17,6 +18,7 @@ import * as memoryRoutes from './memory/memory-routes.js';
 import * as skillRoutes from './skills/skill-routes.js';
 import * as agentRoutes from './agents/agent-routes.js';
 import * as inboxRoutes from './agents/inbox-routes.js';
+import * as chatRoutes from './chat/chat-routes.js';
 import * as t5tRoutes from './t5t/t5t-routes.js';
 import * as adminRoutes from './admin/admin-routes.js';
 import * as webRoutes from './web/web-routes.js';
@@ -56,6 +58,7 @@ export interface ServerHandle {
   skillStore: SkillStore;
   agentStore: AgentStore;
   inboxStore: InboxStore;
+  chatStore: ChatStore;
   t5tStore: T5tStore;
   auditLog: AuditLog;
   startedAt: number;
@@ -198,6 +201,59 @@ function tryServeStatic(
   return true;
 }
 
+function corePublicBaseUrl(): string {
+  const raw = process.env.METABOT_CORE_URL || 'https://metabot-core.xvirobotics.com';
+  return raw.replace(/\/+$/, '');
+}
+
+async function deliverChatRunToAgent(
+  agentStore: AgentStore,
+  inboxStore: InboxStore,
+  logger: Logger,
+  run: {
+    id: string;
+    conversationId: string;
+    triggerMessageId: string;
+    targetAgentRef: string;
+    prompt: string;
+    engine?: string | null;
+    model?: string | null;
+  },
+): Promise<void> {
+  const agent = agentStore.getByName(run.targetAgentRef);
+  if (!agent) {
+    logger.warn({ runId: run.id, targetAgentRef: run.targetAgentRef }, 'chat run target agent unavailable');
+    return;
+  }
+  try {
+    const request = {
+      runId: run.id,
+      conversationId: run.conversationId,
+      triggerMessageId: run.triggerMessageId,
+      targetBot: run.targetAgentRef,
+      prompt: run.prompt,
+      engine: run.engine,
+      model: run.model,
+      eventCallbackUrl: `${corePublicBaseUrl()}/api/chat/runs/${encodeURIComponent(run.id)}/events`,
+      userId: 'metabot-core-chat',
+    };
+    const message = inboxStore.enqueue({
+      targetBot: run.targetAgentRef,
+      chatId: `core-chat:${run.conversationId}`,
+      fromBot: null,
+      fromOwner: 'metabot-core',
+      fromCredentialId: 'metabot-core-system',
+      content: JSON.stringify({
+        type: 'core-chat-run',
+        request,
+      }),
+    });
+    logger.info({ runId: run.id, targetAgentRef: run.targetAgentRef, inboxMessageId: message.id }, 'chat run enqueued for bridge relay');
+  } catch (err) {
+    logger.warn({ err, runId: run.id, targetAgentRef: run.targetAgentRef }, 'chat run delivery failed');
+  }
+}
+
 /**
  * Structural read-only fork for web-identity (browser SSO) credentials.
  * Returns true only for the explicitly enumerated GETs in §11.5 of
@@ -217,6 +273,10 @@ function isWebReadableRoute(method: string, pathname: string): boolean {
   if (pathname === '/api/skills/search') return true;
   if (pathname.startsWith('/api/skills/')) return true;
   if (pathname === '/api/agents') return true;
+  if (pathname === '/api/chat/participants/search') return true;
+  if (pathname === '/api/chat/conversations') return true;
+  if (pathname.startsWith('/api/chat/conversations/')) return true;
+  if (pathname.startsWith('/api/chat/runs/')) return true;
   if (pathname === '/api/whoami') return true;
   if (pathname === '/api/t5t/board') return true;
   if (pathname.startsWith('/api/t5t/projects/')) return true;
@@ -235,6 +295,12 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
   if (method === 'POST' && pathname === '/api/t5t/feedback') return true;
   if (method === 'POST' && pathname === '/api/t5t/topfive') return true;
   if (method === 'POST' && pathname === '/api/web/issue-token') return true;
+  if (pathname === '/api/chat/conversations' && method === 'POST') return true;
+  if (pathname === '/api/chat/conversations/agent-dm' && method === 'POST') return true;
+  if (pathname === '/api/chat/conversations/user-dm' && method === 'POST') return true;
+  if (/^\/api\/chat\/conversations\/[^/]+\/(messages|participants|read)$/.test(pathname) && method === 'POST') {
+    return true;
+  }
   // Project kill (soft-kill via append-only doc) — owner-auth enforced at the
   // route layer. Matches the shape `POST /api/t5t/projects/:slug/kill`.
   if (
@@ -338,6 +404,13 @@ function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname === '/api/t5t/board' && method === 'GET') return 'list';
   if (pathname.startsWith('/api/t5t/projects/') && method === 'GET') return 'get';
   if (pathname === '/api/web/issue-token' && method === 'POST') return 'issue';
+  if (pathname.startsWith('/api/chat/')) {
+    if (method === 'POST' && pathname.includes('/events')) return 'chat_event';
+    if (method === 'GET') return pathname.endsWith('/messages') ? 'list' : 'get';
+    if (method === 'POST' && pathname.endsWith('/messages')) return 'message';
+    if (method === 'POST' && pathname.endsWith('/read')) return 'read';
+    if (method === 'POST') return 'create';
+  }
   if (pathname.startsWith('/api/inbox/')) {
     if (pathname.endsWith('/poll') && method === 'POST') return 'inbox_pop';
     if (method === 'POST') return 'inbox_enqueue';
@@ -372,6 +445,7 @@ export function startServer(options: ServerOptions): ServerHandle {
   const skillStore = new SkillStore(db, logger.child({ module: 'skills' }));
   const agentStore = new AgentStore(db, logger.child({ module: 'agents' }));
   const inboxStore = new InboxStore(db, logger.child({ module: 'inbox' }));
+  const chatStore = new ChatStore(db, logger.child({ module: 'chat' }));
   const t5tFolderIds = loadT5tFolderIds(
     process.env,
     memoryStore,
@@ -389,6 +463,21 @@ export function startServer(options: ServerOptions): ServerHandle {
   }
 
   const startedAt = Date.now();
+  const chatDeps = {
+    chat: chatStore,
+    agents: agentStore,
+    deliverRun: (run: {
+      id: string;
+      conversationId: string;
+      triggerMessageId: string;
+      targetAgentRef: string;
+      prompt: string;
+      engine?: string | null;
+      model?: string | null;
+    }) => {
+      void deliverChatRunToAgent(agentStore, inboxStore, logger, run);
+    },
+  };
 
   const server = http.createServer(async (req, res) => {
     const method = req.method || 'GET';
@@ -748,6 +837,77 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, inboxRoutes.clearInbox(inboxStore, agentStore, botName, query, cred));
       }
 
+      // ---- Chat routes (browser SSO only) ----
+      if (pathname === '/api/chat/participants/search' && method === 'GET') {
+        return jsonResult(res, chatRoutes.searchParticipants(chatDeps, query, cred));
+      }
+      if (pathname === '/api/chat/conversations' && method === 'GET') {
+        return jsonResult(res, chatRoutes.listConversations(chatDeps, cred));
+      }
+      if (pathname === '/api/chat/conversations' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.createConversation(chatDeps, body, cred));
+      }
+      if (pathname === '/api/chat/conversations/agent-dm' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.findOrCreateAgentDm(chatDeps, body, cred));
+      }
+      if (pathname === '/api/chat/conversations/user-dm' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.findOrCreateUserDm(chatDeps, body, cred));
+      }
+      const chatParticipantsMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/participants$/);
+      if (chatParticipantsMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatParticipantsMatch[1]);
+        return jsonResult(res, chatRoutes.listParticipants(chatDeps, conversationId, cred));
+      }
+      if (chatParticipantsMatch && method === 'POST') {
+        const conversationId = decodeURIComponent(chatParticipantsMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.addParticipant(chatDeps, conversationId, body, cred));
+      }
+      const chatRunsMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/runs$/);
+      if (chatRunsMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatRunsMatch[1]);
+        return jsonResult(res, chatRoutes.listRuns(chatDeps, conversationId, cred));
+      }
+      const chatFilesMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/files$/);
+      if (chatFilesMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatFilesMatch[1]);
+        return jsonResult(res, chatRoutes.listFiles(chatDeps, conversationId, cred));
+      }
+      const chatMessagesMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/messages$/);
+      if (chatMessagesMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatMessagesMatch[1]);
+        return jsonResult(res, chatRoutes.listMessages(chatDeps, conversationId, query, cred));
+      }
+      if (chatMessagesMatch && method === 'POST') {
+        const conversationId = decodeURIComponent(chatMessagesMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.postMessage(chatDeps, conversationId, body, cred));
+      }
+      const chatReadMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/read$/);
+      if (chatReadMatch && method === 'POST') {
+        const conversationId = decodeURIComponent(chatReadMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.markRead(chatDeps, conversationId, body, cred));
+      }
+      const chatRunEventsMatch = pathname.match(/^\/api\/chat\/runs\/([^/]+)\/events$/);
+      if (chatRunEventsMatch && method === 'GET') {
+        const runId = decodeURIComponent(chatRunEventsMatch[1]);
+        return jsonResult(res, chatRoutes.listRunEvents(chatDeps, runId, cred));
+      }
+      if (chatRunEventsMatch && method === 'POST') {
+        const runId = decodeURIComponent(chatRunEventsMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.postRunEvent(chatDeps, runId, body, cred));
+      }
+      const chatConversationMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)$/);
+      if (chatConversationMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatConversationMatch[1]);
+        return jsonResult(res, chatRoutes.getConversation(chatDeps, conversationId, cred));
+      }
+
       // ---- T5T routes ----
       if (pathname === '/api/t5t/board' && method === 'GET') {
         return jsonResult(res, t5tRoutes.getBoard(t5tStore, cred));
@@ -860,6 +1020,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     skillStore,
     agentStore,
     inboxStore,
+    chatStore,
     t5tStore,
     auditLog,
     startedAt,

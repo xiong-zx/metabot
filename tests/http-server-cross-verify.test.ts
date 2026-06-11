@@ -9,6 +9,13 @@ describe('isCrossVerifyRoute', () => {
     expect(isCrossVerifyRoute('GET', '/api/talk/abc-123')).toBe(true);
   });
 
+  it('keeps core-chat delivery out of generic cross-verified bearer routes', () => {
+    expect(isCrossVerifyRoute('POST', '/api/core-chat/runs')).toBe(false);
+    expect(isCrossVerifyRoute('POST', '/api/core-chat/runs?source=core')).toBe(false);
+    expect(isCrossVerifyRoute('POST', '/api/core-chat/runs/run-123/cancel')).toBe(false);
+    expect(isCrossVerifyRoute('POST', '/api/core-chat/runs/run-123/cancel?retry=1')).toBe(false);
+  });
+
   it('accepts the read-only peer-discovery routes', () => {
     expect(isCrossVerifyRoute('GET', '/api/bots')).toBe(true);
     expect(isCrossVerifyRoute('GET', '/api/bots?foo=1')).toBe(true);
@@ -32,5 +39,7 @@ describe('isCrossVerifyRoute', () => {
     expect(isCrossVerifyRoute('GET', '/api/health')).toBe(false);
     expect(isCrossVerifyRoute('GET', '/api/schedule')).toBe(false);
     expect(isCrossVerifyRoute('POST', '/api/schedule')).toBe(false);
+    expect(isCrossVerifyRoute('GET', '/api/core-chat/runs')).toBe(false);
+    expect(isCrossVerifyRoute('POST', '/api/core-chat/runs/run-123/events')).toBe(false);
   });
 });

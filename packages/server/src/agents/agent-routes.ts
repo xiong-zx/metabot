@@ -188,6 +188,7 @@ export function listAgents(
         url: a.url,
         host: deriveHost(a.url),
         visible: a.visible,
+        ownerName: a.ownerName,
         memoryPublic: a.memoryPublic,
         visibleToOwners: a.visibleToOwners,
         lastSeenAt: a.lastSeenAt,

@@ -112,6 +112,7 @@ export function AgentsList() {
                 <th>url</th>
                 <th>last seen</th>
                 <th>visibility</th>
+                <th>chat</th>
               </tr>
             </thead>
             <tbody>
@@ -125,6 +126,15 @@ export function AgentsList() {
                     <span className={`badge ${a.visible ? 'vis-published' : 'vis-private'}`}>
                       {a.visible ? 'visible' : 'hidden'}
                     </span>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="agent-chat-button"
+                      onClick={() => nav(`/chat?agent=${encodeURIComponent(a.botName)}`)}
+                    >
+                      chat
+                    </button>
                   </td>
                 </tr>
               ))}
