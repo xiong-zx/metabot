@@ -10,9 +10,8 @@ import { ExecutorRegistry } from '../src/engines/claude/executor-registry.js';
  * restarted → unflag, closed → remove) end-to-end, not a hand-copied mirror.
  */
 const mockInstances: any[] = [];
-vi.mock('../src/engines/claude/persistent-executor.js', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { EventEmitter: EE } = require('node:events');
+vi.mock('../src/engines/claude/persistent-executor.js', async () => {
+  const { EventEmitter: EE } = await import('node:events');
   class MockPersistentExecutor extends EE {
     state: 'ready' | 'closed' | 'restarting' = 'ready';
     sessionId = 'mock-sess';
@@ -85,7 +84,7 @@ describe('ExecutorRegistry crash resurrection (Problem A)', () => {
     // Re-create just the listener wiring from buildExecutor against the fake.
     attachRegistryListeners(registry, 'chat-1', fake);
 
-    let removed: string[] = [];
+    const removed: string[] = [];
     registry.on('executor-removed', (c: string) => removed.push(c));
 
     fake.crashToDeath('sess-1-forked');
@@ -111,7 +110,7 @@ describe('ExecutorRegistry crash resurrection (Problem A)', () => {
     registry.executors.set('chat-2', entry);
     attachRegistryListeners(registry, 'chat-2', fake);
 
-    let removed: string[] = [];
+    const removed: string[] = [];
     registry.on('executor-removed', (c: string) => removed.push(c));
 
     // Clean close: no 'crashed' first.
@@ -133,7 +132,7 @@ describe('ExecutorRegistry crash resurrection (Problem A)', () => {
     registry.executors.set('chat-3', entry);
     attachRegistryListeners(registry, 'chat-3', fake);
 
-    let removed: string[] = [];
+    const removed: string[] = [];
     registry.on('executor-removed', (c: string) => removed.push(c));
 
     // Transient crash, then in-process recovery ('restarted'), then later a
@@ -187,7 +186,7 @@ describe('ExecutorRegistry crash resurrection (Problem A)', () => {
     };
     registry.executors.set('chat-5', parked);
 
-    let removed: string[] = [];
+    const removed: string[] = [];
     registry.on('executor-removed', (c: string) => removed.push(c));
 
     const respawned = await registry.respawnCrashed('chat-5', parked, { cwd: '/tmp' });
@@ -210,7 +209,7 @@ describe('ExecutorRegistry crash resurrection (Problem A)', () => {
     entry.executor = exec;
     registry.executors.set('chat-real', entry);
 
-    let removed: string[] = [];
+    const removed: string[] = [];
     registry.on('executor-removed', (c: string) => removed.push(c));
 
     // Transient crash then in-process recovery: production 'restarted' handler
