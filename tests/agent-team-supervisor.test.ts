@@ -355,6 +355,162 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
+  it('runs multiple pending tasks for the same member concurrently in isolated sessions', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'reviewer', engine: 'codex' });
+    store.createTask('demo', { subject: 'Verify API routes', owner: 'reviewer' });
+    store.createTask('demo', { subject: 'Verify web UI', owner: 'reviewer' });
+
+    const pending: Array<{
+      chatId: string;
+      resolve: (value: { success: boolean; responseText: string; sessionId: string }) => void;
+    }> = [];
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => {
+      return await new Promise<{ success: boolean; responseText: string; sessionId: string }>((resolve) => {
+        pending.push({
+          chatId,
+          resolve,
+        });
+      });
+    });
+    const { registry, setSessionId } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledTimes(2);
+    });
+
+    const chatIds = pending.map((run) => run.chatId);
+    expect(new Set(chatIds).size).toBe(2);
+    expect(chatIds.every((chatId) => chatId.startsWith('team:demo:reviewer:run-'))).toBe(true);
+    expect(setSessionId).not.toHaveBeenCalled();
+    expect(store.listRuns('demo').filter((run) => run.agentName === 'reviewer' && run.status === 'running')).toHaveLength(2);
+    expect(store.listTasks('demo').filter((task) => task.status === 'in_progress')).toHaveLength(2);
+    expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'working' });
+
+    pending[0]!.resolve({ success: true, responseText: 'api verified', sessionId: 'isolated-api' });
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'completed')).toHaveLength(1);
+    });
+    expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'working' });
+
+    pending[1]!.resolve({ success: true, responseText: 'ui verified', sessionId: 'isolated-ui' });
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'completed')).toHaveLength(2);
+      expect(store.listTasks('demo').filter((task) => task.status === 'completed')).toHaveLength(2);
+      expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'idle' });
+    });
+    expect(store.getAgent('demo', 'reviewer')?.sessionId).toBeUndefined();
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('pairs dispatch wake-up messages with their tasks instead of starting extra message lanes', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'reviewer', engine: 'codex' });
+    const apiTask = store.createTask('demo', { subject: 'Verify API routes', owner: 'reviewer' });
+    const uiTask = store.createTask('demo', { subject: 'Verify web UI', owner: 'reviewer' });
+    store.sendMessage('demo', {
+      fromName: 'lead',
+      toName: 'reviewer',
+      summary: `Task #${apiTask.id}: Verify API routes`,
+      body: `Start task #${apiTask.id}: Verify API routes`,
+    });
+    store.sendMessage('demo', {
+      fromName: 'lead',
+      toName: 'reviewer',
+      summary: `Task #${uiTask.id}: Verify web UI`,
+      body: `Start task #${uiTask.id}: Verify web UI`,
+    });
+
+    const pending: Array<{
+      chatId: string;
+      prompt: string;
+      resolve: (value: { success: boolean; responseText: string; sessionId: string }) => void;
+    }> = [];
+    const executeApiTask = vi.fn(async ({ chatId, prompt }: { chatId: string; prompt: string }) => {
+      return await new Promise<{ success: boolean; responseText: string; sessionId: string }>((resolve) => {
+        pending.push({ chatId, prompt, resolve });
+      });
+    });
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledTimes(2);
+    });
+
+    expect(store.listMessages('demo', 'reviewer', true)).toHaveLength(0);
+    expect(pending.map((run) => run.prompt).join('\n')).toContain(`#${apiTask.id}`);
+    expect(pending.map((run) => run.prompt).join('\n')).toContain(`#${uiTask.id}`);
+
+    for (const run of pending) {
+      run.resolve({ success: true, responseText: 'verified', sessionId: run.chatId });
+    }
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'completed')).toHaveLength(2);
+      expect(store.listTasks('demo').filter((task) => task.status === 'completed')).toHaveLength(2);
+    });
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('stops one same-agent parallel run without stopping its sibling lane', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'reviewer', engine: 'codex' });
+    store.createTask('demo', { subject: 'Verify API routes', owner: 'reviewer' });
+    store.createTask('demo', { subject: 'Verify web UI', owner: 'reviewer' });
+
+    const pending: Array<{
+      chatId: string;
+      resolve: (value: { success: boolean; responseText: string; sessionId: string }) => void;
+    }> = [];
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => {
+      return await new Promise<{ success: boolean; responseText: string; sessionId: string }>((resolve) => {
+        pending.push({ chatId, resolve });
+      });
+    });
+    const stopChatTask = vi.fn();
+    const { registry } = makeRegistry(executeApiTask, stopChatTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'running')).toHaveLength(2);
+    });
+    const runs = store.listRuns('demo').filter((run) => run.status === 'running');
+    const stoppedRun = runs[0]!;
+    const siblingRun = runs[1]!;
+    const stoppedChatId = pending.find((run) => run.chatId.endsWith(stoppedRun.id))?.chatId;
+    expect(stoppedChatId).toBeTruthy();
+
+    supervisor.stopRun('demo', stoppedRun.id);
+    expect(stopChatTask).toHaveBeenCalledTimes(1);
+    expect(stopChatTask).toHaveBeenCalledWith(stoppedChatId);
+    expect(store.getRun('demo', stoppedRun.id)).toMatchObject({ status: 'stopped' });
+    expect(store.getRun('demo', siblingRun.id)).toMatchObject({ status: 'running' });
+    expect(store.getTask('demo', stoppedRun.taskId!)).toMatchObject({ status: 'pending' });
+    expect(store.getTask('demo', siblingRun.taskId!)).toMatchObject({ status: 'in_progress' });
+    expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'working' });
+
+    pending.find((run) => run.chatId.endsWith(siblingRun.id))?.resolve({
+      success: true,
+      responseText: 'sibling finished',
+      sessionId: 'sibling-session',
+    });
+    await waitFor(() => {
+      expect(store.getRun('demo', siblingRun.id)).toMatchObject({ status: 'completed' });
+      expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'idle' });
+    });
+    supervisor.destroy();
+    store.close();
+  });
+
   it('requeues assigned tasks when a member run fails or crashes', async () => {
     const failedStore = makeStore();
     failedStore.createTeam('demo', 'Demo');

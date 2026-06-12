@@ -14,13 +14,17 @@ interface RunnableAgent {
   agent: TeamAgent;
   messages: TeamMessage[];
   tasks: TeamTask[];
+  key: string;
+  isolatedSession: boolean;
 }
 
 const DEFAULT_INTERVAL_MS = 5_000;
+const DEFAULT_MAX_PARALLEL_PER_AGENT = 4;
 
 export class AgentTeamSupervisor {
   private readonly logger: Logger;
   private readonly intervalMs: number;
+  private readonly maxParallelPerAgent: number;
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
   private tickInProgress = false;
@@ -32,6 +36,13 @@ export class AgentTeamSupervisor {
     this.logger = options.logger.child({ module: 'agent-team-supervisor' });
     const envInterval = Number(process.env.METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS);
     this.intervalMs = Math.max(1_000, options.intervalMs ?? (Number.isFinite(envInterval) && envInterval > 0 ? envInterval : DEFAULT_INTERVAL_MS));
+    const envMaxParallel = Number(process.env.METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT);
+    this.maxParallelPerAgent = Math.max(
+      1,
+      Number.isFinite(envMaxParallel) && envMaxParallel > 0
+        ? Math.floor(envMaxParallel)
+        : DEFAULT_MAX_PARALLEL_PER_AGENT,
+    );
   }
 
   start(): void {
@@ -93,15 +104,16 @@ export class AgentTeamSupervisor {
         }
         const agents = this.options.store.listAgents(team.name).filter((agent) => agent.status !== 'stopped');
         for (const agent of agents) {
-          const runnable = this.findRunnableAgent(team.name, agent);
-          if (!runnable) continue;
-          const key = `${team.name}:${agent.name}`;
-          if (this.inFlight.has(key)) continue;
-          this.inFlight.add(key);
-          void this.runAgent(bot, team.name, runnable).finally(() => {
-            this.inFlight.delete(key);
-            this.maybeEmitIdleDigest(team.name);
-          });
+          const runnables = this.findRunnableAgents(team.name, agent);
+          for (const runnable of runnables) {
+            const key = `${team.name}:${agent.name}:${runnable.key}`;
+            if (this.inFlight.has(key)) continue;
+            this.inFlight.add(key);
+            void this.runAgent(bot, team.name, runnable).finally(() => {
+              this.inFlight.delete(key);
+              this.maybeEmitIdleDigest(team.name);
+            });
+          }
         }
         this.maybeEmitIdleDigest(team.name);
       }
@@ -148,22 +160,59 @@ export class AgentTeamSupervisor {
     }
   }
 
-  private findRunnableAgent(teamName: string, agent: TeamAgent): RunnableAgent | undefined {
-    if (this.options.store.getRunningRun(teamName, agent.name)) return undefined;
+  private findRunnableAgents(teamName: string, agent: TeamAgent): RunnableAgent[] {
+    const runningCount = this.options.store.listRuns(teamName)
+      .filter((run) => run.agentName === agent.name && run.status === 'running')
+      .length;
+    const capacity = this.maxParallelPerAgent - runningCount;
+    if (capacity <= 0) return [];
+
     const messages = this.options.store.listMessages(teamName, agent.name, true);
     const tasks = this.options.store.listTasks(teamName)
       .filter((task) => task.owner === agent.name && task.status === 'pending' && task.blockedBy.length === 0);
-    if (messages.length === 0 && tasks.length === 0) return undefined;
-    return { agent, messages, tasks };
+    if (messages.length === 0 && tasks.length === 0) return [];
+
+    const runnables: RunnableAgent[] = [];
+    const usedMessageIds = new Set<number>();
+    for (const task of tasks.slice(0, capacity)) {
+      const taskMessages = messages.filter((message) => messageReferencesTask(message, task.id));
+      for (const message of taskMessages) usedMessageIds.add(message.id);
+      runnables.push({
+        agent,
+        messages: taskMessages,
+        tasks: [task],
+        key: `task:${task.id}`,
+        isolatedSession: false,
+      });
+    }
+
+    const unmatchedMessages = messages.filter((message) => !usedMessageIds.has(message.id));
+    if (unmatchedMessages.length > 0 && runnables.length < capacity) {
+      runnables.push({
+        agent,
+        messages: unmatchedMessages,
+        tasks: [],
+        key: 'messages',
+        isolatedSession: false,
+      });
+    }
+
+    const shouldIsolateSessions = runningCount > 0 || runnables.length > 1;
+    return runnables.map((runnable) => ({
+      ...runnable,
+      isolatedSession: shouldIsolateSessions,
+    }));
   }
 
   private async runAgent(bot: RegisteredBot, teamName: string, runnable: RunnableAgent): Promise<void> {
-    const { agent, messages, tasks } = runnable;
-    const chatId = `team:${teamName}:${agent.name}`;
+    const { agent, messages, tasks, isolatedSession } = runnable;
     const run = this.options.store.createRun(teamName, {
       agentName: agent.name,
       taskId: tasks[0]?.id,
     });
+    const chatId = isolatedSession
+      ? `team:${teamName}:${agent.name}:${run.id}`
+      : `team:${teamName}:${agent.name}`;
     this.inFlightRuns.set(run.id, {
       teamName,
       agentName: agent.name,
@@ -176,7 +225,7 @@ export class AgentTeamSupervisor {
       this.options.store.updateTask(teamName, task.id, { status: 'in_progress' });
     }
     if (messages.length > 0) {
-      this.options.store.markMessagesRead(teamName, agent.name);
+      this.options.store.markMessagesReadById(teamName, agent.name, messages.map((message) => message.id));
     }
     const leadMessageIdsBeforeRun = new Set(
       agent.name === 'lead'
@@ -185,7 +234,7 @@ export class AgentTeamSupervisor {
     );
 
     try {
-      this.applyAgentSession(bot.bridge, chatId, agent);
+      this.applyAgentSession(bot.bridge, chatId, agent, !isolatedSession);
       const result = await bot.bridge.executeApiTask({
         chatId,
         userId: 'agent-team-supervisor',
@@ -207,7 +256,7 @@ export class AgentTeamSupervisor {
         this.requeueInProgressTasks(teamName, tasks, `Stopped run ${run.id}; task requeued.`);
         return;
       }
-      if (result.sessionId) {
+      if (result.sessionId && !isolatedSession) {
         this.options.store.setAgentSessionId(teamName, agent.name, result.sessionId, agent.engine);
       }
       this.options.store.updateRun(teamName, run.id, {
@@ -277,16 +326,23 @@ export class AgentTeamSupervisor {
       }
       this.logger.error({ err, teamName, agentName: agent.name, runId: run.id }, 'Agent team member run failed');
     } finally {
-      this.options.store.setAgentStatus(teamName, agent.name, 'idle');
+      this.setAgentIdleIfNoRunningRuns(teamName, agent.name);
       this.inFlightRuns.delete(run.id);
       this.maybeEmitIdleDigest(teamName);
     }
   }
 
-  private applyAgentSession(bridge: MessageBridge, chatId: string, agent: TeamAgent): void {
+  private applyAgentSession(bridge: MessageBridge, chatId: string, agent: TeamAgent, reuseSession: boolean): void {
     const sessionManager = bridge.getSessionManager();
     if (agent.engine) sessionManager.setSessionEngine(chatId, agent.engine);
-    if (agent.sessionId) sessionManager.setSessionId(chatId, agent.sessionId, agent.engine);
+    if (reuseSession && agent.sessionId) sessionManager.setSessionId(chatId, agent.sessionId, agent.engine);
+  }
+
+  private setAgentIdleIfNoRunningRuns(teamName: string, agentName: string): void {
+    const agent = this.options.store.getAgent(teamName, agentName);
+    if (!agent || agent.status === 'stopped') return;
+    if (this.options.store.getRunningRun(teamName, agentName)) return;
+    this.options.store.setAgentStatus(teamName, agentName, 'idle');
   }
 
   private requeueInProgressTasks(teamName: string, tasks: TeamTask[], result: string): void {
@@ -442,4 +498,9 @@ function truncateActivity(text: string | undefined, max = 800): string {
   const value = text?.trim();
   if (!value) return '';
   return value.length <= max ? value : `${value.slice(0, max - 3)}...`;
+}
+
+function messageReferencesTask(message: TeamMessage, taskId: number): boolean {
+  const text = `${message.summary ?? ''}\n${message.body ?? ''}`;
+  return text.includes(`#${taskId}`) || text.includes(`task ${taskId}`) || text.includes(`Task ${taskId}`);
 }

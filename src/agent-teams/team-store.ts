@@ -579,6 +579,18 @@ export class AgentTeamStore {
     return result.changes;
   }
 
+  markMessagesReadById(teamName: string, toName: string, ids: number[]): number {
+    this.requireTeam(teamName);
+    const messageIds = Array.from(new Set(ids.filter((id) => Number.isInteger(id) && id > 0)));
+    if (messageIds.length === 0) return 0;
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const result = this.db.prepare(`
+      UPDATE agent_team_messages SET read_at = ?
+      WHERE team_name = ? AND to_name = ? AND read_at IS NULL AND id IN (${placeholders})
+    `).run(Date.now(), teamName, toName, ...messageIds);
+    return result.changes;
+  }
+
   createRun(teamName: string, input: {
     id?: string;
     agentName?: string;

@@ -63,6 +63,22 @@ describe('AgentTeamStore', () => {
     store.close();
   });
 
+  it('marks only selected message ids read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+    store.createTeam('demo', 'Demo team');
+
+    const first = store.sendMessage('demo', { fromName: 'lead', toName: 'reviewer', body: 'Task #1' });
+    const second = store.sendMessage('demo', { fromName: 'lead', toName: 'reviewer', body: 'Task #2' });
+    store.sendMessage('demo', { fromName: 'lead', toName: 'other', body: 'Other task' });
+
+    expect(store.markMessagesReadById('demo', 'reviewer', [first.id])).toBe(1);
+    expect(store.listMessages('demo', 'reviewer', true).map((message) => message.id)).toEqual([second.id]);
+    expect(store.listMessages('demo', 'other', true)).toHaveLength(1);
+
+    store.close();
+  });
+
   it('allows lead as a normal member name for nested teams', () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
     const store = new AgentTeamStore(logger, join(dir, 'teams.db'));

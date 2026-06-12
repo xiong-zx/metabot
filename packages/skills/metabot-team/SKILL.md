@@ -86,6 +86,28 @@ Use `--summary` or `--plain` on `status`, `next`, `inbox`, `tasks list`,
 `runs list`, `dispatch`, and `watch` when a concise text view is easier to scan
 than JSON. The default output stays JSON for scripting.
 
+## Parallel Same-Agent Runs
+
+One agent can run multiple assigned tasks concurrently. This is useful for a
+single `reviewer` or `verifier` member checking several independent areas in
+parallel:
+
+```bash
+metabot teams dispatch metabot-core-chat reviewer "Verify backend routes" --description "Read-only. Run focused tests." --plain
+metabot teams dispatch metabot-core-chat reviewer "Verify web UI build" --description "Read-only. Check UI build and risks." --plain
+metabot teams dispatch metabot-core-chat reviewer "Verify package install" --description "Read-only. Inspect latest.tgz contents." --plain
+metabot teams status metabot-core-chat --summary
+```
+
+Supervisor behavior:
+- Pending tasks for the same agent are split into separate runs.
+- Default max parallelism per agent is `4`.
+- Override with `METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT=<n>`.
+- Parallel runs use isolated run-scoped chats like
+  `team:<team>:<agent>:<runId>` so one Codex session does not bleed into
+  another. Single non-parallel runs keep the stable `team:<team>:<agent>` chat.
+- The agent remains `working` until all its running tasks finish.
+
 ## Runs
 
 Runs are background execution records. The supervisor creates them
@@ -122,14 +144,17 @@ Failed-run rules:
 ## Supervisor Behavior
 
 The bridge supervisor scans active teams for agents with unread messages or
-assigned pending tasks. It creates a run, marks the agent working, runs that
-agent in chat `team:<team>:<agent>`, records output or error, then returns the
-agent to idle. Non-lead teammates send a completion or failure message to
-`lead`.
+assigned pending tasks. It creates one run per ready task, marks the agent
+working, runs that agent in either `team:<team>:<agent>` or isolated
+`team:<team>:<agent>:<runId>` chats for parallel same-agent work, records output
+or error, then returns the agent to idle once no running runs remain. Non-lead
+teammates send a completion or failure message to `lead`.
 
 Operational knobs:
 - `METABOT_AGENT_TEAM_SUPERVISOR=0` disables the loop.
 - `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS` changes the polling interval.
+- `METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT` caps concurrent runs for one
+  agent. Default: `4`.
 - The supervisor sets the configured session engine for the teammate chat, but
   currently does not validate engine capabilities before dispatch.
 - New CLI-spawned teammates default to `codex`; resident teams should still set
@@ -171,9 +196,10 @@ reconciles these teams at startup and hot-reloads them unless
 }
 ```
 
-Use `chatIds` for teammate execution chats like `team:<team>:<agent>`. Use
-`displayChatIds` for user-facing Feishu chats where the Team and Background
-card sections should appear.
+Use `chatIds` for teammate execution chats like `team:<team>:<agent>`.
+Parallel same-agent runs may also use run-scoped execution chats like
+`team:<team>:<agent>:<runId>`. Use `displayChatIds` for user-facing Feishu
+chats where the Team and Background card sections should appear.
 
 `lead` is not globally reserved. For a top-level team, the current user-facing
 bot can be the leader; if no active `lead` member exists, messages sent to

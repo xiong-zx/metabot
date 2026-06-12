@@ -233,6 +233,11 @@ metabot teams runs list <team>
 `dispatch` is the smooth path: it creates a task, assigns it to the agent, and
 sends the wake-up message in one command.
 
+To parallelize independent verification, dispatch multiple pending tasks to the
+same reviewer/verifier. The supervisor starts one run per ready task, up to
+`METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT` concurrent runs per agent
+(default: `4`), using isolated run-scoped chats for parallel same-agent work.
+
 Teammate path:
 
 ```bash
