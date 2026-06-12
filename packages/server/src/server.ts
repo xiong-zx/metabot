@@ -160,6 +160,7 @@ function serveStaticFile(
   res: http.ServerResponse,
   absPath: string,
   isImmutableAsset: boolean,
+  method: string = 'GET',
 ): boolean {
   let stat: fs.Stats;
   try {
@@ -179,6 +180,10 @@ function serveStaticFile(
     'Content-Length': stat.size,
     'Cache-Control': cacheControl,
   });
+  if (method === 'HEAD') {
+    res.end();
+    return true;
+  }
   fs.createReadStream(absPath).pipe(res);
   return true;
 }
@@ -547,7 +552,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     // intentionally bypass auth — the host already sits behind 飞连 VPN, and
     // tokens are user-supplied at install time, not embedded.
     if (
-      method === 'GET'
+      (method === 'GET' || method === 'HEAD')
       && (pathname === '/cli/install.sh' || pathname === '/cli/latest.tgz')
     ) {
       const rel = pathname.replace(/^\/+/, '');
@@ -556,7 +561,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      if (!serveStaticFile(res, abs, false)) {
+      if (!serveStaticFile(res, abs, false, method)) {
         jsonResponse(res, 404, { error: 'cli_not_installed' });
       }
       return;
@@ -573,7 +578,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     // embed a default env file for shared TTS configuration; pack-metabot.sh
     // only does this when METABOT_PACKAGE_DEFAULT_ENV_FILE is explicitly set.
     if (
-      method === 'GET'
+      (method === 'GET' || method === 'HEAD')
       && (pathname === '/install/install.sh' || pathname === '/install/latest.tgz')
     ) {
       const rel = pathname.replace(/^\/+/, '');
@@ -582,7 +587,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      if (!serveStaticFile(res, abs, false)) {
+      if (!serveStaticFile(res, abs, false, method)) {
         jsonResponse(res, 404, { error: 'install_not_built' });
       }
       return;

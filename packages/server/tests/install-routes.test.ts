@@ -86,6 +86,14 @@ describe('Install distribution endpoints (anonymous)', () => {
     expect(buf.equals(TARBALL_BYTES)).toBe(true);
   });
 
+  it('HEAD /install/latest.tgz serves headers with no auth', async () => {
+    const res = await rawRequest(kit!.port, 'HEAD', '/install/latest.tgz');
+    expect(res.status).toBe(200);
+    expect(String(res.headers['content-type'])).toContain('application/gzip');
+    expect(res.headers['cache-control']).toBe('no-cache');
+    expect(res.body).toBe('');
+  });
+
   it('GET /install/install.sh works on the UI host (no auth, same handler)', async () => {
     await kit!.cleanup();
     kit = await startTestServer('install-dist-ui', { uiHost: 'test-ui.local' });
