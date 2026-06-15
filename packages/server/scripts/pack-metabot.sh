@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pack the metabot bot-host runtime into a tarball + publish the bootstrap
 # installer script. Output lands under `packages/server/static/install/`,
-# which the server's deploy/install.sh rsyncs to /opt/metabot-core/static/.
+# which is published to the server's static dir at install time.
 # The tarball + script are served anonymously at
 # `<host>/install/{install.sh,latest.tgz}` (see server.ts /install route).
 #
@@ -19,7 +19,7 @@
 #   - .git, .github, .codex
 #   - .env, bots.json, logs/, data/   (never committed — naturally absent)
 #
-# Optional internal defaults:
+# Optional packaged defaults:
 #   - If METABOT_PACKAGE_DEFAULT_ENV_FILE (or METABOT_INTERNAL_DEFAULT_ENV_FILE)
 #     points to a local env file at pack time, it is embedded as
 #     .metabot-package/default.env. The bootstrap installer copies it to
@@ -129,7 +129,7 @@ if [[ -n "$PACKAGE_DEFAULT_ENV_FILE" ]]; then
   cp "$PACKAGE_DEFAULT_ENV_FILE" "$TMP_EXTRA_DIR/.metabot-package/default.env"
   chmod 600 "$TMP_EXTRA_DIR/.metabot-package/default.env"
   EXTRA_TAR_ARGS=(-C "$TMP_EXTRA_DIR" '.metabot-package/default.env')
-  echo "==> Embedding internal default env from $PACKAGE_DEFAULT_ENV_FILE"
+  echo "==> Embedding packaged default env from $PACKAGE_DEFAULT_ENV_FILE"
 fi
 
 echo "==> Writing $SERVER_STATIC_DIR/$TARBALL_NAME (atomic)"

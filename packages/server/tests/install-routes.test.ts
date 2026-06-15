@@ -37,6 +37,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  delete process.env.METABOT_PUBLIC_DISTRIBUTION;
   await kit?.cleanup();
   kit = undefined;
   const installPath = path.join(INSTALL_DIR, 'install.sh');
@@ -63,8 +64,9 @@ afterEach(async () => {
   preExistingTarball = undefined;
 });
 
-describe('Install distribution endpoints (anonymous)', () => {
+describe('Install distribution endpoints (anonymous when METABOT_PUBLIC_DISTRIBUTION=1)', () => {
   beforeEach(async () => {
+    process.env.METABOT_PUBLIC_DISTRIBUTION = '1';
     kit = await startTestServer('install-dist');
   });
 
@@ -135,5 +137,30 @@ describe('Install distribution endpoints (anonymous)', () => {
   it('does not affect Bearer-auth routes (regression: /api/agents still 401 anonymous)', async () => {
     const res = await call(kit!.baseUrl, 'GET', '/api/agents', null);
     expect(res.status).toBe(401);
+  });
+});
+
+describe('Install distribution endpoints (default: token-gated)', () => {
+  beforeEach(async () => {
+    delete process.env.METABOT_PUBLIC_DISTRIBUTION;
+    kit = await startTestServer('install-dist-gated');
+  });
+
+  it('GET /install/install.sh without a token returns 401', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/install/install.sh');
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /install/latest.tgz without a token returns 401', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/install/latest.tgz');
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /install/install.sh with a valid Bearer token serves the bootstrap', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/install/install.sh', {
+      Authorization: `Bearer ${kit!.adminToken}`,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(BOOTSTRAP_SH);
   });
 });

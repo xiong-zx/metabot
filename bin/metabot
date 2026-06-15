@@ -78,13 +78,13 @@ cmd_update() {
     # not part of the normal user update story. Developers can opt into the old
     # source checkout workflow with `metabot update --git`.
     if [[ -f "$METABOT_HOME/install.sh" || -d "$METABOT_HOME" ]]; then
-      local core_url="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
+      local core_url="${METABOT_CORE_URL:-http://localhost:9200}"
       info "Refreshing MetaBot from internal package at $core_url/install/latest.tgz"
       exec bash -c 'curl -fsSL "$1/install/install.sh" | METABOT_HOME="$2" bash' bash "$core_url" "$METABOT_HOME"
     fi
     error "MetaBot not found at $METABOT_HOME"
     echo "  Run the installer first:"
-    echo "    curl -fsSL https://metabot-core.xvirobotics.com/install/install.sh | bash"
+    echo "    curl -fsSL http://localhost:9200/install/install.sh | bash"
     exit 1
   fi
 
@@ -563,7 +563,7 @@ check("bridge_health", bridge_health["ok"], "bridge_health_failed" if not bridge
       False,
       {"url": metabot_url, "status": bridge_health["status"], "response": bridge_health["json"] or bridge_health["bodyPreview"]})
 
-core_url = env("METABOT_CORE_URL", "https://metabot-core.xvirobotics.com").rstrip("/")
+core_url = env("METABOT_CORE_URL", "http://localhost:9200").rstrip("/")
 core_token_present = bool(env("METABOT_CORE_TOKEN") or (Path.home() / ".metabot-core" / "token").exists())
 core_health = http_json(f"{core_url}/health")
 check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["ok"] else "ok",

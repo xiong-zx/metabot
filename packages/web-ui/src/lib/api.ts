@@ -348,7 +348,7 @@ export class ApiError extends Error {
 }
 
 function redirectToSignIn(): never {
-  // Auth is provided by oauth2-proxy (飞连 OIDC) via session cookie. A 401
+  // Auth is provided via an optional SSO proxy (session cookie). A 401
   // means the browser has no valid session — bounce through oauth2-proxy's
   // sign-in, preserving the deep link so the user lands back where they were.
   const rd = encodeURIComponent(location.pathname + location.search);

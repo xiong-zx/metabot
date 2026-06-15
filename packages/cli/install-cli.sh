@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-shot installer for the metabot CLI. Served at
-# `<host>/cli/install.sh` from metabot-core (anonymous, intranet-only via
-# 飞连 VPN). Intended UX:
+# `<host>/cli/install.sh` from metabot-core (token-gated by default; set
+# METABOT_PUBLIC_DISTRIBUTION=1 on the server to serve anonymously). Intended UX:
 #
-#   curl -fsSL https://metabot-core.xvirobotics.com/cli/install.sh \
+#   curl -fsSL http://localhost:9200/cli/install.sh \
 #     | METABOT_CORE_TOKEN=mt_xxx bash
 #
 # Installs:
@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-CORE_URL_DEFAULT="https://metabot-core.xvirobotics.com"
+CORE_URL_DEFAULT="http://localhost:9200"
 CORE_URL="${METABOT_CORE_URL:-$CORE_URL_DEFAULT}"
 TARBALL_URL="$CORE_URL/cli/latest.tgz"
 TARBALL_TMP="$(mktemp -t metabot-cli.XXXXXX.tgz)"

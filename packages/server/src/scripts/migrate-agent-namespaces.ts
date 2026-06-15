@@ -20,12 +20,13 @@
  *   node dist/scripts/migrate-agent-namespaces.js          # dry-run
  *   node dist/scripts/migrate-agent-namespaces.js --apply  # write
  *
- * Env: METABOT_CORE_DATA_DIR (defaults to host path, same as server).
+ * Env: METABOT_CORE_DATA_DIR (defaults to ~/.metabot-core/data, same as server).
  *
  * Re-runs are safe — the WHERE clause filters out already-migrated rows.
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -179,7 +180,7 @@ function main(): void {
   const apply = process.argv.includes('--apply');
   const dataDir =
     process.env.METABOT_CORE_DATA_DIR ||
-    '/vepfs/users/floodsung/metabot-core-data';
+    path.join(os.homedir(), '.metabot-core', 'data');
   const dbPath = path.join(dataDir, 'central.db');
 
   if (!fs.existsSync(dbPath)) {

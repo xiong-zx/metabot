@@ -26,7 +26,7 @@ metabot update
 
 If `lark-cli` or Feishu/Lark skills were already installed, `metabot update` updates them too and syncs them into the bot workspace.
 
-Developer source checkouts can opt into Git-based updates with `metabot update --git`. Regular bot hosts should use the default package refresh so no GitLab/GitHub credentials are required.
+Developer source checkouts can opt into Git-based updates with `metabot update --git`. Regular bot hosts should use the default package refresh so no Git credentials are required.
 
 ## Manual Install
 

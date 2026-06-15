@@ -1,7 +1,6 @@
 # MetaBot Installer for Windows PowerShell
 # Usage:
-#   # Requires 飞连/VPN to reach gitlab.xvirobotics.com + your SSH key on GitLab
-#   git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git $env:USERPROFILE\metabot
+#   git clone https://github.com/xvirobotics/metabot.git $env:USERPROFILE\metabot
 #   cd $env:USERPROFILE\metabot
 #   .\install.ps1
 #   # Optional: .\install.ps1 -Dir C:\opt\metabot
@@ -23,8 +22,7 @@ if ($Help) {
 MetaBot Installer (Windows)
 
 Usage:
-  # Requires 飞连/VPN to reach gitlab.xvirobotics.com + SSH key on GitLab
-  git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
+  git clone https://github.com/xvirobotics/metabot.git
   cd metabot
   .\install.ps1 [-Dir <path>]
 
@@ -45,7 +43,7 @@ Examples:
 # ============================================================================
 # Configuration defaults
 # ============================================================================
-$MetabotRepo = if ($env:METABOT_REPO) { $env:METABOT_REPO } else { "ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git" }
+$MetabotRepo = if ($env:METABOT_REPO) { $env:METABOT_REPO } else { "https://github.com/xvirobotics/metabot.git" }
 # $MetabotHome is resolved later (Phase 0.5) — priority: -Dir > env > prompt > default.
 $DefaultMetabotHome = Join-Path $env:USERPROFILE "metabot"
 $MetabotHome = $null

@@ -27,7 +27,7 @@ import { loadConfig, request, parseArgs, print } from '@xvirobotics/cli-core';
 
 ## Environment contract
 
-- `METABOT_CORE_URL` — server base URL (default `https://metabot-core.xvirobotics.com`, dedicated front-door domain since P4-MR6)
+- `METABOT_CORE_URL` — server base URL (default `http://localhost:9200`, dedicated front-door domain since P4-MR6)
 - `METABOT_CORE_TOKEN` — bearer token; falls back to first line of `~/.metabot-core/token`
 
 `loadConfig()` throws when no token is configured.

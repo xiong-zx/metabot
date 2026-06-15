@@ -26,5 +26,5 @@ metabot help
 
 ## Env
 
-- `METABOT_CORE_URL` — default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since the P4-MR6 pivot)
+- `METABOT_CORE_URL` — default `http://localhost:9200` (locally self-hosted metabot-core); set your own remote host if you run it elsewhere
 - `METABOT_CORE_TOKEN` — bearer token (falls back to first line of `~/.metabot-core/token`)

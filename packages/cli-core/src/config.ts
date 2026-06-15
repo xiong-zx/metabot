@@ -2,7 +2,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-export const DEFAULT_URL = 'https://metabot-core.xvirobotics.com';
+// Personal edition default: a metabot-core server running locally. Override
+// with METABOT_CORE_URL to point at a remote/self-hosted host.
+export const DEFAULT_URL = 'http://localhost:9200';
 
 export interface Config {
   url: string;

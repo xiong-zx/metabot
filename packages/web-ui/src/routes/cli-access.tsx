@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { api, ApiError, type IssueTokenResponse } from '../lib/api';
 
-// Bare-root host the CLI will hit — dedicated front-door domain (P4-MR6
-// pivot). Matches the CLI's METABOT_CORE_URL default in `@xvirobotics/cli-core`.
-// The shared multi-tenant `metabot.xvirobotics.com` is a different host and is
-// not used as the CLI default; old configs against `…/core` keep working.
-const CLI_ROOT_URL = 'https://metabot-core.xvirobotics.com';
+// Bare-root host the CLI will hit. Personal edition: derive from the page
+// origin so the snippet matches wherever the user actually hosts metabot-core
+// (localhost, LAN, or their own reverse proxy). Override server-side with
+// METABOT_CORE_URL if the CLI must target a different host than the web UI.
+const CLI_ROOT_URL =
+  typeof window !== 'undefined' && window.location?.origin
+    ? window.location.origin
+    : 'http://localhost:9200';
 
 export function CliAccess() {
   const [issued, setIssued] = useState<IssueTokenResponse | null>(null);
@@ -68,7 +71,7 @@ export function CliAccess() {
         </div>
         <div style={{ padding: '0 18px', color: 'var(--bone-300)', fontSize: 11, lineHeight: 1.6 }}>
           self-service token for the <code style={{ color: 'var(--amber)' }}>metabot</code> CLI.
-          generating issues a fresh credential for your 飞连 identity and
+          generating issues a fresh credential for your account and
           revokes any previous self-service token you held.
         </div>
         <div style={{ padding: '12px 18px 0', color: 'var(--bone-300)', fontSize: 11, lineHeight: 1.6 }}>
@@ -122,7 +125,7 @@ export function CliAccess() {
               <pre className="env-block">{installCmd}</pre>
               <div className="cli-access-meta" style={{ marginBottom: 12 }}>
                 <span style={{ color: 'var(--bone-300)', fontSize: 11 }}>
-                  仅内网（飞连 VPN）；token 会出现在 shell 历史里，需要换可随时点
+                  token 会出现在 shell 历史里，需要换可随时点
                   上方 regenerate；要求 node ≥ 20。
                 </span>
               </div>

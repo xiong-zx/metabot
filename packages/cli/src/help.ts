@@ -28,7 +28,7 @@ Each subcommand has its own help; pass --help through to see it:
   metabot t5t --help
 
 Env:
-  METABOT_CORE_URL              default https://metabot-core.xvirobotics.com
+  METABOT_CORE_URL              default http://localhost:9200
   METABOT_CORE_TOKEN            bearer token (or write to ~/.metabot-core/token)
   METABOT_CORE_AGENT_BUS_URL    optional override of the agent-registry base URL (falls back to METABOT_CORE_URL)
 `,

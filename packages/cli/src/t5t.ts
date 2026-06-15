@@ -59,7 +59,7 @@ Subcommands:
   top5 <project> list                            List the current Top-5 items
 
 Env:
-  METABOT_CORE_URL    metabot-core base URL (default https://metabot-core.xvirobotics.com)
+  METABOT_CORE_URL    metabot-core base URL (default http://localhost:9200)
   METABOT_CORE_TOKEN  Bearer token (or ~/.metabot-core/token first line)
 `;
 }

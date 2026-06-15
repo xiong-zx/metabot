@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # MetaBot Installer
 # Usage:
-#   # Requires 飞连/VPN to reach gitlab.xvirobotics.com + your SSH key on GitLab
-#   git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+#   git clone https://github.com/xvirobotics/metabot.git ~/metabot
 #   cd ~/metabot && bash install.sh
 #   # Optional: METABOT_HOME=/opt/metabot bash install.sh
 set -euo pipefail
@@ -70,7 +69,7 @@ done
 # ============================================================================
 # METABOT_HOME is resolved later (Phase 0.5) — priority: --dir > env var > prompt > default.
 DEFAULT_METABOT_HOME="$HOME/metabot"
-METABOT_REPO="${METABOT_REPO:-ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git}"
+METABOT_REPO="${METABOT_REPO:-https://github.com/xvirobotics/metabot.git}"
 
 # ============================================================================
 # Colors and formatting
@@ -731,7 +730,7 @@ API_TIMEOUT_MS=600000"
   echo -e "${BOLD}metabot-core central service:${NC}"
   echo "  MetaBot delegates MetaMemory / Skill Hub / Agents / T5T to a central"
   echo "  metabot-core service — no local DB, no embedded server."
-  prompt_input METABOT_CORE_URL "metabot-core URL" "https://metabot-core.xvirobotics.com"
+  prompt_input METABOT_CORE_URL "metabot-core URL" "http://localhost:9200"
 
   echo ""
   info "Get your personal Bearer token at ${METABOT_CORE_URL}/cli"
@@ -1076,7 +1075,7 @@ fi
 # ============================================================================
 step "Phase 7: Legacy MetaMemory cleanup"
 
-info "MetaMemory is now served by metabot-core at ${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}."
+info "MetaMemory is now served by metabot-core at ${METABOT_CORE_URL:-http://localhost:9200}."
 info "No local DB, no embedded server — the bridge talks to the central service via HTTP."
 
 # Stop old embedded/standalone MetaMemory PM2 process if it still exists.
@@ -1268,7 +1267,7 @@ if [[ "${SKIP_CONFIG}" == "false" ]]; then
     echo -e "  ${BOLD}Provider:${NC}       ${PROVIDER_NAME}"
   fi
 fi
-CORE_URL_DISPLAY="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
+CORE_URL_DISPLAY="${METABOT_CORE_URL:-http://localhost:9200}"
 echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"

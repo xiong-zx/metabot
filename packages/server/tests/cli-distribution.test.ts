@@ -39,6 +39,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // Never let the opt-in flag leak into other test files (singleFork shares process.env).
+  delete process.env.METABOT_PUBLIC_DISTRIBUTION;
   await kit?.cleanup();
   kit = undefined;
   const installPath = path.join(CLI_DIR, 'install.sh');
@@ -65,8 +67,11 @@ afterEach(async () => {
   preExistingTarball = undefined;
 });
 
-describe('CLI distribution endpoints (anonymous)', () => {
+describe('CLI distribution endpoints (anonymous when METABOT_PUBLIC_DISTRIBUTION=1)', () => {
   beforeEach(async () => {
+    // Personal edition gates distribution behind auth by default; opt back in
+    // to anonymous serving for this suite.
+    process.env.METABOT_PUBLIC_DISTRIBUTION = '1';
     kit = await startTestServer('cli-dist');
   });
 
@@ -141,5 +146,31 @@ describe('CLI distribution endpoints (anonymous)', () => {
   it('does not affect Bearer-auth routes (regression: /api/agents still 401 anonymous)', async () => {
     const res = await call(kit!.baseUrl, 'GET', '/api/agents', null);
     expect(res.status).toBe(401);
+  });
+});
+
+describe('CLI distribution endpoints (default: token-gated)', () => {
+  beforeEach(async () => {
+    // Default personal-edition behavior: no METABOT_PUBLIC_DISTRIBUTION set.
+    delete process.env.METABOT_PUBLIC_DISTRIBUTION;
+    kit = await startTestServer('cli-dist-gated');
+  });
+
+  it('GET /cli/install.sh without a token returns 401 (no anonymous serving)', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/cli/install.sh');
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /cli/latest.tgz without a token returns 401', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/cli/latest.tgz');
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /cli/install.sh with a valid Bearer token serves the script', async () => {
+    const res = await rawRequest(kit!.port, 'GET', '/cli/install.sh', {
+      Authorization: `Bearer ${kit!.adminToken}`,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(INSTALL_SH);
   });
 });

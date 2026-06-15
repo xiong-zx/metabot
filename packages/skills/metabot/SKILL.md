@@ -17,11 +17,11 @@ metabot t5t    <cmd>   # daily team status portal
 metabot help           # top-level help (also --help, -h, bare invocation)
 ```
 
-`metabot` is the **single** CLI binary. Beyond the metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm`, `mh`, and per-bot `bot-skills` surfaces were removed in P4-MR4 and the follow-on cleanup; `mb` is now a thin deprecation wrapper that forwards to `metabot`. Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
+`metabot` is the **single** CLI binary. Beyond the metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm`, `mh`, and per-bot `bot-skills` surfaces have been removed; `mb` is now a thin deprecation wrapper that forwards to `metabot`. Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
 
-Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first line). Server URL is `METABOT_CORE_URL`, default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since the P4-MR6 pivot — no `/core` path prefix, no shared multi-tenant host). CLIs explicitly configured against the legacy `https://metabot.xvirobotics.com/core` keep working unchanged — the multi-tenant `/core` sub-handle is untouched.
+Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first line). Server URL is `METABOT_CORE_URL`, default `http://localhost:9200` for a locally self-hosted metabot-core; point it at `https://your-metabot-host.example.com` if you run metabot-core on a remote box behind your own reverse proxy.
 
-**Fastest path for a fresh agent**: open `https://metabot-core.xvirobotics.com` in a browser, sign in via 飞连 OIDC, click **CLI Access**, hit **Generate**, paste the emitted `.env` block into `~/.metabot-core/.env` (or your shell env). Then `metabot agents whoami` should echo your email-derived identity. Full walkthrough at `docs/internal/onboarding.md`.
+**Fastest path for a fresh agent**: run metabot-core locally (or reach your own remote host), then put the API token in `~/.metabot-core/token` (or export `METABOT_CORE_TOKEN`) and set `METABOT_CORE_URL`. No SSO or corporate VPN is required for the personal edition — a single local API token is the only credential. Then `metabot agents whoami` should echo your identity.
 
 ## `metabot memory` — shared knowledge
 
@@ -203,7 +203,7 @@ metabot inbox clear   [--chat <id>] [--all-chats]
 
 ```json
 {"id":"…","targetBot":"cli:flood@laptop","chatId":"proj:metabot:1a2b3c4d",
- "fromBot":"alice","fromOwner":"alice@xvirobotics.com","content":"ping","enqueuedAt":"…"}
+ "fromBot":"alice","fromOwner":"alice@example.com","content":"ping","enqueuedAt":"…"}
 ```
 
 **`clear`** — delete queued messages. Defaults to the cwd chatId; `--all-chats` wipes every chat for the bot. Use this when a stale CLI session left messages behind that no longer make sense.
@@ -294,7 +294,7 @@ metabot t5t top5 <project> list                # show the current Top-5 items
 
 **Anomalies.** `board` and `status` include an `anomalies[]` array — each entry has a `reason` (`no_owner` / `stale` / `kill_red` / `no_goal` / `stale_bottleneck`). These are derived by the server from the latest docs at read time; no separate maintenance call needed.
 
-**Migration from the old `t5t` CLI** (Python, against `t5t.xvirobotics.com`):
+**Migration from an older standalone `t5t` CLI**, if you ever used one:
 
 | Old | New |
 |---|---|
@@ -303,9 +303,9 @@ metabot t5t top5 <project> list                # show the current Top-5 items
 | `t5t goal <slug> "<text>"` | `metabot t5t goal <slug> "<text>"` |
 | `t5t feedback <entry> "<comment>"` | `metabot t5t feedback <entryDocId> "<comment>"` |
 | `~/.t5t/credentials` | discarded — use `~/.metabot-core/token` or `METABOT_CORE_TOKEN` |
-| hardcoded `https://t5t.xvirobotics.com` | `METABOT_CORE_URL` (default `https://metabot-core.xvirobotics.com`) |
+| a hardcoded t5t host | `METABOT_CORE_URL` (default `http://localhost:9200`) |
 
-The Phase 3 hard cutover stops `t5t-johor` and 301-redirects `t5t.xvirobotics.com/*` → `https://metabot-core.xvirobotics.com/t5t{uri}` (the unified portal's t5t tab). After cutover, only `metabot t5t` works — the old `t5t` Python CLI dies because its hardcoded host stops serving content directly.
+The t5t portal is now just the t5t tab of your metabot-core instance — only `metabot t5t` is needed.
 
 ## `metabot` bridge-local — local bridge daemon API
 
@@ -340,7 +340,7 @@ surface above.
 
 | Var | Purpose |
 |---|---|
-| `METABOT_CORE_URL` | Memory + skills + agents base URL. Default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since P4-MR6). |
+| `METABOT_CORE_URL` | Memory + skills + agents base URL. Default `http://localhost:9200` (locally self-hosted metabot-core); set to your own remote host if running it elsewhere. |
 | `METABOT_CORE_TOKEN` | Bearer token for member or admin access. If unset, the CLI reads the first line of `~/.metabot-core/token`. |
 | `METABOT_CORE_AGENT_BUS_URL` | Optional override for the agent-registry base URL when it diverges from `METABOT_CORE_URL` (e.g. a staging core). Falls back to `METABOT_CORE_URL`. |
 

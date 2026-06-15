@@ -12,7 +12,7 @@
 | `API_PORT` | `9100` | HTTP API 端口 |
 | `API_SECRET` | — | Bearer Token 认证 |
 | `LOG_LEVEL` | `info` | 日志级别（debug, info, warn, error） |
-| `METABOT_LOCAL_ADDRESS` | — | 所有飞书 socket（REST + wss 长连接）绑定到该本机源 IP，触发 source-based routing 绕过 VPN 智能分流（如飞连把 `*.feishu.cn` 劫持进失效隧道）。不设则走默认路由 |
+| `METABOT_LOCAL_ADDRESS` | — | 所有飞书 socket（REST + wss 长连接）绑定到该本机源 IP，触发 source-based routing 绕过 VPN 智能分流（如某些企业 VPN 把 `*.feishu.cn` 劫持进失效隧道）。不设则走默认路由 |
 
 ## Claude Code
 

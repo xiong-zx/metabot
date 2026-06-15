@@ -142,7 +142,7 @@ Flags:
   --once|--loop       poll: single shot vs continuous drain
 
 Env:
-  METABOT_CORE_URL              metabot-core base URL (default https://metabot-core.xvirobotics.com)
+  METABOT_CORE_URL              metabot-core base URL (default http://localhost:9200)
   METABOT_CORE_AGENT_BUS_URL    override the inbox base URL (falls back to METABOT_CORE_URL)
   METABOT_CORE_TOKEN            bearer token (or ~/.metabot-core/token)
 `;

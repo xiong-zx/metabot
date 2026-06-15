@@ -143,8 +143,8 @@ export function heartbeat(
 }
 
 // Derive the host the agent advertises itself on. The web UI groups agents
-// by this value, so callers see "all bots on 172.31.32.2" vs "all bots on
-// localhost" rather than a flat list. Falls back to the raw url string when
+// by this value, so callers see "all bots on host-a.example.com" vs "all bots
+// on localhost" rather than a flat list. Falls back to the raw url string when
 // parsing throws (malformed URL stored against expectation) so the list call
 // never 500s on a single bad row.
 function deriveHost(url: string): string {

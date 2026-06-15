@@ -27,9 +27,9 @@ import { name as pkgName, version as pkgVersion } from './pkg-meta.js';
 export interface ServerOptions {
   port: number;
   /**
-   * Bind address. Defaults to '127.0.0.1' so the server is only reachable via
-   * the Caddy reverse proxy on metabot-core.xvirobotics.com. Set explicitly to
-   * '0.0.0.0' for dev/test on remote hosts.
+   * Bind address. Defaults to '127.0.0.1' so the server is only reachable
+   * locally (or via a reverse proxy you put in front of it). Set explicitly to
+   * '0.0.0.0' to expose it on the network / for dev/test on remote hosts.
    */
   host?: string;
   dataDir: string;
@@ -226,7 +226,7 @@ function tryServeStatic(
 }
 
 function corePublicBaseUrl(): string {
-  const raw = process.env.METABOT_CORE_URL || 'https://metabot-core.xvirobotics.com';
+  const raw = process.env.METABOT_CORE_URL || 'http://localhost:9200';
   return raw.replace(/\/+$/, '');
 }
 
@@ -544,17 +544,31 @@ export function startServer(options: ServerOptions): ServerHandle {
       return;
     }
 
-    // Anonymous CLI distribution endpoints. Self-hosted internal install:
+    // Distribution endpoints (/cli/*, /install/*) serve install scripts +
+    // tarballs. There is no corporate VPN in front of a personal-edition
+    // server, so these are gated behind a valid token by DEFAULT. Set
+    // METABOT_PUBLIC_DISTRIBUTION=1 to serve them anonymously — only do this
+    // when you intentionally self-distribute and have confirmed your build
+    // embeds no secrets (see METABOT_PACKAGE_DEFAULT_ENV_FILE in pack scripts).
+    const publicDistribution =
+      process.env.METABOT_PUBLIC_DISTRIBUTION === '1'
+      || process.env.METABOT_PUBLIC_DISTRIBUTION === 'true';
+    const distributionAuthorized = (): boolean =>
+      publicDistribution || !isAuthFailure(authenticate(req, credentialsStore));
+
+    // Self-hosted CLI install:
     //   curl -fsSL <host>/cli/install.sh | METABOT_CORE_TOKEN=... bash
     // The tarball + script are built by `packages/cli/scripts/pack.sh` into
-    // `packages/server/static/cli/` and rsynced to /opt/metabot-core/static/
-    // by deploy/install.sh. Reachable on every host (UI + bare API) and
-    // intentionally bypass auth — the host already sits behind 飞连 VPN, and
-    // tokens are user-supplied at install time, not embedded.
+    // `packages/server/static/cli/`. Tokens are user-supplied at install time,
+    // not embedded.
     if (
       (method === 'GET' || method === 'HEAD')
       && (pathname === '/cli/install.sh' || pathname === '/cli/latest.tgz')
     ) {
+      if (!distributionAuthorized()) {
+        jsonResponse(res, 401, { error: 'unauthorized' });
+        return;
+      }
       const rel = pathname.replace(/^\/+/, '');
       const abs = path.resolve(path.join(STATIC_DIR, rel));
       if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {
@@ -567,20 +581,24 @@ export function startServer(options: ServerOptions): ServerHandle {
       return;
     }
 
-    // Anonymous metabot bot-host distribution endpoints. Internal-network
-    // one-liner installer for the full bridge bot (not just the CLI):
+    // metabot bot-host distribution endpoints. One-liner installer for the
+    // full bridge bot (not just the CLI):
     //   curl -fsSL <host>/install/install.sh | bash
     // Built by `packages/server/scripts/pack-metabot.sh` into
-    // `packages/server/static/install/{install.sh,latest.tgz}` and rsynced
-    // to /opt/metabot-core/static/ by deploy/install.sh. Same auth model as
-    // /cli/* — anonymous behind 飞连 VPN. Feishu/Telegram credentials are
-    // prompted by install.sh at install time. Internal builds may optionally
-    // embed a default env file for shared TTS configuration; pack-metabot.sh
-    // only does this when METABOT_PACKAGE_DEFAULT_ENV_FILE is explicitly set.
+    // `packages/server/static/install/{install.sh,latest.tgz}`. Same auth gate
+    // as /cli/* (token-gated unless METABOT_PUBLIC_DISTRIBUTION=1).
+    // Feishu/Telegram credentials are prompted by install.sh at install time.
+    // Builds may optionally embed a default env file (TTS etc.); pack-metabot.sh
+    // only does this when METABOT_PACKAGE_DEFAULT_ENV_FILE is explicitly set —
+    // another reason these endpoints are not anonymous by default.
     if (
       (method === 'GET' || method === 'HEAD')
       && (pathname === '/install/install.sh' || pathname === '/install/latest.tgz')
     ) {
+      if (!distributionAuthorized()) {
+        jsonResponse(res, 401, { error: 'unauthorized' });
+        return;
+      }
       const rel = pathname.replace(/^\/+/, '');
       const abs = path.resolve(path.join(STATIC_DIR, rel));
       if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {

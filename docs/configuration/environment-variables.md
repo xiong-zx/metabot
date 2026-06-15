@@ -12,7 +12,7 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `API_PORT` | `9100` | HTTP API port |
 | `API_SECRET` | — | Bearer token auth for API and MetaMemory. Generate one with `openssl rand -hex 32` |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
-| `METABOT_LOCAL_ADDRESS` | — | Bind all Feishu sockets (REST + wss long-connection) to this local source IP, forcing source-based routing past VPN smart split-tunneling (e.g. 飞连 hijacking `*.feishu.cn` into a dead tunnel). Unset = default route |
+| `METABOT_LOCAL_ADDRESS` | — | Bind all Feishu sockets (REST + wss long-connection) to this local source IP, forcing source-based routing past VPN smart split-tunneling (e.g. a corporate VPN hijacking `*.feishu.cn` into a dead tunnel). Unset = default route |
 
 ## Claude Code
 

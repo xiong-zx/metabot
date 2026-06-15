@@ -4,7 +4,7 @@
  * `packages/server/src/t5t/t5t-routes.ts`).
  *
  * URL + token resolution comes from `cli-core`'s `loadConfig()` —
- * `METABOT_CORE_URL` (default `https://metabot-core.xvirobotics.com`,
+ * `METABOT_CORE_URL` (default `http://localhost:9200`,
  * dedicated front-door domain after the P4-MR6 pivot) +
  * `METABOT_CORE_TOKEN` env or `~/.metabot-core/token` first line.
  */

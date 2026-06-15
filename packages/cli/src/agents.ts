@@ -23,7 +23,8 @@ import * as path from 'node:path';
 import { parseArgs, print, loadConfig } from '@xvirobotics/cli-core';
 import { deriveProjectChatId } from './project-id.js';
 
-const DEFAULT_BUS_URL = 'https://metabot-core.xvirobotics.com';
+// Personal edition default: local metabot-core. Override with METABOT_CORE_URL.
+const DEFAULT_BUS_URL = 'http://localhost:9200';
 
 interface BusConfig {
   url: string;

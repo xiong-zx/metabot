@@ -3,7 +3,7 @@
 # metabot bootstrap — internal-network one-line installer.
 #
 # Usage:
-#   curl -fsSL https://metabot-core.xvirobotics.com/install/install.sh | bash
+#   curl -fsSL http://localhost:9200/install/install.sh | bash
 #   curl -fsSL ... | METABOT_HOME=/opt/metabot bash
 #   curl -fsSL ... | bash -s -- --dir /opt/metabot
 #
@@ -106,7 +106,7 @@ if [[ -d "$METABOT_HOME/.git" ]]; then
 fi
 
 # ----- 5. download + extract tarball (always) -----
-CORE_URL="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
+CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
 TARBALL_URL="$CORE_URL/install/latest.tgz"
 TMPDIR_BOOT="$(mktemp -d -t metabot-install.XXXXXX)"
 trap 'rm -rf "$TMPDIR_BOOT"' EXIT
@@ -114,7 +114,7 @@ TARBALL_PATH="$TMPDIR_BOOT/metabot.tgz"
 
 info "Downloading $TARBALL_URL"
 if ! curl -fsSL "$TARBALL_URL" -o "$TARBALL_PATH"; then
-  error "Download failed. Is metabot-core reachable via 飞连/VPN?"
+  error "Download failed. Is metabot-core reachable at this URL?"
   error "  URL: $TARBALL_URL"
   error "  Override host with: METABOT_CORE_URL=https://… curl … | bash"
   exit 1

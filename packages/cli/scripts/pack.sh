@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bundle the metabot CLI into a self-contained tarball + sync the installer
-# script. Output lands under `packages/server/static/cli/`, which the server's
-# deploy/install.sh rsyncs to /opt/metabot-core/static/. The tarball + script
+# script. Output lands under `packages/server/static/cli/`, which is published
+# to the server's static dir at install time. The tarball + script
 # are served anonymously at `<host>/cli/{latest.tgz,install.sh}`.
 #
 # Inputs (resolved at runtime):
@@ -63,7 +63,7 @@ cat > "$STAGE_DIR/package.json" <<EOF
 {
   "name": "metabot-cli",
   "version": "$VERSION",
-  "description": "metabot — internal CLI dispatcher (self-contained bundle).",
+  "description": "metabot — CLI dispatcher (self-contained bundle).",
   "type": "module",
   "bin": { "metabot": "./bundle.mjs" },
   "files": ["bundle.mjs", "skills"],

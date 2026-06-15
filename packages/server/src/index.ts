@@ -1,3 +1,4 @@
+import * as os from 'node:os';
 import * as path from 'node:path';
 import pino from 'pino';
 import { startServer } from './server.js';
@@ -22,7 +23,7 @@ async function main() {
   const host = process.env.METABOT_CORE_HOST || '127.0.0.1';
   const dataDir =
     process.env.METABOT_CORE_DATA_DIR ||
-    '/vepfs/users/floodsung/metabot-core-data';
+    path.join(os.homedir(), '.metabot-core', 'data');
   const instanceName = process.env.METABOT_CORE_INSTANCE_NAME;
   const uiHost = process.env.METABOT_CORE_UI_HOST
     ? process.env.METABOT_CORE_UI_HOST.toLowerCase()

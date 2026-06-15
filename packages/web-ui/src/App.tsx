@@ -183,7 +183,10 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/chat">chat</NavLink>
           <NavLink to="/cli">cli</NavLink>
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          <a className="signout" href="/oauth2/sign_out" title="end 飞连 SSO session">
+          {/* Sign-out targets the standard oauth2-proxy endpoint; only
+              meaningful when you front the server with an SSO proxy. In
+              pure local-token mode there is no session to end. */}
+          <a className="signout" href="/oauth2/sign_out" title="end SSO session (if behind an SSO proxy)">
             sign out
           </a>
         </nav>

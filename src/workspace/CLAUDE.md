@@ -32,7 +32,7 @@ metabot health                                  # Health check
 
 For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/retract, etc.), use the `/metabot` skill.
 
-Web 控制台（所有人统一入口）：https://metabot-core.xvirobotics.com — 飞连 OIDC SSO 登录，覆盖 Agents / Memory / Skills / T5T 四个标签页。
+Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或你自托管的地址）— 用本地 API token 访问，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
 ### Scheduling (Claude Code native)
 

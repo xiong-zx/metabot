@@ -5,9 +5,10 @@ import type { Logger } from '../utils/logger.js';
 import { proxyFetch } from '../utils/http.js';
 
 /**
- * Talks to the central `metabot-core` service over HTTPS (default
- * `https://metabot.xvirobotics.com/core`). All endpoints live under
- * `/api/memory/*` and require a `Authorization: Bearer <token>` header.
+ * Talks to the central `metabot-core` service over HTTP(S) (default
+ * `http://localhost:9200` — set METABOT_CORE_URL for a remote/self-hosted
+ * host). All endpoints live under `/api/memory/*` and require a
+ * `Authorization: Bearer <token>` header.
  *
  * Token resolution order:
  *   1. constructor `tokenOverride`
@@ -17,10 +18,10 @@ import { proxyFetch } from '../utils/http.js';
  * Base URL resolution order:
  *   1. constructor `baseUrlOverride`
  *   2. `METABOT_CORE_URL` env var
- *   3. `https://metabot.xvirobotics.com/core` (production default)
+ *   3. `http://localhost:9200` (local default)
  */
 
-const DEFAULT_BASE_URL = 'https://metabot.xvirobotics.com/core';
+const DEFAULT_BASE_URL = 'http://localhost:9200';
 
 export interface FolderTreeNode {
   id: string;

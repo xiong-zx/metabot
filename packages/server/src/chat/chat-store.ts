@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { Logger } from 'pino';
@@ -19,7 +20,8 @@ import type {
   ChatFile,
 } from './chat-types.js';
 
-export const DEFAULT_CHAT_FILE_STORAGE_ROOT = '/vepfs/users/floodsung/metabot-core-chat-files';
+// Default under the user's home; override with METABOT_CORE_CHAT_FILE_DIR.
+export const DEFAULT_CHAT_FILE_STORAGE_ROOT = path.join(os.homedir(), '.metabot-core', 'chat-files');
 
 export function resolveChatFilePath(
   storageKey: string,

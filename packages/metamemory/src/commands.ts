@@ -372,7 +372,7 @@ Commands:
   help
 
 Env:
-  METABOT_CORE_URL    default https://metabot-core.xvirobotics.com
+  METABOT_CORE_URL    default http://localhost:9200
   METABOT_CORE_TOKEN  bearer token (or write to ~/.metabot-core/token)
 
 Stdin: 'create' and 'update' read content from stdin if no content arg given.

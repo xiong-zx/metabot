@@ -35,7 +35,7 @@ interface FeishuBotHandle {
  * METABOT_LOCAL_ADDRESS=<source-ip> pins the source address of every Feishu
  * socket (REST + the wss long-connection), so the OS routes them out the
  * interface owning that IP instead of the default route. Workaround for VPN
- * clients with smart split-tunneling (e.g. 飞连) that capture *.feishu.cn
+ * clients with smart split-tunneling (e.g. some corporate VPNs) that capture *.feishu.cn
  * into a tunnel that is actually down while still claiming connected: live
  * sockets held by an old process keep working, but the next restart can't
  * reconnect and every bot goes silent — looking like the upgrade broke it.

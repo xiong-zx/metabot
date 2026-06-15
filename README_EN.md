@@ -7,7 +7,7 @@
 *Write code · Manage agents · Automate everything*
 
 <p>
-  <a href="https://gitlab.xvirobotics.com/xvirobotics/metabot/-/pipelines"><img src="https://gitlab.xvirobotics.com/xvirobotics/metabot/badges/main/pipeline.svg" alt="Pipeline"></a>
+  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
 </p>
 
@@ -26,7 +26,7 @@
   <img src="https://img.shields.io/badge/Web_UI-61DAFB?style=for-the-badge&logo=react&logoColor=white" alt="Web UI">
 </p>
 
-[中文](README.md) · **English** · [📚 Docs](https://xvirobotics.com/metabot/)
+[中文](README.md) · **English** · [📚 Docs](docs/)
 
 </div>
 
@@ -45,8 +45,7 @@
 </div>
 
 ```bash
-# First connect 飞连/VPN to the internal network and add your SSH key on GitLab
-git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+git clone https://github.com/xvirobotics/metabot.git ~/metabot
 cd ~/metabot && bash install.sh
 ```
 
@@ -54,7 +53,7 @@ The installer walks you through everything: working directory → **engine choic
 
 > Custom install directory (default `~/metabot`): clone into the directory you want, or `METABOT_HOME=/opt/metabot bash install.sh`. Windows: `.\install.ps1 -Dir C:\opt\metabot`.
 >
-> MetaBot is now maintained only on the internal company GitLab (`gitlab.xvirobotics.com`); the public GitHub mirror is no longer kept in sync. Cloning the internal repo requires 飞连/VPN and a personal SSH key (add it in GitLab `User Settings → SSH Keys`).
+> One-line install also works: `curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash`.
 
 ---
 
@@ -198,7 +197,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 
 **Stack**: React 19 + Vite + Zustand + react-markdown
 
-> Voice features require HTTPS. We recommend Caddy as a reverse proxy. See [Web UI docs](https://xvirobotics.com/metabot/features/web-ui/).
+> Voice features require HTTPS. We recommend Caddy as a reverse proxy. See [Web UI docs](docs/features/web-ui.md).
 
 ## Core Components
 
@@ -208,7 +207,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; teammates and background tasks survive between turns |
 | **Agent Teams** | A lead agent spawns specialist teammates in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
-| **MetaMemory** | Shared knowledge store hosted by central [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) with full-text search; MetaBot reads/writes via `/api/memory/*` and auto-syncs to Feishu Wiki |
+| **MetaMemory** | Shared knowledge store served by metabot-core (self-hosted locally, default `http://localhost:9200`) with full-text search; MetaBot reads/writes via `/api/memory/*` and can sync to Feishu Wiki |
 | **IM Bridge** | Chat with any agent from Feishu, Telegram, or WeChat (including mobile). Streaming cards + tool call tracking |
 | **Agent Bus** | Agents talk to each other via `metabot talk`. Create/remove bots at runtime |
 | **MetaSchedule (opt-in)** | Persistent server-side scheduler — cron + one-shot, survives restarts, exposes HTTP API + `metabot schedule` CLI. Not installed by default; enable with `cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/` |
@@ -229,7 +228,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 
 1. iPhone WeChat 8.0.70+ → Settings → Plugins → enable **ClawBot**
 2. Run `install.sh`, pick `3) WeChat ClawBot` — scan QR to bind
-3. See [WeChat Setup Guide](https://xvirobotics.com/metabot/features/wechat/)
+3. See [WeChat Setup Guide](docs/features/wechat.md)
 
 ### Feishu/Lark
 
@@ -403,7 +402,7 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 |----------|---------|-------------|
 | `API_PORT` | 9100 | HTTP API port |
 | `API_SECRET` | — | Bearer token auth (protects API + Web UI). Generate one with `openssl rand -hex 32` |
-| `METABOT_CORE_URL` | `https://metabot.xvirobotics.com/core` | Central metabot-core service URL (MetaMemory + Skill Hub) |
+| `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core service URL (MetaMemory + Skill Hub + Agents + T5T) — self-host locally or point at your own remote host |
 | `METABOT_CORE_TOKEN` | reads `~/.metabot-core/token` | Bearer token for metabot-core |
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
@@ -546,7 +545,7 @@ CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` i
 <summary><strong>Manual install</strong></summary>
 
 ```bash
-git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
+git clone https://github.com/xvirobotics/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # edit with your bot configs
 cp .env.example .env              # edit global settings

@@ -7,7 +7,7 @@
 *写代码 · 管 Agent · 自动化一切*
 
 <p>
-  <a href="https://gitlab.xvirobotics.com/xvirobotics/metabot/-/pipelines"><img src="https://gitlab.xvirobotics.com/xvirobotics/metabot/badges/main/pipeline.svg" alt="Pipeline"></a>
+  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
 </p>
 
@@ -26,7 +26,7 @@
   <img src="https://img.shields.io/badge/Web_UI-61DAFB?style=for-the-badge&logo=react&logoColor=white" alt="Web UI">
 </p>
 
-**中文** · [English](README_EN.md) · [📚 文档站](https://xvirobotics.com/metabot/zh/)
+**中文** · [English](README_EN.md) · [📚 文档](docs/)
 
 </div>
 
@@ -45,8 +45,7 @@
 </div>
 
 ```bash
-# 先连飞连/VPN 进内网，并把你的 GitLab SSH key 配好
-git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+git clone https://github.com/xvirobotics/metabot.git ~/metabot
 cd ~/metabot && bash install.sh
 ```
 
@@ -54,7 +53,7 @@ cd ~/metabot && bash install.sh
 
 > 自定义安装目录（默认 `~/metabot`）：把 `~/metabot` 换成你想要的路径即可，或 `METABOT_HOME=/opt/metabot bash install.sh`。Windows: `.\install.ps1 -Dir C:\opt\metabot`。
 >
-> MetaBot 当前只在公司内部 GitLab 维护（`gitlab.xvirobotics.com`），公网 GitHub mirror 不再同步。GitLab 内网仓库需要飞连/VPN + 你的个人 SSH key（在 GitLab `用户设置 → SSH 密钥` 添加）。
+> 也可以一行直装：`curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash`。
 
 ---
 
@@ -202,7 +201,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 
 **技术栈**：React 19 + Vite + Zustand + react-markdown
 
-> 语音功能需要 HTTPS。推荐用 Caddy 反向代理，自动管理证书。详见 [Web UI 文档](https://xvirobotics.com/metabot/zh/features/web-ui/)。
+> 语音功能需要 HTTPS。推荐用 Caddy 反向代理，自动管理证书。详见 [Web UI 文档](docs/features/web-ui.zh.md)。
 
 ## 核心能力
 
@@ -212,7 +211,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | **常驻会话与目标循环** | 每个会话一个常驻 Claude 进程 — `/goal` 让 Agent 在多轮之间持续自驱直到目标达成；团队成员和后台任务跨轮存活 |
 | **Agent 团队（运行时）** | 主导 Agent 并行派遣专家队友，互相路由任务、汇总结果 —— 全部在一个飞书会话中完成 |
 | **CC 原生调度** | 直接用 Claude Code 内置的 `CronCreate` / `/loop` —— 即开即用，会话内最简单 |
-| **MetaMemory** | 由中心 [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) 提供的共享知识库，全文搜索；MetaBot 通过 `/api/memory/*` 读写，并自动同步到飞书知识库 |
+| **MetaMemory** | 由 metabot-core 服务（本地自托管，默认 `http://localhost:9200`）提供的共享知识库，全文搜索；MetaBot 通过 `/api/memory/*` 读写，并可同步到飞书知识库 |
 | **IM Bridge** | 飞书、Telegram、微信（含手机端）对话任意 Agent，流式卡片 + 工具调用追踪 |
 | **Agent 总线** | Agent 通过 `metabot talk` 互相对话，运行时创建/删除 Bot |
 | **MetaSchedule（可选）** | 跨重启的服务端定时调度器，Cron + 一次性延迟，HTTP API + `metabot schedule` CLI。默认不装，按需 `cp src/skills/metaschedule/SKILL.md` 启用 |
@@ -233,7 +232,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 
 1. iPhone 微信 8.0.70+ → 设置 → 插件 → 开启 **ClawBot**
 2. 运行 `install.sh`，选 `3) WeChat ClawBot` — 扫码绑定
-3. 详见 [微信接入指南](https://xvirobotics.com/metabot/zh/features/wechat/)
+3. 详见 [微信接入指南](docs/features/wechat.zh.md)
 
 ### 飞书
 
@@ -400,7 +399,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 |------|------|------|
 | `API_PORT` | 9100 | HTTP API 端口 |
 | `API_SECRET` | — | Bearer 认证（同时保护 API 和 Web UI） |
-| `METABOT_CORE_URL` | `https://metabot-core.xvirobotics.com` | 中心 metabot-core 服务地址（MetaMemory + Skill Hub + Agents + T5T） |
+| `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core 服务地址（MetaMemory + Skill Hub + Agents + T5T），本地自托管或填你自己的远程地址 |
 | `METABOT_CORE_TOKEN` | 读 `~/.metabot-core/token` | metabot-core Bearer Token（在 `<METABOT_CORE_URL>/cli` 自助生成） |
 | `WIKI_SYNC_ENABLED` | true | 启用 MetaMemory→飞书知识库同步 |
 | `WIKI_SPACE_NAME` | MetaMemory | 飞书知识库空间名称 |
@@ -547,7 +546,7 @@ CLI 支持连接远程 MetaBot 服务器，在 `~/.metabot/.env` 配置 `METABOT
 <summary><strong>手动安装</strong></summary>
 
 ```bash
-git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
+git clone https://github.com/xvirobotics/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # 编辑 Bot 配置
 cp .env.example .env              # 编辑全局设置
