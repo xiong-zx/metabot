@@ -57,6 +57,8 @@ export interface RegistryOptions {
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
   backend?: 'sdk' | 'pty';
+  /** Append the research-PM behavior contract to new persistent executors. */
+  pmPrompt?: boolean;
   /**
    * Max registry-level respawns of a crashed executor before its pool slot is
    * truly removed. Distinct from the executor's own in-process restart cap.
@@ -267,6 +269,7 @@ export class ExecutorRegistry extends EventEmitter {
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
       backend: this.opts.backend,
+      pmPrompt: this.opts.pmPrompt,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Remember the last live sessionId so a crash-respawn can resume it even

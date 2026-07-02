@@ -35,8 +35,9 @@ import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthr
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
-import { apply1MContextSettings } from './executor.js';
+import { apply1MContextSettings, loadMcpServersWithApiContext } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { buildPmSystemPrompt } from '../pm-prompt.js';
 import { ptyQuery } from './pty/pty-query.js';
 import type {
   PtyQueryOptions,
@@ -149,6 +150,8 @@ export interface PersistentExecutorOptions {
    * The bridge scans this dir for new files at turn end.
    */
   outputsDir?: string;
+  /** Append the research-PM behavior contract to this persistent session. */
+  pmPrompt?: boolean;
   /** Auto-shutdown after this many ms of silence (no turn, no spontaneous msg). 0 disables. Default 30 min. */
   idleTimeoutMs?: number;
   /** Max consecutive restart attempts before giving up. Default 3. */
@@ -469,6 +472,9 @@ export class PersistentClaudeExecutor extends EventEmitter {
         ].join('\n'),
       );
     }
+    if (this.options.pmPrompt) {
+      appendSections.push(buildPmSystemPrompt());
+    }
     if (appendSections.length > 0) {
       queryOptions.systemPrompt = {
         type: 'preset',
@@ -476,6 +482,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
         append: '\n\n' + appendSections.join('\n\n'),
       };
     }
+    const mcpServers = loadMcpServersWithApiContext(this.options.apiContext);
+    if (mcpServers) queryOptions.mcpServers = mcpServers;
     apply1MContextSettings(queryOptions);
 
     // Hooks: AskUserQuestion (mirrored from legacy executor — required so

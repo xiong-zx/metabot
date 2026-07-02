@@ -22,6 +22,7 @@ import { RtcVoiceChatService } from './rtc-voice-chat.js';
 import { ActivityStore } from './activity-store.js';
 import { AgentTeamStore } from '../agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
+import type { WorkerManager } from '../workers/worker-manager.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
@@ -38,6 +39,7 @@ import {
   handleSessionRoutes,
   handleExecutorRoutes,
   handleAgentTeamRoutes,
+  handleWorkerRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
@@ -57,7 +59,9 @@ interface ApiServerOptions {
   teamManager?: TeamManager;
   agentTeamStore?: AgentTeamStore;
   agentTeams?: AgentTeamConfig[];
+  agentTeamExecutionBot?: string;
   sessionRegistry?: SessionRegistry;
+  workerManager?: WorkerManager;
 }
 
 const startTime = Date.now();
@@ -133,7 +137,12 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
-  const agentTeamSupervisor = new AgentTeamSupervisor({ registry, store: agentTeamStore, logger });
+  const agentTeamSupervisor = new AgentTeamSupervisor({
+    registry,
+    store: agentTeamStore,
+    logger,
+    executionBotName: options.agentTeamExecutionBot,
+  });
   if (options.agentTeams?.length) {
     agentTeamStore.reconcileTeams(options.agentTeams);
     logger.info({ count: options.agentTeams.length }, 'Agent teams reconciled from config');
@@ -168,6 +177,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     activityStore,
     agentTeamStore,
     agentTeamSupervisor,
+    workerManager: options.workerManager,
   };
 
   if (peerManager) {
@@ -232,6 +242,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleSessionRoutes,
     handleExecutorRoutes,
     handleAgentTeamRoutes,
+    handleWorkerRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {

@@ -8,6 +8,8 @@ export interface AgentTeamSupervisorOptions {
   store: AgentTeamStore;
   logger: Logger;
   intervalMs?: number;
+  /** Explicit bridge bot used to execute teammate runs. */
+  executionBotName?: string;
 }
 
 interface RunnableAgent {
@@ -123,7 +125,16 @@ export class AgentTeamSupervisor {
   }
 
   private selectExecutionBot(): RegisteredBot | undefined {
-    return this.options.registry.get('metabot') ?? this.options.registry.listRegistered()[0];
+    const configured = this.options.executionBotName?.trim();
+    if (configured) {
+      const bot = this.options.registry.get(configured);
+      if (bot) return bot;
+      this.logger.warn({ executionBotName: configured }, 'Configured Agent Team execution bot not found; falling back');
+    }
+    return this.options.registry.get('metabot')
+      ?? this.options.registry.get('research-pm')
+      ?? this.options.registry.listRegistered().find((bot) => bot.name !== 'manager')
+      ?? this.options.registry.listRegistered()[0];
   }
 
   private recoverStaleRunningRuns(): void {

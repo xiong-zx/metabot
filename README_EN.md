@@ -400,8 +400,17 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 | `maxTurns` / `maxBudgetUsd` | No | unlimited | Execution limits |
 | `model` | No | SDK default | Claude model |
 | `apiKey` | No | — | Anthropic API key (leave unset for dynamic auth via cc-switch) |
+| `pmPrompt` | No | `false` | Enables the research-PM behavior contract and the 40-minute worker check-in reminder |
 | `visible` | No | `true` | Whether this bot is visible to other bots / Agent Bus and reachable via `metabot talk`. Re-asserted from `bots.json` on every bridge bulk-register (not sticky) |
 | `memoryPublic` | No | `true` | Default target for `metabot memory create/mkdir` when no `--path` is given: `true` = `/shared/<bot>` (readable by everyone), `false` = `/users/<bot>` (private). Explicit `--path` always wins. Omitting the field preserves the last `metabot memory visibility` CLI toggle (sticky) |
+
+Global fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `workers.defaultModel` | `gpt-5.4` | Default model for `worker_dispatch` |
+| `workers.maxPerPm` | `8` | Maximum concurrent workers per PM chat |
+| `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute teammate runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
 
 </details>
 

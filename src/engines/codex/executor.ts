@@ -18,6 +18,7 @@ import {
   type CodexJsonEvent,
 } from './jsonl-translator.js';
 import { prepareWorkdirCodexHome } from './codex-home.js';
+import { buildPmSystemPrompt } from '../pm-prompt.js';
 
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
@@ -442,7 +443,7 @@ export class CodexExecutor {
     const effectiveCodexHome = codexConfig.env?.CODEX_HOME
       ?? (codexConfig.homeScope === 'workdir' ? prepareWorkdirCodexHome(cwd, this.logger) : undefined);
     const fullPrompt = prompt;
-    const developerInstructions = this.buildDeveloperInstructions(outputsDir, apiContext);
+    const developerInstructions = this.buildDeveloperInstructions(outputsDir, apiContext, !!this.config.pmPrompt);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
@@ -580,6 +581,7 @@ export class CodexExecutor {
   private buildDeveloperInstructions(
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
+    includePmPrompt: boolean,
   ): string | undefined {
     const sections: string[] = [];
 
@@ -602,6 +604,10 @@ export class CodexExecutor {
           );
         }
       }
+    }
+
+    if (includePmPrompt) {
+      sections.push(buildPmSystemPrompt());
     }
 
     return sections.length > 0 ? sections.join('\n\n') : undefined;

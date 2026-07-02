@@ -9,6 +9,7 @@ import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { buildPmSystemPrompt } from '../pm-prompt.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -270,6 +271,28 @@ export interface ExecutorOptions {
   onTeamEvent?: (event: TeamEvent) => void;
 }
 
+export function loadMcpServersWithApiContext(apiContext: ApiContext | undefined): Record<string, unknown> | undefined {
+  if (!apiContext) return undefined;
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      mcpServers?: Record<string, { env?: Record<string, string> }>;
+    };
+    if (!settings.mcpServers || Object.keys(settings.mcpServers).length === 0) return undefined;
+    const cloned = JSON.parse(JSON.stringify(settings.mcpServers)) as Record<string, { env?: Record<string, string> }>;
+    for (const server of Object.values(cloned)) {
+      server.env = {
+        ...(server.env ?? {}),
+        METABOT_BOT_NAME: apiContext.botName,
+        METABOT_CHAT_ID: apiContext.chatId,
+      };
+    }
+    return cloned;
+  } catch {
+    return undefined;
+  }
+}
+
 export type SDKMessage = {
   type: string;
   subtype?: string;
@@ -411,6 +434,16 @@ export class ClaudeExecutor {
         append: '\n\n' + appendSections.join('\n\n'),
       };
     }
+    if (this.config.pmPrompt) {
+      appendSections.push(buildPmSystemPrompt());
+      queryOptions.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: '\n\n' + appendSections.join('\n\n'),
+      };
+    }
+    const mcpServers = loadMcpServersWithApiContext(apiContext);
+    if (mcpServers) queryOptions.mcpServers = mcpServers;
 
     if (this.config.claude.maxTurns !== undefined) {
       queryOptions.maxTurns = this.config.claude.maxTurns;

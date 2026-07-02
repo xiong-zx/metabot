@@ -32,6 +32,8 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import type { TaskScheduler } from '../scheduler/task-scheduler.js';
+import type { WorkerManager } from '../workers/worker-manager.js';
 import {
   BATCH_DEBOUNCE_MS,
   IDLE_TIMEOUT_MS,
@@ -58,6 +60,20 @@ export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontane
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+const AUTO_REMIND_DELAY_SECONDS = 2400; // 40 minutes
+const AUTO_REMIND_PROMPT = [
+  '⏰ 40分钟定时提醒。请检查当前任务状态并决策下一步：',
+  '',
+  '1. 用 worker_list 查看所有 worker 状态',
+  '2. 对于 running 的 worker：去 workdir 查看日志和进度文件，评估是否正常推进',
+  '3. 对于 completed/failed 的 worker：去 workdir 查看结果，分析输出',
+  '4. 如有重要进展：commit + push 到 GitHub，更新 PROGRESS.md',
+  '5. 决策下一步：启动新一轮任务？调整方向？继续等待？',
+  '6. 如无 running worker 且需要新任务：创建 worktree，调用 worker_dispatch',
+  '7. 向用户汇报当前进展',
+  '',
+  '如果所有任务已完成、无需继续，调用 stop_auto_remind 关闭定时提醒。',
+].join('\n');
 /**
  * Window during which a freshly-resolved between-turn question card is reused
  * (updated in place) for the next sub-question of the same AskUserQuestion
@@ -129,6 +145,10 @@ export interface ApiTaskOptions {
   model?: string;
   /** Override engine for this API task without changing the chat's IM session default. */
   engine?: EngineName;
+  /** Override working directory for this API task. Used by worker dispatch. */
+  workingDirectory?: string;
+  /** Override model reasoning effort for this API task. Used by worker dispatch. */
+  reasoningEffort?: import('../config.js').CodexReasoningEffort;
   /** Override allowed tools for this task (empty array = no tools). */
   allowedTools?: string[];
   /** Called on every card state update (streaming). `final` is true on the last update. */
@@ -179,8 +199,14 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
+  private scheduler?: TaskScheduler;
+  private workerManager?: WorkerManager;
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
+  /** Auto-remind opt-out per chat. Default enabled; reset to true on every user message. */
+  private autoRemindEnabled = new Map<string, boolean>();
+  /** Pending auto-remind scheduler task ids per chat. */
+  private pendingRemindIds = new Map<string, string>();
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
   /**
    * Stage 2 — persistent executor pool. Lazy-created on first acquire when
@@ -437,6 +463,57 @@ export class MessageBridge {
     this.sessionRegistry = registry;
   }
 
+  /** Inject the task scheduler (index.ts) — enables the PM auto-remind loop. */
+  setScheduler(scheduler: TaskScheduler): void {
+    this.scheduler = scheduler;
+  }
+
+  /** Inject the worker manager (index.ts) — enables worker dispatch and /btw audit records. */
+  setWorkerManager(workerManager: WorkerManager): void {
+    this.workerManager = workerManager;
+  }
+
+  scheduleAutoRemind(chatId: string): void {
+    if (!this.scheduler || !this.config.pmPrompt) return;
+    if (chatId.startsWith('worker-')) return;
+    if (!(this.autoRemindEnabled.get(chatId) ?? true)) return;
+    this.cancelPendingRemind(chatId);
+    try {
+      const task = this.scheduler.scheduleTask({
+        botName: this.config.name,
+        chatId,
+        prompt: AUTO_REMIND_PROMPT,
+        delaySeconds: AUTO_REMIND_DELAY_SECONDS,
+        sendCards: true,
+        label: `auto-remind-${chatId}`,
+      });
+      this.pendingRemindIds.set(chatId, task.id);
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'Failed to schedule auto-remind');
+    }
+  }
+
+  cancelPendingRemind(chatId: string): void {
+    if (!this.scheduler) return;
+    const id = this.pendingRemindIds.get(chatId);
+    if (id) {
+      try { this.scheduler.cancelTask(id); } catch { /* ignore */ }
+      this.pendingRemindIds.delete(chatId);
+    }
+    try {
+      for (const task of this.scheduler.listTasks()) {
+        if (task.label === `auto-remind-${chatId}` && task.botName === this.config.name) {
+          try { this.scheduler.cancelTask(task.id); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  setAutoRemind(chatId: string, enabled: boolean): void {
+    this.autoRemindEnabled.set(chatId, enabled);
+    if (!enabled) this.cancelPendingRemind(chatId);
+  }
+
   /** Inject MetaBot Agent Teams store so cards can show team and run state. */
   setAgentTeamStore(store: AgentTeamStore): void {
     this.agentTeamStore = store;
@@ -581,6 +658,7 @@ export class MessageBridge {
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
         backend: this.config.claude.backend,
+        pmPrompt: this.config.pmPrompt,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -1524,6 +1602,10 @@ export class MessageBridge {
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
+
+    if (this.config.pmPrompt && !chatId.startsWith('worker-')) {
+      this.autoRemindEnabled.set(chatId, true);
+    }
 
     // Feishu users often type command names without the leading slash. Treat
     // an exact bare "reset" as /reset so it can abort a running PTY turn and
@@ -2474,6 +2556,7 @@ export class MessageBridge {
         metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
         this.processQueue(chatId);
       }
+      this.scheduleAutoRemind(chatId);
       if (imagePath) {
         try { fs.unlinkSync(imagePath); } catch { /* ignore */ }
       }
@@ -2495,7 +2578,7 @@ export class MessageBridge {
     }
 
     const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
-    const cwd = session.workingDirectory;
+    const cwd = options.workingDirectory ?? session.workingDirectory;
     const abortController = new AbortController();
 
     const outputsDir = this.outputsManager.prepareDir(chatId);
@@ -2561,6 +2644,7 @@ export class MessageBridge {
       maxTurns: options.maxTurns,
       model: options.model ?? session.model,
       allowedTools: options.allowedTools,
+      reasoningEffort: options.reasoningEffort,
       onTeamEvent,
     });
 
@@ -2706,6 +2790,7 @@ export class MessageBridge {
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext,
           model: options.model ?? session.model,
+          reasoningEffort: options.reasoningEffort,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2786,6 +2871,7 @@ export class MessageBridge {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
             prompt, cwd, abortController, outputsDir, apiContext,
             model: options.model ?? session.model,
+            reasoningEffort: options.reasoningEffort,
             onTeamEvent, freshSession: true,
           });
           executionHandle.finish();
@@ -2870,6 +2956,7 @@ export class MessageBridge {
       this.runningTasks.delete(chatId);
       metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
       this.processQueue(chatId);
+      this.scheduleAutoRemind(chatId);
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
     }
   }

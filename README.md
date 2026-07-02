@@ -397,8 +397,17 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | `maxTurns` / `maxBudgetUsd` | 否 | 不限 | 执行限制 |
 | `model` | 否 | SDK 默认 | Claude 模型 |
 | `apiKey` | 否 | — | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
+| `pmPrompt` | 否 | `false` | 启用研究 PM 行为契约和 40 分钟 worker 巡检提醒 |
 | `visible` | 否 | `true` | Bot 是否对其他 bot / Agent Bus 可见，可被 `metabot talk` 触达。每次 bridge bulk-register 都按 bots.json 回写（不 sticky）|
 | `memoryPublic` | 否 | `true` | `metabot memory create/mkdir` 不带 `--path` 时的默认落点：`true` = `/shared/<bot>`（其他人可读），`false` = `/users/<bot>`（私有）。显式传 `--path` 永远以传入为准。bots.json 不写则保留 `metabot memory visibility` CLI 上次设置（sticky）|
+
+全局字段：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `workers.defaultModel` | `gpt-5.4` | `worker_dispatch` 默认模型 |
+| `workers.maxPerPm` | `8` | 每个 PM chat 最多同时运行的 worker 数 |
+| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 用来执行队友 run 的 bot，建议设为 `research-pm` 或内部 worker，避免落到 `manager` |
 
 </details>
 

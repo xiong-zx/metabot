@@ -16,6 +16,7 @@ import { BotRegistry } from './api/bot-registry.js';
 import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
+import { WorkerManager } from './workers/worker-manager.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
@@ -285,6 +286,21 @@ async function main() {
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);
 
+  const workerManager = new WorkerManager(registry, logger, {
+    defaultModel: appConfig.workers.defaultModel,
+    maxPerPm: appConfig.workers.maxPerPm,
+  });
+  for (const info of registry.list()) {
+    const bot = registry.get(info.name);
+    if (!bot) continue;
+    bot.bridge.setScheduler(scheduler);
+    bot.bridge.setWorkerManager(workerManager);
+  }
+  logger.info(
+    { defaultModel: appConfig.workers.defaultModel, maxPerPm: appConfig.workers.maxPerPm },
+    'Worker manager initialized',
+  );
+
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the
   // central server URL) lets the bridge boot peerManager even with zero
@@ -374,6 +390,8 @@ async function main() {
     peerManager,
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
+    agentTeamExecutionBot: appConfig.agentTeamExecutionBot,
+    workerManager,
   });
 
   // Graceful shutdown

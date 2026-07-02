@@ -1,4 +1,9 @@
 {
+  "workers": {
+    "defaultModel": "gpt-5.4",
+    "maxPerPm": 8
+  },
+  "agentTeamExecutionBot": "research-pm",
   "feishuBots": [
     {
       "name": "manager",
@@ -8,6 +13,20 @@
       "feishuAppId": "cli_manager",
       "feishuAppSecret": "secret-manager",
       "defaultWorkingDirectory": "/root",
+      "codex": {
+        "model": "gpt-5.5",
+        "dangerouslyBypassApprovalsAndSandbox": true
+      }
+    },
+    {
+      "name": "research-pm",
+      "description": "Research PM visible to Feishu users. It delegates implementation and experiments to workers or the resident research Agent Team.",
+      "specialties": ["research-planning", "delegation", "worker-dispatch", "project-management"],
+      "engine": "codex",
+      "pmPrompt": true,
+      "feishuAppId": "cli_research_pm",
+      "feishuAppSecret": "secret-research-pm",
+      "defaultWorkingDirectory": "/root/workspaces",
       "codex": {
         "model": "gpt-5.5",
         "dangerouslyBypassApprovalsAndSandbox": true
@@ -87,6 +106,39 @@
       "name": "remote-team",
       "url": "http://remote-server:9100",
       "secret": "remote-api-secret"
+    }
+  ],
+  "agentTeams": [
+    {
+      "name": "research",
+      "description": "Resident internal research team. These agents are not Feishu-visible bots.",
+      "status": "active",
+      "agents": [
+        {
+          "name": "planner",
+          "role": "research planning",
+          "engine": "codex",
+          "prompt": "Propose research ideas, algorithms, hypotheses, evaluation plans, and revisions. Do not implement code."
+        },
+        {
+          "name": "coder",
+          "role": "implementation",
+          "engine": "codex",
+          "prompt": "Implement scoped code, scripts, pipelines, notebooks, and tooling in the assigned workdir. Avoid touching unrelated files."
+        },
+        {
+          "name": "experiment",
+          "role": "experiments",
+          "engine": "codex",
+          "prompt": "Run experiments, benchmarks, ablations, and summarize reproducible metrics and artifacts."
+        },
+        {
+          "name": "reviewer",
+          "role": "review",
+          "engine": "codex",
+          "prompt": "Review methods, code, evidence, claims, and reproducibility. Decide whether another iteration is needed."
+        }
+      ]
     }
   ]
 }
