@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh
     {
       "name": "wechat-assistant",
       "description": "微信 AI 助手",
-      "defaultWorkingDirectory": "/home/user/project"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ]
 }
@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh
   "wechatBots": [
     {
       "name": "wechat-bot",
-      "defaultWorkingDirectory": "/home/user/project",
+      "defaultWorkingDirectory": "/root/workspaces",
       "maxTurns": 50,
       "maxBudgetUsd": 1.0
     }
@@ -122,7 +122,7 @@ Waiting for scan...
 
 ```bash
 WECHAT_ILINK_ENABLED=true
-CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/user/project
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/root/workspaces
 ```
 
 ## 消息支持

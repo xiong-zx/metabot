@@ -377,12 +377,12 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
     "name": "metabot",
     "feishuAppId": "cli_xxx",
     "feishuAppSecret": "...",
-    "defaultWorkingDirectory": "/home/user/project"
+    "defaultWorkingDirectory": "/root/workspaces"
   }],
   "telegramBots": [{
     "name": "tg-bot",
     "telegramBotToken": "123456:ABC...",
-    "defaultWorkingDirectory": "/home/user/project"
+    "defaultWorkingDirectory": "/root/workspaces"
   }]
 }
 ```

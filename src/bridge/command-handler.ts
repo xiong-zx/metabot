@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { BotConfigBase, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { IncomingMessage } from '../types.js';
@@ -77,6 +79,8 @@ export class CommandHandler {
           '`/effort low|medium|high|xhigh` - Set Codex reasoning effort for this chat',
           '`/resume` - List & switch to a previous Claude session (Claude only)',
           '`/resume <id>` - Resume a session directly by id prefix',
+          '`/cat <path> [start] [end]` - Show a file or line range without starting the agent',
+          '`/ls [path]` - List a directory without starting the agent',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
@@ -215,9 +219,121 @@ export class CommandHandler {
         return true;
       }
 
+      case '/cat': {
+        const args = text.slice('/cat'.length).trim();
+        await this.handleCatCommand(chatId, args);
+        return true;
+      }
+
+      case '/ls': {
+        const args = text.slice('/ls'.length).trim();
+        await this.handleLsCommand(chatId, args);
+        return true;
+      }
+
       default:
         // Unrecognized /xxx commands — not handled here, pass through to Claude
         return false;
+    }
+  }
+
+  private resolveWorkdirPath(inputPath: string): string {
+    return path.isAbsolute(inputPath)
+      ? inputPath
+      : path.resolve(this.config.claude.defaultWorkingDirectory, inputPath);
+  }
+
+  private async handleCatCommand(chatId: string, args: string): Promise<void> {
+    const parts = args.split(/\s+/).filter(Boolean);
+    const filePath = parts[0];
+
+    if (!filePath) {
+      await this.sender.sendTextNotice(chatId, 'Cat', 'Usage:\n- `/cat <path>`\n- `/cat <path> <start> <end>`');
+      return;
+    }
+
+    const resolved = this.resolveWorkdirPath(filePath);
+    try {
+      const stat = fs.statSync(resolved);
+      if (stat.isDirectory()) {
+        await this.sender.sendTextNotice(chatId, 'Error', `\`${resolved}\` is a directory. Use \`/ls\` instead.`, 'orange');
+        return;
+      }
+
+      const raw = fs.readFileSync(resolved, 'utf-8');
+      const allLines = raw.split('\n');
+      const totalLines = allLines.length;
+      const startLine = parts[1] ? Math.max(1, parseInt(parts[1], 10)) : 1;
+      const endLine = parts[2] ? Math.min(totalLines, parseInt(parts[2], 10)) : totalLines;
+      const selected = allLines.slice(startLine - 1, endLine);
+      const numbered = selected.map((line, i) => `${String(startLine + i).padStart(4)} | ${line}`).join('\n');
+
+      const maxLen = 25_000;
+      const truncated = numbered.length > maxLen
+        ? `${numbered.slice(0, maxLen)}\n\n... (truncated, showing ${maxLen} chars of ${numbered.length})`
+        : numbered;
+      const range = (startLine !== 1 || endLine !== totalLines)
+        ? `lines ${startLine}-${endLine} of ${totalLines}`
+        : `${totalLines} lines, ${formatSize(stat.size)}`;
+      await this.sender.sendTextNotice(chatId, `${path.basename(resolved)} (${range})`, `\`\`\`\n${truncated}\n\`\`\``);
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        await this.sender.sendTextNotice(chatId, 'File Not Found', `\`${resolved}\` does not exist.`, 'red');
+      } else if (e.code === 'EACCES') {
+        await this.sender.sendTextNotice(chatId, 'Permission Denied', `Cannot read \`${resolved}\`.`, 'red');
+      } else {
+        this.logger.error({ err, filePath: resolved }, 'Cat command error');
+        await this.sender.sendTextNotice(chatId, 'Error', e.message ?? String(err), 'red');
+      }
+    }
+  }
+
+  private async handleLsCommand(chatId: string, args: string): Promise<void> {
+    const dirPath = args.trim() || this.config.claude.defaultWorkingDirectory;
+    const resolved = this.resolveWorkdirPath(dirPath);
+
+    try {
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) {
+        await this.sender.sendTextNotice(chatId, 'Error', `\`${resolved}\` is not a directory. Use \`/cat\` to view files.`, 'orange');
+        return;
+      }
+
+      const entries = fs.readdirSync(resolved, { withFileTypes: true });
+      if (entries.length === 0) {
+        await this.sender.sendTextNotice(chatId, resolved, '_Empty directory_');
+        return;
+      }
+
+      entries.sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1;
+        if (!a.isDirectory() && b.isDirectory()) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      const lines = entries.slice(0, 100).map((entry) => {
+        if (entry.isDirectory()) return `[dir]  ${entry.name}/`;
+        try {
+          const entryStat = fs.statSync(path.join(resolved, entry.name));
+          return `[file] ${entry.name} (${formatSize(entryStat.size)})`;
+        } catch {
+          return `[file] ${entry.name}`;
+        }
+      });
+      if (entries.length > 100) {
+        lines.push(`\n... and ${entries.length - 100} more entries`);
+      }
+
+      await this.sender.sendTextNotice(chatId, resolved, `\`\`\`\n${lines.join('\n')}\n\`\`\``);
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') {
+        await this.sender.sendTextNotice(chatId, 'Not Found', `\`${resolved}\` does not exist.`, 'red');
+      } else {
+        this.logger.error({ err, dirPath: resolved }, 'Ls command error');
+        await this.sender.sendTextNotice(chatId, 'Error', e.message ?? String(err), 'red');
+      }
     }
   }
 
@@ -662,4 +778,10 @@ function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | u
   if (normalized === 'max') return 'xhigh';
   if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') return normalized;
   return undefined;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

@@ -159,6 +159,12 @@ export interface CodexBotConfig {
   contextWindow?: number;
   /** Default reasoning effort for Codex CLI (`model_reasoning_effort`). */
   reasoningEffort?: CodexReasoningEffort;
+  /**
+   * CODEX_HOME scoping. 'global' (default) uses Codex's normal shared home.
+   * 'workdir' gives each working directory an isolated CODEX_HOME under the
+   * MetaBot state directory.
+   */
+  homeScope?: 'workdir' | 'global';
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -268,6 +274,8 @@ export interface CodexJsonConfig {
   /** Context window size in tokens for display only. */
   contextWindow?: number;
   reasoningEffort?: CodexReasoningEffort;
+  /** CODEX_HOME scoping: 'global' (default) | 'workdir'. */
+  homeScope?: 'workdir' | 'global';
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -499,6 +507,9 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),
     ...(process.env.CODEX_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.CODEX_CONTEXT_WINDOW, 10) } : {}),
     ...(isCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT) ? { reasoningEffort: process.env.CODEX_REASONING_EFFORT } : {}),
+    ...(process.env.CODEX_HOME_SCOPE === 'global' || process.env.CODEX_HOME_SCOPE === 'workdir'
+      ? { homeScope: process.env.CODEX_HOME_SCOPE }
+      : {}),
     ...(entry ?? {}),
   };
   return Object.keys(cfg).length > 0 ? cfg : undefined;

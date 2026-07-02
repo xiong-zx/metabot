@@ -13,20 +13,20 @@
       "name": "metabot",
       "feishuAppId": "cli_xxx",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/home/user/project-a"
+      "defaultWorkingDirectory": "/root/workspaces"
     },
     {
       "name": "backend-bot",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/home/user/project-b"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ],
   "telegramBots": [
     {
       "name": "tg-bot",
       "telegramBotToken": "123456:ABC...",
-      "defaultWorkingDirectory": "/home/user/project-c"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ]
 }
@@ -58,7 +58,7 @@
   "engine": "kimi",
   "feishuAppId": "cli_xxx",
   "feishuAppSecret": "...",
-  "defaultWorkingDirectory": "/home/user/project",
+  "defaultWorkingDirectory": "/root/workspaces",
   "kimi": {
     "model": "kimi-for-coding",
     "thinking": true
@@ -107,5 +107,5 @@ Kimi 需要先执行一次 `kimi login`（安装 `uv tool install kimi-cli` 后�
 ```bash
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=...
-DEFAULT_WORKING_DIRECTORY=/home/user/project
+DEFAULT_WORKING_DIRECTORY=/root/workspaces
 ```

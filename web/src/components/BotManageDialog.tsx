@@ -107,7 +107,7 @@ export function BotManageDialog({ mode, bot, onClose }: BotManageDialogProps) {
               className={styles.input}
               value={workDir}
               onChange={(e) => setWorkDir(e.target.value)}
-              placeholder="/home/user/project"
+              placeholder="/root/workspaces"
             />
           </label>
 

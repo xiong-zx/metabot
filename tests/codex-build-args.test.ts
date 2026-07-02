@@ -66,6 +66,42 @@ describe('buildCodexArgs', () => {
     expect(args).toContain('model_reasoning_effort="xhigh"');
   });
 
+  it('lets extraArgs override per-turn reasoning effort', () => {
+    const args = buildCodexArgs({ extraArgs: ['-c', 'model_reasoning_effort="medium"'] }, cwd, prompt, undefined, undefined, 'high');
+    expect(args).toContain('model_reasoning_effort="medium"');
+    expect(args).not.toContain('model_reasoning_effort="high"');
+  });
+
+  it('injects verified context profiles for known Codex models', () => {
+    const gpt54 = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.4').join(' ');
+    expect(gpt54).toContain('-c model_context_window=1000000');
+    expect(gpt54).toContain('-c model_auto_compact_token_limit=820000');
+    expect(gpt54).toContain('-c model_max_output_tokens=192000');
+
+    const gpt55 = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5').join(' ');
+    expect(gpt55).toContain('-c model_context_window=272000');
+    expect(gpt55).toContain('-c model_auto_compact_token_limit=258400');
+    expect(gpt55).toContain('-c model_max_output_tokens=128000');
+    expect(gpt55).not.toContain('1000000');
+  });
+
+  it('does not inject profile keys already supplied in extraArgs', () => {
+    const args = buildCodexArgs({ extraArgs: ['-c', 'model_context_window=500000'] }, cwd, prompt, undefined, 'gpt-5.4').join(' ');
+    expect(args).toContain('model_context_window=500000');
+    expect(args).not.toContain('model_context_window=1000000');
+    expect(args).toContain('model_auto_compact_token_limit=820000');
+  });
+
+  it('passes developer_instructions as a quoted config override', () => {
+    const instructions = '## MetaBot API\nYou are bot "x" in chat "y".';
+    const args = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5', undefined, instructions);
+    const idx = args.findIndex((a) => a.startsWith('developer_instructions='));
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx - 1]).toBe('-c');
+    expect(args[idx]).toBe(`developer_instructions=${JSON.stringify(instructions)}`);
+    expect(idx).toBeLessThan(args.indexOf('exec'));
+  });
+
   it('appends extraArgs verbatim between global flags and the exec subcommand', () => {
     const cfg: CodexBotConfig = { extraArgs: ['--foo', 'bar baz', '--qux'] };
     const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
@@ -111,6 +147,26 @@ describe('buildCodexArgs', () => {
         model: 'gpt-test',
         contextWindow: 123456,
       });
+    } finally {
+      if (priorCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = priorCodexHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses model profiles and config.toml context before cache fallback', () => {
+    const priorCodexHome = process.env.CODEX_HOME;
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-codex-'));
+    try {
+      process.env.CODEX_HOME = dir;
+      writeFileSync(join(dir, 'config.toml'), 'model_context_window = 654321\n');
+      writeFileSync(join(dir, 'models_cache.json'), JSON.stringify({
+        models: [{ slug: 'gpt-5.4', context_window: 272000, max_context_window: 1000000 }],
+      }));
+
+      expect(resolveCodexModelMetadata({}, 'gpt-5.4').contextWindow).toBe(1000000);
+      expect(resolveCodexModelMetadata({ contextWindow: 42 }, 'gpt-5.4').contextWindow).toBe(42);
+      expect(resolveCodexModelMetadata({}, 'gpt-custom').contextWindow).toBe(654321);
     } finally {
       if (priorCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = priorCodexHome;

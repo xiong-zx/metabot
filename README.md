@@ -374,12 +374,12 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
     "name": "metabot",
     "feishuAppId": "cli_xxx",
     "feishuAppSecret": "...",
-    "defaultWorkingDirectory": "/home/user/project"
+    "defaultWorkingDirectory": "/root/workspaces"
   }],
   "telegramBots": [{
     "name": "tg-bot",
     "telegramBotToken": "123456:ABC...",
-    "defaultWorkingDirectory": "/home/user/project"
+    "defaultWorkingDirectory": "/root/workspaces"
   }]
 }
 ```
