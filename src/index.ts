@@ -272,33 +272,41 @@ async function main() {
     };
     for (const handle of feishuHandles) tapFrames(handle);
 
+    const rebuildWsClient = async (handle: FeishuBotHandle, silentMs: number) => {
+      logger.warn({ bot: handle.name, silentSec: Math.round(silentMs / 1000) }, 'WS watchdog: no Feishu frames; rebuilding wsClient');
+      handle.lastEventAt.value = Date.now();
+      rebuildingBots.add(handle.name);
+      const old = handle.wsClient;
+      try {
+        const fresh = new lark.WSClient({
+          appId: handle.feishuCreds.appId,
+          appSecret: handle.feishuCreds.appSecret,
+          loggerLevel: lark.LoggerLevel.info,
+          agent: feishuLocalAgent,
+        });
+        await fresh.start({ eventDispatcher: handle.dispatcher });
+        handle.wsClient = fresh;
+        tapFrames(handle);
+        try {
+          old.close({ force: true });
+        } catch (err) {
+          logger.warn({ err, bot: handle.name }, 'WS watchdog: stale wsClient close failed');
+        }
+        logger.info({ bot: handle.name }, 'WS watchdog: wsClient rebuilt');
+      } catch (err) {
+        logger.error({ err, bot: handle.name }, 'WS watchdog: wsClient rebuild failed');
+      } finally {
+        rebuildingBots.delete(handle.name);
+      }
+    };
+
     setInterval(() => {
       for (const handle of feishuHandles) {
         tapFrames(handle);
         const silentMs = Date.now() - handle.lastEventAt.value;
         if (silentMs < wsWatchdogStaleMs) continue;
         if (rebuildingBots.has(handle.name)) continue;
-        logger.warn({ bot: handle.name, silentSec: Math.round(silentMs / 1000) }, 'WS watchdog: no Feishu frames; rebuilding wsClient');
-        handle.lastEventAt.value = Date.now();
-        rebuildingBots.add(handle.name);
-        try {
-          const old = handle.wsClient;
-          const fresh = new lark.WSClient({
-            appId: handle.feishuCreds.appId,
-            appSecret: handle.feishuCreds.appSecret,
-            loggerLevel: lark.LoggerLevel.info,
-            agent: feishuLocalAgent,
-          });
-          void fresh.start({ eventDispatcher: handle.dispatcher });
-          handle.wsClient = fresh;
-          old.close({ force: true });
-          tapFrames(handle);
-          logger.info({ bot: handle.name }, 'WS watchdog: wsClient rebuilt');
-        } catch (err) {
-          logger.error({ err, bot: handle.name }, 'WS watchdog: wsClient rebuild failed');
-        } finally {
-          rebuildingBots.delete(handle.name);
-        }
+        void rebuildWsClient(handle, silentMs);
       }
     }, 60 * 1000).unref();
     logger.info({ staleMs: wsWatchdogStaleMs }, 'Feishu WS watchdog armed');
