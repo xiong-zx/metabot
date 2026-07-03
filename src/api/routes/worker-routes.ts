@@ -63,6 +63,8 @@ export async function handleWorkerRoutes(
           reasoningEffort: body.reasoningEffort as WorkerReasoningEffort | undefined,
           approvalPolicy: body.approvalPolicy as CodexApprovalPolicy | undefined,
           sandbox: body.sandbox as CodexSandbox | undefined,
+          timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
+          idleTimeoutMs: typeof body.idleTimeoutMs === 'number' ? body.idleTimeoutMs : undefined,
         });
         jsonResponse(res, 202, record);
       } catch (err: any) {

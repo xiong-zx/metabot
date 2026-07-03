@@ -29,6 +29,8 @@ export interface WorkerRecord {
   reasoningEffort?: WorkerReasoningEffort;
   approvalPolicy?: CodexApprovalPolicy;
   sandbox?: CodexSandbox;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
   status: 'running' | 'completed' | 'failed' | 'aborted';
   startTime: number;
   endTime?: number;
@@ -51,6 +53,8 @@ export interface DispatchInput {
   reasoningEffort?: WorkerReasoningEffort;
   approvalPolicy?: CodexApprovalPolicy;
   sandbox?: CodexSandbox;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
 }
 
 export interface WorkerManagerConfig {
@@ -218,6 +222,8 @@ export class WorkerManager {
       reasoningEffort: input.reasoningEffort,
       approvalPolicy: input.approvalPolicy,
       sandbox: input.sandbox,
+      timeoutMs: input.timeoutMs,
+      idleTimeoutMs: input.idleTimeoutMs,
       status: 'running',
       startTime: Date.now(),
     };
@@ -289,6 +295,8 @@ export class WorkerManager {
       reasoningEffort: record.reasoningEffort,
       approvalPolicy: record.approvalPolicy,
       sandbox: record.sandbox,
+      timeoutMs: record.timeoutMs,
+      idleTimeoutMs: record.idleTimeoutMs,
     });
   }
 
@@ -355,6 +363,10 @@ export class WorkerManager {
         model: record.model,
         engine: record.engine,
         reasoningEffort: record.reasoningEffort,
+        approvalPolicy: record.approvalPolicy,
+        sandbox: record.sandbox,
+        timeoutMs: record.timeoutMs,
+        idleTimeoutMs: record.idleTimeoutMs,
       });
 
       record.endTime = Date.now();

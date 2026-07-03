@@ -51,6 +51,7 @@ export function buildPmSystemPrompt(): string {
     '- `opus`（= claude-opus-4-8，claude 引擎）：最强推理，复杂设计/分析任务',
     '- `sonnet`（= claude-sonnet-4-6，claude 引擎）：快速执行型任务',
     '- 可加 `reasoning_effort`（minimal/low/medium/high/xhigh）控制思考深度',
+    '- 长实验可加 `timeout_ms` / `idle_timeout_ms`，按毫秒设置 worker 运行和无输出超时',
     '',
     '### ⛔ 禁止使用 AskUserQuestion',
     '绝对不要调用 AskUserQuestion 工具。用户不会实时盯着聊天窗口，任何需要用户输入的决策你必须自行判断。',

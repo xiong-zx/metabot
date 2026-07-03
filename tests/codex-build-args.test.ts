@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
+import { applyCodexRuntimeOverrides, buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
 import type { CodexBotConfig } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
@@ -35,6 +35,16 @@ describe('buildCodexArgs', () => {
     expect(args[0]).toBe('--dangerously-bypass-approvals-and-sandbox');
     expect(args).not.toContain('-a');
     expect(args).not.toContain('--sandbox');
+  });
+
+  it('lets per-call policy/sandbox overrides disable bot-level bypass', () => {
+    const cfg = applyCodexRuntimeOverrides(
+      { dangerouslyBypassApprovalsAndSandbox: true },
+      { approvalPolicy: 'on-request', sandbox: 'workspace-write' },
+    );
+    const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
+    expect(args.slice(0, 4)).toEqual(['-a', 'on-request', '--sandbox', 'workspace-write']);
+    expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
   });
 
   it('passes model and profile when provided', () => {

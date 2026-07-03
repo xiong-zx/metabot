@@ -78,6 +78,8 @@ export function createEventDispatcher(
   botOpenId?: string,
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
+  /** Fired for every Feishu event before filtering; used by the WS watchdog. */
+  onAnyEvent?: () => void,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -88,6 +90,7 @@ export function createEventDispatcher(
       register: (handlers: Record<string, (data: unknown) => unknown>) => void;
     }).register({
       'card.action.trigger': (data: unknown) => {
+        onAnyEvent?.();
         try {
           const d = data as {
             operator?: { open_id?: string };
@@ -119,6 +122,7 @@ export function createEventDispatcher(
 
   dispatcher.register({
     'im.message.receive_v1': async (data: any) => {
+      onAnyEvent?.();
       try {
         const event = data;
         const message = event.message;
@@ -406,4 +410,3 @@ function extractTextFromPost(content: Record<string, unknown>): string {
 
   return '';
 }
-

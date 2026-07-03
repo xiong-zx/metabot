@@ -204,6 +204,31 @@ export function forkCodexThread(sessionId: string, codexHome?: string): { forkId
   }
 }
 
+const BYTHEWAY_CODEX_NOTE = [
+  'SIDE BRANCH MODE (/bytheway). You are in a SIDE BRANCH session that',
+  'inherits the main conversation history but does NOT write back to it.',
+  'The user may later continue THIS branch with /btwc.',
+  'File reading and editing are allowed under the bot\'s normal sandbox.',
+  'Do NOT dispatch or control workers in side branches; worker_dispatch,',
+  'worker_abort, worker_redirect, remind_me, and stop_auto_remind are',
+  'off-limits by design. Checking status via worker_list is fine.',
+  'If the task requires dispatching workers, tell the user to re-send it as',
+  'a normal non-/bytheway message.',
+].join('\n');
+
+export function applyCodexRuntimeOverrides(
+  base: CodexBotConfig,
+  options: Pick<ExecutorOptions, 'approvalPolicy' | 'sandbox'>,
+): CodexBotConfig {
+  if (!options.approvalPolicy && !options.sandbox) return base;
+  return {
+    ...base,
+    dangerouslyBypassApprovalsAndSandbox: false,
+    ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+  };
+}
+
 export function readCodexLastTokenUsage(
   sessionId: string,
   codexHome?: string,
@@ -373,6 +398,13 @@ export function buildCodexEnv(
   return env;
 }
 
+function applyApiContextEnv(env: Record<string, string>, apiContext: ApiContext | undefined): void {
+  if (!apiContext) return;
+  env.METABOT_BOT_NAME = apiContext.botName;
+  env.METABOT_CHAT_ID = apiContext.chatId;
+  if (apiContext.groupId) env.METABOT_GROUP_ID = apiContext.groupId;
+}
+
 /**
  * Build the argv array for `codex exec`. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
@@ -437,19 +469,42 @@ export class CodexExecutor {
 
   startExecution(options: ExecutorOptions): ExecutionHandle {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
-    const codexConfig = this.config.codex ?? {};
+    const codexConfig = applyCodexRuntimeOverrides(this.config.codex ?? {}, options);
     const model = options.model ?? codexConfig.model;
     const modelMetadata = resolveCodexModelMetadata(codexConfig, model);
     const effectiveCodexHome = codexConfig.env?.CODEX_HOME
       ?? (codexConfig.homeScope === 'workdir' ? prepareWorkdirCodexHome(cwd, this.logger) : undefined);
-    const fullPrompt = prompt;
+    let effectiveSessionId = sessionId;
+    let fullPrompt = prompt;
+    if (options.oneShot) {
+      fullPrompt = `${BYTHEWAY_CODEX_NOTE}\n\n${prompt}`;
+      if (options.oneShot === 'fork' && sessionId) {
+        const fork = forkCodexThread(sessionId, effectiveCodexHome);
+        if (fork) {
+          effectiveSessionId = fork.forkId;
+          this.logger.info({ mainThread: sessionId, forkThread: fork.forkId }, '/bytheway: forked codex thread');
+        } else {
+          effectiveSessionId = undefined;
+          fullPrompt = `(The main conversation history could not be forked for this side query; answer from scratch.)\n\n${fullPrompt}`;
+          this.logger.warn({ sessionId }, '/bytheway: codex rollout not found; running without history');
+        }
+      }
+    }
     const developerInstructions = this.buildDeveloperInstructions(outputsDir, apiContext, !!this.config.pmPrompt);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort, developerInstructions);
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      fullPrompt,
+      effectiveSessionId,
+      model,
+      options.reasoningEffort as CodexReasoningEffort | undefined,
+      developerInstructions,
+    );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
@@ -458,7 +513,7 @@ export class CodexExecutor {
     let stdoutBuffer = '';
 
     const executable = resolveCodexPath(codexConfig.executable);
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
+    this.logger.info({ cwd, hasSession: !!effectiveSessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
 
     const finishWithError = (message: string): void => {
       if (sawResult) return;
@@ -466,7 +521,7 @@ export class CodexExecutor {
       queue.enqueue({
         type: 'result',
         subtype: abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution',
-        session_id: state.sessionId ?? sessionId,
+        session_id: state.sessionId ?? effectiveSessionId,
         duration_ms: Date.now() - startTime,
         result: state.lastAgentText,
         is_error: true,
@@ -503,6 +558,7 @@ export class CodexExecutor {
     try {
       const env = buildCodexEnv(codexConfig);
       if (effectiveCodexHome) env.CODEX_HOME = effectiveCodexHome;
+      applyApiContextEnv(env, apiContext);
       child = spawn(executable, args, {
         cwd,
         env,
@@ -542,7 +598,7 @@ export class CodexExecutor {
         } else if (pendingResult) {
           const snapshot = state.lastUsage
             ? { usage: state.lastUsage, contextWindow: state.contextWindow }
-            : readLastTokenCountFromSession(state.sessionId ?? sessionId, effectiveCodexHome);
+            : readLastTokenCountFromSession(state.sessionId ?? effectiveSessionId, effectiveCodexHome);
           queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
         }
         if (stderr.trim()) {

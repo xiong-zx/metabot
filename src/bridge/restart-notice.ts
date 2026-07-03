@@ -21,6 +21,14 @@ const BREADCRUMB_FILENAME = 'last-restart.json';
 // the reminder days later on an unrelated start.
 const RESTART_WINDOW_MS = 15 * 60 * 1000;
 
+export interface RestartBreadcrumb {
+  restartedAt: number;
+  botName?: string;
+  chatId?: string;
+  reason?: string;
+}
+
+let restartBreadcrumb: RestartBreadcrumb | undefined;
 let restartedAtMs: number | undefined;
 const remindedChats = new Set<string>();
 
@@ -38,8 +46,14 @@ export function loadRestartBreadcrumb(): void {
   const file = breadcrumbPath();
   try {
     const raw = fs.readFileSync(file, 'utf-8');
-    const parsed = JSON.parse(raw) as { restartedAt?: number };
+    const parsed = JSON.parse(raw) as RestartBreadcrumb;
     if (typeof parsed.restartedAt === 'number') {
+      restartBreadcrumb = {
+        restartedAt: parsed.restartedAt,
+        ...(typeof parsed.botName === 'string' && parsed.botName ? { botName: parsed.botName } : {}),
+        ...(typeof parsed.chatId === 'string' && parsed.chatId ? { chatId: parsed.chatId } : {}),
+        ...(typeof parsed.reason === 'string' && parsed.reason ? { reason: parsed.reason } : {}),
+      };
       restartedAtMs = parsed.restartedAt * 1000; // breadcrumb stores epoch seconds
     }
   } catch {
@@ -55,8 +69,7 @@ export function loadRestartBreadcrumb(): void {
 
 /** True if we should inject the restart reminder for this chat's next turn. */
 export function shouldRemindRestart(chatId: string): boolean {
-  if (restartedAtMs === undefined) return false;
-  if (Date.now() - restartedAtMs > RESTART_WINDOW_MS) return false;
+  if (!isFreshRestart()) return false;
   return !remindedChats.has(chatId);
 }
 
@@ -69,4 +82,13 @@ export function markReminded(chatId: string): void {
 export function restartSecondsAgo(): number {
   if (restartedAtMs === undefined) return 0;
   return Math.max(0, Math.round((Date.now() - restartedAtMs) / 1000));
+}
+
+export function isFreshRestart(): boolean {
+  return restartedAtMs !== undefined && Date.now() - restartedAtMs <= RESTART_WINDOW_MS;
+}
+
+export function getRestartBreadcrumb(): RestartBreadcrumb | undefined {
+  if (!isFreshRestart()) return undefined;
+  return restartBreadcrumb;
 }

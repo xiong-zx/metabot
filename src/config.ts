@@ -37,6 +37,13 @@ loadEnvFiles();
 /** Agent engine backing a bot. */
 export type EngineName = 'claude' | 'kimi' | 'codex';
 export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+const CLAUDE_EFFORT_VALUES: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+function parseClaudeEffort(value: string | undefined): ClaudeEffort | undefined {
+  return value && CLAUDE_EFFORT_VALUES.has(value) ? (value as ClaudeEffort) : undefined;
+}
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -84,6 +91,8 @@ export interface BotConfigBase {
     maxTurns: number | undefined;
     maxBudgetUsd: number | undefined;
     model: string | undefined;
+    /** Reasoning effort for the Claude Agent SDK's `effort` query option. */
+    effort: ClaudeEffort | undefined;
     /** Explicit Anthropic API key. When set, child Claude Code processes use this
      *  key instead of ~/.claude/.credentials.json. Supports cc-switch compatibility:
      *  leave unset to let Claude Code resolve auth dynamically. */
@@ -328,6 +337,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -381,6 +391,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -429,6 +440,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }
@@ -469,6 +481,7 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -500,6 +513,7 @@ function buildClaudeConfig(entry: {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -512,6 +526,7 @@ function buildClaudeConfig(entry: {
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-fable-5',
+    effort: entry.effort ?? parseClaudeEffort(process.env.CLAUDE_EFFORT),
     apiKey: entry.apiKey || undefined,
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -561,6 +576,7 @@ function feishuBotFromEnv(): BotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -584,6 +600,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -607,6 +624,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),

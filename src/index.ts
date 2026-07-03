@@ -20,6 +20,7 @@ import { WorkerManager } from './workers/worker-manager.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { recoverInterruptedTasksAfterRestart } from './bridge/restart-recovery.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -30,6 +31,9 @@ interface FeishuBotHandle {
   config: BotConfigBase;
   sender: IMessageSender;
   feishuClient: lark.Client;
+  lastEventAt: { value: number };
+  dispatcher: lark.EventDispatcher;
+  feishuCreds: { appId: string; appSecret: string };
 }
 
 /**
@@ -96,6 +100,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?:
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
   const bridge = new MessageBridge(botConfig, botLogger, sender);
+  const lastEventAt = { value: Date.now() };
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -113,6 +118,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?:
         botLogger.error({ err, event }, 'Unhandled error in card action handler');
       });
     },
+    () => { lastEventAt.value = Date.now(); },
   );
 
   // Create WebSocket client
@@ -133,7 +139,17 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?:
     maxBudgetUsd: botConfig.claude.maxBudgetUsd ?? 'unlimited',
   }, 'Configuration');
 
-  return { name: botConfig.name, bridge, wsClient, config: botConfig, sender, feishuClient: client };
+  return {
+    name: botConfig.name,
+    bridge,
+    wsClient,
+    config: botConfig,
+    sender,
+    feishuClient: client,
+    lastEventAt,
+    dispatcher,
+    feishuCreds: { appId: botConfig.feishu.appId, appSecret: botConfig.feishu.appSecret },
+  };
 }
 
 /**
@@ -235,6 +251,52 @@ async function main() {
     )
     : [];
 
+  const wsWatchdogStaleMs = process.env.METABOT_WS_WATCHDOG_STALE_MS
+    ? parseInt(process.env.METABOT_WS_WATCHDOG_STALE_MS, 10)
+    : 7 * 60 * 1000;
+  if (feishuHandles.length > 0 && wsWatchdogStaleMs > 0) {
+    const tappedSockets = new WeakSet<object>();
+    const tapFrames = (handle: FeishuBotHandle) => {
+      try {
+        const inst = (handle.wsClient as unknown as {
+          wsConfig?: { getWSInstance?: () => { on: (ev: string, fn: () => void) => void } | undefined };
+        }).wsConfig?.getWSInstance?.();
+        if (inst && !tappedSockets.has(inst)) {
+          tappedSockets.add(inst);
+          inst.on('message', () => { handle.lastEventAt.value = Date.now(); });
+        }
+      } catch {
+        // SDK internals shifted; dispatcher-level liveness still applies.
+      }
+    };
+    for (const handle of feishuHandles) tapFrames(handle);
+
+    setInterval(() => {
+      for (const handle of feishuHandles) {
+        tapFrames(handle);
+        const silentMs = Date.now() - handle.lastEventAt.value;
+        if (silentMs < wsWatchdogStaleMs) continue;
+        logger.warn({ bot: handle.name, silentSec: Math.round(silentMs / 1000) }, 'WS watchdog: no Feishu frames; rebuilding wsClient');
+        handle.lastEventAt.value = Date.now();
+        try {
+          const fresh = new lark.WSClient({
+            appId: handle.feishuCreds.appId,
+            appSecret: handle.feishuCreds.appSecret,
+            loggerLevel: lark.LoggerLevel.info,
+            agent: feishuLocalAgent,
+          });
+          void fresh.start({ eventDispatcher: handle.dispatcher });
+          handle.wsClient = fresh;
+          tapFrames(handle);
+          logger.info({ bot: handle.name }, 'WS watchdog: wsClient rebuilt');
+        } catch (err) {
+          logger.error({ err, bot: handle.name }, 'WS watchdog: wsClient rebuild failed');
+        }
+      }
+    }, 60 * 1000).unref();
+    logger.info({ staleMs: wsWatchdogStaleMs }, 'Feishu WS watchdog armed');
+  }
+
   // Register all bots in the registry
   for (const handle of feishuHandles) {
     registry.register({
@@ -300,6 +362,7 @@ async function main() {
     { defaultModel: appConfig.workers.defaultModel, maxPerPm: appConfig.workers.maxPerPm },
     'Worker manager initialized',
   );
+  await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
 
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the

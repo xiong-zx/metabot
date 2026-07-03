@@ -400,7 +400,27 @@ _update_core_workspace() {
 _write_restart_breadcrumb() {
   local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '{"restartedAt": %s}\n' "$(date +%s)" > "$dir/last-restart.json" 2>/dev/null || true
+  python3 - "$dir/last-restart.json" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+import time
+
+data = {"restartedAt": int(time.time())}
+fields = {
+    "METABOT_BOT_NAME": "botName",
+    "METABOT_CHAT_ID": "chatId",
+    "METABOT_RESTART_REASON": "reason",
+}
+for env_name, json_name in fields.items():
+    value = os.environ.get(env_name, "").strip()
+    if value:
+        data[json_name] = value
+
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False)
+    f.write("\n")
+PY
 }
 
 cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }

@@ -111,6 +111,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           reasoning_effort: { type: 'string', enum: ['minimal', 'low', 'medium', 'high', 'xhigh'], description: 'Reasoning effort for the worker' },
           approval_policy: { type: 'string', enum: ['untrusted', 'on-failure', 'on-request', 'never'], description: 'Codex approval policy (codex workers only)' },
           sandbox: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: 'Codex sandbox level (codex workers only)' },
+          timeout_ms: { type: 'number', description: 'Optional wall-clock timeout in milliseconds for long-running workers' },
+          idle_timeout_ms: { type: 'number', description: 'Optional no-stream idle timeout in milliseconds for long-running workers' },
           botName: { type: 'string', description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})` },
           pmChatId: { type: 'string', description: 'Your chat ID for callbacks (REQUIRED for codex-engine PMs; auto-detected for claude PMs)' },
         },
@@ -210,6 +212,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           reasoningEffort: args?.reasoning_effort,
           approvalPolicy: args?.approval_policy,
           sandbox: args?.sandbox,
+          timeoutMs: args?.timeout_ms,
+          idleTimeoutMs: args?.idle_timeout_ms,
         });
         if (status >= 400) {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };

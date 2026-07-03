@@ -62,6 +62,7 @@ function buildHandler(opts: HandlerOpts = {}) {
     async () => {},
     () => [],        // listSessions — not touched by /stop
     async () => {},  // applyResume — not touched by /stop
+    async () => {},  // runBytheway — not touched by /stop
   );
   return {
     handler,

@@ -33,9 +33,10 @@ import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from '../../utils/logger.js';
+import type { ClaudeEffort } from '../../config.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
-import { apply1MContextSettings, loadMcpServersWithApiContext } from './executor.js';
+import { apply1MContextSettings, applyNoProxyPolicy, loadMcpServersWithApiContext } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
 import { ptyQuery } from './pty/pty-query.js';
@@ -114,6 +115,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
+    applyNoProxyPolicy(env);
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
       env,
@@ -121,6 +123,15 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return child as unknown as SpawnedProcess;
+  };
+}
+
+function apiContextEnv(apiContext: ApiContext | undefined): Record<string, string> | undefined {
+  if (!apiContext) return undefined;
+  return {
+    METABOT_BOT_NAME: apiContext.botName,
+    METABOT_CHAT_ID: apiContext.chatId,
+    ...(apiContext.groupId ? { METABOT_GROUP_ID: apiContext.groupId } : {}),
   };
 }
 
@@ -137,6 +148,8 @@ export interface PersistentExecutorOptions {
   /** Optional explicit API key, otherwise OAuth credentials file is used. */
   apiKey?: string;
   model?: string;
+  /** Reasoning effort forwarded to the SDK. */
+  effort?: ClaudeEffort;
   logger: Logger;
   /**
    * MetaBot bot/chat context. Stable for the lifetime of the executor
@@ -415,6 +428,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
     }
 
     const isRoot = process.getuid?.() === 0;
+    const runtimeEnv = apiContextEnv(this.options.apiContext);
     const queryOptions: Record<string, unknown> = {
       permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
       ...(isRoot ? {} : { allowDangerouslySkipPermissions: true }),
@@ -425,8 +439,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
       settings: { teammateMode: 'in-process' },
       agentProgressSummaries: true,
+      ...(runtimeEnv ? { env: runtimeEnv } : {}),
     };
     if (this.options.model) queryOptions.model = this.options.model;
+    if (this.options.effort) queryOptions.effort = this.options.effort;
     // resume: prefer the most-recent observed sessionId; fall back to the
     // one supplied at construction. This way, a restart picks up the live
     // session even if the SDK forked sessionId mid-life.
@@ -515,6 +531,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
         systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
         logger: this.options.logger,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
+        env: queryOptions.env as NodeJS.ProcessEnv | undefined,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
       };
       const stream = ptyQuery({

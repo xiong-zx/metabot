@@ -26,6 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
+import type { ClaudeEffort } from '../../config.js';
 import type { TeamEvent, ApiContext } from './executor.js';
 import {
   PersistentClaudeExecutor,
@@ -53,6 +54,8 @@ export interface RegistryOptions {
   idleTimeoutMs?: number;
   /** Default model for new executors. Per-acquire option overrides this. */
   defaultModel?: string;
+  /** Default reasoning effort for new executors. */
+  defaultEffort?: ClaudeEffort;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
@@ -263,6 +266,7 @@ export class ExecutorRegistry extends EventEmitter {
       resumeSessionId,
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
+      effort: this.opts.defaultEffort,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,

@@ -54,6 +54,7 @@ function buildHandler(opts: HandlerOpts = {}) {
     async () => { releaseExecutorCalls++; },
     () => [],
     async () => {},
+    async () => {},
   );
 
   return {

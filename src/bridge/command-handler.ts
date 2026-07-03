@@ -49,6 +49,10 @@ export class CommandHandler {
      * resumes via `claude --resume`. Backs both `/resume` forms.
      */
     private applyResume: (chatId: string, sessionId: string) => Promise<void>,
+    /**
+     * Kick off a /bytheway side query. `continueBranch` backs /btwc.
+     */
+    private runBytheway: (msg: IncomingMessage, question: string, continueBranch: boolean) => Promise<void>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
@@ -71,7 +75,7 @@ export class CommandHandler {
         await this.sender.sendTextNotice(chatId, '📖 Help', [
           '**Bot Commands:**',
           '`/reset` - Clear session, start fresh',
-          '`/stop` - Abort current running task',
+          '`/stop` - Abort current running task (and any in-flight /btw)',
           '`/status` - Show current session info',
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
@@ -79,6 +83,8 @@ export class CommandHandler {
           '`/effort low|medium|high|xhigh` - Set Codex reasoning effort for this chat',
           '`/resume` - List & switch to a previous Claude session (Claude only)',
           '`/resume <id>` - Resume a session directly by id prefix',
+          '`/btw <q>` (alias `/bytheway`) - Run a side branch without writing back to the main session',
+          '`/btwc <q>` (alias `/bythewayc`) - Continue the previous /btw side branch',
           '`/cat <path> [start] [end]` - Show a file or line range without starting the agent',
           '`/ls [path]` - List a directory without starting the agent',
           '`/memory` - Memory document commands',
@@ -228,6 +234,42 @@ export class CommandHandler {
       case '/ls': {
         const args = text.slice('/ls'.length).trim();
         await this.handleLsCommand(chatId, args);
+        return true;
+      }
+
+      case '/bytheway':
+      case '/btw': {
+        const question = text.slice(cmd.length).trim();
+        if (!question) {
+          await this.sender.sendTextNotice(
+            chatId,
+            '/bytheway',
+            '`/btw <question>` starts a side branch that can read the main session history but does not write back. Use `/btwc` to continue the previous side branch.',
+          );
+          return true;
+        }
+        this.audit.log({ event: 'bytheway_command', botName: this.config.name, chatId, userId, prompt: question });
+        this.runBytheway(msg, question, false).catch((err) => {
+          this.logger.error({ err, chatId }, '/bytheway: unhandled error');
+        });
+        return true;
+      }
+
+      case '/bythewayc':
+      case '/btwc': {
+        const question = text.slice(cmd.length).trim();
+        if (!question) {
+          await this.sender.sendTextNotice(
+            chatId,
+            '/btwc',
+            '`/btwc <question>` continues the previous /btw side branch. If no branch exists, it behaves like `/btw`.',
+          );
+          return true;
+        }
+        this.audit.log({ event: 'bytheway_command', botName: this.config.name, chatId, userId, prompt: question, meta: { continueBranch: true } });
+        this.runBytheway(msg, question, true).catch((err) => {
+          this.logger.error({ err, chatId }, '/bytheway: unhandled error');
+        });
         return true;
       }
 

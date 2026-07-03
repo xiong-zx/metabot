@@ -67,6 +67,7 @@ function buildHandler(workdir = '/tmp') {
     async () => {},  // releaseExecutor
     () => [],        // listSessions
     async () => {},  // applyResume
+    async () => {},  // runBytheway
   );
   return { handler, notices };
 }
