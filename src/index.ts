@@ -256,6 +256,7 @@ async function main() {
     : 7 * 60 * 1000;
   if (feishuHandles.length > 0 && wsWatchdogStaleMs > 0) {
     const tappedSockets = new WeakSet<object>();
+    const rebuildingBots = new Set<string>();
     const tapFrames = (handle: FeishuBotHandle) => {
       try {
         const inst = (handle.wsClient as unknown as {
@@ -276,9 +277,12 @@ async function main() {
         tapFrames(handle);
         const silentMs = Date.now() - handle.lastEventAt.value;
         if (silentMs < wsWatchdogStaleMs) continue;
+        if (rebuildingBots.has(handle.name)) continue;
         logger.warn({ bot: handle.name, silentSec: Math.round(silentMs / 1000) }, 'WS watchdog: no Feishu frames; rebuilding wsClient');
         handle.lastEventAt.value = Date.now();
+        rebuildingBots.add(handle.name);
         try {
+          const old = handle.wsClient;
           const fresh = new lark.WSClient({
             appId: handle.feishuCreds.appId,
             appSecret: handle.feishuCreds.appSecret,
@@ -287,10 +291,13 @@ async function main() {
           });
           void fresh.start({ eventDispatcher: handle.dispatcher });
           handle.wsClient = fresh;
+          old.close({ force: true });
           tapFrames(handle);
           logger.info({ bot: handle.name }, 'WS watchdog: wsClient rebuilt');
         } catch (err) {
           logger.error({ err, bot: handle.name }, 'WS watchdog: wsClient rebuild failed');
+        } finally {
+          rebuildingBots.delete(handle.name);
         }
       }
     }, 60 * 1000).unref();
