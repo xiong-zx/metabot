@@ -36,7 +36,14 @@ loadEnvFiles();
 
 /** Agent engine backing a bot. */
 export type EngineName = 'claude' | 'kimi' | 'codex';
-export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+const CLAUDE_EFFORT_VALUES: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+function parseClaudeEffort(value: string | undefined): ClaudeEffort | undefined {
+  return value && CLAUDE_EFFORT_VALUES.has(value) ? (value as ClaudeEffort) : undefined;
+}
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -74,11 +81,18 @@ export interface BotConfigBase {
   memoryPublic?: boolean;
   /** Agent engine. Defaults to 'codex' unless METABOT_ENGINE or bots.json overrides it. */
   engine?: EngineName;
+  /**
+   * Research-PM mode. When true, the bot receives the PM workflow contract
+   * and the bridge re-arms the 40-minute worker check-in reminder after turns.
+   */
+  pmPrompt?: boolean;
   claude: {
     defaultWorkingDirectory: string;
     maxTurns: number | undefined;
     maxBudgetUsd: number | undefined;
     model: string | undefined;
+    /** Reasoning effort for the Claude Agent SDK's `effort` query option. */
+    effort: ClaudeEffort | undefined;
     /** Explicit Anthropic API key. When set, child Claude Code processes use this
      *  key instead of ~/.claude/.credentials.json. Supports cc-switch compatibility:
      *  leave unset to let Claude Code resolve auth dynamically. */
@@ -159,6 +173,12 @@ export interface CodexBotConfig {
   contextWindow?: number;
   /** Default reasoning effort for Codex CLI (`model_reasoning_effort`). */
   reasoningEffort?: CodexReasoningEffort;
+  /**
+   * CODEX_HOME scoping. 'global' (default) uses Codex's normal shared home.
+   * 'workdir' gives each working directory an isolated CODEX_HOME under the
+   * MetaBot state directory.
+   */
+  homeScope?: 'workdir' | 'global';
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -215,6 +235,19 @@ export interface AppConfig {
   peers: PeerConfig[];
   /** Resident MetaBot Agent Teams reconciled into the bridge runtime. */
   agentTeams: AgentTeamConfig[];
+  /**
+   * Bot used by the Agent Team supervisor when executing teammate runs.
+   * Set this to a non-privileged PM/internal worker bot so teams do not
+   * accidentally run under the first registered bot (often manager).
+   */
+  agentTeamExecutionBot?: string;
+  /** PM/Worker dispatch system defaults. */
+  workers: {
+    /** Default worker model (alias or raw name). Default: gpt-5.4 (codex, real 1M ctx). */
+    defaultModel: string;
+    /** Max concurrent running workers per PM chat. Default 8. */
+    maxPerPm: number;
+  };
 }
 
 function required(name: string): string {
@@ -268,6 +301,8 @@ export interface CodexJsonConfig {
   /** Context window size in tokens for display only. */
   contextWindow?: number;
   reasoningEffort?: CodexReasoningEffort;
+  /** CODEX_HOME scoping: 'global' (default) | 'workdir'. */
+  homeScope?: 'workdir' | 'global';
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -279,6 +314,8 @@ interface EngineJsonFields {
   codex?: CodexJsonConfig;
   /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
   backend?: 'sdk' | 'pty';
+  /** Enable the research-PM prompt and auto-remind loop for this bot. */
+  pmPrompt?: boolean;
 }
 
 export interface FeishuBotJsonEntry extends EngineJsonFields {
@@ -300,6 +337,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -322,6 +360,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
+    ...(entry.pmPrompt ? { pmPrompt: true } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     feishu: {
@@ -352,6 +391,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -371,6 +411,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
+    ...(entry.pmPrompt ? { pmPrompt: true } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     telegram: {
@@ -399,6 +440,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }
@@ -417,6 +459,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
+    ...(entry.pmPrompt ? { pmPrompt: true } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     claude: buildClaudeConfig(entry),
@@ -438,6 +481,7 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -451,6 +495,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
+    ...(entry.pmPrompt ? { pmPrompt: true } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     wechat: {
@@ -468,6 +513,7 @@ function buildClaudeConfig(entry: {
   maxTurns?: number;
   maxBudgetUsd?: number;
   model?: string;
+  effort?: ClaudeEffort;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -480,6 +526,7 @@ function buildClaudeConfig(entry: {
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-fable-5',
+    effort: entry.effort ?? parseClaudeEffort(process.env.CLAUDE_EFFORT),
     apiKey: entry.apiKey || undefined,
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -499,13 +546,16 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),
     ...(process.env.CODEX_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.CODEX_CONTEXT_WINDOW, 10) } : {}),
     ...(isCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT) ? { reasoningEffort: process.env.CODEX_REASONING_EFFORT } : {}),
+    ...(process.env.CODEX_HOME_SCOPE === 'global' || process.env.CODEX_HOME_SCOPE === 'workdir'
+      ? { homeScope: process.env.CODEX_HOME_SCOPE }
+      : {}),
     ...(entry ?? {}),
   };
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
 function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
-  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
+  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
 }
 
 // --- Single-bot env var mode ---
@@ -515,6 +565,7 @@ function feishuBotFromEnv(): BotConfig {
   return {
     name: 'default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
+    ...(process.env.METABOT_PM_PROMPT === 'true' ? { pmPrompt: true } : {}),
     ...(codex ? { codex } : {}),
     feishu: {
       appId: required('FEISHU_APP_ID'),
@@ -525,6 +576,7 @@ function feishuBotFromEnv(): BotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -538,6 +590,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
   return {
     name: 'telegram-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
+    ...(process.env.METABOT_PM_PROMPT === 'true' ? { pmPrompt: true } : {}),
     ...(codex ? { codex } : {}),
     telegram: {
       botToken: required('TELEGRAM_BOT_TOKEN'),
@@ -547,6 +600,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -560,6 +614,7 @@ function wechatBotFromEnv(): WechatBotConfig {
   return {
     name: 'wechat-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
+    ...(process.env.METABOT_PM_PROMPT === 'true' ? { pmPrompt: true } : {}),
     ...(codex ? { codex } : {}),
     wechat: {
       botToken: process.env.WECHAT_BOT_TOKEN || undefined,
@@ -569,6 +624,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
@@ -592,6 +648,11 @@ export interface BotsJsonNewFormat {
   wechatBots?: WechatBotJsonEntry[];
   peers?: PeerJsonEntry[];
   agentTeams?: AgentTeamConfig[];
+  agentTeamExecutionBot?: string;
+  workers?: {
+    defaultModel?: string;
+    maxPerPm?: number;
+  };
 }
 
 export function loadAppConfig(): AppConfig {
@@ -602,6 +663,8 @@ export function loadAppConfig(): AppConfig {
   let webBots: BotConfigBase[] = [];
   let wechatBots: WechatBotConfig[] = [];
   let agentTeams: AgentTeamConfig[] = [];
+  let agentTeamExecutionBot: string | undefined;
+  let workerDefaults: BotsJsonNewFormat['workers'];
   let parsedConfig: unknown;
 
   if (botsConfigPath) {
@@ -633,6 +696,12 @@ export function loadAppConfig(): AppConfig {
       }
       if (cfg.agentTeams) {
         agentTeams = cfg.agentTeams.map(normalizeAgentTeamConfig);
+      }
+      if (cfg.agentTeamExecutionBot) {
+        agentTeamExecutionBot = cfg.agentTeamExecutionBot;
+      }
+      if (cfg.workers) {
+        workerDefaults = cfg.workers;
       }
       if (feishuBots.length === 0 && telegramBots.length === 0 && webBots.length === 0 && wechatBots.length === 0) {
         throw new Error(`BOTS_CONFIG file must define at least one bot: ${resolved}`);
@@ -717,6 +786,13 @@ export function loadAppConfig(): AppConfig {
     },
     peers,
     agentTeams,
+    agentTeamExecutionBot: process.env.METABOT_AGENT_TEAM_EXECUTION_BOT || agentTeamExecutionBot || undefined,
+    workers: {
+      defaultModel: process.env.METABOT_WORKER_DEFAULT_MODEL || workerDefaults?.defaultModel || 'gpt-5.4',
+      maxPerPm: process.env.METABOT_WORKER_MAX_PER_PM
+        ? parseInt(process.env.METABOT_WORKER_MAX_PER_PM, 10)
+        : workerDefaults?.maxPerPm ?? 8,
+    },
   };
 }
 

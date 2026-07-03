@@ -26,6 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
+import type { ClaudeEffort } from '../../config.js';
 import type { TeamEvent, ApiContext } from './executor.js';
 import {
   PersistentClaudeExecutor,
@@ -53,10 +54,14 @@ export interface RegistryOptions {
   idleTimeoutMs?: number;
   /** Default model for new executors. Per-acquire option overrides this. */
   defaultModel?: string;
+  /** Default reasoning effort for new executors. */
+  defaultEffort?: ClaudeEffort;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
   backend?: 'sdk' | 'pty';
+  /** Append the research-PM behavior contract to new persistent executors. */
+  pmPrompt?: boolean;
   /**
    * Max registry-level respawns of a crashed executor before its pool slot is
    * truly removed. Distinct from the executor's own in-process restart cap.
@@ -261,12 +266,14 @@ export class ExecutorRegistry extends EventEmitter {
       resumeSessionId,
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
+      effort: this.opts.defaultEffort,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
       backend: this.opts.backend,
+      pmPrompt: this.opts.pmPrompt,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Remember the last live sessionId so a crash-respawn can resume it even

@@ -99,6 +99,7 @@ function buildHandler(opts: BuildOpts = {}) {
     async () => {},
     () => [],
     async () => {},
+    async () => {},
   );
 
   if (opts.docSyncConfigured) {

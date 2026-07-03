@@ -1,5 +1,37 @@
 {
+  "workers": {
+    "defaultModel": "gpt-5.4",
+    "maxPerPm": 8
+  },
+  "agentTeamExecutionBot": "research-pm",
   "feishuBots": [
+    {
+      "name": "manager",
+      "description": "System-level manager for server, package, repository, and infrastructure operations",
+      "specialties": ["operations", "infrastructure", "repository"],
+      "engine": "codex",
+      "feishuAppId": "cli_manager",
+      "feishuAppSecret": "secret-manager",
+      "defaultWorkingDirectory": "/root",
+      "codex": {
+        "model": "gpt-5.5",
+        "dangerouslyBypassApprovalsAndSandbox": true
+      }
+    },
+    {
+      "name": "research-pm",
+      "description": "Research PM visible to Feishu users. It delegates implementation and experiments to workers or the resident research Agent Team.",
+      "specialties": ["research-planning", "delegation", "worker-dispatch", "project-management"],
+      "engine": "codex",
+      "pmPrompt": true,
+      "feishuAppId": "cli_research_pm",
+      "feishuAppSecret": "secret-research-pm",
+      "defaultWorkingDirectory": "/root/workspaces",
+      "codex": {
+        "model": "gpt-5.5",
+        "dangerouslyBypassApprovalsAndSandbox": true
+      }
+    },
     {
       "name": "project-alpha",
       "description": "Frontend development agent for Project Alpha — React, TypeScript, CSS",
@@ -10,7 +42,7 @@
       "ttsVoice": "zh_male_rap_mars_bigtts",
       "feishuAppId": "cli_xxx",
       "feishuAppSecret": "secret1",
-      "defaultWorkingDirectory": "/home/user/project-alpha"
+      "defaultWorkingDirectory": "/root/workspaces"
     },
     {
       "name": "project-beta",
@@ -18,7 +50,7 @@
       "specialties": ["backend", "api", "database"],
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "secret2",
-      "defaultWorkingDirectory": "/home/user/project-beta",
+      "defaultWorkingDirectory": "/root/workspaces",
       "maxTurns": 30,
       "maxBudgetUsd": 0.5
     },
@@ -28,7 +60,7 @@
       "engine": "kimi",
       "feishuAppId": "cli_zzz",
       "feishuAppSecret": "secret3",
-      "defaultWorkingDirectory": "/home/user/project-gamma",
+      "defaultWorkingDirectory": "/root/workspaces",
       "kimi": {
         "model": "kimi-latest",
         "thinking": true
@@ -40,10 +72,9 @@
       "engine": "codex",
       "feishuAppId": "cli_codex",
       "feishuAppSecret": "secret4",
-      "defaultWorkingDirectory": "/home/user/project-delta",
+      "defaultWorkingDirectory": "/root/workspaces",
       "codex": {
         "model": "gpt-5.5",
-        "apiKey": "sk-optional-openai-compatible-key",
         "baseUrl": "https://api.openai.com/v1",
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
@@ -55,14 +86,14 @@
       "name": "tg-project",
       "description": "General purpose project assistant via Telegram",
       "telegramBotToken": "123456:ABC-DEF...",
-      "defaultWorkingDirectory": "/home/user/project"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ],
   "wechatBots": [
     {
       "name": "wechat-assistant",
       "description": "WeChat AI assistant via iLink",
-      "defaultWorkingDirectory": "/home/user/project"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ],
   "peers": [
@@ -75,6 +106,39 @@
       "name": "remote-team",
       "url": "http://remote-server:9100",
       "secret": "remote-api-secret"
+    }
+  ],
+  "agentTeams": [
+    {
+      "name": "research",
+      "description": "Resident internal research team. These agents are not Feishu-visible bots.",
+      "status": "active",
+      "agents": [
+        {
+          "name": "planner",
+          "role": "research planning",
+          "engine": "codex",
+          "prompt": "Propose research ideas, algorithms, hypotheses, evaluation plans, and revisions. Do not implement code."
+        },
+        {
+          "name": "coder",
+          "role": "implementation",
+          "engine": "codex",
+          "prompt": "Implement scoped code, scripts, pipelines, notebooks, and tooling in the assigned workdir. Avoid touching unrelated files."
+        },
+        {
+          "name": "experiment",
+          "role": "experiments",
+          "engine": "codex",
+          "prompt": "Run experiments, benchmarks, ablations, and summarize reproducible metrics and artifacts."
+        },
+        {
+          "name": "reviewer",
+          "role": "review",
+          "engine": "codex",
+          "prompt": "Review methods, code, evidence, claims, and reproducibility. Decide whether another iteration is needed."
+        }
+      ]
     }
   ]
 }

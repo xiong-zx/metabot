@@ -1,5 +1,6 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
@@ -16,6 +17,8 @@ import {
   translateCodexJsonEvent,
   type CodexJsonEvent,
 } from './jsonl-translator.js';
+import { prepareWorkdirCodexHome } from './codex-home.js';
+import { buildPmSystemPrompt } from '../pm-prompt.js';
 
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
@@ -50,6 +53,25 @@ interface CodexModelMetadata {
   contextWindow?: number;
 }
 
+export const CODEX_MODEL_PROFILES: Record<string, { configOverrides: Record<string, number>; contextWindow: number }> = {
+  'gpt-5.4': {
+    configOverrides: {
+      model_context_window: 1_000_000,
+      model_auto_compact_token_limit: 820_000,
+      model_max_output_tokens: 192_000,
+    },
+    contextWindow: 1_000_000,
+  },
+  'gpt-5.5': {
+    configOverrides: {
+      model_context_window: 272_000,
+      model_auto_compact_token_limit: 258_400,
+      model_max_output_tokens: 128_000,
+    },
+    contextWindow: 272_000,
+  },
+};
+
 export function resolveCodexModelMetadata(codexConfig: CodexBotConfig, requestedModel?: string): CodexModelMetadata {
   const model = requestedModel
     || codexConfig.model
@@ -58,7 +80,11 @@ export function resolveCodexModelMetadata(codexConfig: CodexBotConfig, requested
     || readDefaultModelFromCache();
   return {
     model,
-    contextWindow: codexConfig.contextWindow ?? readContextWindowFromCache(model) ?? (model ? FALLBACK_CODEX_CONTEXT_WINDOW : undefined),
+    contextWindow: codexConfig.contextWindow
+      ?? (model ? CODEX_MODEL_PROFILES[model]?.contextWindow : undefined)
+      ?? readCodexConfigContextWindow(codexConfig.profile)
+      ?? readContextWindowFromCache(model)
+      ?? (model ? FALLBACK_CODEX_CONTEXT_WINDOW : undefined),
   };
 }
 
@@ -70,6 +96,22 @@ function readCodexConfigModel(profile?: string): string | undefined {
     const text = readFileSync(configPath, 'utf-8');
     const profileModel = profile ? readTomlSectionValue(text, `profiles.${profile}`, 'model') : undefined;
     return profileModel ?? readTomlTopLevelValue(text, 'model');
+  } catch {
+    return undefined;
+  }
+}
+
+function readCodexConfigContextWindow(profile?: string): number | undefined {
+  const configPath = process.env.CODEX_HOME
+    ? path.join(process.env.CODEX_HOME, 'config.toml')
+    : path.join(os.homedir(), '.codex', 'config.toml');
+  try {
+    const text = readFileSync(configPath, 'utf-8');
+    const raw = (profile ? readTomlSectionValue(text, `profiles.${profile}`, 'model_context_window') : undefined)
+      ?? readTomlTopLevelValue(text, 'model_context_window');
+    if (!raw) return undefined;
+    const parsed = parseInt(raw.replace(/_/g, ''), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   } catch {
     return undefined;
   }
@@ -105,10 +147,9 @@ interface CodexTokenCountSnapshot {
   contextWindow?: number;
 }
 
-function readLastTokenCountFromSession(sessionId: string | undefined): CodexTokenCountSnapshot | undefined {
+function readLastTokenCountFromSession(sessionId: string | undefined, codexHome?: string): CodexTokenCountSnapshot | undefined {
   if (!sessionId) return undefined;
-  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const sessionsDir = path.join(codexHome, 'sessions');
+  const sessionsDir = path.join(resolveCodexHome(codexHome), 'sessions');
   const sessionPath = findCodexSessionFile(sessionsDir, sessionId);
   if (!sessionPath) return undefined;
 
@@ -133,6 +174,105 @@ function readLastTokenCountFromSession(sessionId: string | undefined): CodexToke
         usage,
         contextWindow: rec.payload.info?.model_context_window,
       };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function resolveCodexHome(codexHome?: string): string {
+  return codexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+export function findCodexRolloutFile(sessionId: string, codexHome?: string): string | undefined {
+  const sessionsDir = path.join(resolveCodexHome(codexHome), 'sessions');
+  return findCodexSessionFile(sessionsDir, sessionId);
+}
+
+export function forkCodexThread(sessionId: string, codexHome?: string): { forkId: string; forkPath: string } | undefined {
+  const src = findCodexRolloutFile(sessionId, codexHome);
+  if (!src) return undefined;
+  const forkId = randomUUID();
+  const dst = path.join(path.dirname(src), path.basename(src).split(sessionId).join(forkId));
+  try {
+    const content = readFileSync(src, 'utf-8');
+    writeFileSync(dst, content.split(sessionId).join(forkId));
+    return { forkId, forkPath: dst };
+  } catch {
+    return undefined;
+  }
+}
+
+const BYTHEWAY_CODEX_NOTE = [
+  'SIDE BRANCH MODE (/bytheway). You are in a SIDE BRANCH session that',
+  'inherits the main conversation history but does NOT write back to it.',
+  'The user may later continue THIS branch with /btwc.',
+  'File reading and editing are allowed under the bot\'s normal sandbox.',
+  'Do NOT dispatch or control workers in side branches; worker_dispatch,',
+  'worker_abort, worker_redirect, remind_me, and stop_auto_remind are',
+  'off-limits by design. Checking status via worker_list is fine.',
+  'If the task requires dispatching workers, tell the user to re-send it as',
+  'a normal non-/bytheway message.',
+].join('\n');
+
+export function applyCodexRuntimeOverrides(
+  base: CodexBotConfig,
+  options: Pick<ExecutorOptions, 'approvalPolicy' | 'sandbox'>,
+): CodexBotConfig {
+  if (!options.approvalPolicy && !options.sandbox) return base;
+  return {
+    ...base,
+    dangerouslyBypassApprovalsAndSandbox: false,
+    ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+  };
+}
+
+export function readCodexLastTokenUsage(
+  sessionId: string,
+  codexHome?: string,
+): { inputTokens: number; cachedInputTokens: number; outputTokens: number; contextWindow?: number } | undefined {
+  const file = findCodexRolloutFile(sessionId, codexHome);
+  if (!file) return undefined;
+  try {
+    const fd = openSync(file, 'r');
+    let tail: string;
+    try {
+      const size = fstatSync(fd).size;
+      const readLen = Math.min(size, 256 * 1024);
+      const buf = Buffer.alloc(readLen);
+      readSync(fd, buf, 0, readLen, size - readLen);
+      tail = buf.toString('utf-8');
+    } finally {
+      closeSync(fd);
+    }
+    const lines = tail.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"token_count"')) continue;
+      try {
+        const parsed = JSON.parse(lines[i]) as {
+          payload?: {
+            type?: string;
+            info?: {
+              last_token_usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
+              model_context_window?: number;
+            };
+          };
+        };
+        const info = parsed.payload?.type === 'token_count' ? parsed.payload.info : undefined;
+        const last = info?.last_token_usage;
+        if (last) {
+          return {
+            inputTokens: last.input_tokens ?? 0,
+            cachedInputTokens: last.cached_input_tokens ?? 0,
+            outputTokens: last.output_tokens ?? 0,
+            contextWindow: info?.model_context_window,
+          };
+        }
+      } catch {
+        // Partial tail line; continue scanning.
+      }
     }
   } catch {
     return undefined;
@@ -225,6 +365,10 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
+function extraArgsContainConfigKey(extraArgs: string[] | undefined, key: string): boolean {
+  return (extraArgs ?? []).some((arg) => arg === key || arg.startsWith(`${key}=`));
+}
+
 /**
  * Build the environment for the Codex CLI child process.
  *
@@ -254,6 +398,13 @@ export function buildCodexEnv(
   return env;
 }
 
+function applyApiContextEnv(env: Record<string, string>, apiContext: ApiContext | undefined): void {
+  if (!apiContext) return;
+  env.METABOT_BOT_NAME = apiContext.botName;
+  env.METABOT_CHAT_ID = apiContext.chatId;
+  if (apiContext.groupId) env.METABOT_GROUP_ID = apiContext.groupId;
+}
+
 /**
  * Build the argv array for `codex exec`. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
@@ -268,6 +419,7 @@ export function buildCodexArgs(
   sessionId: string | undefined,
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
+  developerInstructions?: string,
 ): string[] {
   const args: string[] = [];
 
@@ -282,8 +434,22 @@ export function buildCodexArgs(
   if (model) args.push('-m', model);
   if (codexConfig.profile) args.push('-p', codexConfig.profile);
   if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
+
+  const modelProfile = model ? CODEX_MODEL_PROFILES[model] : undefined;
+  if (modelProfile) {
+    for (const [key, value] of Object.entries(modelProfile.configOverrides)) {
+      if (extraArgsContainConfigKey(codexConfig.extraArgs, key)) continue;
+      args.push('-c', `${key}=${value}`);
+    }
+  }
+
   const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
-  if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
+  if (effectiveEffort && !extraArgsContainConfigKey(codexConfig.extraArgs, 'model_reasoning_effort')) {
+    args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
+  }
+  if (developerInstructions) {
+    args.push('-c', `developer_instructions=${tomlString(developerInstructions)}`);
+  }
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -303,16 +469,42 @@ export class CodexExecutor {
 
   startExecution(options: ExecutorOptions): ExecutionHandle {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
-    const codexConfig = this.config.codex ?? {};
+    const codexConfig = applyCodexRuntimeOverrides(this.config.codex ?? {}, options);
     const model = options.model ?? codexConfig.model;
     const modelMetadata = resolveCodexModelMetadata(codexConfig, model);
-    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
+    const effectiveCodexHome = codexConfig.env?.CODEX_HOME
+      ?? (codexConfig.homeScope === 'workdir' ? prepareWorkdirCodexHome(cwd, this.logger) : undefined);
+    let effectiveSessionId = sessionId;
+    let fullPrompt = prompt;
+    if (options.oneShot) {
+      fullPrompt = `${BYTHEWAY_CODEX_NOTE}\n\n${prompt}`;
+      if (options.oneShot === 'fork' && sessionId) {
+        const fork = forkCodexThread(sessionId, effectiveCodexHome);
+        if (fork) {
+          effectiveSessionId = fork.forkId;
+          this.logger.info({ mainThread: sessionId, forkThread: fork.forkId }, '/bytheway: forked codex thread');
+        } else {
+          effectiveSessionId = undefined;
+          fullPrompt = `(The main conversation history could not be forked for this side query; answer from scratch.)\n\n${fullPrompt}`;
+          this.logger.warn({ sessionId }, '/bytheway: codex rollout not found; running without history');
+        }
+      }
+    }
+    const developerInstructions = this.buildDeveloperInstructions(outputsDir, apiContext, !!this.config.pmPrompt);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      fullPrompt,
+      effectiveSessionId,
+      model,
+      options.reasoningEffort as CodexReasoningEffort | undefined,
+      developerInstructions,
+    );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
@@ -321,7 +513,7 @@ export class CodexExecutor {
     let stdoutBuffer = '';
 
     const executable = resolveCodexPath(codexConfig.executable);
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
+    this.logger.info({ cwd, hasSession: !!effectiveSessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
 
     const finishWithError = (message: string): void => {
       if (sawResult) return;
@@ -329,7 +521,7 @@ export class CodexExecutor {
       queue.enqueue({
         type: 'result',
         subtype: abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution',
-        session_id: state.sessionId ?? sessionId,
+        session_id: state.sessionId ?? effectiveSessionId,
         duration_ms: Date.now() - startTime,
         result: state.lastAgentText,
         is_error: true,
@@ -364,9 +556,12 @@ export class CodexExecutor {
     };
 
     try {
+      const env = buildCodexEnv(codexConfig);
+      if (effectiveCodexHome) env.CODEX_HOME = effectiveCodexHome;
+      applyApiContextEnv(env, apiContext);
       child = spawn(executable, args, {
         cwd,
-        env: buildCodexEnv(codexConfig),
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: any) {
@@ -403,7 +598,7 @@ export class CodexExecutor {
         } else if (pendingResult) {
           const snapshot = state.lastUsage
             ? { usage: state.lastUsage, contextWindow: state.contextWindow }
-            : readLastTokenCountFromSession(state.sessionId ?? sessionId);
+            : readLastTokenCountFromSession(state.sessionId ?? effectiveSessionId, effectiveCodexHome);
           queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
         }
         if (stderr.trim()) {
@@ -439,11 +634,11 @@ export class CodexExecutor {
     }
   }
 
-  private buildPromptWithContext(
-    prompt: string,
+  private buildDeveloperInstructions(
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
-  ): string {
+    includePmPrompt: boolean,
+  ): string | undefined {
     const sections: string[] = [];
 
     if (outputsDir) {
@@ -467,7 +662,10 @@ export class CodexExecutor {
       }
     }
 
-    if (sections.length === 0) return prompt;
-    return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    if (includePmPrompt) {
+      sections.push(buildPmSystemPrompt());
+    }
+
+    return sections.length > 0 ? sections.join('\n\n') : undefined;
   }
 }

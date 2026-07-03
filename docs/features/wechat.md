@@ -51,7 +51,7 @@ Add a `wechatBots` section to your `bots.json`:
     {
       "name": "wechat-assistant",
       "description": "WeChat AI assistant",
-      "defaultWorkingDirectory": "/home/user/project"
+      "defaultWorkingDirectory": "/root/workspaces"
     }
   ]
 }
@@ -102,7 +102,7 @@ For a single WeChat bot, use env vars instead of `bots.json`:
 
 ```bash
 WECHAT_ILINK_ENABLED=true
-CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/user/project
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/root/workspaces
 ```
 
 ## Message Support

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { BotConfigBase } from '../config.js';
+import type { BotConfigBase, ClaudeEffort, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { BackgroundEvent, IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
@@ -25,6 +25,7 @@ import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
 import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
+import { clearActiveTask, recordActiveTask } from './restart-recovery.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import { CommandHandler } from './command-handler.js';
@@ -32,12 +33,16 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import type { TaskScheduler } from '../scheduler/task-scheduler.js';
+import type { WorkerManager } from '../workers/worker-manager.js';
 import {
   BATCH_DEBOUNCE_MS,
   IDLE_TIMEOUT_MS,
   IDLE_TIMEOUT_MESSAGE,
   MAX_QUEUE_SIZE,
+  QUESTION_TIMEOUT_MS,
   SPONTANEOUS_COALESCE_MS,
+  TASK_TIMEOUT_MS,
   TASK_TIMEOUT_MESSAGE,
 } from './bridge-constants.js';
 import { CodexCommandController } from './codex-command-controller.js';
@@ -56,8 +61,20 @@ export { isContextOverflowError, isStaleSessionError } from './error-classifiers
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
-const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
-const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+const AUTO_REMIND_DELAY_SECONDS = 2400; // 40 minutes
+const AUTO_REMIND_PROMPT = [
+  '⏰ 40分钟定时提醒。请检查当前任务状态并决策下一步：',
+  '',
+  '1. 用 worker_list 查看所有 worker 状态',
+  '2. 对于 running 的 worker：去 workdir 查看日志和进度文件，评估是否正常推进',
+  '3. 对于 completed/failed 的 worker：去 workdir 查看结果，分析输出',
+  '4. 如有重要进展：commit + push 到 GitHub，更新 PROGRESS.md',
+  '5. 决策下一步：启动新一轮任务？调整方向？继续等待？',
+  '6. 如无 running worker 且需要新任务：创建 worktree，调用 worker_dispatch',
+  '7. 向用户汇报当前进展',
+  '',
+  '如果所有任务已完成、无需继续，调用 stop_auto_remind 关闭定时提醒。',
+].join('\n');
 /**
  * Window during which a freshly-resolved between-turn question card is reused
  * (updated in place) for the next sub-question of the same AskUserQuestion
@@ -129,6 +146,18 @@ export interface ApiTaskOptions {
   model?: string;
   /** Override engine for this API task without changing the chat's IM session default. */
   engine?: EngineName;
+  /** Override working directory for this API task. Used by worker dispatch. */
+  workingDirectory?: string;
+  /** Override reasoning effort for this API task. Used by worker dispatch. */
+  reasoningEffort?: CodexReasoningEffort | ClaudeEffort;
+  /** Override Codex approval policy for this API task. Used by worker dispatch. */
+  approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
+  /** Override Codex sandbox for this API task. Used by worker dispatch. */
+  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Override wall-clock timeout for this API task. */
+  timeoutMs?: number;
+  /** Override idle/no-stream timeout for this API task. */
+  idleTimeoutMs?: number;
   /** Override allowed tools for this task (empty array = no tools). */
   allowedTools?: string[];
   /** Called on every card state update (streaming). `final` is true on the last update. */
@@ -150,6 +179,24 @@ export interface ApiTaskResult {
   costUsd?: number;
   durationMs?: number;
   error?: string;
+}
+
+/** Remembered /bytheway side branch for a chat (engine-tagged session id). */
+export interface BtwBranch {
+  sessionId: string;
+  engine: EngineName;
+}
+
+export function resolveBtwTarget(
+  continueBranch: boolean,
+  branch: BtwBranch | undefined,
+  engine: EngineName,
+  mainSessionId: string | undefined,
+): { sessionId: string | undefined; mode: 'fork' | 'continue' } {
+  if (continueBranch && branch?.sessionId && branch.engine === engine) {
+    return { sessionId: branch.sessionId, mode: 'continue' };
+  }
+  return { sessionId: mainSessionId, mode: 'fork' };
 }
 
 export interface ActivityEventData {
@@ -179,8 +226,18 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
+  private scheduler?: TaskScheduler;
+  private workerManager?: WorkerManager;
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
+  /** /bytheway side queries, parallel to runningTasks. */
+  private bythewayTasks = new Map<string, RunningTask>();
+  /** Last /bytheway side branch per chat; /btwc continues it. */
+  private btwBranches = new Map<string, BtwBranch>();
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
+  /** Auto-remind opt-out per chat. Default enabled; reset to true on every user message. */
+  private autoRemindEnabled = new Map<string, boolean>();
+  /** Pending auto-remind scheduler task ids per chat. */
+  private pendingRemindIds = new Map<string, string>();
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
   /**
    * Stage 2 — persistent executor pool. Lazy-created on first acquire when
@@ -279,12 +336,16 @@ export class MessageBridge {
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
-      (chatId) => this.runningTasks.get(chatId),
+      (chatId) => this.runningTasks.get(chatId) ?? this.bythewayTasks.get(chatId),
       (chatId) => this.stopTask(chatId),
       (chatId) => this.clearChatQueue(chatId),
-      (chatId, reason) => this.releaseChatExecutor(chatId, reason),
+      (chatId, reason) => {
+        if (reason === 'reset-command') this.btwBranches.delete(chatId);
+        return this.releaseChatExecutor(chatId, reason);
+      },
       (chatId) => this.listSessionsForChat(chatId),
       (chatId, sessionId) => this.applyResume(chatId, sessionId),
+      (msg, question, continueBranch) => this.runBytheway(msg, question, continueBranch),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -437,6 +498,57 @@ export class MessageBridge {
     this.sessionRegistry = registry;
   }
 
+  /** Inject the task scheduler (index.ts) — enables the PM auto-remind loop. */
+  setScheduler(scheduler: TaskScheduler): void {
+    this.scheduler = scheduler;
+  }
+
+  /** Inject the worker manager (index.ts) — enables worker dispatch and /btw audit records. */
+  setWorkerManager(workerManager: WorkerManager): void {
+    this.workerManager = workerManager;
+  }
+
+  scheduleAutoRemind(chatId: string): void {
+    if (!this.scheduler || !this.config.pmPrompt) return;
+    if (chatId.startsWith('worker-')) return;
+    if (!(this.autoRemindEnabled.get(chatId) ?? true)) return;
+    this.cancelPendingRemind(chatId);
+    try {
+      const task = this.scheduler.scheduleTask({
+        botName: this.config.name,
+        chatId,
+        prompt: AUTO_REMIND_PROMPT,
+        delaySeconds: AUTO_REMIND_DELAY_SECONDS,
+        sendCards: true,
+        label: `auto-remind-${chatId}`,
+      });
+      this.pendingRemindIds.set(chatId, task.id);
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'Failed to schedule auto-remind');
+    }
+  }
+
+  cancelPendingRemind(chatId: string): void {
+    if (!this.scheduler) return;
+    const id = this.pendingRemindIds.get(chatId);
+    if (id) {
+      try { this.scheduler.cancelTask(id); } catch { /* ignore */ }
+      this.pendingRemindIds.delete(chatId);
+    }
+    try {
+      for (const task of this.scheduler.listTasks()) {
+        if (task.label === `auto-remind-${chatId}` && task.botName === this.config.name) {
+          try { this.scheduler.cancelTask(task.id); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  setAutoRemind(chatId: string, enabled: boolean): void {
+    this.autoRemindEnabled.set(chatId, enabled);
+    if (!enabled) this.cancelPendingRemind(chatId);
+  }
+
   /** Inject MetaBot Agent Teams store so cards can show team and run state. */
   setAgentTeamStore(store: AgentTeamStore): void {
     this.agentTeamStore = store;
@@ -496,6 +608,12 @@ export class MessageBridge {
   }
 
   private stopTask(chatId: string): void {
+    const btw = this.bythewayTasks.get(chatId);
+    if (btw) {
+      try { btw.executionHandle.finish(); } catch { /* ignore */ }
+      btw.abortController.abort();
+    }
+
     const task = this.runningTasks.get(chatId);
     if (!task) return;
     if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
@@ -530,6 +648,7 @@ export class MessageBridge {
     if (this.runningTasks.get(chatId) === task) {
       this.runningTasks.delete(chatId);
       metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+      clearActiveTask({ botName: this.config.name, chatId });
     }
   }
 
@@ -580,7 +699,9 @@ export class MessageBridge {
         maxConcurrent,
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
+        defaultEffort: this.config.claude.effort,
         backend: this.config.claude.backend,
+        pmPrompt: this.config.pmPrompt,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -1323,7 +1444,9 @@ export class MessageBridge {
       outputsDir: string;
       apiContext?: ApiContext;
       model?: string;
-      reasoningEffort?: import('../config.js').CodexReasoningEffort;
+      reasoningEffort?: CodexReasoningEffort | ClaudeEffort;
+      approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
+      sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
       onTeamEvent?: (event: TeamEvent) => void;
       maxTurns?: number;
       allowedTools?: string[];
@@ -1339,7 +1462,8 @@ export class MessageBridge {
       this.isPersistentExecutorEnabled() &&
       engineName === 'claude' &&
       opts.maxTurns === undefined &&
-      opts.allowedTools === undefined;
+      opts.allowedTools === undefined &&
+      opts.reasoningEffort === undefined;
 
     if (usePersistent) {
       if (opts.freshSession) {
@@ -1370,7 +1494,9 @@ export class MessageBridge {
       outputsDir: opts.outputsDir,
       apiContext: opts.apiContext,
       model: opts.model,
-      reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
+      reasoningEffort: opts.reasoningEffort ?? (engineName === 'codex' ? session.reasoningEffort : undefined),
+      approvalPolicy: opts.approvalPolicy,
+      sandbox: opts.sandbox,
       onTeamEvent: opts.onTeamEvent,
       maxTurns: opts.maxTurns,
       allowedTools: opts.allowedTools,
@@ -1524,6 +1650,10 @@ export class MessageBridge {
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
+
+    if (this.config.pmPrompt && !chatId.startsWith('worker-')) {
+      this.autoRemindEnabled.set(chatId, true);
+    }
 
     // Feishu users often type command names without the leading slash. Treat
     // an exact bare "reset" as /reset so it can abort a running PTY turn and
@@ -1977,6 +2107,15 @@ export class MessageBridge {
       this.logger.error('Failed to send initial card, aborting');
       return;
     }
+    const taskStartedAt = Date.now();
+    recordActiveTask({
+      botName: this.config.name,
+      chatId,
+      messageId,
+      userPrompt: displayPrompt,
+      startedAt: taskStartedAt,
+      source: 'chat',
+    });
 
     const apiContext = { botName: this.config.name, chatId };
 
@@ -2044,7 +2183,7 @@ export class MessageBridge {
     });
 
     // Register running task
-    const startTime = Date.now();
+    const startTime = taskStartedAt;
     runningTask = {
       abortController,
       startTime,
@@ -2472,8 +2611,10 @@ export class MessageBridge {
       if (this.runningTasks.get(chatId) === runningTask) {
         this.runningTasks.delete(chatId);
         metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+        clearActiveTask({ botName: this.config.name, chatId, messageId });
         this.processQueue(chatId);
       }
+      this.scheduleAutoRemind(chatId);
       if (imagePath) {
         try { fs.unlinkSync(imagePath); } catch { /* ignore */ }
       }
@@ -2487,6 +2628,232 @@ export class MessageBridge {
     }
   }
 
+  /**
+   * /bytheway (/btw, /btwc) runs a side-branch query in parallel with the main
+   * task. It never overwrites the main chat session id.
+   */
+  async runBytheway(msg: IncomingMessage, question: string, continueBranch = false): Promise<void> {
+    const { userId, chatId } = msg;
+
+    if (this.bythewayTasks.has(chatId)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '/btw busy',
+        'Already running a /bytheway query in this chat. Use `/stop` to abort it first.',
+        'orange',
+      );
+      return;
+    }
+
+    const { session, engineName } = this.prepareSessionForExecution(chatId);
+    const cwd = session.workingDirectory;
+    const abortController = new AbortController();
+    const target = resolveBtwTarget(
+      continueBranch,
+      this.btwBranches.get(chatId),
+      engineName,
+      session.sessionId || undefined,
+    );
+    const oneShotMode = target.mode;
+
+    let effectiveQuestion = question;
+    let btwSessionId = target.sessionId;
+    if (engineName === 'kimi' && btwSessionId) {
+      btwSessionId = undefined;
+      effectiveQuestion = `(/btw on kimi does not inherit conversation history; answer from scratch.)\n\n${question}`;
+      await this.sender.sendTextNotice(
+        chatId,
+        '/btw degraded',
+        '/btw on the kimi engine does not inherit conversation history; answering statelessly.',
+        'orange',
+      );
+    }
+
+    const syntheticRecord = this.workerManager
+      ? this.workerManager.recordSyntheticTask({
+          botName: this.config.name,
+          pmChatId: chatId,
+          workingDirectory: cwd,
+          prompt: question,
+          label: '/btw: ' + question.slice(0, 80),
+        })
+      : undefined;
+
+    const outputsDir = this.outputsManager.prepareDir(`${chatId}-btw-${Date.now()}`);
+    const displayPrompt = (oneShotMode === 'continue' ? 'ByTheWay (continued): ' : 'ByTheWay: ') + question;
+    const processor = new StreamProcessor(displayPrompt);
+    const initialState: CardState = {
+      status: 'thinking',
+      userPrompt: displayPrompt,
+      responseText: '',
+      toolCalls: [],
+    };
+
+    const messageId = await this.sender.sendCard(chatId, initialState);
+    if (!messageId) {
+      this.logger.error({ chatId }, '/bytheway: failed to send initial card');
+      if (syntheticRecord && this.workerManager) {
+        this.workerManager.finishSyntheticTask(syntheticRecord.id, { status: 'failed', error: 'send card failed' });
+      }
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      return;
+    }
+
+    const executionHandle = this.executorForEngine(chatId, engineName).startExecution({
+      prompt: effectiveQuestion,
+      cwd,
+      sessionId: btwSessionId,
+      abortController,
+      outputsDir,
+      apiContext: { botName: this.config.name, chatId },
+      model: session.model,
+      oneShot: oneShotMode,
+    });
+
+    const rateLimiter = new RateLimiter(1500);
+    const startTime = Date.now();
+    const runningTask: RunningTask = {
+      abortController,
+      startTime,
+      executionHandle,
+      pendingQuestion: null,
+      currentQuestionIndex: 0,
+      collectedAnswers: {},
+      cardMessageId: messageId,
+      processor,
+      rateLimiter,
+      chatId,
+    };
+    this.bythewayTasks.set(chatId, runningTask);
+    this.audit.log({ event: 'bytheway_start', botName: this.config.name, chatId, userId, prompt: question });
+
+    let timedOut = false;
+    let idledOut = false;
+    const timeoutId = setTimeout(() => {
+      this.logger.warn({ chatId, userId }, '/bytheway: task timeout, aborting');
+      timedOut = true;
+      executionHandle.finish();
+      abortController.abort();
+    }, TASK_TIMEOUT_MS);
+
+    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+    const resetIdleTimer = () => {
+      if (idleTimerId) clearTimeout(idleTimerId);
+      idleTimerId = setTimeout(() => {
+        this.logger.warn({ chatId, userId }, '/bytheway: idle timeout, aborting');
+        idledOut = true;
+        executionHandle.finish();
+        abortController.abort();
+      }, IDLE_TIMEOUT_MS);
+    };
+    resetIdleTimer();
+
+    let lastState: CardState = initialState;
+    const autoAnsweredQuestionIds = new Set<string>();
+
+    try {
+      for await (const message of executionHandle.stream) {
+        if (abortController.signal.aborted) break;
+        resetIdleTimer();
+
+        const state = processor.processMessage(message);
+        lastState = state;
+
+        if (state.status === 'waiting_for_input' && state.pendingQuestion) {
+          const q = state.pendingQuestion;
+          if (!autoAnsweredQuestionIds.has(q.toolUseId)) {
+            autoAnsweredQuestionIds.add(q.toolUseId);
+            this.logger.info({ chatId, toolUseId: q.toolUseId }, '/bytheway: auto-resolving AskUserQuestion');
+            executionHandle.resolveQuestion(q.toolUseId, {});
+          }
+          continue;
+        }
+
+        if (state.status === 'complete' || state.status === 'error') {
+          break;
+        }
+
+        rateLimiter.schedule(() => {
+          void this.sender.updateCard(messageId, state);
+        });
+      }
+
+      await rateLimiter.cancelAndWait();
+
+      if (lastState.status !== 'complete' && lastState.status !== 'error') {
+        if (timedOut) {
+          lastState = { ...lastState, status: 'error', errorMessage: '/btw task timed out' };
+        } else if (idledOut) {
+          lastState = { ...lastState, status: 'error', errorMessage: '/btw task aborted: no stream activity' };
+        } else if (abortController.signal.aborted) {
+          lastState = { ...lastState, status: 'error', errorMessage: '/btw task was stopped' };
+        } else {
+          lastState = {
+            ...lastState,
+            status: lastState.responseText ? 'complete' : 'error',
+            errorMessage: lastState.responseText ? undefined : 'Session ended unexpectedly',
+          };
+        }
+      }
+
+      const branchSessionId = processor.getSessionId();
+      if (branchSessionId && engineName !== 'kimi') {
+        this.btwBranches.set(chatId, { sessionId: branchSessionId, engine: engineName });
+      }
+
+      await this.sendFinalCard(messageId, lastState, chatId);
+
+      const durationMs = Date.now() - startTime;
+      const auditEvent = timedOut ? 'bytheway_timeout' as const
+        : lastState.status === 'error' ? 'bytheway_error' as const
+        : 'bytheway_complete' as const;
+      this.audit.log({
+        event: auditEvent,
+        botName: this.config.name, chatId, userId, prompt: question,
+        durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
+      });
+
+      if (syntheticRecord && this.workerManager) {
+        this.workerManager.finishSyntheticTask(syntheticRecord.id, {
+          status: lastState.status === 'complete' ? 'completed' : (abortController.signal.aborted ? 'aborted' : 'failed'),
+          costUsd: lastState.costUsd,
+          durationMs,
+          resultSummary: lastState.responseText ? lastState.responseText.slice(0, 300) : undefined,
+          error: lastState.errorMessage,
+        });
+      }
+
+      await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+    } catch (err: any) {
+      this.logger.error({ err, chatId, userId }, '/bytheway: execution error');
+      const durationMs = Date.now() - startTime;
+      this.audit.log({
+        event: 'bytheway_error', botName: this.config.name, chatId, userId, prompt: question,
+        durationMs, error: err.message || 'Unknown error',
+      });
+      if (syntheticRecord && this.workerManager) {
+        this.workerManager.finishSyntheticTask(syntheticRecord.id, {
+          status: 'failed', durationMs, error: err.message || 'Unknown error',
+        });
+      }
+      const errorState: CardState = {
+        status: 'error',
+        userPrompt: displayPrompt,
+        responseText: lastState.responseText,
+        toolCalls: lastState.toolCalls,
+        errorMessage: err.message || 'Unknown error',
+      };
+      await rateLimiter.cancelAndWait();
+      await this.sendFinalCard(messageId, errorState, chatId);
+    } finally {
+      clearTimeout(timeoutId);
+      if (idleTimerId) clearTimeout(idleTimerId);
+      try { executionHandle.finish(); } catch { /* ignore */ }
+      this.bythewayTasks.delete(chatId);
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
+  }
+
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
 
@@ -2495,7 +2862,7 @@ export class MessageBridge {
     }
 
     const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
-    const cwd = session.workingDirectory;
+    const cwd = options.workingDirectory ?? session.workingDirectory;
     const abortController = new AbortController();
 
     const outputsDir = this.outputsManager.prepareDir(chatId);
@@ -2516,6 +2883,16 @@ export class MessageBridge {
     let messageId: string | undefined;
     if (sendCards) {
       messageId = await this.sender.sendCard(chatId, initialState);
+      if (messageId) {
+        recordActiveTask({
+          botName: this.config.name,
+          chatId,
+          messageId,
+          userPrompt: displayPrompt,
+          startedAt: Date.now(),
+          source: 'api',
+        });
+      }
     }
 
     // Generate a messageId for onUpdate even if sendCards is false
@@ -2561,6 +2938,9 @@ export class MessageBridge {
       maxTurns: options.maxTurns,
       model: options.model ?? session.model,
       allowedTools: options.allowedTools,
+      reasoningEffort: options.reasoningEffort,
+      approvalPolicy: options.approvalPolicy,
+      sandbox: options.sandbox,
       onTeamEvent,
     });
 
@@ -2583,24 +2963,26 @@ export class MessageBridge {
     this.audit.log({ event: 'api_task_start', botName: this.config.name, chatId, userId, prompt });
     this.emitActivity({ type: 'task_started', botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200), timestamp: startTime });
 
+    const taskTimeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : TASK_TIMEOUT_MS;
+    const idleTimeoutMs = options.idleTimeoutMs && options.idleTimeoutMs > 0 ? options.idleTimeoutMs : IDLE_TIMEOUT_MS;
     let timedOut = false;
     let idledOut = false;
     const timeoutId = setTimeout(() => {
-      this.logger.warn({ chatId, userId }, 'API task timeout, aborting');
+      this.logger.warn({ chatId, userId, taskTimeoutMs }, 'API task timeout, aborting');
       timedOut = true;
       executionHandle.finish();
       abortController.abort();
-    }, TASK_TIMEOUT_MS);
+    }, taskTimeoutMs);
 
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
-        this.logger.warn({ chatId, userId }, 'API task idle timeout (1h no stream), aborting');
+        this.logger.warn({ chatId, userId, idleTimeoutMs }, 'API task idle timeout, aborting');
         idledOut = true;
         executionHandle.finish();
         abortController.abort();
-      }, IDLE_TIMEOUT_MS);
+      }, idleTimeoutMs);
     };
     resetIdleTimer();
 
@@ -2706,6 +3088,9 @@ export class MessageBridge {
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext,
           model: options.model ?? session.model,
+          reasoningEffort: options.reasoningEffort,
+          approvalPolicy: options.approvalPolicy,
+          sandbox: options.sandbox,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2786,6 +3171,9 @@ export class MessageBridge {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
             prompt, cwd, abortController, outputsDir, apiContext,
             model: options.model ?? session.model,
+            reasoningEffort: options.reasoningEffort,
+            approvalPolicy: options.approvalPolicy,
+            sandbox: options.sandbox,
             onTeamEvent, freshSession: true,
           });
           executionHandle.finish();
@@ -2869,7 +3257,9 @@ export class MessageBridge {
       try { executionHandle.finish(); } catch (e) { this.logger.warn({ err: e, chatId }, 'Error finishing execution handle'); }
       this.runningTasks.delete(chatId);
       metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+      if (messageId) clearActiveTask({ botName: this.config.name, chatId, messageId });
       this.processQueue(chatId);
+      this.scheduleAutoRemind(chatId);
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
     }
   }

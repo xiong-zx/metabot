@@ -59,6 +59,7 @@ function buildHandler(opts: {
     async () => {},
     () => opts.sessions ?? makeSessions(),
     async (_chatId: string, sessionId: string) => { resumed.push(sessionId); },
+    async () => {},
   );
   return { handler, notices, resumed };
 }

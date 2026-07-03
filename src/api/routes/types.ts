@@ -19,6 +19,7 @@ import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
 import type { AgentTeamStore } from '../../agent-teams/team-store.js';
 import type { AgentTeamSupervisor } from '../../agent-teams/team-supervisor.js';
+import type { WorkerManager } from '../../workers/worker-manager.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -41,6 +42,7 @@ export interface RouteContext {
   activityStore?: ActivityStore;
   agentTeamStore?: AgentTeamStore;
   agentTeamSupervisor?: AgentTeamSupervisor;
+  workerManager?: WorkerManager;
 }
 
 /**

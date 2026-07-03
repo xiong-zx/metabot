@@ -4,11 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import type { BotConfigBase } from '../../config.js';
-import type { CodexReasoningEffort } from '../../config.js';
+import type { BotConfigBase, ClaudeEffort, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { buildPmSystemPrompt } from '../pm-prompt.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -58,6 +58,62 @@ const CLAUDE_ENV_PASSTHROUGH = new Set([
 const AUTH_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
 /**
+ * no_proxy list written into every child Claude process env. Disable with
+ * METABOT_NO_PROXY_DISABLE=true on hosts that want inherited proxy behavior.
+ */
+export const NO_PROXY_LIST = [
+  'localhost', '127.0.0.1',
+  'open.feishu.cn', '*.feishu.cn', 'lark.larksuite.com', '*.larksuite.com',
+  '*.tuna.tsinghua.edu.cn', '*.aliyun.com', '*.ubuntu.com',
+  '*.npmmirror.com', 'registry.npmmirror.com',
+  '*.anaconda.com', '*.conda.io',
+  '*.github.com', 'github.com', '*.githubusercontent.com',
+  '*.pypi.org', 'pypi.org', 'files.pythonhosted.org',
+  '*.papercopilot.com', 'papercopilot.com',
+  '*.semanticscholar.org', 'api.semanticscholar.org',
+  '*.arxiv.org', 'arxiv.org',
+  '*.openreview.net', 'openreview.net',
+  '*.google.com', '*.googleapis.com',
+  '*.huggingface.co', '*.hf.co',
+].join(',');
+
+export function applyNoProxyPolicy(env: Record<string, string>): void {
+  if (process.env.METABOT_NO_PROXY_DISABLE === 'true') return;
+  env.no_proxy = NO_PROXY_LIST;
+  env.NO_PROXY = NO_PROXY_LIST;
+}
+
+export const BYTHEWAY_DISALLOWED_MCP_TOOLS = [
+  'mcp__worker-manager__worker_dispatch',
+  'mcp__worker-manager__worker_abort',
+  'mcp__worker-manager__worker_redirect',
+  'mcp__worker-manager__remind_me',
+  'mcp__worker-manager__stop_auto_remind',
+];
+
+export const BYTHEWAY_SYSTEM_NOTE = [
+  'SIDE BRANCH MODE (/bytheway).',
+  "You are in a SIDE BRANCH session that inherits the main conversation's",
+  'history but does NOT write back to it. The user is asking something on',
+  'the side; the user may later continue THIS branch with /btwc.',
+  '',
+  '## What is intentionally restricted (NOT a real outage)',
+  '- The mutating worker-manager MCP tools (worker_dispatch, worker_abort,',
+  '  worker_redirect, remind_me, stop_auto_remind) are hidden in this mode',
+  '  by design. This is the /bytheway safety policy, NOT an MCP server outage.',
+  '- The read-only worker tools `worker_list` and `worker_quick_status` ARE',
+  '  available; use them freely if you need to check worker state.',
+  '',
+  '## What is allowed',
+  '- Reading AND editing files are allowed under the bot\'s normal permissions.',
+  '',
+  '## Behavior',
+  '- Answer the side question / do the side task, then exit.',
+  '- If the task requires dispatching or controlling workers, tell the user',
+  '  to re-send it as a normal non-/bytheway message.',
+].join('\n');
+
+/**
  * Check if Claude Code has credentials.json (OAuth login).
  */
 function hasCredentialsFile(): boolean {
@@ -81,7 +137,7 @@ function hasCredentialsFile(): boolean {
  * - Merges process.env so child inherits system PATH, TEMP, etc.
  * - Optionally injects an explicit ANTHROPIC_API_KEY from bots.json config.
  */
-function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => SpawnedProcess {
+function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string>): (options: SpawnOptions) => SpawnedProcess {
   // Force-use-env mode: pass ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY /
   // ANTHROPIC_BASE_URL through to the Claude Code subprocess instead of
   // filtering them out. Triggered by either:
@@ -127,6 +183,9 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     if (explicitApiKey) {
       env.ANTHROPIC_API_KEY = explicitApiKey;
     }
+    for (const [key, value] of Object.entries(extraEnv ?? {})) {
+      env[key] = value;
+    }
 
     // Default-enable Claude Code Agent Teams. Without a real terminal there's
     // no tmux/iTerm2, so teammates must run in-process (controlled via the
@@ -146,6 +205,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
+    applyNoProxyPolicy(env);
 
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
@@ -165,6 +225,15 @@ export interface ApiContext {
   groupMembers?: string[];
   /** Group ID — used to build grouptalk chatIds for inter-bot communication. */
   groupId?: string;
+}
+
+function apiContextEnv(apiContext: ApiContext | undefined): Record<string, string> | undefined {
+  if (!apiContext) return undefined;
+  return {
+    METABOT_BOT_NAME: apiContext.botName,
+    METABOT_CHAT_ID: apiContext.chatId,
+    ...(apiContext.groupId ? { METABOT_GROUP_ID: apiContext.groupId } : {}),
+  };
 }
 
 /**
@@ -262,12 +331,44 @@ export interface ExecutorOptions {
   maxTurns?: number;
   /** Override model for this execution (e.g. faster model for voice calls). */
   model?: string;
-  /** Per-turn Codex reasoning effort override. Ignored by non-Codex executors. */
-  reasoningEffort?: CodexReasoningEffort;
+  /** Per-turn reasoning effort override. Claude maps it to SDK `effort`; Codex maps it to model_reasoning_effort. */
+  reasoningEffort?: CodexReasoningEffort | ClaudeEffort;
+  /** Per-turn Codex approval policy override. Ignored by non-Codex executors. */
+  approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
+  /** Per-turn Codex sandbox override. Ignored by non-Codex executors. */
+  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
+  /**
+   * /bytheway side-branch mode.
+   * - fork: inherit main session history without writing back to it.
+   * - continue: resume the remembered side-branch session.
+   */
+  oneShot?: 'fork' | 'continue';
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
+}
+
+export function loadMcpServersWithApiContext(apiContext: ApiContext | undefined): Record<string, unknown> | undefined {
+  if (!apiContext) return undefined;
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      mcpServers?: Record<string, { env?: Record<string, string> }>;
+    };
+    if (!settings.mcpServers || Object.keys(settings.mcpServers).length === 0) return undefined;
+    const cloned = JSON.parse(JSON.stringify(settings.mcpServers)) as Record<string, { env?: Record<string, string> }>;
+    for (const server of Object.values(cloned)) {
+      server.env = {
+        ...(server.env ?? {}),
+        METABOT_BOT_NAME: apiContext.botName,
+        METABOT_CHAT_ID: apiContext.chatId,
+      };
+    }
+    return cloned;
+  } catch {
+    return undefined;
+  }
 }
 
 export type SDKMessage = {
@@ -346,7 +447,7 @@ export class ClaudeExecutor {
       // (>= 0.2.140) supplies the correct command in spawn options — for the
       // native Claude binary that's the binary itself; for legacy JS
       // entrypoints it's the Node executable.
-      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey),
+      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, apiContextEnv(apiContext)),
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
       // MetaBot has no terminal — split-pane (tmux/iTerm2) teammate display
       // doesn't apply. Force in-process so teammates run inside the same
@@ -411,6 +512,16 @@ export class ClaudeExecutor {
         append: '\n\n' + appendSections.join('\n\n'),
       };
     }
+    if (this.config.pmPrompt) {
+      appendSections.push(buildPmSystemPrompt());
+      queryOptions.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: '\n\n' + appendSections.join('\n\n'),
+      };
+    }
+    const mcpServers = loadMcpServersWithApiContext(apiContext);
+    if (mcpServers) queryOptions.mcpServers = mcpServers;
 
     if (this.config.claude.maxTurns !== undefined) {
       queryOptions.maxTurns = this.config.claude.maxTurns;
@@ -422,6 +533,10 @@ export class ClaudeExecutor {
 
     if (this.config.claude.model) {
       queryOptions.model = this.config.claude.model;
+    }
+
+    if (this.config.claude.effort) {
+      queryOptions.effort = this.config.claude.effort;
     }
 
     if (sessionId) {
@@ -459,6 +574,26 @@ export class ClaudeExecutor {
     }
     if (options.allowedTools !== undefined) {
       queryOptions.allowedTools = options.allowedTools;
+    }
+    if (options.reasoningEffort) {
+      queryOptions.effort = options.reasoningEffort;
+    }
+
+    if (options.oneShot) {
+      if (options.oneShot === 'fork' && sessionId) {
+        queryOptions.forkSession = true;
+      }
+      queryOptions.disallowedTools = BYTHEWAY_DISALLOWED_MCP_TOOLS;
+      const sp = queryOptions.systemPrompt as { type: string; preset: string; append?: string } | undefined;
+      if (sp && typeof sp === 'object') {
+        sp.append = (sp.append ?? '') + '\n\n' + BYTHEWAY_SYSTEM_NOTE;
+      } else {
+        queryOptions.systemPrompt = {
+          type: 'preset',
+          preset: 'claude_code',
+          append: '\n\n' + BYTHEWAY_SYSTEM_NOTE,
+        };
+      }
     }
 
     apply1MContextSettings(queryOptions);

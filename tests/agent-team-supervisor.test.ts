@@ -136,6 +136,56 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
+  it('uses the configured execution bot instead of the first registered bot', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'Use PM bot', owner: 'worker' });
+
+    const managerExecute = vi.fn(async () => ({ success: true, responseText: 'manager' }));
+    const pmExecute = vi.fn(async () => ({ success: true, responseText: 'research-pm' }));
+    const registry = new BotRegistry();
+    const makeBridge = (executeApiTask: any) => ({
+      getSessionManager: () => ({ setSessionEngine: vi.fn(), setSessionId: vi.fn() }),
+      executeApiTask,
+      stopChatTask: vi.fn(),
+      sendAgentActivityCard: vi.fn(),
+    });
+    registry.register({
+      name: 'manager',
+      platform: 'feishu',
+      bridge: makeBridge(managerExecute),
+      sender: {},
+      config: { name: 'manager', engine: 'codex', claude: { defaultWorkingDirectory: process.cwd() } },
+    } as any);
+    registry.register({
+      name: 'research-pm',
+      platform: 'feishu',
+      bridge: makeBridge(pmExecute),
+      sender: {},
+      config: { name: 'research-pm', engine: 'codex', claude: { defaultWorkingDirectory: process.cwd() } },
+    } as any);
+
+    const supervisor = new AgentTeamSupervisor({
+      registry,
+      store,
+      logger,
+      intervalMs: 60_000,
+      executionBotName: 'research-pm',
+    });
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(pmExecute).toHaveBeenCalledWith(expect.objectContaining({
+        chatId: 'team:demo:worker',
+        userId: 'agent-team-supervisor',
+      }));
+    });
+    expect(managerExecute).not.toHaveBeenCalled();
+    supervisor.destroy();
+    store.close();
+  });
+
   it('sends an agent activity card to display chats when a member finishes', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });

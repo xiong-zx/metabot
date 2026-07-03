@@ -80,7 +80,8 @@ Operational details:
 
 - Disable the loop with `METABOT_AGENT_TEAM_SUPERVISOR=0`.
 - Tune the polling interval with `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS`.
-- The supervisor selects the local `metabot` bridge bot when available, otherwise the first registered bot.
+- Set `agentTeamExecutionBot` in `bots.json` or `METABOT_AGENT_TEAM_EXECUTION_BOT` to pin which bridge bot executes teammate runs. Use a non-privileged PM/internal worker bot such as `research-pm`; do not rely on registration order when `manager` is first.
+- Without an explicit execution bot, the supervisor falls back to `metabot`, then `research-pm`, then the first non-`manager` bot, then the first registered bot.
 - Assigned pending tasks are moved to `in_progress` when the supervisor starts the run.
 - The supervisor sets the configured session engine for the teammate chat, but it does not yet validate per-engine capabilities before dispatching work. Keep resident teams on engines known to work in the local bridge until runtime capability checks or per-engine adapters are added.
 
@@ -93,6 +94,7 @@ CLI-only setup is useful for ad-hoc teams. Resident teams are declared in `bots.
   "feishuBots": [
     { "name": "metabot", "engine": "codex", "feishu": { "appId": "...", "appSecret": "..." } }
   ],
+  "agentTeamExecutionBot": "metabot",
   "agentTeams": [
     {
       "name": "metabot-dev",
