@@ -250,6 +250,13 @@ export class AgentTeamSupervisor {
         chatId,
         userId: 'agent-team-supervisor',
         sendCards: false,
+        model: agent.model,
+        reasoningEffort: agent.reasoningEffort,
+        approvalPolicy: agent.approvalPolicy,
+        sandbox: agent.sandbox,
+        timeoutMs: agent.timeoutMs,
+        idleTimeoutMs: agent.idleTimeoutMs,
+        allowedTools: agent.allowedTools,
         prompt: this.buildPrompt(teamName, agent, messages, tasks),
         onUpdate: (state) => {
           const current = this.options.store.getRun(teamName, run.id);
@@ -346,6 +353,7 @@ export class AgentTeamSupervisor {
   private applyAgentSession(bridge: MessageBridge, chatId: string, agent: TeamAgent, reuseSession: boolean): void {
     const sessionManager = bridge.getSessionManager();
     if (agent.engine) sessionManager.setSessionEngine(chatId, agent.engine);
+    if (agent.model) sessionManager.setSessionModel(chatId, agent.model, agent.engine);
     if (reuseSession && agent.sessionId) sessionManager.setSessionId(chatId, agent.sessionId, agent.engine);
   }
 

@@ -7,7 +7,7 @@
 *Write code · Manage agents · Automate everything*
 
 <p>
-  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
+  <a href="https://github.com/xiong-zx/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
 </p>
 
@@ -45,7 +45,7 @@
 </div>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git ~/metabot
+git clone https://github.com/xiong-zx/metabot.git ~/metabot
 cd ~/metabot && bash install.sh
 ```
 
@@ -53,7 +53,7 @@ The installer walks you through everything: working directory → **engine choic
 
 > Custom install directory (default `~/metabot`): clone into the directory you want, or `METABOT_HOME=/opt/metabot bash install.sh`. Windows: `.\install.ps1 -Dir C:\opt\metabot`.
 >
-> One-line install also works: `curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash`.
+> One-line install also works: `curl -fsSL https://raw.githubusercontent.com/xiong-zx/metabot/main/install.sh | bash`.
 
 ---
 
@@ -412,6 +412,16 @@ Global fields:
 | `workers.maxPerPm` | `8` | Maximum concurrent workers per PM chat |
 | `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute teammate runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
 
+`agentTeams[].agents[]` also supports per-member execution overrides:
+
+| Field | Description |
+|-------|-------------|
+| `engine` / `model` | Engine and model for this member, for example reviewer with `codex` + `gpt-5.5` |
+| `reasoningEffort` | Member reasoning effort: `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `approvalPolicy` / `sandbox` | Codex permission boundary, for example reviewer with `approvalPolicy: "never"` + `sandbox: "read-only"` |
+| `timeoutMs` / `idleTimeoutMs` | Total timeout and no-output timeout for one member run |
+| `allowedTools` | Claude tool allowlist; omit it to use the bot default tool policy |
+
 </details>
 
 <details>
@@ -564,14 +574,14 @@ CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` i
 <summary><strong>Manual install</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone https://github.com/xiong-zx/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # edit with your bot configs
 cp .env.example .env              # edit global settings
 npm run dev
 ```
 
-Prerequisites: Node.js 20+, [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated.
+Prerequisites: Node.js 20+, native build tools (Linux: `python3 make g++`; macOS: Xcode Command Line Tools), and [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated. `install.sh` checks and prompts for these automatically. If a manual `npm install` cannot download Node headers because of a proxy/certificate chain and `/usr/include/node` exists, run `export npm_config_nodedir=/usr` first.
 
 </details>
 

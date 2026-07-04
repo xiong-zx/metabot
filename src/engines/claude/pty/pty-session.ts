@@ -16,7 +16,7 @@ import xterm from '@xterm/headless';
 const { Terminal } = xterm;
 type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
-import { applyNoProxyPolicy } from '../executor.js';
+import { applyClaudeChildEnvPolicy } from '../executor.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
@@ -82,8 +82,8 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
    * Pre-accept the per-folder trust dialog for `cwd` in ~/.claude.json.
    *
    * On the FIRST interactive run in a directory, `claude` shows a blocking
-   * "Is this a project you trust?" prompt — even under
-   * --dangerously-skip-permissions. That dialog renders a `❯` menu pointer,
+   * "Is this a project you trust?" prompt even when permission prompts are
+   * otherwise bypassed or automated. That dialog renders a `❯` menu pointer,
    * which fools waitForReady()'s input-box detector: we then "type" the
    * prompt into the menu and the session is corrupted. metabot uses a fresh
    * per-chat working directory, so EVERY new chat's first turn would hit
@@ -128,7 +128,11 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     args.push('--settings', opts.settingsPath);
-    args.push('--dangerously-skip-permissions');
+    if (process.getuid?.() === 0) {
+      args.push('--permission-mode', 'auto');
+    } else {
+      args.push('--dangerously-skip-permissions');
+    }
 
     if (opts.appendSystemPrompt) {
       args.push('--append-system-prompt', opts.appendSystemPrompt);
@@ -158,7 +162,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
       delete env[k];
     }
-    applyNoProxyPolicy(env);
+    applyClaudeChildEnvPolicy(env);
 
     const claudePath = opts.pathToClaudeExecutable ?? 'claude';
     const cols = opts.cols ?? 120;
