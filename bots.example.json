@@ -1,141 +1,69 @@
 {
   "workers": {
-    "defaultModel": "gpt-5.4",
+    "defaultModel": "gpt-5.5",
     "maxPerPm": 8
   },
-  "agentTeamExecutionBot": "research-pm",
-  "feishuBots": [
+  "agentTeamExecutionBot": "local-web",
+  "webBots": [
     {
-      "name": "manager",
-      "description": "System-level manager for server, package, repository, and infrastructure operations",
-      "specialties": ["operations", "infrastructure", "repository"],
-      "engine": "codex",
-      "feishuAppId": "cli_manager",
-      "feishuAppSecret": "secret-manager",
-      "defaultWorkingDirectory": "/root",
-      "codex": {
-        "model": "gpt-5.5",
-        "dangerouslyBypassApprovalsAndSandbox": true
-      }
-    },
-    {
-      "name": "research-pm",
-      "description": "Research PM visible to Feishu users. It delegates implementation and experiments to workers or the resident research Agent Team.",
-      "specialties": ["research-planning", "delegation", "worker-dispatch", "project-management"],
-      "engine": "codex",
+      "name": "local-web",
+      "description": "Local web-only bot for first-run smoke tests. It does not connect to Feishu, Telegram, or WeChat.",
+      "specialties": ["local-development", "smoke-test"],
+      "engine": "claude",
       "pmPrompt": true,
-      "feishuAppId": "cli_research_pm",
-      "feishuAppSecret": "secret-research-pm",
-      "defaultWorkingDirectory": "/root/workspaces",
-      "codex": {
-        "model": "gpt-5.5",
-        "dangerouslyBypassApprovalsAndSandbox": true
-      }
-    },
-    {
-      "name": "project-alpha",
-      "description": "Frontend development agent for Project Alpha — React, TypeScript, CSS",
-      "specialties": ["frontend", "react", "typescript", "css"],
-      "icon": "🎨",
-      "maxConcurrentTasks": 3,
-      "budgetLimitDaily": 5.0,
-      "ttsVoice": "zh_male_rap_mars_bigtts",
-      "feishuAppId": "cli_xxx",
-      "feishuAppSecret": "secret1",
-      "defaultWorkingDirectory": "/root/workspaces"
-    },
-    {
-      "name": "project-beta",
-      "description": "Backend API development agent for Project Beta",
-      "specialties": ["backend", "api", "database"],
-      "feishuAppId": "cli_yyy",
-      "feishuAppSecret": "secret2",
-      "defaultWorkingDirectory": "/root/workspaces",
-      "maxTurns": 30,
-      "maxBudgetUsd": 0.5
-    },
-    {
-      "name": "project-gamma",
-      "description": "Kimi-powered agent (uses your Moonshot subscription)",
-      "engine": "kimi",
-      "feishuAppId": "cli_zzz",
-      "feishuAppSecret": "secret3",
-      "defaultWorkingDirectory": "/root/workspaces",
-      "kimi": {
-        "model": "kimi-latest",
-        "thinking": true
-      }
-    },
-    {
-      "name": "project-delta",
-      "description": "Codex-powered agent (uses Codex CLI)",
-      "engine": "codex",
-      "feishuAppId": "cli_codex",
-      "feishuAppSecret": "secret4",
-      "defaultWorkingDirectory": "/root/workspaces",
-      "codex": {
-        "model": "gpt-5.5",
-        "baseUrl": "https://api.openai.com/v1",
-        "approvalPolicy": "never",
-        "sandbox": "workspace-write"
-      }
+      "defaultWorkingDirectory": ".",
+      "model": "claude-opus-4-8",
+      "effort": "high",
+      "permissionMode": "auto"
     }
   ],
-  "telegramBots": [
-    {
-      "name": "tg-project",
-      "description": "General purpose project assistant via Telegram",
-      "telegramBotToken": "123456:ABC-DEF...",
-      "defaultWorkingDirectory": "/root/workspaces"
-    }
-  ],
-  "wechatBots": [
-    {
-      "name": "wechat-assistant",
-      "description": "WeChat AI assistant via iLink",
-      "defaultWorkingDirectory": "/root/workspaces"
-    }
-  ],
-  "peers": [
-    {
-      "name": "alice",
-      "url": "http://localhost:9200",
-      "secret": "alice-api-secret"
-    },
-    {
-      "name": "remote-team",
-      "url": "http://remote-server:9100",
-      "secret": "remote-api-secret"
-    }
-  ],
+  "feishuBots": [],
+  "telegramBots": [],
+  "wechatBots": [],
   "agentTeams": [
     {
       "name": "research",
-      "description": "Resident internal research team. These agents are not Feishu-visible bots.",
+      "description": "Resident internal research team. These agents are not IM-visible bots.",
       "status": "active",
       "agents": [
         {
           "name": "planner",
           "role": "research planning",
           "engine": "codex",
+          "model": "gpt-5.5",
+          "reasoningEffort": "high",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
           "prompt": "Propose research ideas, algorithms, hypotheses, evaluation plans, and revisions. Do not implement code."
         },
         {
           "name": "coder",
           "role": "implementation",
           "engine": "codex",
+          "model": "gpt-5.5",
+          "reasoningEffort": "medium",
+          "approvalPolicy": "never",
+          "sandbox": "workspace-write",
           "prompt": "Implement scoped code, scripts, pipelines, notebooks, and tooling in the assigned workdir. Avoid touching unrelated files."
         },
         {
           "name": "experiment",
           "role": "experiments",
           "engine": "codex",
+          "model": "gpt-5.5",
+          "reasoningEffort": "low",
+          "approvalPolicy": "never",
+          "sandbox": "danger-full-access",
           "prompt": "Run experiments, benchmarks, ablations, and summarize reproducible metrics and artifacts."
         },
         {
           "name": "reviewer",
           "role": "review",
           "engine": "codex",
+          "model": "gpt-5.5",
+          "reasoningEffort": "high",
+          "approvalPolicy": "never",
+          "sandbox": "read-only",
           "prompt": "Review methods, code, evidence, claims, and reproducibility. Decide whether another iteration is needed."
         }
       ]

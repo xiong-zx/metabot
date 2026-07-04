@@ -21,9 +21,10 @@ function makeStore() {
 
 function makeRegistry(executeApiTask: any, stopChatTask = vi.fn(), sendAgentActivityCard = vi.fn()) {
   const setSessionEngine = vi.fn();
+  const setSessionModel = vi.fn();
   const setSessionId = vi.fn();
   const bridge = {
-    getSessionManager: () => ({ setSessionEngine, setSessionId }),
+    getSessionManager: () => ({ setSessionEngine, setSessionModel, setSessionId }),
     executeApiTask,
     stopChatTask,
     sendAgentActivityCard,
@@ -40,7 +41,7 @@ function makeRegistry(executeApiTask: any, stopChatTask = vi.fn(), sendAgentActi
       claude: { defaultWorkingDirectory: process.cwd() },
     },
   } as any);
-  return { registry, bridge, setSessionEngine, setSessionId, stopChatTask, sendAgentActivityCard };
+  return { registry, bridge, setSessionEngine, setSessionModel, setSessionId, stopChatTask, sendAgentActivityCard };
 }
 
 async function waitFor(assertion: () => void): Promise<void> {
@@ -298,6 +299,49 @@ describe('AgentTeamSupervisor', () => {
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('Worker final report');
     expect(store.listMessages('demo', 'lead', true)).toHaveLength(0);
     expect(store.listRuns('demo').some((run) => run.agentName === 'lead')).toBe(false);
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('passes per-agent model, effort, and permission overrides to member runs', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', {
+      name: 'reviewer',
+      engine: 'codex',
+      model: 'gpt-5.5',
+      reasoningEffort: 'high',
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      timeoutMs: 123_000,
+      idleTimeoutMs: 45_000,
+      allowedTools: ['Read'],
+    });
+    store.createTask('demo', { subject: 'Review diff', owner: 'reviewer' });
+
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: 'review complete',
+      sessionId: 'reviewer-session',
+    }));
+    const { registry, setSessionModel } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
+        chatId: 'team:demo:reviewer',
+        model: 'gpt-5.5',
+        reasoningEffort: 'high',
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        timeoutMs: 123_000,
+        idleTimeoutMs: 45_000,
+        allowedTools: ['Read'],
+      }));
+    });
+    expect(setSessionModel).toHaveBeenCalledWith('team:demo:reviewer', 'gpt-5.5', 'codex');
     supervisor.destroy();
     store.close();
   });

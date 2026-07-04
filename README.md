@@ -7,7 +7,7 @@
 *写代码 · 管 Agent · 自动化一切*
 
 <p>
-  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
+  <a href="https://github.com/xiong-zx/metabot"><img src="https://img.shields.io/badge/GitHub-Repo-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
 </p>
 
@@ -45,7 +45,7 @@
 </div>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git ~/metabot
+git clone https://github.com/xiong-zx/metabot.git ~/metabot
 cd ~/metabot && bash install.sh
 ```
 
@@ -53,7 +53,7 @@ cd ~/metabot && bash install.sh
 
 > 自定义安装目录（默认 `~/metabot`）：把 `~/metabot` 换成你想要的路径即可，或 `METABOT_HOME=/opt/metabot bash install.sh`。Windows: `.\install.ps1 -Dir C:\opt\metabot`。
 >
-> 也可以一行直装：`curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash`。
+> 也可以一行直装：`curl -fsSL https://raw.githubusercontent.com/xiong-zx/metabot/main/install.sh | bash`。
 
 ---
 
@@ -396,6 +396,8 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | `wechatBotToken` | 微信(可选) | — | 预认证 iLink token（不填则 QR 登录） |
 | `maxTurns` / `maxBudgetUsd` | 否 | 不限 | 执行限制 |
 | `model` | 否 | SDK 默认 | Claude 模型 |
+| `effort` | 否 | Claude 默认 | Claude 推理强度：`low` / `medium` / `high` / `xhigh` / `max` |
+| `permissionMode` | 否 | root 下 `auto`，非 root 下 `bypassPermissions` | Claude Code 工具权限模式：`default` / `acceptEdits` / `bypassPermissions` / `plan` / `dontAsk` / `auto` |
 | `apiKey` | 否 | — | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
 | `pmPrompt` | 否 | `false` | 启用研究 PM 行为契约和 40 分钟 worker 巡检提醒 |
 | `visible` | 否 | `true` | Bot 是否对其他 bot / Agent Bus 可见，可被 `metabot talk` 触达。每次 bridge bulk-register 都按 bots.json 回写（不 sticky）|
@@ -408,6 +410,16 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 | `workers.defaultModel` | `gpt-5.4` | `worker_dispatch` 默认模型 |
 | `workers.maxPerPm` | `8` | 每个 PM chat 最多同时运行的 worker 数 |
 | `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 用来执行队友 run 的 bot，建议设为 `research-pm` 或内部 worker，避免落到 `manager` |
+
+`agentTeams[].agents[]` 还支持成员级执行覆盖：
+
+| 字段 | 说明 |
+|------|------|
+| `engine` / `model` | 该成员使用的引擎和模型，例如 reviewer 用 `codex` + `gpt-5.5` |
+| `reasoningEffort` | 该成员的推理强度：`minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `approvalPolicy` / `sandbox` | Codex 权限边界，例如 reviewer 用 `approvalPolicy: "never"` + `sandbox: "read-only"` |
+| `timeoutMs` / `idleTimeoutMs` | 单次成员 run 的总超时和无输出超时 |
+| `allowedTools` | Claude 工具白名单；不设置则使用 bot 默认工具策略 |
 
 </details>
 
@@ -457,9 +469,21 @@ ANTHROPIC_AUTH_TOKEN=你的key
 <details>
 <summary><strong>安全</strong></summary>
 
-MetaBot 以 `bypassPermissions` 模式运行 Claude Code — 无交互式确认：
+MetaBot 默认以 root-aware 模式运行 Claude Code：root 进程使用 `auto`，非 root 进程使用 `bypassPermissions`。可在 `bots.json` 的 Claude bot 顶层设置 `permissionMode` 覆盖：
+
+```json
+{
+  "name": "pm-claude",
+  "engine": "claude",
+  "permissionMode": "auto"
+}
+```
+
+注意：
 
 - Claude 对工作目录有完整读写执行权限
+- `bypassPermissions` 会跳过权限检查，权限边界主要来自运行用户、容器和工作目录
+- `plan` 只规划不执行工具，适合只做设计审阅的 bot
 - 通过飞书/Telegram/微信平台设置控制访问
 - 用 `maxBudgetUsd` 限制单次花费
 - `API_SECRET` 保护 API 服务器
@@ -565,14 +589,14 @@ CLI 支持连接远程 MetaBot 服务器，在 `~/.metabot/.env` 配置 `METABOT
 <summary><strong>手动安装</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone https://github.com/xiong-zx/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # 编辑 Bot 配置
 cp .env.example .env              # 编辑全局设置
 npm run dev
 ```
 
-前置条件：Node.js 20+，[Claude Code CLI](https://github.com/anthropics/claude-code) 已安装并认证。
+前置条件：Node.js 20+、native 编译工具（Linux: `python3 make g++`；macOS: Xcode Command Line Tools），[Claude Code CLI](https://github.com/anthropics/claude-code) 已安装并认证。使用 `install.sh` 时这些会自动检查/提示安装；如果手动 `npm install` 时 node-gyp 下载 Node headers 被证书/代理拦截，且系统有 `/usr/include/node`，可先执行 `export npm_config_nodedir=/usr`。
 
 </details>
 
