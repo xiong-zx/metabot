@@ -1,5 +1,18 @@
 const path = require('path');
 
+const noProxyEntries = [
+  'localhost',
+  '127.0.0.1',
+  'open.feishu.cn',
+  '*.feishu.cn',
+  'lark.larksuite.com',
+  '*.larksuite.com',
+  'modelscope.com',
+  'aliyuncs.com',
+  'tencentyun.com',
+  'wisemodel.cn',
+];
+
 module.exports = {
   apps: [
     {
@@ -33,6 +46,8 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         CLAUDE_MAX_TURNS: '',  // unlimited turns (override any inherited shell env)
+        no_proxy: noProxyEntries.join(','),
+        NO_PROXY: noProxyEntries.join(','),
       },
     },
   ],
