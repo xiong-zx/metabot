@@ -77,4 +77,80 @@ describe('restart recovery', () => {
     }));
     expect(recovery.listActiveTaskRecords()).toEqual([]);
   });
+
+  it('marks interrupted tasks as error and clears them on ordinary startup without queuing continuation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
+    process.env.SESSION_STORE_DIR = dir;
+    vi.resetModules();
+
+    const recovery = await import('../src/bridge/restart-recovery.js');
+    recovery.recordActiveTask({
+      botName: 'research-pm',
+      chatId: 'oc_1',
+      messageId: 'msg_1',
+      userPrompt: 'Still running?',
+      startedAt: Date.now() - 5000,
+      source: 'chat',
+    });
+
+    const updateCard = vi.fn().mockResolvedValue(true);
+    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
+    const scheduleTask = vi.fn();
+    const registry = {
+      get: vi.fn((name: string) => name === 'research-pm'
+        ? { sender: { updateCard, sendTextNotice } }
+        : undefined),
+    };
+
+    await recovery.recoverInterruptedTasksAfterRestart({
+      registry: registry as any,
+      scheduler: { scheduleTask } as any,
+      logger,
+    });
+
+    expect(updateCard).toHaveBeenCalledWith('msg_1', expect.objectContaining({
+      status: 'error',
+      userPrompt: 'Still running?',
+      errorMessage: 'Task interrupted by service restart',
+    }));
+    expect(sendTextNotice).not.toHaveBeenCalled();
+    expect(scheduleTask).not.toHaveBeenCalled();
+    expect(recovery.listActiveTaskRecords()).toEqual([]);
+  });
+
+  it('clears expired active tasks on startup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
+    process.env.SESSION_STORE_DIR = dir;
+    vi.resetModules();
+
+    const recovery = await import('../src/bridge/restart-recovery.js');
+    const old = Date.now() - 25 * 60 * 60 * 1000;
+    writeFileSync(
+      join(dir, 'active-tasks.json'),
+      JSON.stringify([
+        {
+          botName: 'research-pm',
+          chatId: 'oc_1',
+          messageId: 'msg_1',
+          userPrompt: 'Old running task',
+          startedAt: old,
+          updatedAt: old,
+          source: 'chat',
+        },
+      ]),
+    );
+
+    const registry = { get: vi.fn() };
+    const scheduleTask = vi.fn();
+
+    await recovery.recoverInterruptedTasksAfterRestart({
+      registry: registry as any,
+      scheduler: { scheduleTask } as any,
+      logger,
+    });
+
+    expect(registry.get).not.toHaveBeenCalled();
+    expect(scheduleTask).not.toHaveBeenCalled();
+    expect(recovery.listActiveTaskRecords()).toEqual([]);
+  });
 });
