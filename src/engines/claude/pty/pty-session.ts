@@ -147,16 +147,38 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
         if (v !== undefined) env[k] = v;
       }
     }
-    // A PTY session is INTERACTIVE by definition. The parent (metabot) runs
-    // under the Agent SDK, so its env carries CLAUDE_CODE_ENTRYPOINT=sdk-cli /
-    // CLAUDECODE. We MUST strip those so the spawned `claude` uses the
-    // interactive entrypoint marker — that marker is what selects the Claude
-    // Code SUBSCRIPTION billing pool (vs the Agent-SDK credit pool) post
-    // June-2026. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are deliberately
-    // KEPT so traffic still routes through TeamClaude for Max-account load
-    // balancing — the entrypoint marker passes through that transparent proxy.
-    for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
-      delete env[k];
+    // A PTY session is INTERACTIVE by definition, and the parent metabot
+    // process may itself be running INSIDE a Claude Code session (e.g. the
+    // bridge was launched from a `claude` shell, or under the Agent SDK).
+    // In that case process.env carries a whole family of CLAUDE_* markers:
+    // CLAUDE_CODE_ENTRYPOINT, CLAUDECODE, CLAUDE_CODE_SESSION_ID,
+    // CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_BRIDGE_SESSION_ID,
+    // CLAUDE_AGENTS_SELECT, CLAUDE_JOB_DIR, CLAUDE_CODE_EXECPATH, ... If those
+    // leak into the child, claude treats itself as a NESTED/child session and
+    // does NOT persist its transcript jsonl to
+    // ~/.claude/projects/<escaped-cwd>/<id>.jsonl — so our scanner (which
+    // tails exactly that path) finds nothing and the turn completes with an
+    // EMPTY body. Strip every CLAUDE-prefixed var except the handful of feature
+    // toggles we intentionally pass through (mirrors createSpawnFn in the SDK
+    // backend). Dropping CLAUDE_CODE_ENTRYPOINT also lets the child adopt the
+    // interactive entrypoint marker that selects the Claude Code SUBSCRIPTION
+    // billing pool (vs the Agent-SDK credit pool) post June-2026.
+    // ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are NOT CLAUDE-prefixed and are
+    // deliberately KEPT so traffic still routes through TeamClaude for
+    // Max-account load balancing — the entrypoint marker passes through that
+    // transparent proxy.
+    const CLAUDE_ENV_PASSTHROUGH = new Set([
+      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+      'CLAUDE_CODE_DISABLE_AGENT_VIEW',
+      'CLAUDE_CODE_SIMPLE',
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
+      'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+    ]);
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('CLAUDE') && !CLAUDE_ENV_PASSTHROUGH.has(k)) {
+        delete env[k];
+      }
     }
     applyNoProxyPolicy(env);
 

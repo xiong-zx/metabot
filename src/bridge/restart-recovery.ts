@@ -90,14 +90,25 @@ export async function recoverInterruptedTasksAfterRestart(input: {
   scheduler: TaskScheduler;
   logger: Logger;
 }): Promise<void> {
-  if (!isFreshRestart()) return;
+  const freshRestart = isFreshRestart();
   const breadcrumb = getRestartBreadcrumb();
   const now = Date.now();
+  const expiredRecords = readActiveTasks()
+    .filter((record) => now - record.updatedAt > ACTIVE_TASK_STALE_MS)
+    .filter((record) => !record.chatId.startsWith('worker-') && !record.chatId.startsWith('team:'));
+  for (const record of expiredRecords) {
+    input.logger.warn(
+      { botName: record.botName, chatId: record.chatId, messageId: record.messageId },
+      'restart recovery cleared expired active task',
+    );
+    clearActiveTask(record);
+  }
+
   const records = readActiveTasks()
     .filter((record) => now - record.updatedAt <= ACTIVE_TASK_STALE_MS)
     .filter((record) => !record.chatId.startsWith('worker-') && !record.chatId.startsWith('team:'));
 
-  if (records.length === 0 && breadcrumb?.botName && breadcrumb.chatId) {
+  if (freshRestart && records.length === 0 && breadcrumb?.botName && breadcrumb.chatId) {
     records.push({
       botName: breadcrumb.botName,
       chatId: breadcrumb.chatId,
@@ -110,54 +121,73 @@ export async function recoverInterruptedTasksAfterRestart(input: {
   }
 
   for (const record of records) {
-    const bot = input.registry.get(record.botName);
-    if (!bot) {
-      input.logger.warn({ botName: record.botName, chatId: record.chatId }, 'restart recovery skipped: bot not found');
-      clearActiveTask(record);
-      continue;
-    }
-
-    const responseText = [
-      'MetaBot service restarted successfully.',
-      'The previous turn was interrupted by the restart.',
-      'A continuation turn has been queued so the bot can continue the interrupted work.',
-    ].join('\n');
-
-    if (record.messageId) {
-      const state: CardState = {
-        status: 'complete',
-        userPrompt: record.userPrompt,
-        responseText,
-        toolCalls: [],
-        durationMs: Math.max(0, now - record.startedAt),
-      };
-      try {
-        await bot.sender.updateCard(record.messageId, state);
-      } catch (err) {
-        input.logger.warn({ err, botName: record.botName, chatId: record.chatId, messageId: record.messageId }, 'restart recovery card update failed');
-      }
-    }
-
     try {
-      await bot.sender.sendTextNotice(
-        record.chatId,
-        'MetaBot Restart Complete',
-        'Service restart completed. I queued a continuation turn for the interrupted work.',
-        'green',
-      );
-    } catch (err) {
-      input.logger.warn({ err, botName: record.botName, chatId: record.chatId }, 'restart recovery notice failed');
-    }
+      const bot = input.registry.get(record.botName);
+      if (!bot) {
+        input.logger.warn({ botName: record.botName, chatId: record.chatId }, 'restart recovery skipped: bot not found');
+        continue;
+      }
 
-    input.scheduler.scheduleTask({
-      botName: record.botName,
-      chatId: record.chatId,
-      prompt: buildContinuationPrompt(record),
-      delaySeconds: 2,
-      sendCards: true,
-      label: `restart-resume-${record.chatId}`,
-    });
-    clearActiveTask(record);
+      const responseText = freshRestart
+        ? [
+          'MetaBot service restarted successfully.',
+          'The previous turn was interrupted by the restart.',
+          'A continuation turn has been queued so the bot can continue the interrupted work.',
+        ].join('\n')
+        : [
+          'MetaBot service restarted.',
+          'The previous turn was interrupted before it could finish.',
+          'It was not resumed automatically; please resend the request if it still matters.',
+        ].join('\n');
+
+      if (record.messageId) {
+        const state: CardState = {
+          status: freshRestart ? 'complete' : 'error',
+          userPrompt: record.userPrompt,
+          responseText,
+          toolCalls: [],
+          durationMs: Math.max(0, now - record.startedAt),
+          errorMessage: freshRestart ? undefined : 'Task interrupted by service restart',
+        };
+        try {
+          await bot.sender.updateCard(record.messageId, state);
+        } catch (err) {
+          input.logger.warn(
+            { err, botName: record.botName, chatId: record.chatId, messageId: record.messageId },
+            'restart recovery card update failed',
+          );
+        }
+      }
+
+      if (freshRestart) {
+        try {
+          await bot.sender.sendTextNotice(
+            record.chatId,
+            'MetaBot Restart Complete',
+            'Service restart completed. I queued a continuation turn for the interrupted work.',
+            'green',
+          );
+        } catch (err) {
+          input.logger.warn({ err, botName: record.botName, chatId: record.chatId }, 'restart recovery notice failed');
+        }
+
+        input.scheduler.scheduleTask({
+          botName: record.botName,
+          chatId: record.chatId,
+          prompt: buildContinuationPrompt(record),
+          delaySeconds: 2,
+          sendCards: true,
+          label: `restart-resume-${record.chatId}`,
+        });
+      }
+    } catch (err) {
+      input.logger.warn(
+        { err, botName: record.botName, chatId: record.chatId, messageId: record.messageId },
+        'restart recovery failed while finalizing active task',
+      );
+    } finally {
+      clearActiveTask(record);
+    }
   }
 }
 
