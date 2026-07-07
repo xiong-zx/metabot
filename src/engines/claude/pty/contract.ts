@@ -260,6 +260,14 @@ export type RawJsonlRecord = Record<string, unknown>;
 export interface JsonlScanner extends AsyncIterable<RawJsonlRecord> {
   /** Stop tailing and end the async iteration. */
   stop(): void;
+  /**
+   * Synchronously read any records appended since the last poll and return
+   * them, advancing the internal offset so the async iterator won't re-emit
+   * them. When `includePartial` is true, also emits a trailing record whose
+   * terminating newline hasn't landed yet (used at end-of-turn to recover
+   * claude's final assistant line before synthesizing the `result`).
+   */
+  drainPending(includePartial?: boolean): RawJsonlRecord[];
 }
 
 export type CreateJsonlScanner = (args: {

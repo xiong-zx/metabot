@@ -132,9 +132,12 @@ export function readLatestExitPlan(
  * Drain delay after a Stop-hook fires before synthesizing the `result`. The
  * scanner polls every ~120ms; this gives it room to read the turn's final
  * assistant line(s) so the `result` is ordered AFTER them. Matches the POC's
- * proven ~500ms settle.
+ * proven ~500ms settle. A synchronous `drainPending(true)` runs when this timer
+ * fires (see onTurnComplete) to recover any still-unterminated final line, so
+ * this value only needs to cover claude's byte-write latency, not the newline
+ * flush — bumped from 450ms to give headroom under heavy host I/O load.
  */
-const RESULT_DRAIN_MS = 450;
+const RESULT_DRAIN_MS = 600;
 
 /** Extract a typeable prompt string from an input user message, or null. */
 function extractPromptText(m: PtyUserMessage): string | null {
@@ -227,6 +230,18 @@ export const ptyQuery = (args: {
       lastUsage = {};
       setTimeout(() => {
         if (disposed) return;
+        // Final flush BEFORE the terminal result. The Stop hook can fire before
+        // claude flushes the terminating newline of its last assistant line;
+        // the newline-only scanner would then emit that line AFTER `result`,
+        // stranding the real answer as a post-turn "spontaneous" card while the
+        // previous (intermediate) line becomes the "Complete" card. Draining the
+        // unterminated tail here re-orders the true final line ahead of `result`.
+        try {
+          const pending = scanner?.drainPending(true) ?? [];
+          for (const rec of pending) emitRecord(rec);
+        } catch (err) {
+          logger.warn({ err }, 'ptyQuery: final drain before result failed');
+        }
         out.enqueue(
           synthesizeResult({
             sessionId,
@@ -254,23 +269,28 @@ export const ptyQuery = (args: {
   });
 
   // ── Scanner loop ─────────────────────────────────────────────────────────
+  /** Track usage/session off a raw record, adapt it, and enqueue to `out`. */
+  function emitRecord(rec: RawJsonlRecord): void {
+    trackUsage(rec);
+    if (!sessionId) {
+      const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
+      if (sid) sessionId = sid;
+    }
+    const adapted = adaptJsonlRecord(rec);
+    if (!adapted) return;
+    if (Array.isArray(adapted)) {
+      for (const m of adapted) out.enqueue(m);
+    } else {
+      out.enqueue(adapted);
+    }
+  }
+
   async function runScanner(): Promise<void> {
     if (!scanner) return;
     try {
       for await (const rec of scanner) {
         if (disposed) break;
-        trackUsage(rec);
-        if (!sessionId) {
-          const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
-          if (sid) sessionId = sid;
-        }
-        const adapted = adaptJsonlRecord(rec);
-        if (!adapted) continue;
-        if (Array.isArray(adapted)) {
-          for (const m of adapted) out.enqueue(m);
-        } else {
-          out.enqueue(adapted);
-        }
+        emitRecord(rec);
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: scanner loop ended with error');
