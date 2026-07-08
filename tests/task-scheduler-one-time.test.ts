@@ -139,6 +139,29 @@ describe('TaskScheduler one-time tasks — creation', () => {
     expect(scheduler.taskCount()).toBe(2);
     scheduler.destroy();
   });
+
+  it('reuses an active task when dedupeKey matches', () => {
+    const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const first = scheduler.scheduleTask({
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'p1',
+      delaySeconds: 60,
+      dedupeKey: 'restart-resume:b:c:m1',
+    });
+    const second = scheduler.scheduleTask({
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'p2',
+      delaySeconds: 120,
+      dedupeKey: 'restart-resume:b:c:m1',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.prompt).toBe('p1');
+    expect(scheduler.listTasks()).toHaveLength(1);
+    scheduler.destroy();
+  });
 });
 
 // =====================================================================
@@ -286,6 +309,32 @@ describe('TaskScheduler one-time tasks — persistence', () => {
     expect(tasks[0].id).toBe('fresh-task-1');
     s.destroy();
   });
+
+  it('retries a one-shot task that was executing when the bridge restarted', () => {
+    const executingTask = {
+      id: 'executing-task-1',
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'resume me',
+      executeAt: Date.now() - 1_000,
+      sendCards: true,
+      status: 'executing',
+      createdAt: Date.now() - 5_000,
+      retryCount: 0,
+    };
+    fs.mkdirSync(PERSIST_DIR, { recursive: true });
+    fs.writeFileSync(PERSIST_FILE, JSON.stringify({ tasks: [executingTask], recurringTasks: [] }));
+
+    const s = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const tasks = s.listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: 'executing-task-1',
+      status: 'pending',
+      retryCount: 1,
+    });
+    s.destroy();
+  });
 });
 
 // =====================================================================
@@ -312,6 +361,7 @@ describe('TaskScheduler one-time tasks — execution', () => {
         prompt: 'Do work',
         chatId: 'chat1',
         userId: 'scheduler',
+        lifecycleKey: expect.stringMatching(/^schedule:/),
       }),
     );
     scheduler.destroy();

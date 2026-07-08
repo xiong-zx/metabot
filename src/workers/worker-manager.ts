@@ -38,6 +38,7 @@ export interface WorkerRecord {
   costUsd?: number;
   durationMs?: number;
   error?: string;
+  dedupeKey?: string;
 }
 
 export interface DispatchInput {
@@ -55,6 +56,7 @@ export interface DispatchInput {
   sandbox?: CodexSandbox;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  dedupeKey?: string;
 }
 
 export interface WorkerManagerConfig {
@@ -64,6 +66,14 @@ export interface WorkerManagerConfig {
   /** Custom path to the worker CLAUDE.md template. */
   claudeMdTemplate?: string;
 }
+
+export type WorkerRulesContextProvider = (input: {
+  botName: string;
+  pmChatId: string;
+  workerChatId: string;
+  workingDirectory: string;
+  label?: string;
+}) => string | undefined;
 
 // --- Model alias resolution ---
 
@@ -113,6 +123,7 @@ export function resolveWorkerModel(
 // production) can fully isolate its state.
 const PERSISTENCE_DIR = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
 const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, 'workers.json');
+const WORKER_DEDUPE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
 
 function loadRecords(): WorkerRecord[] {
   try {
@@ -126,6 +137,11 @@ function loadRecords(): WorkerRecord[] {
 function saveRecords(records: WorkerRecord[]): void {
   fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
   fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(records, null, 2));
+}
+
+function normalizeDedupeKey(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.slice(0, 300) : undefined;
 }
 
 // --- Worker CLAUDE.md injection ---
@@ -173,6 +189,7 @@ export function injectWorkerTemplates(workDir: string, customTemplatePath?: stri
 
 export class WorkerManager {
   private records: WorkerRecord[];
+  private rulesContextProvider?: WorkerRulesContextProvider;
 
   constructor(
     private registry: BotRegistry,
@@ -180,19 +197,38 @@ export class WorkerManager {
     private config: WorkerManagerConfig,
   ) {
     this.records = loadRecords();
-    // Mark stale "running" records from a previous process as failed.
+    const recordsToResume: WorkerRecord[] = [];
     for (const r of this.records) {
       if (r.status === 'running') {
-        r.status = 'failed';
-        r.error = 'metabot restarted while worker was running';
-        r.endTime = Date.now();
+        r.error = 'metabot restarted while worker was running; automatically restarting worker';
+        r.startTime = Date.now();
+        delete r.endTime;
+        delete r.durationMs;
+        delete r.costUsd;
+        delete r.resultSummary;
+        recordsToResume.push(r);
       }
     }
     this.persist();
+    if (recordsToResume.length > 0) {
+      setImmediate(() => this.resumeWorkersAfterRestart(recordsToResume));
+    }
+  }
+
+  setRulesContextProvider(provider: WorkerRulesContextProvider | undefined): void {
+    this.rulesContextProvider = provider;
   }
 
   dispatch(input: DispatchInput): WorkerRecord {
     const { botName, pmChatId, workingDirectory, prompt, label } = input;
+    const dedupeKey = normalizeDedupeKey(input.dedupeKey);
+    if (dedupeKey) {
+      const existing = this.findReusableWorker(pmChatId, dedupeKey);
+      if (existing) {
+        this.logger.info({ workerId: existing.id, pmChatId, dedupeKey }, 'Worker dispatch deduped to existing record');
+        return existing;
+      }
+    }
 
     const runningCount = this.records.filter(
       (r) => r.pmChatId === pmChatId && r.status === 'running',
@@ -208,14 +244,22 @@ export class WorkerManager {
 
     const { model, engine } = resolveWorkerModel(input.model, input.engine, this.config.defaultModel);
     const id = crypto.randomUUID().slice(0, 8);
+    const workerChatId = `worker-${id}`;
+    const runtimePrompt = this.withRulesContext(input.prompt, {
+      botName,
+      pmChatId,
+      workerChatId,
+      workingDirectory,
+      label,
+    });
 
     const record: WorkerRecord = {
       id,
       botName,
       pmChatId,
-      workerChatId: `worker-${id}`,
+      workerChatId,
       workingDirectory,
-      prompt,
+      prompt: runtimePrompt,
       label,
       model,
       engine,
@@ -224,6 +268,7 @@ export class WorkerManager {
       sandbox: input.sandbox,
       timeoutMs: input.timeoutMs,
       idleTimeoutMs: input.idleTimeoutMs,
+      dedupeKey,
       status: 'running',
       startTime: Date.now(),
     };
@@ -245,9 +290,22 @@ export class WorkerManager {
     this.logger.info({
       workerId: id, botName, pmChatId, workerChatId: record.workerChatId,
       workDir: workingDirectory, model, engine, reasoningEffort: input.reasoningEffort, label,
+      dedupeKey,
     }, 'Worker dispatched');
 
     return record;
+  }
+
+  private findReusableWorker(pmChatId: string, dedupeKey: string): WorkerRecord | undefined {
+    const now = Date.now();
+    return this.records
+      .filter((record) => record.pmChatId === pmChatId && record.dedupeKey === dedupeKey)
+      .filter((record) => {
+        if (record.status === 'running') return true;
+        if (record.status !== 'completed') return false;
+        return now - (record.endTime ?? record.startTime) <= WORKER_DEDUPE_COMPLETED_TTL_MS;
+      })
+      .sort((a, b) => (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime))[0];
   }
 
   listWorkers(pmChatId?: string): WorkerRecord[] {
@@ -351,6 +409,30 @@ export class WorkerManager {
 
   // --- Internal ---
 
+  private withRulesContext(prompt: string, input: Parameters<NonNullable<WorkerRulesContextProvider>>[0]): string {
+    const context = this.rulesContextProvider?.(input)?.trim();
+    return context ? `${context}\n\n${prompt}` : prompt;
+  }
+
+  private resumeWorkersAfterRestart(records: WorkerRecord[]): void {
+    for (const record of records) {
+      const bot = this.registry.get(record.botName);
+      if (!bot) {
+        record.status = 'failed';
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - record.startTime;
+        record.error = 'metabot restarted while worker was running; bot not found during worker recovery';
+        this.persist();
+        this.logger.warn({ workerId: record.id, botName: record.botName }, 'Could not restart worker after bridge restart: bot not found');
+        continue;
+      }
+      this.logger.info({ workerId: record.id, botName: record.botName, workerChatId: record.workerChatId }, 'Restarting worker after bridge restart');
+      this.runWorker(record, bot).catch((err) => {
+        this.logger.error({ err, workerId: record.id }, 'Restarted worker execution failed unexpectedly');
+      });
+    }
+  }
+
   private async runWorker(record: WorkerRecord, bot: { bridge: MessageBridge }): Promise<void> {
     const startTime = Date.now();
     try {
@@ -359,6 +441,7 @@ export class WorkerManager {
         chatId: record.workerChatId,
         userId: 'worker-manager',
         sendCards: false,
+        lifecycleKey: `worker:${record.id}`,
         workingDirectory: record.workingDirectory,
         model: record.model,
         engine: record.engine,
@@ -423,6 +506,7 @@ export class WorkerManager {
         chatId: record.pmChatId,
         userId: 'worker-manager',
         sendCards: true,
+        lifecycleKey: `worker-notify:${record.id}`,
       });
       this.logger.info({ workerId: record.id, pmChatId: record.pmChatId }, 'PM notified of worker completion');
     } catch (err) {

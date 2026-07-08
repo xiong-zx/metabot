@@ -21,6 +21,7 @@ import { parseMarkdownToBlocks, type Block } from './markdown-parser.js';
 import {
   STATUS_CONFIG,
   BG_ICON,
+  LIFECYCLE_STAGE_LABELS,
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
@@ -110,6 +111,16 @@ export function buildCardV2(state: CardState): string {
     elements.push({
       tag:     'markdown',
       content: `🎯 **Goal:** ${truncate(state.goalCondition, 200)}`,
+    });
+    elements.push({ tag: 'hr' });
+  }
+
+  if (state.lifecycleStage && state.lifecycleStage !== 'closed') {
+    const label = LIFECYCLE_STAGE_LABELS[state.lifecycleStage];
+    const key = state.lifecycleKey ? ` · \`${truncate(state.lifecycleKey, 48)}\`` : '';
+    elements.push({
+      tag:     'markdown',
+      content: `**State:** ${label}${key}`,
     });
     elements.push({ tag: 'hr' });
   }

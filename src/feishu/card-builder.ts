@@ -1,6 +1,7 @@
 // Re-export shared types so existing imports from this module continue to work
 export type {
   CardStatus,
+  CardLifecycleStage,
   ToolCall,
   PendingQuestion,
   CardState,
@@ -11,6 +12,7 @@ import type { CardState } from '../types.js';
 import {
   STATUS_CONFIG,
   BG_ICON,
+  LIFECYCLE_STAGE_LABELS,
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
@@ -26,6 +28,16 @@ export function buildCard(state: CardState): string {
     elements.push({
       tag: 'markdown',
       content: `🎯 **Goal:** ${truncate(state.goalCondition, 200)}`,
+    });
+    elements.push({ tag: 'hr' });
+  }
+
+  if (state.lifecycleStage && state.lifecycleStage !== 'closed') {
+    const label = LIFECYCLE_STAGE_LABELS[state.lifecycleStage];
+    const key = state.lifecycleKey ? ` · \`${truncate(state.lifecycleKey, 48)}\`` : '';
+    elements.push({
+      tag: 'markdown',
+      content: `**State:** ${label}${key}`,
     });
     elements.push({ tag: 'hr' });
   }

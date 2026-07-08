@@ -159,7 +159,26 @@
 }
 
 /* Activity tab */
-.activityTab { animation: v2-fadeIn 200ms ease; }
+.activityTab {
+  animation: v2-fadeIn 200ms ease;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.activitySection {
+  min-width: 0;
+}
+
+.activitySectionTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-family: var(--font-mono);
+  margin: 0 0 8px 12px;
+}
 
 .activeTask {
   background: var(--surface-1);

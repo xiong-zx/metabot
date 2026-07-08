@@ -10,33 +10,27 @@ export async function handleTaskRoutes(
   url: string,
 ): Promise<boolean> {
   const { registry, scheduler, logger, peerManager, asyncTaskStore, circuitBreaker, budgetManager, ws } = ctx;
+  const requestUrl = new URL(url, 'http://localhost');
+  const pathname = requestUrl.pathname;
 
   // GET /api/talk/:taskId — async task status
-  if (method === 'GET' && url.startsWith('/api/talk/')) {
-    const taskId = url.slice('/api/talk/'.length).split('?')[0];
+  if (method === 'GET' && pathname.startsWith('/api/talk/')) {
+    const taskId = pathname.slice('/api/talk/'.length);
     if (!taskId) {
       jsonResponse(res, 400, { error: 'Missing taskId' });
       return true;
     }
     const task = asyncTaskStore.get(taskId);
     if (!task) {
-      jsonResponse(res, 404, { error: 'Task not found' });
+      jsonResponse(res, 404, taskNotFoundResponse(taskId));
       return true;
     }
-    jsonResponse(res, 200, {
-      taskId: task.id,
-      status: task.status,
-      botName: task.botName,
-      chatId: task.chatId,
-      createdAt: new Date(task.createdAt).toISOString(),
-      completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : undefined,
-      result: task.result,
-    });
+    jsonResponse(res, 200, taskStatusResponse(task));
     return true;
   }
 
   // POST /api/talk (primary) + POST /api/tasks (deprecated alias)
-  if (method === 'POST' && (url === '/api/talk' || url === '/api/tasks')) {
+  if (method === 'POST' && (pathname === '/api/talk' || pathname === '/api/tasks')) {
     const body = await parseJsonBody(req);
     const rawBotName = body.botName as string;
     const chatId = body.chatId as string;
@@ -44,7 +38,8 @@ export async function handleTaskRoutes(
       ? body.prompt as string
       : (body.content as string);
     const sendCards = body.sendCards as boolean | undefined;
-    const asyncMode = body.async === true;
+    const asyncMode = body.async === true || requestUrl.searchParams.get('async') === 'true';
+    const waitMs = parseWaitMs(body.waitMs, requestUrl.searchParams.get('waitMs'));
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
 
@@ -105,68 +100,43 @@ export async function handleTaskRoutes(
 
       logger.info({ botName, chatId, promptLength: prompt.length, asyncMode }, 'API talk request');
 
-      // Async mode: accept immediately, execute in background
-      if (asyncMode) {
+      // Async mode: accept immediately, execute in background. If waitMs is
+      // supplied, keep the HTTP request open briefly and return the final
+      // result when it finishes fast; otherwise return 202 with a status URL.
+      if (asyncMode || waitMs > 0) {
         const asyncTask = asyncTaskStore.create({
           botName, chatId, prompt, callbackChatId, callbackBotName,
         });
 
-        (async () => {
-          asyncTaskStore.update(asyncTask.id, { status: 'running' });
-          try {
-            const result = await bot.bridge.executeApiTask({
-              prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
-            });
-            asyncTaskStore.update(asyncTask.id, {
-              status: result.success ? 'completed' : 'failed',
-              completedAt: Date.now(),
-              result: {
-                success: result.success,
-                responseText: result.responseText,
-                costUsd: result.costUsd,
-                durationMs: result.durationMs,
-                error: result.error,
-              },
-            });
-
-            if (result.success) {
-              circuitBreaker.recordSuccess(botName);
-            } else {
-              circuitBreaker.recordFailure(botName);
-            }
-            if (result.costUsd) {
-              budgetManager.recordCost(botName, result.costUsd);
-            }
-
-            // Send callback if configured
-            if (callbackChatId && callbackBotName) {
-              const callbackBot = registry.get(callbackBotName);
-              if (callbackBot) {
-                const summary = result.responseText?.slice(0, 500) || 'Task completed';
-                await callbackBot.bridge.executeApiTask({
-                  prompt: `[Async task callback] Bot "${botName}" finished a task. Result: ${summary}`,
-                  chatId: callbackChatId,
-                  userId: 'system',
-                  sendCards: true,
-                  maxTurns: 1,
-                });
-              }
-            }
-          } catch (err: any) {
-            circuitBreaker.recordFailure(botName);
-            asyncTaskStore.update(asyncTask.id, {
-              status: 'failed',
-              completedAt: Date.now(),
-              result: { success: false, responseText: '', error: err.message },
-            });
-          }
-        })();
-
-        jsonResponse(res, 202, {
-          taskId: asyncTask.id,
-          status: 'accepted',
-          message: 'Task accepted for async execution',
+        const taskPromise = runTalkAsyncTask({
+          asyncTaskId: asyncTask.id,
+          bot,
+          botName,
+          chatId,
+          prompt,
+          sendCards: sendCards ?? true,
+          callbackChatId,
+          callbackBotName,
+          registry,
+          asyncTaskStore,
+          circuitBreaker,
+          budgetManager,
         });
+
+        if (waitMs > 0) {
+          const finished = await waitForTalkTask(taskPromise, waitMs);
+          const current = asyncTaskStore.get(asyncTask.id);
+          if (finished && current?.result) {
+            jsonResponse(res, statusForTalkResult(current.result), {
+              taskId: asyncTask.id,
+              status: current.status,
+              ...current.result,
+            });
+            return true;
+          }
+        }
+
+        jsonResponse(res, 202, acceptedTalkTaskResponse(asyncTask.id, asyncTask.status, prompt));
         return true;
       }
 
@@ -207,7 +177,7 @@ export async function handleTaskRoutes(
         budgetManager.recordCost(botName, result.costUsd);
       }
 
-      jsonResponse(res, result.success ? 200 : 500, result);
+      jsonResponse(res, statusForTalkResult(result), result);
       return true;
     }
 
@@ -392,4 +362,185 @@ export async function handleTaskRoutes(
   }
 
   return false;
+}
+
+function parseWaitMs(bodyValue: unknown, queryValue: string | null): number {
+  const raw = bodyValue ?? queryValue;
+  if (raw === undefined || raw === null || raw === '') return 0;
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Math.floor(value), 25_000);
+}
+
+function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: string): Record<string, unknown> {
+  void prompt;
+  return {
+    taskId,
+    status,
+    phase: taskStatusPhase(status),
+    progress: {
+      kind: 'indeterminate',
+      elapsedMs: 0,
+      retryAfterMs: 2000,
+    },
+    message: 'Task accepted for async execution',
+    statusUrl: `/api/talk/${encodeURIComponent(taskId)}`,
+    statusCommand: `metabot talk-status ${taskId}`,
+    retryAfterMs: 2000,
+    nextAction: `Run metabot talk-status ${taskId} after 2s to check progress.`,
+  };
+}
+
+function taskStatusResponse(task: {
+  id: string;
+  status: string;
+  botName: string;
+  chatId: string;
+  createdAt: number;
+  completedAt?: number;
+  result?: unknown;
+}): Record<string, unknown> {
+  const now = Date.now();
+  const finished = task.completedAt ?? now;
+  const elapsedMs = Math.max(0, finished - task.createdAt);
+  const running = task.status === 'accepted' || task.status === 'running';
+  const retryAfterMs = running ? 2000 : undefined;
+  return {
+    taskId: task.id,
+    status: task.status,
+    phase: taskStatusPhase(task.status),
+    progress: running
+      ? {
+          kind: 'indeterminate',
+          elapsedMs,
+          retryAfterMs,
+        }
+      : {
+          kind: 'complete',
+          elapsedMs,
+        },
+    botName: task.botName,
+    chatId: task.chatId,
+    createdAt: new Date(task.createdAt).toISOString(),
+    completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : undefined,
+    elapsedMs,
+    statusUrl: `/api/talk/${encodeURIComponent(task.id)}`,
+    statusCommand: `metabot talk-status ${task.id}`,
+    retryAfterMs,
+    message: running
+      ? 'Task is still running. Check statusUrl again later.'
+      : 'Task finished. See result for the final response or error.',
+    nextAction: running
+      ? `Run metabot talk-status ${task.id} again after 2s.`
+      : 'Inspect result for the final response or error.',
+    result: task.result,
+  };
+}
+
+function taskNotFoundResponse(taskId: string): Record<string, unknown> {
+  return {
+    taskId,
+    status: 'not_found',
+    phase: 'not_found',
+    progress: {
+      kind: 'unavailable',
+    },
+    statusUrl: `/api/talk/${encodeURIComponent(taskId)}`,
+    statusCommand: `metabot talk-status ${taskId}`,
+    error: 'Task not found or no longer retained',
+    message:
+      'Task status is unavailable. The task may never have existed, may have expired after retention, or may have been lost before persistence during service restart.',
+    nextAction:
+      'If this was a wake/check request, resend it with metabot talk --wait-ms so the response is observed directly.',
+  };
+}
+
+function taskStatusPhase(status: string): string {
+  if (status === 'accepted') return 'accepted';
+  if (status === 'running') return 'running';
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  return status;
+}
+
+async function waitForTalkTask(task: Promise<void>, waitMs: number): Promise<boolean> {
+  return await Promise.race([
+    task.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), waitMs)),
+  ]);
+}
+
+function statusForTalkResult(result: { success: boolean; error?: string; errorCode?: string }): number {
+  if (result.success) return 200;
+  if (result.errorCode === 'chat_busy' || result.error === 'Chat is busy with another task') return 409;
+  return 500;
+}
+
+async function runTalkAsyncTask(input: {
+  asyncTaskId: string;
+  bot: any;
+  botName: string;
+  chatId: string;
+  prompt: string;
+  sendCards: boolean;
+  callbackChatId?: string;
+  callbackBotName?: string;
+  registry: any;
+  asyncTaskStore: any;
+  circuitBreaker: any;
+  budgetManager: any;
+}): Promise<void> {
+  input.asyncTaskStore.update(input.asyncTaskId, { status: 'running' });
+  try {
+    const result = await input.bot.bridge.executeApiTask({
+      prompt: input.prompt,
+      chatId: input.chatId,
+      userId: 'api',
+      sendCards: input.sendCards,
+    });
+    input.asyncTaskStore.update(input.asyncTaskId, {
+      status: result.success ? 'completed' : 'failed',
+      completedAt: Date.now(),
+      result: {
+        success: result.success,
+        responseText: result.responseText,
+        costUsd: result.costUsd,
+        durationMs: result.durationMs,
+        error: result.error,
+        errorCode: result.errorCode,
+        retryAfterMs: result.retryAfterMs,
+        busy: result.busy,
+      },
+    });
+
+    if (result.success) {
+      input.circuitBreaker.recordSuccess(input.botName);
+    } else {
+      input.circuitBreaker.recordFailure(input.botName);
+    }
+    if (result.costUsd) {
+      input.budgetManager.recordCost(input.botName, result.costUsd);
+    }
+
+    if (input.callbackChatId && input.callbackBotName) {
+      const callbackBot = input.registry.get(input.callbackBotName);
+      if (callbackBot) {
+        const summary = result.responseText?.slice(0, 500) || result.error || 'Task completed';
+        await callbackBot.bridge.executeApiTask({
+          prompt: `[Async task callback] Bot "${input.botName}" finished a task. Result: ${summary}`,
+          chatId: input.callbackChatId,
+          userId: 'system',
+          sendCards: true,
+          maxTurns: 1,
+        });
+      }
+    }
+  } catch (err: any) {
+    input.circuitBreaker.recordFailure(input.botName);
+    input.asyncTaskStore.update(input.asyncTaskId, {
+      status: 'failed',
+      completedAt: Date.now(),
+      result: { success: false, responseText: '', error: err.message },
+    });
+  }
 }

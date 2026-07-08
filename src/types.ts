@@ -1,5 +1,7 @@
 // Shared types used across IM platforms (Feishu, Telegram, etc.)
 
+import type { TeamActorRole } from './agent-teams/team-store.js';
+
 export type CardStatus =
   | 'thinking'
   | 'running'
@@ -31,6 +33,16 @@ export interface PendingQuestion {
 }
 
 export type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
+
+export type CardLifecycleStage =
+  | 'received'
+  | 'acknowledged'
+  | 'executing'
+  | 'checkpointing'
+  | 'responding'
+  | 'closed'
+  | 'recovering'
+  | 'blocked';
 
 export interface BackgroundEvent {
   taskId: string;
@@ -72,6 +84,10 @@ export interface CardState {
   userPrompt: string;
   responseText: string;
   toolCalls: ToolCall[];
+  /** Bounded card lifecycle stage used for recovery, observability, and stuck-card prevention. */
+  lifecycleStage?: CardLifecycleStage;
+  /** Optional idempotency/recovery key for the card lifecycle. */
+  lifecycleKey?: string;
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;
@@ -98,6 +114,8 @@ export interface IncomingMessage {
   chatType: string;
   userId: string;
   text: string;
+  /** Authority role for synthetic/internal messages. Human chat messages default to user. */
+  actorRole?: TeamActorRole;
   timestamp?: number;
   imageKey?: string;
   fileKey?: string;

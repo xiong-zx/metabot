@@ -1,12 +1,12 @@
 ---
 name: metabot-team
-description: "Use when coordinating or working inside a MetaBot Agent Team via `metabot teams`: create/list teams, spawn teammates, exchange messages, manage shared tasks, inspect runs, and report status to the lead."
+description: "Use when coordinating or working inside a MetaBot Agent Team via `metabot teams`: create/list teams, spawn agents, exchange messages, manage shared tasks, inspect runs, and report status to the lead."
 ---
 
 # MetaBot Agent Team
 
 MetaBot Agent Teams mirror the compact Claude Agent Teams workflow, but the
-coordination model is MetaBot-native and engine-neutral. Teammates may be
+coordination model is MetaBot-native and engine-neutral. Agents may be
 declared as Claude, Codex, Kimi, or future engines, but execution still goes
 through the current bridge/session-engine path. Do not assume every engine can
 handle every workflow until runtime capability validation or per-engine
@@ -17,13 +17,13 @@ adapters are added.
 Team = Agents + Messages + Tasks + Runs.
 
 Use the CLI for all team coordination. Plain chat output is not visible to
-teammates unless you send it through the team mailbox.
+agents unless you send it through the team mailbox.
 
 ## Lead Workflow
 
 ```bash
 metabot teams create <team> --description "..."
-metabot teams agents spawn <team> <name> --role <role> --prompt "..."  # engine defaults to codex
+metabot teams agents spawn <team> <name> --role <agent-role> --actor-role pm --prompt "..."  # engine defaults to codex
 metabot teams dispatch <team> <name> "<subject>" --description "..." --plain
 metabot teams next <team> <name> --summary
 metabot teams runs list <team>
@@ -32,13 +32,17 @@ metabot teams status <team> --summary
 
 Lead rules:
 - Keep the team task list current.
-- Prefer `metabot teams dispatch` over separate `tasks create` + `tasks update --owner` + `send`; it creates the task, assigns the owner, and wakes the teammate in one command.
-- Use `agents spawn` without `--engine` for Codex teammates. Pass `--engine claude|kimi` only when a teammate specifically needs another engine.
-- Use `next` to inspect a teammate's unread messages and open assigned tasks before deciding whether to send more work.
+- Prefer `metabot teams dispatch` over separate `tasks create` + `tasks update --owner` + `send`; it creates the task, assigns the owner, and wakes the agent in one command.
+- Use `agents spawn` without `--engine` for Codex agents. Pass `--engine claude|kimi` only when an Agent specifically needs another engine.
+- Only a PM, user, or admin may create Agents. Use `--actor-role pm|user|admin` only when you are actually acting with that authority; team managers and Agents must request creation from the PM instead.
+- Only a PM, user, or admin may dispatch, abort, or redirect Workers, or restart the MetaBot service. Worker MCP calls require explicit `actor_role`; managers and Agents must ask the PM instead of calling them directly.
+- If a controlled service restart is blocked on your chat, checkpoint current work and reply with `/restart ready <requestId> [checkpoint note]`; do not run the restart yourself.
+- A blocked restart request has a bounded ready timeout; if it expires, wait for a PM/user/admin to retry or explicitly force the restart.
+- Use `next` to inspect an Agent's unread messages and open assigned tasks before deciding whether to send more work.
 - Integrate completed work before reporting to the user.
 - Stop or delete the team when the work is done.
 
-## Teammate Workflow
+## Agent Workflow
 
 ```bash
 metabot teams next <team> <your-name> --read
@@ -50,11 +54,14 @@ metabot teams runs list <team>
 metabot teams send <team> lead "Completed task <taskId>: ..."
 ```
 
-Teammate rules:
+Agent rules:
 - Claim a task before working on it.
 - Prefer available tasks in ID order.
 - Mark a task completed only after the requested verification is done.
 - If blocked, use `tasks block` and message the lead with the concrete blocker.
+- Do not run `worker_dispatch`, Worker abort/redirect, service restart, template promotion, or Agent creation directly. Request those actions from the PM/lead.
+- If asked to prepare for a controlled restart, save a concise checkpoint and send `/restart ready <requestId> [checkpoint note]`.
+- If the request is already timed out, do not restart the service yourself; report current status to the PM/user/admin.
 - After completing a task, check the task list again.
 
 ## Smooth CLI Shortcuts
@@ -70,7 +77,7 @@ metabot teams dispatch metabot-core-chat bridge-runtime "Review agent bus relay"
 This is equivalent to creating a task, assigning it, and sending a start
 message. It returns both the task and the message ids.
 
-Teammate loop:
+Agent loop:
 
 ```bash
 metabot teams next metabot-core-chat bridge-runtime --read
@@ -83,8 +90,11 @@ For local shell aliases, set `METABOT_TEAM_AGENT=<name>` and omit the owner in
 `tasks claim`.
 
 Use `--summary` or `--plain` on `status`, `next`, `inbox`, `tasks list`,
-`runs list`, `dispatch`, and `watch` when a concise text view is easier to scan
-than JSON. The default output stays JSON for scripting.
+`runs list`, `activity`, `dispatch`, and `watch` when a concise text view is
+easier to scan than JSON. The default output stays JSON for scripting.
+Use `metabot teams activity <team> --agent <name> --summary` to inspect
+persisted Agent activity cards by team/instance, agent, run, task, chat, or
+source.
 
 ## Parallel Same-Agent Runs
 
@@ -111,7 +121,7 @@ Supervisor behavior:
 ## Runs
 
 Runs are background execution records. The supervisor creates them
-automatically when it starts a teammate, but leads and teammates can also use
+automatically when it starts an Agent, but leads and agents can also use
 them for smoke tests or long-running work:
 
 ```bash
@@ -126,7 +136,7 @@ Run statuses: `running`, `completed`, `failed`, `stopped`.
 
 Stop semantics: `metabot teams runs stop` marks the stored run as `stopped`.
 When the supervisor owns the in-flight run, it also asks the bridge to stop the
-teammate chat task, requeues assigned in-progress tasks to `pending` with a
+agent chat task, requeues assigned in-progress tasks to `pending` with a
 stop note, and suppresses late executor output so delayed success cannot
 overwrite the stopped run.
 
@@ -136,7 +146,7 @@ Failed-run rules:
 - The supervisor marks failed or crashed executions as `failed`, records the
   error, requeues assigned in-progress tasks to `pending` with failure context
   in `result`, returns the agent to idle, and sends a failure message to
-  `lead` for non-lead teammates.
+  `lead` for non-lead agents.
 - Do not manually mark a requeued task completed just because a failed run
   produced partial output; let the supervisor retry it or ask the lead whether
   to reassign/stop it.
@@ -148,16 +158,16 @@ assigned pending tasks. It creates one run per ready task, marks the agent
 working, runs that agent in either `team:<team>:<agent>` or isolated
 `team:<team>:<agent>:<runId>` chats for parallel same-agent work, records output
 or error, then returns the agent to idle once no running runs remain. Non-lead
-teammates send a completion or failure message to `lead`.
+agents send a completion or failure message to `lead`.
 
 Operational knobs:
 - `METABOT_AGENT_TEAM_SUPERVISOR=0` disables the loop.
 - `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS` changes the polling interval.
 - `METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT` caps concurrent runs for one
   agent. Default: `4`.
-- The supervisor sets the configured session engine for the teammate chat, but
+- The supervisor sets the configured session engine for the agent chat, but
   currently does not validate engine capabilities before dispatch.
-- New CLI-spawned teammates default to `codex`; resident teams should still set
+- New CLI-spawned agents default to `codex`; resident teams should still set
   `engine: "codex"` explicitly for reproducibility.
 
 ## Card Display
@@ -196,7 +206,7 @@ reconciles these teams at startup and hot-reloads them unless
 }
 ```
 
-Use `chatIds` for teammate execution chats like `team:<team>:<agent>`.
+Use `chatIds` for agent execution chats like `team:<team>:<agent>`.
 Parallel same-agent runs may also use run-scoped execution chats like
 `team:<team>:<agent>:<runId>`. Use `displayChatIds` for user-facing Feishu
 chats where the Team and Background card sections should appear.

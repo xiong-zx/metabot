@@ -54,13 +54,22 @@ metabot bot <name>                  # get bot details
 ### Agent talk
 
 ```bash
-metabot talk <bot> <chatId> <prompt>      # talk to a bot (bridge /api/talk)
+metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <prompt>      # talk to a bot (bridge /api/talk)
+metabot talk-status <taskId>        # check an async talk task with local auth
 metabot talk alice/bot <chatId> <prompt>  # talk to a specific peer's bot
 ```
 
 The bot name supports [qualified names](../features/peers.md#qualified-names)
 (`peerName/botName`) for cross-instance routing. This is the bridge-local talk
 path; `metabot agents talk` is the separate central-registry P2P variant.
+`metabot talk` waits up to 25 seconds by default; if the task is still running,
+it returns a `taskId` and `statusCommand` instead of blocking indefinitely. Use
+`--sync` for the old blocking behavior, or `--async` to return immediately.
+Async talk responses include a `statusUrl` for API clients and a
+`statusCommand` such as `metabot talk-status <taskId>` for local CLI users.
+Async task status is persisted under `SESSION_STORE_DIR`; if the bridge restarts
+while a task is running, the old task id should return `failed` with
+`task_interrupted_by_restart` instead of disappearing as `Task not found`.
 
 ### Peers
 
@@ -80,8 +89,28 @@ metabot teams start <team>
 metabot teams stop <team>
 metabot teams delete <team>
 
+metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+metabot teams activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
+metabot teams templates list [name]
+metabot teams templates export <name> [--version <n>]
+metabot teams templates diff <name> --from <n> [--to <n>]
+metabot teams templates import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams proposals list [--status pending|approved|rejected]
+metabot teams proposals create [template|ruleset] '<json>' [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
+metabot teams proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams instances list [--template <name>]
+metabot teams instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--actor-role admin|user|pm]
+metabot teams rules list [name]
+metabot teams rules export <name> [--version <n>]
+metabot teams rules diff <name> --from <n> [--to <n>]
+metabot teams rules import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--actor-role admin|user|pm]
+metabot teams rules context --ref <name[@version]> [--rule <text>]
+
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
 metabot teams agents stop <team> <name>
 metabot teams agents delete <team> <name>
 
@@ -100,7 +129,11 @@ metabot teams runs output <team> <runId>
 metabot teams runs stop <team> <runId>
 ```
 
-`runs stop` marks the run `stopped` and, when the bridge supervisor owns the in-flight run, asks the bridge to stop that teammate chat task, requeues assigned in-progress tasks to `pending`, and suppresses late executor output for that stopped run.
+`runs stop` marks the run `stopped` and, when the bridge supervisor owns the in-flight run, asks the bridge to stop that agent chat task, requeues assigned in-progress tasks to `pending`, and suppresses late executor output for that stopped run.
+
+Template/rule commands are the Phase 1 control surface for versioned Agent Team templates, chat/project-scoped runtime instances, pinned RuleSet refs, versioned RuleSets, and promotion proposals. Managers or agents can create proposal records, but only a PM, user, or admin can approve or reject them; approval writes a new template or RuleSet version and does not auto-upgrade pinned instances. `instances resolve --rule-ref ...` pins extra project/runtime RuleSets at creation time, `teams config ... --rule-ref ...` updates the current instance explicitly, and `rules export/diff/import` gives RuleSets the same reviewable lifecycle as templates. Existing `<team>` arguments accept either a team name or an `instanceId`; prefer the `instanceId` returned by `instances resolve` for scoped project/chat teams. The storage schema still keeps rows under `teamName` while the runtime migrates toward first-class `instanceId` internally.
+
+For privileged CLI actions, `--actor-role` is the caller authority (`admin`, `user`, or `pm`). It is required for direct Agent creation, direct template/rule import or set, instance resolve, team config updates, and promotion decisions. `--role` on `agents spawn` is the spawned Agent's functional role, not authority.
 
 The same command surface is implemented in both `bin/metabot` and the TypeScript feature CLI under `packages/cli`. The bridge reads `API_PORT` / `API_SECRET` and optional `METABOT_URL` from `.env`.
 

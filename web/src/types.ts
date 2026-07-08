@@ -170,6 +170,51 @@ export interface ActivityEvent {
   timestamp: number;
 }
 
+export interface AgentTeamSummary {
+  name: string;
+  description?: string;
+  status?: string;
+  templateName?: string;
+  templateVersion?: number;
+  templateDigest?: string;
+  scopeType?: 'chat' | 'project' | 'global' | 'legacy';
+  scopeKey?: string;
+  instanceId?: string;
+  chatIds?: string[];
+  displayChatIds?: string[];
+  pmBot?: string;
+  updatedAt?: number;
+}
+
+export interface AgentTeamActivityRecord {
+  lifecycleKey: string;
+  botName: string;
+  chatId: string;
+  messageId?: string;
+  source: string;
+  teamName?: string;
+  instanceId?: string;
+  agentName?: string;
+  runId?: string;
+  taskIds?: number[];
+  status: CardStatus;
+  lifecycleStage?: string;
+  userPrompt?: string;
+  responsePreview?: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: number;
+  checkpointNote?: string;
+  checkpointBy?: string;
+  checkpointAt?: number;
+  restartRequestId?: string;
+  finalDeliveredAt?: number;
+  finalDeliveryStatus?: 'card' | 'fallback' | 'failed';
+  finalDeliveryMessageId?: string;
+  createdAt: number;
+  updatedAt: number;
+  closedAt?: number;
+}
+
 /* --- WebSocket messages --- */
 
 export type WSIncomingMessage =

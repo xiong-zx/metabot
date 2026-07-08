@@ -17,6 +17,10 @@
   background: var(--bg-hover, rgba(255, 255, 255, 0.04));
 }
 
+.teamEvent {
+  border: 1px solid transparent;
+}
+
 .iconCol {
   display: flex;
   flex-direction: column;
@@ -69,6 +73,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .meta {

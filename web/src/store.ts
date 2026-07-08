@@ -6,6 +6,8 @@ import { create } from 'zustand';
 import type {
   ActiveView,
   ActivityEvent,
+  AgentTeamActivityRecord,
+  AgentTeamSummary,
   BotInfo,
   CardState,
   ChatGroup,
@@ -179,6 +181,10 @@ export interface AppStore {
   activityEvents: ActivityEvent[];
   addActivityEvent: (event: ActivityEvent) => void;
   setActivityEvents: (events: ActivityEvent[]) => void;
+  agentTeams: AgentTeamSummary[];
+  setAgentTeams: (teams: AgentTeamSummary[]) => void;
+  agentTeamActivity: AgentTeamActivityRecord[];
+  setAgentTeamActivity: (records: AgentTeamActivityRecord[]) => void;
 
   // Incoming voice call
   incomingVoiceCall: { sessionId: string; roomId: string; token: string; appId: string; userId: string; aiUserId: string; chatId: string; botName: string; prompt?: string } | null;
@@ -532,6 +538,15 @@ export const useStore = create<AppStore>((set, get) => ({
   },
   setActivityEvents(events: ActivityEvent[]) {
     set({ activityEvents: events });
+  },
+  agentTeams: [],
+  setAgentTeams(teams: AgentTeamSummary[]) {
+    set({ agentTeams: teams });
+  },
+  agentTeamActivity: [],
+  setAgentTeamActivity(records: AgentTeamActivityRecord[]) {
+    const ordered = [...records].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 200);
+    set({ agentTeamActivity: ordered });
   },
 
   /* ---- Incoming voice call ---- */
