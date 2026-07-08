@@ -20,6 +20,7 @@ import { WorkerManager } from './workers/worker-manager.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { checkMetabotCoreMemoryConnection } from './memory/core-connection.js';
 import { recoverInterruptedTasksAfterRestart } from './bridge/restart-recovery.js';
 
 import { SessionRegistry } from './session/session-registry.js';
@@ -378,6 +379,26 @@ async function main() {
     'Worker manager initialized',
   );
   await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
+
+  const memoryCheck = await checkMetabotCoreMemoryConnection({ timeoutMs: 4_000 });
+  if (memoryCheck.ok) {
+    logger.info({
+      baseUrl: memoryCheck.baseUrl,
+      tokenSource: memoryCheck.tokenSource,
+      folderCount: memoryCheck.folderCount,
+      documentCount: memoryCheck.documentCount,
+      durationMs: memoryCheck.durationMs,
+    }, 'MetaMemory connected via metabot-core');
+  } else {
+    logger.warn({
+      baseUrl: memoryCheck.baseUrl,
+      tokenPresent: memoryCheck.tokenPresent,
+      tokenSource: memoryCheck.tokenSource,
+      status: memoryCheck.status,
+      error: memoryCheck.error,
+      durationMs: memoryCheck.durationMs,
+    }, 'MetaMemory is not reachable; memory features will fail until METABOT_CORE_URL/METABOT_CORE_TOKEN are fixed');
+  }
 
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the

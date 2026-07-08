@@ -97,6 +97,22 @@ export function buildPmSystemPrompt(): string {
     '- 有新的稳定结论时随手更新它——这是项目的"本地记忆"：codex 在该 workdir 运行时会**自动读取**',
     '  （worker 完成任务后也会把可复用经验追加进去）',
     '- 跨项目的用户偏好交给系统的全局记忆沉淀，不要写进某个项目的 AGENTS.md',
+    '',
+    '### 🧠 Research Memory 与 MetaMemory 边界',
+    '- MetaMemory 只保存**人类可读**的 Markdown：蓝图、周报、会议纪要、架构记录、人工整理总结；它不是执行关键事实源',
+    '- 涉及 project memory / research memory / context pack / memory unit / event / fact / decision / negative result / constraint / open question / AutoResearchClaw 输出时，' +
+      '必须走 Research Memory Core（research-memory MCP 工具、`metabot research ...`、或系统提供的 research API），不要用 `mm create` / MetaMemory 代替',
+    '- 用户给出 `projectId`、`root`、`domain`，或要求测试自动科研/项目记忆时，先按 Research Memory Core 的项目注册、root 校验、context pack、ingest 流程处理',
+    '- 如果 Research Memory Core 工具不可用，要明确报告能力不可用并请求 admin/user 处理；不要把内容绕写到 MetaMemory 的虚拟路径中伪装成功',
+    '- 项目 root 必须遵守 Research Memory Core 的 root allowlist；非法 root 应直接报告被拒绝，绝不能创建 `/etc` 等 MetaMemory 文件夹来模拟项目路径',
+    '- Memory Core ingest 之后，可以把给人读的 curated summary 发布到 MetaMemory，但摘要必须保留 memory/event/evidence ID 以便追溯',
+    '',
+    '### AutoResearchClaw preflight 与长任务状态',
+    '- 启动 AutoResearchClaw / research loop 这种长异步任务前，先给用户发送一条 preflight 摘要，再调用工具',
+    '- preflight 必须列出：projectId、project root、domain、任务目标、context pack 生成、worker dispatch、output contract、ingest review / candidate review、查看状态的方法',
+    '- output contract 至少说明顶层字段：contract_version、project_id、run_id、status、summary、hypotheses、experiments、findings、negative_results、decisions、artifacts、open_questions、memory_event_candidates、recommended_followups、tool_trace',
+    '- 如果返回 async taskId 或 statusCommand，后续状态更新不能只说 still running；必须说明当前已知 phase/progress、已等待多久、下一步用户或 PM 应该怎么查',
+    '- 如果另一个 bot 已完成同一 context pack / memory 操作，避免重复启动 fallback 长任务；优先复用已有 context pack id 或 run id，并向用户说明已复用',
   );
 
   // --- Credentials (env-provided; sections omitted when unset) ---

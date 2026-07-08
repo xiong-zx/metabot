@@ -15,5 +15,7 @@ export { handleSessionRoutes } from './session-routes.js';
 export { handleExecutorRoutes } from './executor-routes.js';
 export { handleAgentTeamRoutes } from './agent-team-routes.js';
 export { handleWorkerRoutes } from './worker-routes.js';
+export { handleResearchMemoryRoutes } from './research-memory-routes.js';
+export { handleMetaMemoryProxyRoutes } from './metamemory-proxy-routes.js';
 export { jsonResponse, readBody, parseJsonBody } from './helpers.js';
 export type { RouteContext, RouteHandler } from './types.js';

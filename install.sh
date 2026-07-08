@@ -70,6 +70,7 @@ done
 # METABOT_HOME is resolved later (Phase 0.5) — priority: --dir > env var > prompt > default.
 DEFAULT_METABOT_HOME="$HOME/metabot"
 METABOT_REPO="${METABOT_REPO:-https://github.com/xiong-zx/metabot.git}"
+DEFAULT_METABOT_CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
 
 # ============================================================================
 # Colors and formatting
@@ -835,7 +836,7 @@ API_TIMEOUT_MS=600000"
   echo -e "${BOLD}metabot-core central service:${NC}"
   echo "  MetaBot delegates MetaMemory / Skill Hub / Agents / T5T to a central"
   echo "  metabot-core service — no local DB, no embedded server."
-  prompt_input METABOT_CORE_URL "metabot-core URL" "http://localhost:9200"
+  prompt_input METABOT_CORE_URL "metabot-core URL" "${METABOT_CORE_URL:-$DEFAULT_METABOT_CORE_URL}"
 
   echo ""
   info "Get your personal Bearer token:"
@@ -843,7 +844,11 @@ API_TIMEOUT_MS=600000"
   info "  - or open ${METABOT_CORE_URL}/cli and click 'Generate'"
   info "  Paste the mt_... token below — or press Enter to configure later"
   info "     (later: drop it into ${METABOT_HOME}/.env or ~/.metabot-core/token)"
-  prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
+  if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
+    info "Using METABOT_CORE_TOKEN from environment."
+  else
+    prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
+  fi
 fi
 
 # ============================================================================

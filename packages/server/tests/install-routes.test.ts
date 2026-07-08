@@ -10,6 +10,16 @@ const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const STATIC_DIR = path.join(PKG_DIR, 'static');
 const INSTALL_DIR = path.join(STATIC_DIR, 'install');
 const BOOTSTRAP_SH = '#!/usr/bin/env bash\necho metabot-bootstrap-fixture\n';
+const BOOTSTRAP_WITH_MARKER = [
+  '#!/usr/bin/env bash',
+  'PACKAGED_METABOT_CORE_URL="${PACKAGED_METABOT_CORE_URL:-}"',
+  '# __METABOT_CORE_URL_INJECT__',
+  'echo "$PACKAGED_METABOT_CORE_URL"',
+  '',
+].join('\n');
+const ORIGINAL_METABOT_PUBLIC_DISTRIBUTION = process.env.METABOT_PUBLIC_DISTRIBUTION;
+const ORIGINAL_METABOT_CORE_PUBLIC_URL = process.env.METABOT_CORE_PUBLIC_URL;
+const ORIGINAL_METABOT_CORE_URL = process.env.METABOT_CORE_URL;
 // gzip-magic-prefixed bytes — only the Content-Type assertion depends on it.
 const TARBALL_BYTES = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x12, 0x34, 0x56, 0x78]);
 
@@ -20,6 +30,8 @@ let preExistingInstallSh: Buffer | undefined;
 let preExistingTarball: Buffer | undefined;
 
 beforeEach(() => {
+  delete process.env.METABOT_CORE_PUBLIC_URL;
+  delete process.env.METABOT_CORE_URL;
   if (!fs.existsSync(STATIC_DIR)) {
     fs.mkdirSync(STATIC_DIR, { recursive: true });
     createdStatic = true;
@@ -37,7 +49,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  delete process.env.METABOT_PUBLIC_DISTRIBUTION;
+  restoreEnv('METABOT_PUBLIC_DISTRIBUTION', ORIGINAL_METABOT_PUBLIC_DISTRIBUTION);
+  restoreEnv('METABOT_CORE_PUBLIC_URL', ORIGINAL_METABOT_CORE_PUBLIC_URL);
+  restoreEnv('METABOT_CORE_URL', ORIGINAL_METABOT_CORE_URL);
   await kit?.cleanup();
   kit = undefined;
   const installPath = path.join(INSTALL_DIR, 'install.sh');
@@ -63,6 +77,11 @@ afterEach(async () => {
   preExistingInstallSh = undefined;
   preExistingTarball = undefined;
 });
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
 
 describe('Install distribution endpoints (anonymous when METABOT_PUBLIC_DISTRIBUTION=1)', () => {
   beforeEach(async () => {
@@ -102,6 +121,27 @@ describe('Install distribution endpoints (anonymous when METABOT_PUBLIC_DISTRIBU
     const res = await rawRequest(kit!.port, 'GET', '/install/install.sh', { Host: 'test-ui.local' });
     expect(res.status).toBe(200);
     expect(String(res.headers['content-type'])).toContain('text/x-shellscript');
+  });
+
+  it('injects the request origin as the bootstrap default metabot-core URL', async () => {
+    fs.writeFileSync(path.join(INSTALL_DIR, 'install.sh'), BOOTSTRAP_WITH_MARKER);
+    const res = await rawRequest(kit!.port, 'GET', '/install/install.sh', {
+      Host: 'core.example.test:9443',
+      'X-Forwarded-Proto': 'https',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("PACKAGED_METABOT_CORE_URL='https://core.example.test:9443'");
+    expect(res.body).not.toContain('__METABOT_CORE_URL_INJECT__');
+  });
+
+  it('preserves an explicit public metabot-core URL path when injecting bootstrap defaults', async () => {
+    process.env.METABOT_CORE_PUBLIC_URL = 'https://public.example.test/metabot-core/';
+    fs.writeFileSync(path.join(INSTALL_DIR, 'install.sh'), BOOTSTRAP_WITH_MARKER);
+    const res = await rawRequest(kit!.port, 'GET', '/install/install.sh', {
+      Host: 'internal.example.test:9200',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("PACKAGED_METABOT_CORE_URL='https://public.example.test/metabot-core'");
   });
 
   it('POST /install/install.sh falls through to 404 (GET-only handler)', async () => {

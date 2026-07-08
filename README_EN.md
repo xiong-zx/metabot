@@ -114,6 +114,10 @@ If the host disables unprivileged user namespaces, Codex CLI's `workspace-write`
 
 Run your frontend bot on Claude and your backend bot on Kimi? Totally fine. The Agent Bus lets them delegate to each other — the calling bot doesn't need to know which engine is on the other side.
 
+`agentTeams` in `bots.json` is a bootstrap seed for Agent Team Templates, not a global shared runtime team. Use `metabot teams instances resolve <template> --chat <chatId>` to create or find a chat/project-scoped instance; the returned `instanceId` can be used anywhere `metabot teams ... <team>` appears.
+
+Agents and managers can create template or RuleSet promotion proposals with `metabot teams proposals create ...`; workers must report candidate changes back to an agent, manager, or PM. Only a PM, user, or admin can approve or reject proposals. Approval creates a new version and does not automatically change already pinned running instances.
+
 ---
 
 ## What You Can Build
@@ -214,8 +218,8 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | Component | Description |
 |-----------|-------------|
 | **Triple Engine Kernel** | Each bot independently chooses Claude Code / Kimi Code / Codex CLI — full tool stack (Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP) in autonomous mode |
-| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; teammates and background tasks survive between turns |
-| **Agent Teams** | A lead agent spawns specialist teammates in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
+| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; internal agents and background tasks survive between turns |
+| **Agent Teams** | A PM/lead bot spawns specialist internal agents in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
 | **MetaMemory** | Shared knowledge store served by metabot-core (self-hosted locally, default `http://localhost:9200`) with full-text search; MetaBot reads/writes via `/api/memory/*` and can sync to Feishu Wiki |
 | **IM Bridge** | Chat with any agent from Feishu, Telegram, or WeChat (including mobile). Streaming cards + tool call tracking |
@@ -400,7 +404,7 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 | `maxTurns` / `maxBudgetUsd` | No | unlimited | Execution limits |
 | `model` | No | SDK default | Claude model |
 | `apiKey` | No | — | Anthropic API key (leave unset for dynamic auth via cc-switch) |
-| `pmPrompt` | No | `false` | Enables the research-PM behavior contract and the 40-minute worker check-in reminder |
+| `pmPrompt` | No | `false` | Enables the research-PM behavior contract and the 1-hour worker check-in reminder |
 | `visible` | No | `true` | Whether this bot is visible to other bots / Agent Bus and reachable via `metabot talk`. Re-asserted from `bots.json` on every bridge bulk-register (not sticky) |
 | `memoryPublic` | No | `true` | Default target for `metabot memory create/mkdir` when no `--path` is given: `true` = `/shared/<bot>` (readable by everyone), `false` = `/users/<bot>` (private). Explicit `--path` always wins. Omitting the field preserves the last `metabot memory visibility` CLI toggle (sticky) |
 
@@ -410,7 +414,7 @@ Global fields:
 |-------|---------|-------------|
 | `workers.defaultModel` | `gpt-5.4` | Default model for `worker_dispatch` |
 | `workers.maxPerPm` | `8` | Maximum concurrent workers per PM chat |
-| `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute teammate runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
+| `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute agent runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
 
 `agentTeams[].agents[]` also supports per-member execution overrides:
 
@@ -433,6 +437,8 @@ Global fields:
 | `API_SECRET` | — | Bearer token auth (protects API + Web UI). Generate one with `openssl rand -hex 32` |
 | `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core service URL (MetaMemory + Skill Hub + Agents + T5T) — self-host locally or point at your own remote host |
 | `METABOT_CORE_TOKEN` | reads `~/.metabot-core/token` | Bearer token for metabot-core |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API write calls may create/update; comma-separated |
+| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | Mark `/api/talk?async=true` tasks as `task_expired` when they exceed this runtime without completing |
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Directory holding the wiki-sync mapping SQLite |
@@ -542,7 +548,7 @@ metabot status                      # PM2 process status
 
 # 2. Bridge daemon API (curls the local bridge at localhost:9100)
 metabot bots                        # list all bots
-metabot talk <bot> <chatId> <prompt> # talk to a bot
+metabot talk [--async|--sync] <bot> <chatId> <prompt> # talk to a bot; defaults to a 25s bounded wait, then returns a taskId
 metabot stats                       # cost & usage stats
 metabot voice tts "Hello world" --play  # text-to-speech
 

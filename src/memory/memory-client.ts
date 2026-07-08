@@ -1,8 +1,6 @@
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { Logger } from '../utils/logger.js';
 import { proxyFetch } from '../utils/http.js';
+import { resolveMetabotCoreConnection } from './core-connection.js';
 
 /**
  * Talks to the central `metabot-core` service over HTTP(S) (default
@@ -20,8 +18,6 @@ import { proxyFetch } from '../utils/http.js';
  *   2. `METABOT_CORE_URL` env var
  *   3. `http://localhost:9200` (local default)
  */
-
-const DEFAULT_BASE_URL = 'http://localhost:9200';
 
 export interface FolderTreeNode {
   id: string;
@@ -68,20 +64,6 @@ export interface HealthStatus {
   folder_count: number;
 }
 
-function loadTokenFromFile(): string | undefined {
-  const candidate = path.join(os.homedir(), '.metabot-core', 'token');
-  try {
-    const raw = fs.readFileSync(candidate, 'utf-8');
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (trimmed) return trimmed;
-    }
-  } catch {
-    /* file missing or unreadable — caller will warn */
-  }
-  return undefined;
-}
-
 export class MemoryClient {
   /** Base URL for metabot-core (no trailing slash). Public so callers
    *  that need to build sibling URLs (e.g. doc-sync uploads) can reuse it. */
@@ -99,20 +81,14 @@ export class MemoryClient {
     baseUrlOverride?: string,
     tokenOverride?: string,
   ) {
-    const rawUrl = baseUrlOverride
-      || process.env.METABOT_CORE_URL
-      || DEFAULT_BASE_URL;
-    this.baseUrl = rawUrl.replace(/\/+$/, '');
-
-    const resolved = tokenOverride
-      || process.env.METABOT_CORE_TOKEN
-      || loadTokenFromFile();
-    this.token = resolved || '';
+    const resolved = resolveMetabotCoreConnection({ baseUrlOverride, tokenOverride });
+    this.baseUrl = resolved.baseUrl;
+    this.token = resolved.token;
     this.secret = this.token;
 
     if (!this.token) {
       this.logger.warn(
-        { baseUrl: this.baseUrl },
+        { baseUrl: this.baseUrl, tokenFile: resolved.tokenFile },
         'MemoryClient: no metabot-core token found (set METABOT_CORE_TOKEN or write ~/.metabot-core/token). Requests will fail with 401.',
       );
     }

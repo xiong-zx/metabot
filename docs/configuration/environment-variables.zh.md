@@ -46,6 +46,8 @@
 | `MEMORY_ADMIN_TOKEN` | — | 管理员 Token（完整访问） |
 | `MEMORY_TOKEN` | — | 读者 Token（仅 shared 文件夹） |
 | `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 地址（CLI 远程访问） |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许写入的顶层路径，逗号分隔 |
+| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | `/api/talk?async=true` 任务超过该时长仍未完成时标记为 `task_expired` |
 
 ## 飞书服务应用
 
