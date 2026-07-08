@@ -259,6 +259,40 @@ describe('buildCardV2', () => {
     expect(cardStr).not.toContain('answer_question');
   });
 
+  it('renders non-closed lifecycle state and key', () => {
+    const state: CardState = {
+      status:         'running',
+      userPrompt:     'restart recovery',
+      responseText:   '',
+      toolCalls:      [],
+      lifecycleStage: 'recovering',
+      lifecycleKey:   'teaminst:abc:manager:run-123',
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const lifecycle = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle.content).toContain('Recovering');
+    expect(lifecycle.content).toContain('teaminst:abc:manager:run-123');
+  });
+
+  it('hides closed lifecycle state', () => {
+    const state: CardState = {
+      status:         'complete',
+      userPrompt:     'done',
+      responseText:   'Done.',
+      toolCalls:      [],
+      lifecycleStage: 'closed',
+      lifecycleKey:   'chat:done',
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const lifecycle = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeUndefined();
+  });
+
   it('shows stats footer with cost/duration/model on complete', () => {
     const state: CardState = {
       status:        'complete',

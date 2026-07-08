@@ -259,6 +259,40 @@ describe('buildCard', () => {
     expect(team.content).toContain('1 pending');
     expect(team.content).toContain('Plan work');
   });
+
+  it('renders non-closed lifecycle state and key', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 'restart recovery',
+      responseText: '',
+      toolCalls: [],
+      lifecycleStage: 'recovering',
+      lifecycleKey: 'teaminst:abc:manager:run-123',
+    };
+    const json = JSON.parse(buildCard(state));
+    const lifecycle = json.elements.find(
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle.content).toContain('Recovering');
+    expect(lifecycle.content).toContain('teaminst:abc:manager:run-123');
+  });
+
+  it('hides closed lifecycle state', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'done',
+      responseText: 'Done.',
+      toolCalls: [],
+      lifecycleStage: 'closed',
+      lifecycleKey: 'chat:done',
+    };
+    const json = JSON.parse(buildCard(state));
+    const lifecycle = json.elements.find(
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeUndefined();
+  });
 });
 
 describe('buildHelpCard', () => {

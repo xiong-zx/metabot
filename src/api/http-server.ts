@@ -3,13 +3,13 @@ import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 import { loadAppConfig } from '../config.js';
-import type { AgentTeamConfig } from '../agent-teams/team-store.js';
+import type { AgentTeamConfig, RulesContextPack, RuntimeRulesPurpose } from '../agent-teams/team-store.js';
 import type { BotRegistry } from './bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type { PeerManager } from './peer-manager.js';
 
-import { AsyncTaskStore } from './async-task-store.js';
+import { AsyncTaskStore, defaultAsyncTaskStoreFile } from './async-task-store.js';
 import { setupWebSocketServer, serveStaticFiles, timingSafeStrEqual, type WebSocketHandle } from '../web/ws-server.js';
 import { rateLimiterFromEnv, resolveClientIp } from './request-rate-limiter.js';
 import { IntentRouter } from './intent-router.js';
@@ -128,7 +128,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const host = secret ? '0.0.0.0' : '127.0.0.1';
 
   // Initialize shared services
-  const asyncTaskStore = new AsyncTaskStore();
+  const asyncTaskStore = new AsyncTaskStore({ storageFile: defaultAsyncTaskStoreFile() });
   const intentRouter = new IntentRouter(logger);
   const circuitBreaker = options.circuitBreaker ?? new CircuitBreaker(logger);
   const budgetManager = options.budgetManager ?? new BudgetManager(logger);
@@ -147,6 +147,19 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     agentTeamStore.reconcileTeams(options.agentTeams);
     logger.info({ count: options.agentTeams.length }, 'Agent teams reconciled from config');
   }
+  options.workerManager?.setRulesContextProvider((input) => {
+    const pack = agentTeamStore.buildRuntimeRulesContextPack({
+      purpose: 'worker-dispatch',
+      botName: input.botName,
+      chatId: input.pmChatId,
+      workerLabel: input.label,
+      inlineRules: [
+        { text: `Worker workdir: ${input.workingDirectory}` },
+        ...(input.label ? [{ text: `Worker label: ${input.label}` }] : []),
+      ],
+    });
+    return formatRuntimeRulesContextPack(pack, 'worker-dispatch');
+  });
   const agentTeamsConfigWatcher = watchAgentTeamsConfig({
     botsConfigPath,
     store: agentTeamStore,
@@ -420,6 +433,19 @@ function parseRelayContent(content: string): Record<string, any> | undefined {
   } catch {
     return undefined;
   }
+}
+
+function formatRuntimeRulesContextPack(pack: RulesContextPack, purpose: RuntimeRulesPurpose): string {
+  if (!pack.text.trim()) return '';
+  const provenance = pack.provenance.length
+    ? `\n\nProvenance: ${pack.provenance.map((item) => `${item.scope}:${item.name}@v${item.version}`).join(', ')}`
+    : '';
+  return [
+    `<rules-context-pack purpose="${purpose}">`,
+    pack.text,
+    provenance,
+    '</rules-context-pack>',
+  ].join('\n');
 }
 
 function watchAgentTeamsConfig(options: {

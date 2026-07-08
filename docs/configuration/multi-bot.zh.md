@@ -49,7 +49,7 @@
 | `maxTurns` | 否 | 不限 | 每次请求最大轮次 |
 | `maxBudgetUsd` | 否 | 不限 | 每次请求费用上限（仅 Claude — Kimi 走订阅） |
 | `model` | 否 | SDK 默认 | 默认模型 ID（引擎相关） |
-| `pmPrompt` | 否 | `false` | 启用研究 PM 指令和 40 分钟 worker 巡检提醒 |
+| `pmPrompt` | 否 | `false` | 启用研究 PM 指令和 1 小时 worker 巡检提醒 |
 | `allowedTools` | 否 | `Read,Edit,Write,Glob,Grep,Bash` | 工具白名单（仅 Claude） |
 | `outputsBaseDir` | 否 | `/tmp/metabot-outputs` | 输出文件目录 |
 | `kimi` | 否 | — | Kimi 专用配置（仅当 `engine: "kimi"` 时） — 见下方 |
@@ -60,7 +60,7 @@
 |------|--------|------|
 | `workers.defaultModel` | `gpt-5.4` | PM bot 派发后台 worker 时的默认模型 |
 | `workers.maxPerPm` | `8` | 每个 PM chat 最多同时 running 的 worker 数 |
-| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 执行队友 run 时使用的 bridge bot；建议固定到 `research-pm` 或内部 worker，不要依赖注册顺序 |
+| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 执行 Agent run 时使用的 bridge bot；建议固定到 `research-pm` 或内部 worker，不要依赖注册顺序 |
 
 ### Kimi 引擎选项
 

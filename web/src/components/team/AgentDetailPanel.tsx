@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import type { BotStatus, AgentMetadata } from '../../store';
 import { useStore } from '../../store';
 import { ActivityTimeline } from './ActivityTimeline';
+import { AgentTeamActivityTimeline } from './AgentTeamActivityTimeline';
 import s from './AgentDetailPanel.module.css';
 
 /* ── Icons ── */
@@ -123,7 +124,7 @@ export function AgentDetailPanel({ bot, agentKey, activeTab, onTabChange, onOpen
       {/* Tab content */}
       <div className={s.content}>
         {activeTab === 'activity' && (
-          <ActivityTab bot={bot} />
+          <ActivityTab bot={bot} agentName={subAgentName || undefined} />
         )}
 
         {activeTab === 'stats' && (
@@ -225,8 +226,9 @@ export function AgentDetailPanel({ bot, agentKey, activeTab, onTabChange, onOpen
 
 /* ── Activity Tab with active task + timeline ── */
 
-function ActivityTab({ bot }: { bot: BotStatus }) {
+function ActivityTab({ bot, agentName }: { bot: BotStatus; agentName?: string }) {
   const activityEvents = useStore((s) => s.activityEvents);
+  const agentTeamActivity = useStore((s) => s.agentTeamActivity);
 
   return (
     <div className={s.activityTab}>
@@ -247,7 +249,14 @@ function ActivityTab({ bot }: { bot: BotStatus }) {
           </div>
         </div>
       )}
-      <ActivityTimeline events={activityEvents} botFilter={bot.name} />
+      <div className={s.activitySection}>
+        <div className={s.activitySectionTitle}>Agent Team Activity</div>
+        <AgentTeamActivityTimeline records={agentTeamActivity} agentFilter={agentName} />
+      </div>
+      <div className={s.activitySection}>
+        <div className={s.activitySectionTitle}>Bot Task Activity</div>
+        <ActivityTimeline events={activityEvents} botFilter={bot.name} />
+      </div>
     </div>
   );
 }

@@ -75,11 +75,13 @@ export function buildPmSystemPrompt(): string {
     '### Codex 引擎 PM 的身份传参',
     '如果你是 codex 引擎的 PM：调用 worker MCP 工具时**必须显式传** `botName` 和 `pmChatId`/`chatId` 参数' +
       '（你的身份见上方 MetaBot API 段）。claude 引擎的 PM 不需要——系统已按会话注入。',
+    '调用 `worker_dispatch` / `worker_abort` / `worker_redirect` 时还必须显式传 `actor_role: "pm"`；' +
+      'manager/Agent/Worker 不能直接调用这些工具，只能请求 PM 操作。',
     '',
     '### 提醒频率规则',
     '- `remind_me` 可设 10-30 分钟，视任务复杂度而定',
-    '- 系统在你每次 turn 结束后会**自动安排 40 分钟提醒**，所以大多数情况你不需要手动调 remind_me',
-    '- 一次 remind 被唤醒后，如果没有特殊情况，不用再手动设 remind——系统的 40 分钟自动提醒会接管',
+    '- 系统在你每次 turn 结束后会**自动安排 1 小时提醒**，所以大多数情况你不需要手动调 remind_me',
+    '- 一次 remind 被唤醒后，如果没有特殊情况，不用再手动设 remind——系统的 1 小时自动提醒会接管',
     '- 如果所有工作都完成了，调用 `stop_auto_remind()` 关闭自动提醒',
     '',
     '### 📝 关键产出写入 workdir 文件',

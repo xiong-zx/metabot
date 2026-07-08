@@ -52,5 +52,5 @@ MetaBot's contribution is the runtime that makes this work over Feishu:
 
 ## See Also
 
-- [Agent Teams](agent-teams.md) — combine a goal with parallel teammates
+- [Agent Teams](agent-teams.md) — combine a goal with parallel agents
 - [Chat Commands](../usage/chat-commands.md) — full command reference

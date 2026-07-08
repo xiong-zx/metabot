@@ -5,6 +5,7 @@ import { TeamTreePanel } from './TeamTreePanel';
 import { AgentDetailPanel } from './AgentDetailPanel';
 import { TeamChatPanel } from './TeamChatPanel';
 import s from './TeamWorkspace.module.css';
+import type { AgentTeamActivityRecord, AgentTeamSummary } from '../../types';
 
 /* ── Team status polling hook ── */
 
@@ -12,6 +13,8 @@ function useTeamPoller(intervalMs = 5000) {
   const token = useStore((st) => st.token);
   const setTeamStatus = useStore((st) => st.setTeamStatus);
   const setActivityEvents = useStore((st) => st.setActivityEvents);
+  const setAgentTeams = useStore((st) => st.setAgentTeams);
+  const setAgentTeamActivity = useStore((st) => st.setAgentTeamActivity);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -29,6 +32,18 @@ function useTeamPoller(intervalMs = 5000) {
           setTeamStatus(data);
           setError('');
           setLoading(false);
+        }
+
+        const teamsRes = await fetch('/api/agent-teams', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!teamsRes.ok) return;
+        const teamsData = await teamsRes.json();
+        const teams: AgentTeamSummary[] = Array.isArray(teamsData.teams) ? teamsData.teams : [];
+        const activity = await fetchAgentTeamActivity(token, teams);
+        if (active) {
+          setAgentTeams(teams);
+          setAgentTeamActivity(activity);
         }
       } catch (err) {
         if (active) {
@@ -49,9 +64,30 @@ function useTeamPoller(intervalMs = 5000) {
     poll();
     const id = setInterval(poll, intervalMs);
     return () => { active = false; clearInterval(id); };
-  }, [token, intervalMs, setTeamStatus, setActivityEvents]);
+  }, [token, intervalMs, setTeamStatus, setActivityEvents, setAgentTeams, setAgentTeamActivity]);
 
   return { loading, error };
+}
+
+async function fetchAgentTeamActivity(token: string | null, teams: AgentTeamSummary[]): Promise<AgentTeamActivityRecord[]> {
+  const selectors = teams
+    .map((team) => team.instanceId || team.name)
+    .filter((selector): selector is string => !!selector);
+  if (selectors.length === 0) return [];
+
+  const results = await Promise.allSettled(selectors.map(async (selector) => {
+    const res = await fetch(`/api/agent-teams/${encodeURIComponent(selector)}/activity?limit=50`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data.activity) ? data.activity as AgentTeamActivityRecord[] : [];
+  }));
+
+  return results
+    .flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 200);
 }
 
 /* ── TeamWorkspace ── */

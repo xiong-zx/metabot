@@ -7,6 +7,8 @@ import type { IMessageSender } from './message-sender.interface.js';
 import { FINAL_CARD_BASE_DELAY_MS, FINAL_CARD_RETRIES } from './bridge-constants.js';
 import { createVoiceReplyOpus } from './voice-reply.js';
 
+export type FinalDeliveryStatus = 'card' | 'fallback' | 'failed';
+
 export async function sendFinalCardWithRetry(opts: {
   sender: IMessageSender;
   config: BotConfigBase;
@@ -15,7 +17,7 @@ export async function sendFinalCardWithRetry(opts: {
   messageId: string;
   state: CardState;
   chatId?: string;
-}): Promise<void> {
+}): Promise<FinalDeliveryStatus> {
   const { sender, config, logger, sessionManager, messageId, state, chatId } = opts;
 
   if (chatId && (state.status === 'complete' || state.status === 'error')) {
@@ -28,7 +30,7 @@ export async function sendFinalCardWithRetry(opts: {
     const ok = await sender.updateCard(messageId, state);
     if (ok) {
       void sendVoiceReplyIfEnabled({ sender, config, logger, chatId, state });
-      return;
+      return 'card';
     }
     const delay = FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt);
     logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
@@ -43,10 +45,12 @@ export async function sendFinalCardWithRetry(opts: {
       : state.errorMessage || 'Task finished';
     try {
       await sender.sendText(chatId, `${statusEmoji} ${summary}`);
+      return 'fallback';
     } catch {
       // Last resort failed; the card path already logged the delivery failure.
     }
   }
+  return 'failed';
 }
 
 export async function sendVoiceReplyIfEnabled(opts: {

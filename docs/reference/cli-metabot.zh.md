@@ -53,13 +53,22 @@ metabot bot <name>                  # 获取 Bot 详情
 ### Agent 对话
 
 ```bash
-metabot talk <bot> <chatId> <prompt>      # 与 Bot 对话（bridge /api/talk）
+metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <prompt>      # 与 Bot 对话（bridge /api/talk）
+metabot talk-status <taskId>        # 用本机认证查询 async talk 任务状态
 metabot talk alice/bot <chatId> <prompt>  # 指定 peer 的 Bot 对话
 ```
 
 Bot 名称支持[限定名](../features/peers.md#限定名)（`peerName/botName`）实现跨实例
 路由。这是 bridge 本地的对话路径；`metabot agents talk` 是基于中心注册表的 P2P
 变体。
+`metabot talk` 默认最多等待 25 秒；如果任务没完成，会返回 `taskId` 和
+`statusCommand`，避免本地测试员一直卡在同步等待。需要旧的阻塞行为时使用
+`--sync`；需要立即后台执行时使用 `--async`。Async talk 响应会同时返回给 API
+客户端用的 `statusUrl`，以及给本机 CLI 用户用的 `statusCommand`，例如
+`metabot talk-status <taskId>`。
+Async task 状态会持久化到 `SESSION_STORE_DIR`；如果 bridge 在任务运行中重启，
+旧 taskId 应返回 `failed` 和 `task_interrupted_by_restart`，而不是直接变成
+`Task not found`。
 
 ### Peers
 
@@ -79,8 +88,28 @@ metabot teams start <team>
 metabot teams stop <team>
 metabot teams delete <team>
 
+metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+metabot teams activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
+metabot teams templates list [name]
+metabot teams templates export <name> [--version <n>]
+metabot teams templates diff <name> --from <n> [--to <n>]
+metabot teams templates import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams proposals list [--status pending|approved|rejected]
+metabot teams proposals create [template|ruleset] '<json>' [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
+metabot teams proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams instances list [--template <name>]
+metabot teams instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--actor-role admin|user|pm]
+metabot teams rules list [name]
+metabot teams rules export <name> [--version <n>]
+metabot teams rules diff <name> --from <n> [--to <n>]
+metabot teams rules import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--actor-role admin|user|pm]
+metabot teams rules context --ref <name[@version]> [--rule <text>]
+
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
 metabot teams agents stop <team> <name>
 metabot teams agents delete <team> <name>
 
@@ -99,7 +128,11 @@ metabot teams runs output <team> <runId>
 metabot teams runs stop <team> <runId>
 ```
 
-`runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应队友 chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
+`runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应 Agent chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
+
+Template/rule 命令是 Phase 1 控制面，用于 versioned Agent Team template、chat/project scoped runtime instance、pinned RuleSet refs、versioned RuleSet 和 promotion proposal。manager 或 agent 可以创建 proposal，但只有 PM、用户或 admin 可以 approve/reject；批准后写入新的 template 或 RuleSet 版本，并且不会自动升级已 pinned 的 instance。`instances resolve --rule-ref ...` 用于在创建时 pin 额外的 project/runtime RuleSet，`teams config ... --rule-ref ...` 用于显式更新当前 instance，`rules export/diff/import` 则让 RuleSet 具备和 template 对称的审查与迁移流程。现有 `<team>` 参数可以传 team name，也可以传 `instanceId`；chat/project scoped team 建议优先使用 `instances resolve` 返回的 `instanceId`。底层存储 schema 仍以 `teamName` 保存行，runtime 会继续逐步迁移到 first-class `instanceId`。
+
+对于有权限影响的 CLI 操作，`--actor-role` 表示调用者权限身份（`admin`、`user` 或 `pm`）。直接创建 Agent、直接 import/set template 或 rules、resolve instance、更新 team config、批准/拒绝 proposal 都需要显式传入。`agents spawn` 的 `--role` 是被创建 Agent 的职责标签，不是权限身份。
 
 同一套命令同时实现在 `bin/metabot` 和 `packages/cli` 的 TypeScript 功能 CLI 中。Bridge 从 `.env` 读取 `API_PORT` / `API_SECRET` 和可选的 `METABOT_URL`。
 

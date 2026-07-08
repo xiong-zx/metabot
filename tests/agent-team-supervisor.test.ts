@@ -114,6 +114,7 @@ describe('AgentTeamSupervisor', () => {
         chatId: 'team:demo:worker',
         userId: 'agent-team-supervisor',
         sendCards: false,
+        lifecycleKey: expect.stringMatching(/^team:demo:worker:run-/),
       }));
     });
     expect(setSessionEngine).toHaveBeenCalledWith('team:demo:worker', 'kimi');
@@ -133,6 +134,77 @@ describe('AgentTeamSupervisor', () => {
     const runs = store.listRuns('demo');
     expect(runs.some((run) => run.agentName === 'worker' && run.status === 'completed')).toBe(true);
     expect(runs.some((run) => run.agentName === 'lead')).toBe(false);
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('uses instance-scoped chat sessions for runtime team instances', async () => {
+    const store = makeStore();
+    store.createTeam('research@chat:oc-a', 'Research A', {
+      scopeType: 'chat',
+      scopeKey: 'oc_a',
+      instanceId: 'ati_chat_a',
+    });
+    store.createAgent('research@chat:oc-a', { name: 'worker', engine: 'kimi', role: 'Worker' });
+    store.createTask('research@chat:oc-a', { subject: 'Inspect scoped session', owner: 'worker' });
+
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => ({
+      success: true,
+      responseText: `done from ${chatId}`,
+      sessionId: `session-${chatId}`,
+    }));
+    const { registry, setSessionEngine } = makeRegistry(executeApiTask);
+
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
+        chatId: 'teaminst:ati_chat_a:worker',
+        userId: 'agent-team-supervisor',
+        sendCards: false,
+        lifecycleKey: expect.stringMatching(/^teaminst:ati_chat_a:worker:run-/),
+      }));
+    });
+    expect(setSessionEngine).toHaveBeenCalledWith('teaminst:ati_chat_a:worker', 'kimi');
+    expect(store.listTasks('research@chat:oc-a')[0]).toMatchObject({
+      status: 'completed',
+      result: 'done from teaminst:ati_chat_a:worker',
+    });
+    expect(store.getAgent('research@chat:oc-a', 'worker')).toMatchObject({
+      instanceId: 'ati_chat_a',
+      sessionId: 'session-teaminst:ati_chat_a:worker',
+    });
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('uses team maxParallelRunsPerAgent quota when selecting runnable work', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo', { quotas: { maxParallelRunsPerAgent: 1 } });
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'First task', owner: 'worker' });
+    store.createTask('demo', { subject: 'Second task', owner: 'worker' });
+
+    let resolveExecution: ((value: any) => void) | undefined;
+    const executeApiTask = vi.fn(() => new Promise((resolve) => {
+      resolveExecution = resolve;
+    }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledTimes(1);
+    });
+    expect(store.listRuns('demo').filter((run) => run.status === 'running')).toHaveLength(1);
+    expect(store.listTasks('demo').map((task) => task.status)).toEqual(['in_progress', 'pending']);
+
+    resolveExecution?.({ success: true, responseText: 'done', sessionId: 'session-worker' });
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'running')).toHaveLength(0);
+    });
     supervisor.destroy();
     store.close();
   });
@@ -207,6 +279,12 @@ describe('AgentTeamSupervisor', () => {
       expect(sendAgentActivityCard).toHaveBeenCalledWith(
         'oc_main',
         expect.stringContaining('demo / worker'),
+        expect.objectContaining({
+          teamName: 'demo',
+          agentName: 'worker',
+          runId: expect.any(String),
+          taskIds: [1],
+        }),
       );
     });
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('member report');
@@ -295,6 +373,10 @@ describe('AgentTeamSupervisor', () => {
     expect(sendAgentActivityCard).toHaveBeenCalledWith(
       'oc_main',
       expect.stringContaining('demo / lead'),
+      expect.objectContaining({
+        teamName: 'demo',
+        agentName: 'lead',
+      }),
     );
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('Worker final report');
     expect(store.listMessages('demo', 'lead', true)).toHaveLength(0);
@@ -346,6 +428,137 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
+  it('injects pinned RuleSet context and manager authority boundaries into agent prompts', async () => {
+    const store = makeStore();
+    const rules = store.upsertRuleSet({
+      name: 'research-workflow',
+      scope: 'team-template',
+      rules: [{ text: 'Follow planner-coder-experiment-reviewer workflow.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'manager',
+      scope: 'agent-role',
+      rules: [{ text: 'Manager role RuleSet: coordinate the team and escalate approvals.' }],
+      source: 'test',
+    });
+    store.createTeam('demo', 'Demo', { ruleSetRefs: [{ name: rules.name, version: rules.version }] });
+    store.createAgent('demo', { name: 'manager', role: 'team manager', engine: 'codex' });
+    store.createTask('demo', { subject: 'Coordinate research loop', owner: 'manager' });
+
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: 'coordinated',
+      sessionId: 'manager-session',
+    }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
+        prompt: expect.stringContaining('Rules Context Pack:'),
+      }));
+    });
+    const prompt = executeApiTask.mock.calls[0]![0].prompt;
+    expect(prompt).toContain('Follow planner-coder-experiment-reviewer workflow.');
+    expect(prompt).toContain('Manager role RuleSet: coordinate the team and escalate approvals.');
+    expect(prompt).toContain('Rules provenance: team-template:research-workflow@v1, agent-role:manager@v1');
+    expect(prompt).toContain('Manager boundary');
+    expect(prompt).toContain('Do not spawn Agents or run worker_dispatch yourself.');
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('recycles expired temporary agents and requeues their running task', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
+    store.createAgent('demo', {
+      name: 'temp',
+      kind: 'temporary',
+      actorRole: 'pm',
+      expiresAt: Date.now() - 1_000,
+    });
+    const task = store.createTask('demo', { subject: 'Temporary work', owner: 'temp' });
+    store.updateTask('demo', task.id, { status: 'in_progress' });
+    const run = store.createRun('demo', { agentName: 'temp', taskId: task.id });
+    store.setAgentStatus('demo', 'temp', 'working');
+
+    const sendAgentActivityCard = vi.fn();
+    const { registry } = makeRegistry(vi.fn(), vi.fn(), sendAgentActivityCard);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+
+    expect(store.getAgent('demo', 'temp')).toMatchObject({ status: 'stopped' });
+    expect(store.getRun('demo', run.id)).toMatchObject({ status: 'stopped' });
+    expect(store.getTask('demo', task.id)).toMatchObject({ status: 'pending' });
+    expect(store.listMessages('demo', 'lead')[0]).toMatchObject({
+      fromName: 'temp',
+      summary: expect.stringContaining('expired'),
+    });
+    expect(sendAgentActivityCard).toHaveBeenCalledWith(
+      'oc_main',
+      expect.stringContaining('Temporary Agent TTL expired'),
+      expect.objectContaining({
+        teamName: 'demo',
+        agentName: 'temp',
+      }),
+    );
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('stops an in-flight temporary agent chat when TTL expires during a run', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', {
+      name: 'temp',
+      kind: 'temporary',
+      actorRole: 'pm',
+      expiresAt: Date.now() + 60_000,
+    });
+    store.createTask('demo', { subject: 'Temporary work', owner: 'temp' });
+
+    let resolveRun!: () => void;
+    let runSettled = false;
+    const executeApiTask = vi.fn(async () => {
+      await new Promise<void>((resolve) => { resolveRun = resolve; });
+      runSettled = true;
+      return { success: true, responseText: 'late success', sessionId: 'temp-session' };
+    });
+    const stopChatTask = vi.fn();
+    const { registry } = makeRegistry(executeApiTask, stopChatTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(store.listRuns('demo').filter((run) => run.status === 'running')).toHaveLength(1);
+    });
+    const run = store.listRuns('demo')[0]!;
+    store.upsertAgent('demo', {
+      name: 'temp',
+      kind: 'temporary',
+      expiresAt: Date.now() - 1_000,
+    });
+
+    await supervisor.tick();
+
+    expect(stopChatTask).toHaveBeenCalledWith('team:demo:temp');
+    expect(store.getRun('demo', run.id)).toMatchObject({ status: 'stopped' });
+    expect(store.getTask('demo', run.taskId!)).toMatchObject({ status: 'pending' });
+
+    resolveRun();
+    await waitFor(() => {
+      expect(runSettled).toBe(true);
+      expect(store.getAgent('demo', 'temp')).toMatchObject({ status: 'stopped' });
+    });
+    expect(store.getRun('demo', run.id)).toMatchObject({ status: 'stopped' });
+    supervisor.destroy();
+    store.close();
+  });
+
   it('runs lead as a normal nested member when the team defines one', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
@@ -375,6 +588,11 @@ describe('AgentTeamSupervisor', () => {
     expect(sendAgentActivityCard).toHaveBeenCalledWith(
       'oc_main',
       expect.stringContaining('demo / lead'),
+      expect.objectContaining({
+        teamName: 'demo',
+        agentName: 'lead',
+        runId: expect.any(String),
+      }),
     );
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('lead reply from team:demo:lead');
     expect(store.listRuns('demo').some((run) => run.agentName === 'lead' && run.status === 'completed')).toBe(true);
@@ -410,6 +628,12 @@ describe('AgentTeamSupervisor', () => {
       expect(sendAgentActivityCard).toHaveBeenCalledWith(
         'oc_main',
         expect.stringContaining('demo / lead'),
+        expect.objectContaining({
+          teamName: 'demo',
+          agentName: 'lead',
+          runId: expect.any(String),
+          taskIds: [1],
+        }),
       );
     });
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('北京当前多云，约 26°C。');

@@ -23,10 +23,7 @@
 import http from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 const API_URL = process.env.METABOT_API_URL || 'http://localhost:9100';
 const API_SECRET = process.env.METABOT_API_SECRET || process.env.API_SECRET || '';
@@ -88,10 +85,7 @@ function apiRequest(method: string, path: string, body?: unknown): Promise<{ sta
 
 // --- MCP Server ---
 
-const server = new Server(
-  { name: 'worker-manager', version: '2.0.0' },
-  { capabilities: { tools: {} } },
-);
+const server = new Server({ name: 'worker-manager', version: '2.0.0' }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -106,17 +100,57 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           workdir: { type: 'string', description: 'Working directory for the worker (absolute path)' },
           prompt: { type: 'string', description: 'Task instructions for the worker' },
           label: { type: 'string', description: 'Optional short label for this worker (e.g. "xgboost-exp")' },
-          model: { type: 'string', description: 'Model or alias: gpt-5.4 (default, 1M ctx) | gpt-5.5 | opus | sonnet | raw model name' },
-          engine: { type: 'string', enum: ['claude', 'codex', 'kimi'], description: 'Engine override (normally inferred from model)' },
-          reasoning_effort: { type: 'string', enum: ['minimal', 'low', 'medium', 'high', 'xhigh'], description: 'Reasoning effort for the worker' },
-          approval_policy: { type: 'string', enum: ['untrusted', 'on-failure', 'on-request', 'never'], description: 'Codex approval policy (codex workers only)' },
-          sandbox: { type: 'string', enum: ['read-only', 'workspace-write', 'danger-full-access'], description: 'Codex sandbox level (codex workers only)' },
-          timeout_ms: { type: 'number', description: 'Optional wall-clock timeout in milliseconds for long-running workers' },
-          idle_timeout_ms: { type: 'number', description: 'Optional no-stream idle timeout in milliseconds for long-running workers' },
-          botName: { type: 'string', description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})` },
-          pmChatId: { type: 'string', description: 'Your chat ID for callbacks (REQUIRED for codex-engine PMs; auto-detected for claude PMs)' },
+          dedupe_key: {
+            type: 'string',
+            description: 'Optional idempotency key. Reuses a running or recent completed worker with the same PM chat and key.',
+          },
+          model: {
+            type: 'string',
+            description: 'Model or alias: gpt-5.4 (default, 1M ctx) | gpt-5.5 | opus | sonnet | raw model name',
+          },
+          engine: {
+            type: 'string',
+            enum: ['claude', 'codex', 'kimi'],
+            description: 'Engine override (normally inferred from model)',
+          },
+          reasoning_effort: {
+            type: 'string',
+            enum: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+            description: 'Reasoning effort for the worker',
+          },
+          approval_policy: {
+            type: 'string',
+            enum: ['untrusted', 'on-failure', 'on-request', 'never'],
+            description: 'Codex approval policy (codex workers only)',
+          },
+          sandbox: {
+            type: 'string',
+            enum: ['read-only', 'workspace-write', 'danger-full-access'],
+            description: 'Codex sandbox level (codex workers only)',
+          },
+          timeout_ms: {
+            type: 'number',
+            description: 'Optional wall-clock timeout in milliseconds for long-running workers',
+          },
+          idle_timeout_ms: {
+            type: 'number',
+            description: 'Optional no-stream idle timeout in milliseconds for long-running workers',
+          },
+          botName: {
+            type: 'string',
+            description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})`,
+          },
+          actor_role: {
+            type: 'string',
+            enum: ['admin', 'user', 'pm', 'manager', 'agent', 'worker'],
+            description: 'Caller authority role. Required; only admin/user/pm may dispatch workers.',
+          },
+          pmChatId: {
+            type: 'string',
+            description: 'Your chat ID for callbacks (REQUIRED for codex-engine PMs; auto-detected for claude PMs)',
+          },
         },
-        required: ['workdir', 'prompt'],
+        required: ['workdir', 'prompt', 'actor_role'],
       },
     },
     {
@@ -132,7 +166,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'worker_quick_status',
       description:
-        'Get a brief metadata-level status of a worker. WARNING: this only returns basic metadata (status, duration, last progress summary). For detailed understanding you MUST inspect the worker\'s workdir yourself — read worker-progress.json, results.json, train.log, and the code/output files directly.',
+        "Get a brief metadata-level status of a worker. WARNING: this only returns basic metadata (status, duration, last progress summary). For detailed understanding you MUST inspect the worker's workdir yourself — read worker-progress.json, results.json, train.log, and the code/output files directly.",
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -148,8 +182,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object' as const,
         properties: {
           id: { type: 'string', description: 'Worker ID to abort' },
+          actor_role: {
+            type: 'string',
+            enum: ['admin', 'user', 'pm', 'manager', 'agent', 'worker'],
+            description: 'Caller authority role. Required; only admin/user/pm may abort workers.',
+          },
         },
-        required: ['id'],
+        required: ['id', 'actor_role'],
       },
     },
     {
@@ -161,8 +200,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           id: { type: 'string', description: 'Worker ID to redirect' },
           newPrompt: { type: 'string', description: 'New task instructions for the replacement worker' },
+          actor_role: {
+            type: 'string',
+            enum: ['admin', 'user', 'pm', 'manager', 'agent', 'worker'],
+            description: 'Caller authority role. Required; only admin/user/pm may redirect workers.',
+          },
         },
-        required: ['id', 'newPrompt'],
+        required: ['id', 'newPrompt', 'actor_role'],
       },
     },
     {
@@ -173,9 +217,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object' as const,
         properties: {
           seconds: { type: 'number', description: 'Delay in seconds before the reminder fires' },
-          extra_prompt: { type: 'string', description: 'Optional: what to do when reminded (e.g. "check exp-xxx results")' },
-          chatId: { type: 'string', description: 'Your chat ID (REQUIRED for codex-engine PMs; auto-detected for claude PMs)' },
-          botName: { type: 'string', description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})` },
+          extra_prompt: {
+            type: 'string',
+            description: 'Optional: what to do when reminded (e.g. "check exp-xxx results")',
+          },
+          chatId: {
+            type: 'string',
+            description: 'Your chat ID (REQUIRED for codex-engine PMs; auto-detected for claude PMs)',
+          },
+          botName: {
+            type: 'string',
+            description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})`,
+          },
         },
         required: ['seconds'],
       },
@@ -183,12 +236,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'stop_auto_remind',
       description:
-        'Stop the automatic 40-minute periodic reminders for your chat session. Call this when all experiments are complete and no further research is pending. Reminders auto-resume when the user sends a new message.',
+        'Stop the automatic 1-hour periodic reminders for your chat session. Call this when all experiments are complete and no further research is pending. Reminders auto-resume when the user sends a new message.',
       inputSchema: {
         type: 'object' as const,
         properties: {
-          chatId: { type: 'string', description: 'Your chat ID (REQUIRED for codex-engine PMs; auto-detected for claude PMs)' },
-          botName: { type: 'string', description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})` },
+          chatId: {
+            type: 'string',
+            description: 'Your chat ID (REQUIRED for codex-engine PMs; auto-detected for claude PMs)',
+          },
+          botName: {
+            type: 'string',
+            description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})`,
+          },
         },
       },
     },
@@ -199,11 +258,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+
     switch (name) {
       case 'worker_dispatch': {
         const { status, data } = await apiRequest('POST', '/api/workers', {
           botName: args?.botName || DEFAULT_BOT_NAME,
           pmChatId: args?.pmChatId || DEFAULT_CHAT_ID,
+          actorRole: args?.actor_role || args?.actorRole,
           workingDirectory: args?.workdir,
           prompt: args?.prompt,
           label: args?.label,
@@ -214,25 +275,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sandbox: args?.sandbox,
           timeoutMs: args?.timeout_ms,
           idleTimeoutMs: args?.idle_timeout_ms,
+          dedupeKey: args?.dedupe_key,
         });
         if (status >= 400) {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };
         }
         return {
-          content: [{
-            type: 'text',
-            text: [
-              `Worker dispatched successfully.`,
-              `ID: ${data.id}`,
-              `Worker chat: ${data.workerChatId}`,
-              `Engine/Model: ${data.engine}/${data.model}${data.reasoningEffort ? ` (effort: ${data.reasoningEffort})` : ''}`,
-              `Workdir: ${data.workingDirectory}`,
-              `Status: ${data.status}`,
-              '',
-              'The worker is now running in the background. You will be notified when it completes.',
-              'Use worker_quick_status to check progress, or inspect the workdir directly for details.',
-            ].join('\n'),
-          }],
+          content: [
+            {
+              type: 'text',
+              text: [
+                data.dedupeKey ? `Worker dispatched or reused successfully.` : `Worker dispatched successfully.`,
+                `ID: ${data.id}`,
+                data.dedupeKey ? `Dedupe key: ${data.dedupeKey}` : '',
+                `Worker chat: ${data.workerChatId}`,
+                `Engine/Model: ${data.engine}/${data.model}${data.reasoningEffort ? ` (effort: ${data.reasoningEffort})` : ''}`,
+                `Workdir: ${data.workingDirectory}`,
+                `Status: ${data.status}`,
+                '',
+                'The worker is now running in the background. You will be notified when it completes.',
+                'Use worker_quick_status to check progress, or inspect the workdir directly for details.',
+              ].filter(Boolean).join('\n'),
+            },
+          ],
         };
       }
 
@@ -249,7 +314,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const lines = workers.map((w: any) => {
           const dur = w.durationMs ? `${Math.round(w.durationMs / 60000)}min` : 'running';
           const cost = w.costUsd ? `$${w.costUsd.toFixed(2)}` : '';
-          const engineTag = w.engine ? `${w.engine}/${w.model}${w.reasoningEffort ? `@${w.reasoningEffort}` : ''}` : w.model;
+          const engineTag = w.engine
+            ? `${w.engine}/${w.model}${w.reasoningEffort ? `@${w.reasoningEffort}` : ''}`
+            : w.model;
           return `- [${w.id}] ${w.status} | ${w.label || 'no-label'} | ${engineTag} | ${dur} ${cost} | ${w.workingDirectory}`;
         });
         return { content: [{ type: 'text', text: lines.join('\n') }] };
@@ -275,7 +342,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           w.error ? `Error: ${w.error}` : '',
           '',
           '⚠️ This is a quick metadata-level status only.',
-          'For detailed information, inspect the worker\'s workdir yourself:',
+          "For detailed information, inspect the worker's workdir yourself:",
           `  - Progress: ${w.workingDirectory}/worker-progress.json`,
           `  - Results:  ${w.workingDirectory}/results.json`,
           `  - Logs:     ${w.workingDirectory}/train.log`,
@@ -285,7 +352,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'worker_abort': {
-        const { status, data } = await apiRequest('POST', `/api/workers/${args?.id}/abort`);
+        const { status, data } = await apiRequest('POST', `/api/workers/${args?.id}/abort`, {
+          actorRole: args?.actor_role || args?.actorRole,
+        });
         if (status >= 400) {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };
         }
@@ -295,21 +364,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'worker_redirect': {
         const { status, data } = await apiRequest('POST', `/api/workers/${args?.id}/redirect`, {
           newPrompt: args?.newPrompt,
+          actorRole: args?.actor_role || args?.actorRole,
         });
         if (status >= 400) {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };
         }
         return {
-          content: [{
-            type: 'text',
-            text: [
-              `Worker ${args?.id} redirected.`,
-              `New worker ID: ${data.id}`,
-              `New worker chat: ${data.workerChatId}`,
-              `Workdir: ${data.workingDirectory}`,
-              'The old worker has been aborted and a new one dispatched with your updated instructions.',
-            ].join('\n'),
-          }],
+          content: [
+            {
+              type: 'text',
+              text: [
+                `Worker ${args?.id} redirected.`,
+                `New worker ID: ${data.id}`,
+                `New worker chat: ${data.workerChatId}`,
+                `Workdir: ${data.workingDirectory}`,
+                'The old worker has been aborted and a new one dispatched with your updated instructions.',
+              ].join('\n'),
+            },
+          ],
         };
       }
 
@@ -330,10 +402,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const mins = Math.round(seconds / 60);
         return {
-          content: [{
-            type: 'text',
-            text: `Reminder set for ${mins > 0 ? mins + ' minutes' : seconds + ' seconds'} from now.\nTask ID: ${data.taskId}\n\nYou can now end your turn. The system will wake you up when the timer fires.`,
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `Reminder set for ${mins > 0 ? mins + ' minutes' : seconds + ' seconds'} from now.\nTask ID: ${data.taskId}\n\nYou can now end your turn. The system will wake you up when the timer fires.`,
+            },
+          ],
         };
       }
 
@@ -346,10 +420,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };
         }
         return {
-          content: [{
-            type: 'text',
-            text: 'Auto-remind has been stopped. You will no longer receive 40-minute periodic reminders.\nNote: Auto-remind will resume automatically when the user sends a new message.',
-          }],
+          content: [
+            {
+              type: 'text',
+              text: 'Auto-remind has been stopped. You will no longer receive 1-hour periodic reminders.\nNote: Auto-remind will resume automatically when the user sends a new message.',
+            },
+          ],
         };
       }
 
