@@ -476,21 +476,69 @@ describe('metabot teams CLI ergonomics', () => {
     });
   });
 
+  it('passes actorRole for privileged team lifecycle commands', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === 'http://localhost:9100/api/agent-teams/demo') {
+        return jsonResponse({ team: { chatIds: [], displayChatIds: [] } });
+      }
+      return jsonResponse({ ok: true });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['create', 'demo', '--actor-role', 'pm']);
+    await mod.run(['delete', 'demo', '--actor-role', 'pm']);
+    await mod.run(['start', 'demo', '--actor-role', 'pm']);
+    await mod.run(['stop', 'demo', '--actor-role', 'pm']);
+    await mod.run(['bind', 'demo', 'oc_project', '--display', '--actor-role', 'pm']);
+    await mod.run(['agents', 'stop', 'demo', 'planner', '--actor-role', 'pm']);
+    await mod.run(['agents', 'delete', 'demo', 'planner', '--actor-role', 'pm']);
+    await mod.run(['runs', 'stop', 'demo', 'run-1', '--actor-role', 'pm']);
+
+    expect(JSON.parse(String(calls(fetchMock)[0]![1].body))).toEqual({
+      name: 'demo',
+      actorRole: 'pm',
+    });
+    expect(calls(fetchMock)[1]).toMatchObject([
+      'http://localhost:9100/api/agent-teams/demo',
+      { method: 'DELETE' },
+    ]);
+    expect(JSON.parse(String(calls(fetchMock)[1]![1].body))).toEqual({ actorRole: 'pm' });
+    expect(JSON.parse(String(calls(fetchMock)[2]![1].body))).toEqual({ actorRole: 'pm' });
+    expect(JSON.parse(String(calls(fetchMock)[3]![1].body))).toEqual({ actorRole: 'pm' });
+    expect(JSON.parse(String(calls(fetchMock)[5]![1].body))).toEqual({
+      chatIds: [],
+      displayChatIds: ['oc_project'],
+      actorRole: 'pm',
+    });
+    expect(JSON.parse(String(calls(fetchMock)[6]![1].body))).toEqual({ actorRole: 'pm' });
+    expect(JSON.parse(String(calls(fetchMock)[7]![1].body))).toEqual({ actorRole: 'pm' });
+    expect(JSON.parse(String(calls(fetchMock)[8]![1].body))).toEqual({ actorRole: 'pm' });
+  });
+
   it('does not default CLI privileged actor role to PM', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true })) as unknown as typeof fetch;
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(process.stdout, 'write').mockReturnValue(true);
 
     const mod = await importFresh();
+    await mod.run(['create', 'demo']);
     await mod.run(['agents', 'spawn', 'demo', 'worker']);
+    await mod.run(['runs', 'stop', 'demo', 'run-1']);
     await mod.run(['proposals', 'approve', 'proposal-1', '--by', 'pm-codex']);
 
     expect(JSON.parse(String(calls(fetchMock)[0]![1].body))).toMatchObject({
+      name: 'demo',
+    });
+    expect(JSON.parse(String(calls(fetchMock)[0]![1].body))).not.toHaveProperty('actorRole');
+    expect(JSON.parse(String(calls(fetchMock)[1]![1].body))).toMatchObject({
       name: 'worker',
       engine: 'codex',
     });
-    expect(JSON.parse(String(calls(fetchMock)[0]![1].body))).not.toHaveProperty('actorRole');
-    expect(JSON.parse(String(calls(fetchMock)[1]![1].body))).toEqual({
+    expect(JSON.parse(String(calls(fetchMock)[1]![1].body))).not.toHaveProperty('actorRole');
+    expect(JSON.parse(String(calls(fetchMock)[2]![1].body))).toEqual({});
+    expect(JSON.parse(String(calls(fetchMock)[3]![1].body))).toEqual({
       decidedBy: 'pm-codex',
     });
   });

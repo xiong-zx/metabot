@@ -20,6 +20,7 @@ export type TeamActorRole = 'admin' | 'user' | 'pm' | 'manager' | 'agent' | 'wor
 export type TeamPromotionProposalKind = 'template' | 'ruleset';
 export type TeamPromotionProposalStatus = 'pending' | 'approved' | 'rejected';
 export type TeamCapabilityAction =
+  | 'manage_team'
   | 'create_agent'
   | 'worker_dispatch'
   | 'promote_template'
@@ -2192,7 +2193,8 @@ function ruleScopePriority(scope: TeamRuleScope): number {
 export function hasTeamCapability(role: TeamActorRole, action: TeamCapabilityAction): boolean {
   if (role === 'admin') return true;
   if (role === 'user' || role === 'pm') {
-    return action === 'create_agent'
+    return action === 'manage_team'
+      || action === 'create_agent'
       || action === 'worker_dispatch'
       || action === 'promote_template'
       || action === 'restart_service'
