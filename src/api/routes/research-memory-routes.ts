@@ -9,6 +9,8 @@ import {
   ResearchLoopRunner,
   ResearchRunStore,
   WorkerManagerAutoResearchClawAdapter,
+  validateAutoResearchClawOutput,
+  type AutoResearchClawOutput,
   type ContextPackPurpose,
   type ContextPackScopeFilter,
   type LogMemoryEventInput,
@@ -109,16 +111,22 @@ export async function handleResearchMemoryRoutes(
 
     if (method === 'POST' && parsedUrl.pathname === '/api/research-memory/autoresearchclaw/ingest') {
       const body = requireRecord(await parseJsonBody(req), 'body');
-      const service = serviceFromBody(body);
+      const root = rootFromBody(body);
+      const service = new MemoryCoreService({ rootDir: root });
+      const actor = requireRecord(body.actor, 'actor') as unknown as MemoryActor;
+      const scope = requireRecord(body.scope, 'scope') as unknown as MemoryScope;
+      const output = validateAutoResearchClawOutput(body.output, { projectRoot: root });
+      const reviewRequired = body.reviewRequired === true;
       const events = service.ingestAutoResearchClawOutput({
-        output: body.output,
-        actor: requireRecord(body.actor, 'actor') as unknown as MemoryActor,
-        scope: requireRecord(body.scope, 'scope') as unknown as MemoryScope,
+        output,
+        actor,
+        scope,
         workerEventId: optionalString(body.workerEventId),
         timestamp: optionalString(body.timestamp),
-        reviewRequired: body.reviewRequired === true,
+        reviewRequired,
       });
-      jsonResponse(res, 201, { events });
+      const projection = syncDirectIngestProjection(root, output, { scope, reviewRequired });
+      jsonResponse(res, 201, { events, ...projection });
       return true;
     }
 
@@ -496,6 +504,64 @@ function buildResearchLoopPreflight(input: {
     ],
     nextAction: `Inspect lifecycle progress with memory_runs or metabot research runs --root ${input.projectRoot} --project ${input.projectId}`,
   };
+}
+
+function syncDirectIngestProjection(
+  root: string,
+  output: AutoResearchClawOutput,
+  input: { scope: MemoryScope; reviewRequired: boolean },
+): Record<string, unknown> {
+  const store = new ResearchRunStore(root);
+  const now = new Date();
+  if (store.getRun(output.run_id) === undefined) {
+    store.startRun({
+      id: output.run_id,
+      projectId: output.project_id,
+      projectRoot: root,
+      task: `Direct AutoResearchClaw ingest: ${output.summary}`,
+      domain: input.scope.domain,
+      now,
+      metadata: {
+        direct_ingest: true,
+      },
+    });
+  }
+  const run = store.updateRun(output.run_id, {
+    status: directIngestRunStatus(output.status, input.reviewRequired),
+    outputSummary: output.summary,
+    artifactIds: output.artifacts.map((artifact) => artifact.id),
+    completedAt: now.toISOString(),
+    metadata: {
+      direct_ingest: true,
+      review_required: input.reviewRequired,
+      autoresearchclaw_status: output.status,
+    },
+    now,
+  });
+  const artifacts = output.artifacts.map((artifact) =>
+    store.indexArtifact({
+      id: artifact.id,
+      runId: output.run_id,
+      projectId: output.project_id,
+      uri: artifact.uri,
+      summary: artifact.summary,
+      metadata: {
+        direct_ingest: true,
+        run_status: output.status,
+      },
+      now,
+    }),
+  );
+  return { run, artifacts };
+}
+
+function directIngestRunStatus(
+  outputStatus: AutoResearchClawOutput['status'],
+  reviewRequired: boolean,
+): 'completed' | 'partial' | 'failed' {
+  if (outputStatus === 'failed') return 'failed';
+  if (reviewRequired) return 'partial';
+  return outputStatus;
 }
 
 function parseCsv(value: string | null): string[] | undefined {

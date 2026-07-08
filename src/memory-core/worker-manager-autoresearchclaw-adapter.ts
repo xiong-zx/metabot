@@ -9,10 +9,13 @@ import type {
 } from '../workers/worker-manager.js';
 import type {
   AutoResearchClawWorkerAdapter,
+  ResearchWorkerFinalizeInput,
+  ResearchWorkerFinalizeResult,
   ResearchWorkerDispatchInput,
   ResearchWorkerHandle,
 } from './research-loop-runner.js';
 import { MemoryCoreError } from './event-ledger.js';
+import { validateAutoResearchClawOutput } from './autoresearchclaw-contract.js';
 
 export interface WorkerManagerLike {
   dispatch(input: DispatchInput): {
@@ -31,6 +34,13 @@ export interface WorkerManagerLike {
         error?: string;
       }
     | undefined;
+  completeWorkerFromExternal?(
+    id: string,
+    patch?: {
+      resultSummary?: string;
+      error?: string;
+    },
+  ): boolean;
 }
 
 export interface WorkerManagerAutoResearchClawAdapterOptions {
@@ -86,7 +96,9 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
       workerChatId: record.workerChatId,
       artifactUri: pathToFileUri(artifact.absolutePath),
       metadata: {
+        project_id: input.projectId,
         run_id: input.runId,
+        project_root: input.projectRoot,
         output_file_name: artifact.relativePath,
         worker_manager_label: `autoresearchclaw-${input.projectId}-${input.runId}`,
       },
@@ -106,7 +118,15 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
       artifactPath ??= this.resolveArtifactPath(handle, record);
       const artifact = tryReadJsonArtifact(artifactPath);
       if (artifact.status === 'parsed') {
-        return artifact.value;
+        try {
+          return validateAutoResearchClawOutput(artifact.value, {
+            expectedProjectId: typeof handle.metadata?.project_id === 'string' ? handle.metadata.project_id : undefined,
+            expectedRunId: typeof handle.metadata?.run_id === 'string' ? handle.metadata.run_id : undefined,
+            projectRoot: record.workingDirectory,
+          });
+        } catch (error) {
+          lastInvalidArtifact = error;
+        }
       }
       if (artifact.status === 'invalid') {
         lastInvalidArtifact = artifact.error;
@@ -121,7 +141,7 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
         }
         if (lastInvalidArtifact !== undefined) {
           throw new Error(
-            `AutoResearchClaw output artifact is not valid JSON: ${artifactPath}: ${errorMessage(lastInvalidArtifact)}`,
+            `AutoResearchClaw output artifact failed contract validation: ${artifactPath}: ${errorMessage(lastInvalidArtifact)}`,
           );
         }
         if (record.status !== 'completed') {
@@ -136,6 +156,60 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
       await sleep(this.pollIntervalMs);
     }
     throw new Error(`Timed out waiting for AutoResearchClaw worker output: ${handle.workerId}`);
+  }
+
+  async finalize(
+    handle: ResearchWorkerHandle,
+    input: ResearchWorkerFinalizeInput,
+  ): Promise<ResearchWorkerFinalizeResult> {
+    const before = this.options.workerManager.getWorker(handle.workerId);
+    if (before === undefined) {
+      return {
+        message: `Worker not found during finalization: ${handle.workerId}`,
+        nextAction:
+          'Memory Core run is the system of record; worker record is unavailable, so inspect the run lifecycle and artifact index.',
+      };
+    }
+
+    if (before.status !== 'running') {
+      return {
+        workerStatusBefore: before.status,
+        workerStatusAfter: before.status,
+        softStopRequested: false,
+        completedFromExternal: false,
+        message: `Worker already reached terminal status: ${before.status}`,
+        nextAction: finalizationNextAction(input.runStatus, before.status),
+      };
+    }
+
+    if (this.options.workerManager.completeWorkerFromExternal === undefined) {
+      return {
+        workerStatusBefore: before.status,
+        workerStatusAfter: before.status,
+        softStopRequested: false,
+        completedFromExternal: false,
+        message: 'WorkerManager does not support external completion; Memory Core run remains the system of record.',
+        nextAction:
+          'Memory Core finalized the artifact, but WorkerManager may still show running; abort or inspect the worker manually if it does not exit.',
+      };
+    }
+
+    const completed = this.options.workerManager.completeWorkerFromExternal(handle.workerId, {
+      resultSummary: externalCompletionSummary(input),
+    });
+    const after = this.options.workerManager.getWorker(handle.workerId);
+    return {
+      workerStatusBefore: before.status,
+      workerStatusAfter: after?.status ?? (completed ? 'completed' : before.status),
+      softStopRequested: completed,
+      completedFromExternal: completed,
+      message: completed
+        ? 'Memory Core finalized the artifact and marked the worker completed from the run lifecycle.'
+        : 'Worker external completion was requested but not applied.',
+      nextAction: completed
+        ? finalizationNextAction(input.runStatus, 'completed')
+        : 'Memory Core finalized the artifact, but worker lifecycle still needs inspection.',
+    };
   }
 
   private resolveArtifactPath(
@@ -165,6 +239,31 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
   }
 }
 
+function externalCompletionSummary(input: ResearchWorkerFinalizeInput): string {
+  const artifactText = input.artifactIds.length > 0 ? ` artifacts=${input.artifactIds.join(',')}` : '';
+  const errorText = input.errorMessages.length > 0 ? ` errors=${input.errorMessages.length}` : '';
+  return `Memory Core ${input.finalizationPhase}: run=${input.runStatus}, output=${input.outputStatus}; ${input.summary}${artifactText}${errorText}`.slice(
+    0,
+    500,
+  );
+}
+
+function finalizationNextAction(runStatus: ResearchWorkerFinalizeInput['runStatus'], workerStatus: string): string {
+  if (runStatus === 'partial') {
+    return workerStatus === 'completed'
+      ? 'Review pending Memory Core candidates or promotion requests; the worker lifecycle is complete.'
+      : 'Review pending Memory Core candidates and inspect worker lifecycle if it remains active.';
+  }
+  if (runStatus === 'completed') {
+    return workerStatus === 'completed'
+      ? 'Inspect Memory Core run artifacts if needed; no worker action is required.'
+      : 'Memory Core run completed; inspect worker lifecycle if it remains active.';
+  }
+  return workerStatus === 'completed'
+    ? 'Inspect Memory Core errors and artifact summary; the worker lifecycle is complete.'
+    : 'Inspect Memory Core errors and worker lifecycle before retrying.';
+}
+
 function withArtifactInstruction(prompt: string, outputFileName: string): string {
   return [
     prompt,
@@ -173,6 +272,7 @@ function withArtifactInstruction(prompt: string, outputFileName: string): string
     `Write the final AutoResearchClaw JSON object to ${outputFileName} in the project root.`,
     'Do not rely on chat text as the system-of-record output; the JSON artifact is required for ingestion.',
     'Do not dispatch nested workers, subagents, reminders, or metabot talk tasks. This worker must write the artifact itself before it exits.',
+    'Before claiming completion, validate the artifact against the same contract used by Memory Core: every memory_event_candidates item needs a non-empty type and summary; use [] when there are no candidates.',
   ].join('\n');
 }
 

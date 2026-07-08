@@ -208,6 +208,8 @@ export function buildAutoResearchClawPrompt(input: AutoResearchClawInput): strin
     '- Every hypothesis, finding, negative_result, decision, open_question, metric, and pivot item must include a non-empty summary string.',
     '- Every experiment item must include a non-empty summary string; status may be completed, partial, or failed.',
     '- Every artifact item must include id, uri, and summary. Artifact paths must stay inside the project root.',
+    '- Every memory_event_candidates item must include a non-empty type and summary. Use ordinary memory event types such as note, finding, decision, negative_result, open_question, or hypothesis; do not use approval_requested, approval_granted, approval_rejected, memory_promoted, memory_superseded, memory_redacted, context_pack_created, or any other controlled event type.',
+    '- memory_event_candidates must not set supersedes. If there is no candidate memory, write an empty array.',
     '- Every recommended_followups item must include summary.',
     '- Every tool_trace item must include tool and summary.',
     '',

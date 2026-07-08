@@ -20,6 +20,39 @@ afterEach(() => {
 });
 
 describe('WorkerManager restart recovery', () => {
+  it('can mark a running worker completed from an external lifecycle owner', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-worker-external-complete-'));
+    process.env.SESSION_STORE_DIR = dir;
+    vi.resetModules();
+
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const stopChatTask = vi.fn();
+    const executeApiTask = vi.fn(() => new Promise(() => {}));
+    const manager = new WorkerManager(
+      { get: vi.fn(() => ({ bridge: { executeApiTask, stopChatTask } })) } as any,
+      logger,
+      { defaultModel: 'gpt-5.4', maxPerPm: 5 },
+    );
+
+    const worker = manager.dispatch({
+      botName: 'pm-codex',
+      pmChatId: 'oc_pm',
+      workerChatId: 'worker-external',
+      workingDirectory: dir,
+      prompt: 'write artifact',
+    } as any);
+    const completed = manager.completeWorkerFromExternal(worker.id, {
+      resultSummary: 'Memory Core finalized artifact',
+    });
+
+    expect(completed).toBe(true);
+    expect(stopChatTask).toHaveBeenCalledWith(worker.workerChatId);
+    expect(manager.getWorker(worker.id)).toMatchObject({
+      status: 'completed',
+      resultSummary: 'Memory Core finalized artifact',
+    });
+  });
+
   it('restarts workers that were running when the bridge process restarted', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-worker-restart-'));
     process.env.SESSION_STORE_DIR = dir;

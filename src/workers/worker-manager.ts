@@ -220,7 +220,7 @@ export class WorkerManager {
   }
 
   dispatch(input: DispatchInput): WorkerRecord {
-    const { botName, pmChatId, workingDirectory, prompt, label } = input;
+    const { botName, pmChatId, workingDirectory, label } = input;
     const dedupeKey = normalizeDedupeKey(input.dedupeKey);
     if (dedupeKey) {
       const existing = this.findReusableWorker(pmChatId, dedupeKey);
@@ -329,6 +329,26 @@ export class WorkerManager {
     record.endTime = Date.now();
     this.persist();
     this.logger.info({ workerId: id }, 'Worker aborted');
+    return true;
+  }
+
+  completeWorkerFromExternal(id: string, patch: { resultSummary?: string; error?: string } = {}): boolean {
+    const record = this.records.find((r) => r.id === id);
+    if (!record || record.status !== 'running') return false;
+
+    record.status = 'completed';
+    record.endTime = Date.now();
+    record.durationMs = record.endTime - record.startTime;
+    record.resultSummary = patch.resultSummary ?? record.resultSummary;
+    if (patch.error !== undefined) record.error = patch.error;
+    this.persist();
+
+    const bot = this.registry.get(record.botName);
+    if (bot) {
+      bot.bridge.stopChatTask(record.workerChatId);
+    }
+
+    this.logger.info({ workerId: id }, 'Worker marked completed by external lifecycle owner');
     return true;
   }
 
@@ -456,7 +476,11 @@ export class WorkerManager {
       record.durationMs = record.endTime - startTime;
       record.costUsd = result.costUsd;
 
-      if (result.success) {
+      if (record.status !== 'running') {
+        if (record.resultSummary === undefined && result.responseText) {
+          record.resultSummary = result.responseText.slice(0, 500);
+        }
+      } else if (result.success) {
         record.status = 'completed';
         record.resultSummary = result.responseText?.slice(0, 500) || '';
       } else {
@@ -467,8 +491,13 @@ export class WorkerManager {
     } catch (err: any) {
       record.endTime = Date.now();
       record.durationMs = record.endTime - startTime;
-      record.status = record.status === 'aborted' ? 'aborted' : 'failed';
-      record.error = err.message || 'Unknown error';
+      if (record.status === 'running') {
+        record.status = 'failed';
+        record.error = err.message || 'Unknown error';
+      } else if (record.status !== 'completed' && record.status !== 'aborted') {
+        record.status = 'failed';
+        record.error = err.message || 'Unknown error';
+      }
     }
 
     this.persist();

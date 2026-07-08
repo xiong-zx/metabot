@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION,
   MemoryEventLedger,
@@ -90,6 +90,13 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
   it('updates run lifecycle and indexes AutoResearchClaw artifacts', async () => {
     const ledger = new MemoryEventLedger(dir);
     const runStore = new ResearchRunStore(dir);
+    const finalize = vi.fn(async () => ({
+      workerStatusBefore: 'running',
+      workerStatusAfter: 'completed',
+      softStopRequested: true,
+      completedFromExternal: true,
+      message: 'worker completed from test finalization',
+    }));
     const worker: AutoResearchClawWorkerAdapter = {
       async dispatch(): Promise<ResearchWorkerHandle> {
         return {
@@ -101,6 +108,7 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
       async collectOutput() {
         return output();
       },
+      finalize,
     };
     const runner = new ResearchLoopRunner({
       readEvents: () => ledger.readAll(),
@@ -119,6 +127,15 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
       now: new Date('2026-07-06T00:00:00Z'),
     });
 
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ workerId: 'worker-alpha' }),
+      expect.objectContaining({
+        runStatus: 'completed',
+        outputStatus: 'completed',
+        artifactIds: ['artifact-results'],
+        finalizationPhase: 'finalized',
+      }),
+    );
     expect(runStore.getRun('run-alpha')).toMatchObject({
       id: 'run-alpha',
       status: 'completed',
@@ -127,6 +144,16 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
       artifact_uri: 'file://autoresearchclaw-output.json',
       output_summary: 'Run completed with artifact index',
       artifact_ids: ['artifact-results'],
+      metadata: expect.objectContaining({
+        system_of_record: 'memory_core_run',
+        finalization_phase: 'finalized',
+        worker_status_before: 'running',
+        worker_status_after: 'completed',
+        worker_status: 'completed',
+        worker_soft_stop_requested: true,
+        worker_completed_from_external: true,
+        next_action: expect.stringContaining('no worker action'),
+      }),
     });
     expect(runStore.listArtifacts({ projectId: 'proj-alpha' })).toEqual([
       expect.objectContaining({
@@ -135,6 +162,55 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
         uri: 'file://results.json',
       }),
     ]);
+  });
+
+  it('keeps partial review-pending runs explicit while completing the worker lifecycle', async () => {
+    const ledger = new MemoryEventLedger(dir);
+    const runStore = new ResearchRunStore(dir);
+    const worker: AutoResearchClawWorkerAdapter = {
+      async dispatch(): Promise<ResearchWorkerHandle> {
+        return { workerId: 'worker-alpha', workerChatId: 'worker-worker-alpha' };
+      },
+      async collectOutput() {
+        return output();
+      },
+      async finalize() {
+        return {
+          workerStatusBefore: 'running',
+          workerStatusAfter: 'completed',
+          softStopRequested: true,
+          completedFromExternal: true,
+          message: 'worker completed from test finalization',
+        };
+      },
+    };
+    const runner = new ResearchLoopRunner({
+      readEvents: () => ledger.readAll(),
+      appendEvent: (event) => ledger.append(event),
+      worker,
+      runStore,
+    });
+
+    await runner.run({
+      projectId: 'proj-alpha',
+      runId: 'run-alpha',
+      projectRoot: dir,
+      task: 'Run lifecycle integration with pending review',
+      domain: 'metabot',
+      actor: { kind: 'agent', id: 'agent-pm' },
+      reviewRequired: true,
+      now: new Date('2026-07-06T00:00:00Z'),
+    });
+
+    expect(runStore.getRun('run-alpha')).toMatchObject({
+      status: 'partial',
+      metadata: expect.objectContaining({
+        system_of_record: 'memory_core_run',
+        finalization_phase: 'candidate_review_pending',
+        worker_status_after: 'completed',
+        next_action: expect.stringContaining('Review pending'),
+      }),
+    });
   });
 
   it('marks the run failed when final memory event append fails after worker completion', async () => {
@@ -172,7 +248,16 @@ describe('ResearchLoopRunner + ResearchRunStore', () => {
     expect(result.errors.some((error) => error.includes('simulated append failure'))).toBe(true);
     expect(runStore.getRun('run-alpha')).toMatchObject({
       status: 'failed',
+      output_summary: 'Run completed with artifact index',
       error_messages: [expect.stringContaining('simulated append failure')],
+      artifact_ids: ['artifact-results'],
+      metadata: expect.objectContaining({
+        system_of_record: 'memory_core_run',
+        finalization_phase: 'finalization_failed',
+        worker_status: 'completed',
+        worker_id: 'worker-alpha',
+        next_action: expect.stringContaining('Worker completed'),
+      }),
     });
   });
 });

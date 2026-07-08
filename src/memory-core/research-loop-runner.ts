@@ -37,9 +37,29 @@ export interface ResearchWorkerHandle {
   metadata?: Record<string, unknown>;
 }
 
+export interface ResearchWorkerFinalizeInput {
+  runStatus: ResearchLoopRunResult['status'];
+  outputStatus: AutoResearchClawOutput['status'];
+  summary: string;
+  artifactIds: string[];
+  errorMessages: string[];
+  finalizationPhase: string;
+}
+
+export interface ResearchWorkerFinalizeResult {
+  workerStatusBefore?: string;
+  workerStatusAfter?: string;
+  softStopRequested?: boolean;
+  completedFromExternal?: boolean;
+  message?: string;
+  nextAction?: string;
+  error?: string;
+}
+
 export interface AutoResearchClawWorkerAdapter {
   dispatch(input: ResearchWorkerDispatchInput): Promise<ResearchWorkerHandle>;
   collectOutput(handle: ResearchWorkerHandle): Promise<unknown>;
+  finalize?(handle: ResearchWorkerHandle, input: ResearchWorkerFinalizeInput): Promise<ResearchWorkerFinalizeResult>;
 }
 
 export interface ResearchReviewInput {
@@ -205,7 +225,13 @@ export class ResearchLoopRunner {
         createWorkerFailureEvent(input, runId, scope, `Worker dispatch failed: ${errorMessage(error)}`),
       );
       errors.push(failure.summary);
-      this.failRunStore(runId, errors, input.now);
+      this.failRunStore(runId, errors, input.now, {
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: 'worker_dispatch_failed',
+          next_action: 'Fix worker dispatch configuration, then re-run the AutoResearchClaw loop.',
+        },
+      });
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
       return { projectId: input.projectId, runId, status: 'failed', contextPack, appendedEvents, errors };
     }
@@ -246,7 +272,17 @@ export class ResearchLoopRunner {
         ),
       );
       errors.push(failure.summary);
-      this.failRunStore(runId, errors, input.now);
+      this.failRunStore(runId, errors, input.now, {
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: 'artifact_collection_failed',
+          worker_id: handle.workerId,
+          worker_chat_id: handle.workerChatId,
+          artifact_uri: handle.artifactUri,
+          next_action:
+            'Inspect the worker artifact and fix the AutoResearchClaw output contract before retrying ingest.',
+        },
+      });
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
       return { projectId: input.projectId, runId, status: 'failed', contextPack, appendedEvents, errors };
     }
@@ -271,7 +307,18 @@ export class ResearchLoopRunner {
         ),
       );
       errors.push(failure.summary);
-      this.failRunStore(runId, errors, input.now);
+      this.failRunStore(runId, errors, input.now, {
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: 'artifact_validation_failed',
+          worker_status: 'completed',
+          worker_id: handle.workerId,
+          worker_chat_id: handle.workerChatId,
+          artifact_uri: handle.artifactUri,
+          next_action:
+            'Regenerate the artifact with the required AutoResearchClaw output contract, then retry ingest.',
+        },
+      });
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
       return { projectId: input.projectId, runId, status: 'failed', contextPack, appendedEvents, errors };
     }
@@ -307,6 +354,14 @@ export class ResearchLoopRunner {
         projectRoot: input.projectRoot,
       });
     } catch (error) {
+      const workerFinalization = await this.finalizeWorker(handle, {
+        runStatus: 'failed',
+        outputStatus: output.status,
+        summary: output.summary,
+        artifactIds: output.artifacts.map((artifact) => artifact.id),
+        errorMessages: errors,
+        finalizationPhase: 'ingest_failed',
+      });
       const failure = await append(
         createWorkerFailureEvent(
           input,
@@ -319,7 +374,22 @@ export class ResearchLoopRunner {
         ),
       );
       errors.push(failure.summary);
-      this.failRunStore(runId, errors, input.now);
+      this.failRunStore(runId, errors, input.now, {
+        outputSummary: output.summary,
+        artifactIds: output.artifacts.map((artifact) => artifact.id),
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: 'ingest_failed',
+          worker_status: 'completed',
+          worker_id: handle.workerId,
+          worker_chat_id: handle.workerChatId,
+          artifact_uri: handle.artifactUri,
+          autoresearchclaw_status: output.status,
+          ...workerFinalizationMetadata(workerFinalization),
+          next_action:
+            'Worker completed, but Memory Core rejected the ingest. Fix the artifact memory event candidates or ingest schema, then retry.',
+        },
+      });
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
       return { projectId: input.projectId, runId, status: 'failed', contextPack, output, appendedEvents, errors };
     }
@@ -336,15 +406,34 @@ export class ResearchLoopRunner {
 
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
       const status = resolveRunStatus(output.status, input.reviewRequired === true, review);
+      this.indexRunArtifacts(input, runId, output);
+      const finalizationPhase = status === 'partial' ? 'candidate_review_pending' : 'finalized';
+      const workerFinalization = await this.finalizeWorker(handle, {
+        runStatus: status,
+        outputStatus: output.status,
+        summary: output.summary,
+        artifactIds: output.artifacts.map((artifact) => artifact.id),
+        errorMessages: errors,
+        finalizationPhase,
+      });
       this.updateRunStore(runId, {
         status,
         outputSummary: output.summary,
         errorMessages: errors,
         artifactIds: output.artifacts.map((artifact) => artifact.id),
         completedAt: (input.now ?? new Date()).toISOString(),
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: finalizationPhase,
+          worker_id: handle.workerId,
+          worker_chat_id: handle.workerChatId,
+          artifact_uri: handle.artifactUri,
+          autoresearchclaw_status: output.status,
+          ...workerFinalizationMetadata(workerFinalization),
+          next_action: runStoreNextAction(status, workerFinalization),
+        },
         now: input.now,
       });
-      this.indexRunArtifacts(input, runId, output);
       return {
         projectId: input.projectId,
         runId,
@@ -357,7 +446,30 @@ export class ResearchLoopRunner {
       };
     } catch (error) {
       errors.push(`Research run finalization failed: ${errorMessage(error)}`);
-      this.failRunStore(runId, errors, input.now);
+      const workerFinalization = await this.finalizeWorker(handle, {
+        runStatus: 'failed',
+        outputStatus: output.status,
+        summary: output.summary,
+        artifactIds: output.artifacts.map((artifact) => artifact.id),
+        errorMessages: errors,
+        finalizationPhase: 'finalization_failed',
+      });
+      this.failRunStore(runId, errors, input.now, {
+        outputSummary: output.summary,
+        artifactIds: output.artifacts.map((artifact) => artifact.id),
+        metadata: {
+          system_of_record: 'memory_core_run',
+          finalization_phase: 'finalization_failed',
+          worker_status: 'completed',
+          worker_id: handle.workerId,
+          worker_chat_id: handle.workerChatId,
+          artifact_uri: handle.artifactUri,
+          autoresearchclaw_status: output.status,
+          ...workerFinalizationMetadata(workerFinalization),
+          next_action:
+            'Worker completed, but Memory Core finalization failed. Inspect error_messages and retry finalization/ingest after fixing the cause.',
+        },
+      });
       return { projectId: input.projectId, runId, status: 'failed', contextPack, output, appendedEvents, errors };
     }
   }
@@ -384,11 +496,23 @@ export class ResearchLoopRunner {
     }
   }
 
-  private failRunStore(runId: string, errors: string[], now: Date | undefined): void {
+  private failRunStore(
+    runId: string,
+    errors: string[],
+    now: Date | undefined,
+    patch: {
+      outputSummary?: string;
+      artifactIds?: string[];
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): void {
     this.updateRunStore(runId, {
       status: 'failed',
       errorMessages: errors,
+      outputSummary: patch.outputSummary,
+      artifactIds: patch.artifactIds,
       completedAt: (now ?? new Date()).toISOString(),
+      metadata: patch.metadata,
       now,
     });
   }
@@ -413,6 +537,25 @@ export class ResearchLoopRunner {
       } catch {
         // Artifact index is secondary to the append-only memory ledger.
       }
+    }
+  }
+
+  private async finalizeWorker(
+    handle: ResearchWorkerHandle,
+    input: ResearchWorkerFinalizeInput,
+  ): Promise<ResearchWorkerFinalizeResult | undefined> {
+    if (this.options.worker.finalize === undefined) {
+      return undefined;
+    }
+    try {
+      return await this.options.worker.finalize(handle, input);
+    } catch (error) {
+      return {
+        error: errorMessage(error),
+        message: 'Worker lifecycle finalization failed after Memory Core finalized the run.',
+        nextAction:
+          'Memory Core run is the system of record; inspect worker status and abort or retry the worker if it is still running.',
+      };
     }
   }
 
@@ -748,6 +891,46 @@ function resolveRunStatus(
     return 'failed';
   }
   return outputStatus === 'failed' ? 'failed' : 'partial';
+}
+
+function workerFinalizationMetadata(
+  result: ResearchWorkerFinalizeResult | undefined,
+): Record<string, unknown> {
+  if (result === undefined) return {};
+  return {
+    worker_status_before: result.workerStatusBefore,
+    worker_status_after: result.workerStatusAfter,
+    worker_status: result.workerStatusAfter ?? result.workerStatusBefore,
+    worker_soft_stop_requested: result.softStopRequested,
+    worker_completed_from_external: result.completedFromExternal,
+    worker_finalization_message: result.message,
+    worker_finalization_error: result.error,
+  };
+}
+
+function runStoreNextAction(
+  status: ResearchLoopRunResult['status'],
+  workerFinalization: ResearchWorkerFinalizeResult | undefined,
+): string {
+  if (workerFinalization?.nextAction !== undefined) {
+    return workerFinalization.nextAction;
+  }
+  const workerDone =
+    workerFinalization?.workerStatusAfter === 'completed' ||
+    workerFinalization?.completedFromExternal === true;
+  if (status === 'partial') {
+    return workerDone
+      ? 'Memory Core finalized the artifact and staged candidate memory. Review pending candidates before promotion; no worker action is required.'
+      : 'Memory Core finalized the artifact and staged candidate memory. Review pending candidates and inspect worker status if it is still running.';
+  }
+  if (status === 'completed') {
+    return workerDone
+      ? 'Memory Core finalized the artifact and completed the worker lifecycle; no worker action is required.'
+      : 'Memory Core finalized the artifact; inspect worker status if WorkerManager still shows the worker running.';
+  }
+  return workerDone
+    ? 'Memory Core finalized a failed AutoResearchClaw artifact and completed the worker lifecycle. Inspect output summary and errors.'
+    : 'Memory Core finalized a failed AutoResearchClaw artifact. Inspect output summary, errors, and worker status.';
 }
 
 function stableRunnerEventId(...parts: string[]): string {

@@ -78,6 +78,8 @@ projectId=proj-alpha，domain=metabot，token budget 3000。
 请说明哪些记忆被纳入，哪些因为 scope/status 被排除。
 ```
 
+较长的自然语言 Memory Core 操作会返回带阶段的异步状态。状态应区分 scope 解析、memory 写入、pending review、search/context-pack 生成、finalization、expected-completion overdue 和 timeout boundary。超过预期完成时间后，应要求 bot 返回已有 event id / contextPack id 等部分证据，同时继续 finalization；如果到达 timeout boundary，不应该只显示 generic running，而应该把操作拆小后继续。
+
 ### 查看候选记忆
 
 ```text

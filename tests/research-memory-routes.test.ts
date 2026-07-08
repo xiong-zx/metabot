@@ -247,6 +247,33 @@ describe('handleResearchMemoryRoutes', () => {
       workerEventId: workerEvent.json().event.id,
     });
     expect(ingestRes.statusCode).toBe(201);
+    expect(ingestRes.json().run).toMatchObject({
+      id: 'run-alpha',
+      project_id: 'proj-alpha',
+      status: 'completed',
+      artifact_ids: ['artifact-results'],
+    });
+    expect(ingestRes.json().artifacts[0]).toMatchObject({
+      id: 'artifact-results',
+      run_id: 'run-alpha',
+      project_id: 'proj-alpha',
+    });
+
+    const projectedRuns = await call('GET', `/api/research-memory/runs?root=${encodeURIComponent(dir)}&projectId=proj-alpha`);
+    expect(projectedRuns.json().runs[0]).toMatchObject({
+      id: 'run-alpha',
+      status: 'completed',
+      output_summary: 'Research loop completed',
+    });
+
+    const projectedArtifacts = await call(
+      'GET',
+      `/api/research-memory/artifacts?root=${encodeURIComponent(dir)}&runId=run-alpha`,
+    );
+    expect(projectedArtifacts.json().artifacts[0]).toMatchObject({
+      id: 'artifact-results',
+      run_id: 'run-alpha',
+    });
 
     const domainIngestRes = await call('POST', '/api/research-memory/autoresearchclaw/ingest', {
       root: dir,

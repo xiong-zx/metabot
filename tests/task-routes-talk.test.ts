@@ -209,14 +209,25 @@ describe('/api/talk async UX', () => {
       botName: 'pm',
       chatId: 'private-test',
       prompt:
-        'Start AutoResearchClaw research loop. projectId=metabot-r6 projectRoot=/root/workspaces/r6 domain=metabot',
+        'Checklist: runId=...、domain=...; Start AutoResearchClaw research loop. projectId=metabot-r6 runId=run-r6-001、domain=metabot. projectRoot=/root/workspaces/r6',
       sendCards: false,
     });
 
     expect(res.statusCode).toBe(202);
     expect(res.json()).toMatchObject({
+      phase: 'autoresearchclaw_accepted',
+      runId: 'run-r6-001',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'worker_dispatch',
+        projectId: 'metabot-r6',
+        runId: 'run-r6-001',
+        projectRoot: '/root/workspaces/r6',
+        domain: 'metabot',
+      }),
       preflight: {
         projectId: 'metabot-r6',
+        runId: 'run-r6-001',
         projectRoot: '/root/workspaces/r6',
         domain: 'metabot',
         stages: expect.arrayContaining([
@@ -227,6 +238,103 @@ describe('/api/talk async UX', () => {
         ]),
         outputContract: expect.arrayContaining(['contract_version', 'hypotheses', 'tool_trace']),
       },
+    });
+
+    const taskId = res.json().taskId;
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'running',
+      phase: 'autoresearchclaw_running',
+      runId: 'run-r6-001',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'worker_dispatch',
+        projectId: 'metabot-r6',
+        runId: 'run-r6-001',
+        projectRoot: '/root/workspaces/r6',
+        domain: 'metabot',
+      }),
+      preflight: expect.objectContaining({
+        projectId: 'metabot-r6',
+        runId: 'run-r6-001',
+        domain: 'metabot',
+      }),
+      nextAction: expect.stringContaining('metabot research runs --root /root/workspaces/r6 --project metabot-r6'),
+    });
+  });
+
+  it('adds phased Memory Core status to natural-language memory operations', async () => {
+    const executeApiTask = vi.fn(() => new Promise(() => {}));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'r11 Memory UX smoke for projectId=metabot-r11 projectRoot=/root/workspaces/projects/r11 domain=metabot-r11. Use natural language Memory Core operations only. Create one finding and one decision, request promotion approval, search, and generate a context pack.',
+      sendCards: false,
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toMatchObject({
+      phase: 'memory_operation_accepted',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'scope_parse',
+        projectId: 'metabot-r11',
+        projectRoot: '/root/workspaces/projects/r11',
+        domain: 'metabot-r11',
+        timeoutBoundaryMs: 150_000,
+      }),
+      preflight: expect.objectContaining({
+        kind: 'memory_core',
+        projectId: 'metabot-r11',
+        stages: expect.arrayContaining([
+          expect.objectContaining({ phase: 'memory_write' }),
+          expect.objectContaining({ phase: 'pending_review' }),
+          expect.objectContaining({ phase: 'search_context_pack' }),
+          expect.objectContaining({ phase: 'timeout_boundary' }),
+        ]),
+      }),
+      nextAction: expect.stringContaining('metabot research events/search/context-pack'),
+    });
+
+    const taskId = res.json().taskId;
+    const task = ctx.asyncTaskStore.get(taskId)!;
+    ctx.asyncTaskStore.update(taskId, {
+      status: 'running',
+      createdAt: task.createdAt - 135_000,
+    });
+
+    const overdue = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(overdue.json()).toMatchObject({
+      status: 'running',
+      phase: 'memory_operation_running',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'expected_completion_overdue',
+        elapsedMs: expect.any(Number),
+      }),
+      message: expect.stringContaining('expected completion window'),
+      nextAction: expect.stringContaining('partial Memory Core evidence'),
+    });
+
+    ctx.asyncTaskStore.update(taskId, {
+      status: 'running',
+      createdAt: task.createdAt - 159_000,
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'running',
+      phase: 'memory_operation_running',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'timeout_boundary',
+        elapsedMs: expect.any(Number),
+      }),
+      message: expect.stringContaining('timeout boundary'),
+      nextAction: expect.stringContaining('partial Memory Core evidence'),
     });
   });
 

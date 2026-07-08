@@ -50,11 +50,13 @@ Before a long AutoResearchClaw run starts, the bot should send a preflight summa
 
 The required output contract is `autoresearchclaw.output.v2` with these top-level fields: `contract_version`, `project_id`, `run_id`, `status`, `summary`, `hypotheses`, `experiments`, `findings`, `negative_results`, `decisions`, `artifacts`, `open_questions`, `memory_event_candidates`, `recommended_followups`, and `tool_trace`.
 
-Every nested evidence item must also satisfy the schema, not just the top-level keys: hypotheses, findings, negative results, decisions, open questions, metrics, and pivots need a non-empty `summary`; artifacts need `id`, `uri`, and `summary`; tool trace entries need `tool` and `summary`. AutoResearchClaw workers should write the artifact themselves and must not dispatch nested workers or background tasks.
+Every nested evidence item must also satisfy the schema, not just the top-level keys: hypotheses, findings, negative results, decisions, open questions, metrics, and pivots need a non-empty `summary`; artifacts need `id`, `uri`, and `summary`; tool trace entries need `tool` and `summary`; each `memory_event_candidates[]` item needs a non-empty `type` and `summary`. AutoResearchClaw workers should write the artifact themselves and must not dispatch nested workers or background tasks.
 
-The JSON artifact is the authoritative system output. Once a valid artifact appears under the project root, Memory Core may collect and ingest it even if the worker process has not exited yet; a later worker timeout should be treated as execution telemetry, not as a reason to drop an already valid artifact.
+The JSON artifact is the authoritative system output. Once a valid artifact appears under the project root, Memory Core may collect and ingest it even if the worker process has not exited yet. After Memory Core finalizes the artifact, it requests WorkerManager external completion / soft-stop so the worker lifecycle does not remain `running` after the run is already finalized.
 
-For async tasks, status replies include `phase`, `progress`, `elapsedMs`, `retryAfterMs`, and `nextAction`. Long research runs may also expose richer lifecycle details through Memory Core run status.
+For async tasks, status replies include `phase`, `progress`, `elapsedMs`, `retryAfterMs`, and `nextAction`. AutoResearchClaw-shaped requests include phased progress with project id, run id when supplied, project root, domain, planned stages, and a concrete Memory Core status command. `metabot research runs` is the system-of-record view and should expose `finalization_phase`, `worker_status_before`, `worker_status_after`, `worker_soft_stop_requested`, error messages when present, and the next action. Long research runs may also expose richer lifecycle details through Memory Core run status.
+
+Manual AutoResearchClaw ingest writes memory events and also syncs the run/artifact projection used by `metabot research runs` and `metabot research artifacts`. With review enabled, the projection may show `partial` while candidate memory waits for review.
 
 ## Review and Promotion
 

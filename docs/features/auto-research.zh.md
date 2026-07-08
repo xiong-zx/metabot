@@ -70,11 +70,13 @@ worker 产出需要包含 hypotheses、experiments、findings、negative_results
 
 必需输出契约是 `autoresearchclaw.output.v2`，顶层字段包括：`contract_version`、`project_id`、`run_id`、`status`、`summary`、`hypotheses`、`experiments`、`findings`、`negative_results`、`decisions`、`artifacts`、`open_questions`、`memory_event_candidates`、`recommended_followups`、`tool_trace`。
 
-嵌套字段也必须满足 schema，不能只满足顶层 key：hypotheses、findings、negative results、decisions、open questions、metrics、pivots 都需要非空 `summary`；artifacts 需要 `id`、`uri`、`summary`；tool trace 需要 `tool` 和 `summary`。AutoResearchClaw worker 应该自己写出 artifact，不能再派发嵌套 worker 或后台任务。
+嵌套字段也必须满足 schema，不能只满足顶层 key：hypotheses、findings、negative results、decisions、open questions、metrics、pivots 都需要非空 `summary`；artifacts 需要 `id`、`uri`、`summary`；tool trace 需要 `tool` 和 `summary`；每个 `memory_event_candidates[]` 项都必须包含非空 `type` 和 `summary`。AutoResearchClaw worker 应该自己写出 artifact，不能再派发嵌套 worker 或后台任务。
 
-JSON artifact 是系统级权威输出。只要项目 root 内出现了合法 artifact，Memory Core 就可以先收割并 ingest；即使 worker 进程之后因为超时被标成 failed，也应作为执行遥测处理，不应丢弃已经通过 contract 校验的 artifact。
+JSON artifact 是系统级权威输出。只要项目 root 内出现了合法 artifact，Memory Core 就可以先收割并 ingest；即使 worker 进程还没自然退出，也不应丢弃已经通过 contract 校验的 artifact。Memory Core 完成 artifact finalization 后，会请求 WorkerManager 做 external completion / soft-stop，避免 run 已经 finalized 但 worker 仍长期显示 `running`。
 
-异步任务的状态回复会包含 `phase`、`progress`、`elapsedMs`、`retryAfterMs` 和 `nextAction`。长时间 research run 还可以通过 Memory Core run status 查看更细的生命周期状态。
+异步任务的状态回复会包含 `phase`、`progress`、`elapsedMs`、`retryAfterMs` 和 `nextAction`。符合 AutoResearchClaw 形态的请求会返回 phased progress，包括 project id、已提供的 run id、project root、domain、计划阶段，以及可直接执行的 Memory Core 状态查询命令。`metabot research runs` 是 system-of-record：run 应显示 `finalization_phase`、`worker_status_before`、`worker_status_after`、`worker_soft_stop_requested`、必要的错误信息和下一步动作。长时间 research run 还可以通过 Memory Core run status 查看更细的生命周期状态。
+
+手动 AutoResearchClaw ingest 不只写 memory events，也会同步 `metabot research runs` 和 `metabot research artifacts` 使用的 run/artifact projection。开启 review 时，projection 可能显示 `partial`，表示候选记忆仍在等待 review。
 
 ## 你会在飞书里看到什么
 

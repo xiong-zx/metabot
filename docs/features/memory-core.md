@@ -66,6 +66,8 @@ projectId=proj-alpha, domain=metabot, token budget 3000.
 Explain which memories were included and which were excluded by scope/status.
 ```
 
+Long natural-language Memory Core operations return async status with phased progress. The status should distinguish scope parsing, memory writes, pending review, search/context-pack generation, finalization, expected-completion overdue, and the timeout boundary. After the expected completion window, ask for partial event ids / contextPack ids while finalization continues; at the timeout boundary, split the operation instead of waiting on a generic running state.
+
 Promotion:
 
 ```text
