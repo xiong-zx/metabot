@@ -16,7 +16,7 @@
  *   - tag: 'code' / 'code_block': 400 error
  *   - tag: 'note': deprecated in v2
  */
-import type { CardState } from '../types.js';
+import type { CardState, TeamMember, TeamState, TeamTask } from '../types.js';
 import { parseMarkdownToBlocks, type Block } from './markdown-parser.js';
 import {
   STATUS_CONFIG,
@@ -125,18 +125,19 @@ export function buildCardV2(state: CardState): string {
     elements.push({ tag: 'hr' });
   }
 
-  // Agent Teams panel — teammates + shared task list. Driven by Claude
+  // Agent Teams panel — agents + shared task list. Driven by Claude
   // Code's TaskCreated / TaskCompleted / TeammateIdle hooks. Mirrors v1
   // builder; removing this hides the entire Agent Teams UI from users.
-  if (state.teamState && (state.teamState.teammates.length > 0 || state.teamState.tasks.length > 0)) {
+  const teamAgents = state.teamState ? agentsForTeamState(state.teamState) : [];
+  if (state.teamState && (teamAgents.length > 0 || state.teamState.tasks.length > 0)) {
     const ts    = state.teamState;
     const lines: string[] = [];
     const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
     lines.push(header);
-    if (ts.teammates.length > 0) {
+    if (teamAgents.length > 0) {
       lines.push('');
-      lines.push('**Teammates:**');
-      for (const m of ts.teammates) {
+      lines.push('**Agents:**');
+      for (const m of teamAgents) {
         const icon = m.status === 'working' ? '⏳' : '💤';
         const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
         lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
@@ -150,15 +151,18 @@ export function buildCardV2(state: CardState): string {
       lines.push('');
       lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter((t) => t.status === 'completed').length} done`);
       for (const t of pending) {
-        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        const ownerName = agentForTeamTask(t);
+        const owner = ownerName ? ` → \`${ownerName}\`` : '';
         lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
       }
       for (const t of inProgress) {
-        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        const ownerName = agentForTeamTask(t);
+        const owner = ownerName ? ` → \`${ownerName}\`` : '';
         lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
       }
       for (const t of completed) {
-        const owner = t.teammate ? ` (\`${t.teammate}\`)` : '';
+        const ownerName = agentForTeamTask(t);
+        const owner = ownerName ? ` (\`${ownerName}\`)` : '';
         lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
       }
     }
@@ -318,6 +322,14 @@ export function buildCardV2(state: CardState): string {
   };
 
   return JSON.stringify(card);
+}
+
+function agentsForTeamState(teamState: TeamState): TeamMember[] {
+  return teamState.agents ?? teamState.teammates ?? [];
+}
+
+function agentForTeamTask(task: TeamTask): string | undefined {
+  return task.agent ?? task.teammate;
 }
 
 /** v2 help card */

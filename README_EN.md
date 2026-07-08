@@ -214,8 +214,8 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | Component | Description |
 |-----------|-------------|
 | **Triple Engine Kernel** | Each bot independently chooses Claude Code / Kimi Code / Codex CLI — full tool stack (Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP) in autonomous mode |
-| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; teammates and background tasks survive between turns |
-| **Agent Teams** | A lead agent spawns specialist teammates in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
+| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; Agent Team agents and background tasks survive between turns |
+| **Agent Teams** | A lead agent spawns specialist agents in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
 | **MetaMemory** | Shared knowledge store served by metabot-core (self-hosted locally, default `http://localhost:9200`) with full-text search; MetaBot reads/writes via `/api/memory/*` and can sync to Feishu Wiki |
 | **IM Bridge** | Chat with any agent from Feishu, Telegram, or WeChat (including mobile). Streaming cards + tool call tracking |
@@ -410,7 +410,7 @@ Global fields:
 |-------|---------|-------------|
 | `workers.defaultModel` | `gpt-5.4` | Default model for `worker_dispatch` |
 | `workers.maxPerPm` | `8` | Maximum concurrent workers per PM chat |
-| `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute teammate runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
+| `agentTeamExecutionBot` | fallback | Bot used by the Agent Team supervisor to execute agent runs; set this to `research-pm` or an internal worker so runs do not fall through to `manager` |
 
 `agentTeams[].agents[]` also supports per-member execution overrides:
 
