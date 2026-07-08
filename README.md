@@ -121,12 +121,16 @@ MetaBot 文档里统一使用下面几类名字，避免把 Bot、Agent 和 Work
 | 名字 | 是什么 | 谁能直接看到 | 怎么创建 |
 |------|--------|--------------|----------|
 | **Bot** | MetaBot 的常驻入口。可以是飞书/TG/微信/Web 机器人，也可以是只通过 API 调用的 backend bot | 用户可在对应 IM 或 Web UI 里直接对话 | 写在 `bots.json`，或通过 `/api/bots` / `metabot bots` 运行时创建 |
-| **Worker** | PM Bot 派出去的一次性后台任务。短生命周期、非阻塞、没有长期聊天身份 | 默认只看到派发结果和回报，不是新的飞书机器人 | 由 PM prompt 的 `worker_dispatch` 或 worker manager 创建 |
+| **Worker** | PM Bot 派出去的一次性后台任务。短生命周期、非阻塞、没有长期聊天身份 | 默认只看到派发结果和回报，不是新的飞书机器人 | 由 PM/user/admin 通过 `worker_dispatch` 或 worker manager 创建 |
 | **Agent** | Agent Team 里的内部成员，例如 planner/coder/reviewer。Agent 比 Bot 低一级，由主 Bot 调度；运行时会和主 Bot 之间创建虚拟 chat | 通常通过主 Bot 会话汇报，Web UI Team tab 可看到状态 | 写在 `bots.json` 的 `agentTeams[].agents[]`，或通过 `metabot teams agents spawn` 创建 |
 | **Claude 项目 subagent** | Claude Code 项目级 `.claude/agents/*.md` 文件，只由 Claude/Kimi 在本地项目中自动发现 | 不是 MetaBot runtime 对象，Web UI Team tab 不会显示 | 由项目文件、MetaSkill 或手工创建 |
 | **Peer** | 另一台 MetaBot 实例上的 Bot 通讯录 | 通过 `metabot talk peer/name` 路由 | 配置 `METABOT_PEERS` |
 
 一句话区分：`bots.json` 里的 `feishuBots` 是用户入口，`agentTeams` 是内部 Agent Team，`workers` 是一次性后台任务默认值；MetaSkill 主要生成项目脚手架和角色文件，不等于自动注册飞书机器人。
+
+`agentTeams` 在当前设计中是 Agent Team Template 的启动种子，不是全局共享运行态。运行时用 `metabot teams instances resolve <template> --chat <chatId>` 生成 chat/project scoped instance；返回的 `instanceId` 可以用在 `metabot teams ... <team>` 位置，避免多个项目共用同一个 team name 串台。
+
+Agent/manager 可以用 `metabot teams proposals create ...` 提出 template 或 RuleSet 更新，worker 只能把候选变更回报给 Agent/manager/PM；只有 PM、用户或 admin 可以 approve/reject。批准后才生成新版本，已运行的 instance 仍保持原先 pin 住的版本。Direct template/rules import、instance resolve、team config 更新以及 Worker 派发/终止/重定向 API/MCP 都需要显式 `actorRole` / `actor_role`；缺省按 `agent` 处理并拒绝，manager/agent 只能向 PM 请求高权限操作。
 
 ---
 
@@ -149,6 +153,7 @@ MetaBot 文档里统一使用下面几类名字，避免把 Bot、Agent 和 Work
 | **代码能力** | 完整 CLI/SDK 工具链（Read/Write/Edit/Bash/MCP） | 完整 | 无 |
 | **多执行单元** | Bot 总线 + Worker 派发 + Agent Team | 单会话 | 有，但封闭生态 |
 | **共享记忆** | MetaMemory 全文搜索 + 自动同步飞书知识库 | 无 | 无 |
+| **科研记忆** | Research Memory Core 自动沉淀实验事实、负结果、决策和 context pack | 无 | 无 |
 | **定时任务** | CC 原生 `CronCreate` / `/loop` 即开即用，可选 `/metaschedule` 跨重启持久化 | 仅原生 `CronCreate` / `/loop` | 有 |
 | **自主运行** | bypassPermissions / yoloMode，全自动 | 需要人工确认 | 受限于 workflow |
 | **开源** | MIT，完全可控 | CLI 开源 | 闭源 SaaS |
@@ -163,6 +168,7 @@ MetaBot 文档里统一使用下面几类名字，避免把 Bot、Agent 和 Work
                                             └─→ Codex CLI（codex exec --json 子进程）
                               ↕
                     MetaMemory（共享知识库）
+                    Research Memory Core（项目记忆、科研事实、Context Pack）
                     定时调度（CC 原生 CronCreate / /loop；可选 /metaschedule 持久化）
                     Bot 总线（跨 Bot 通信，引擎无关）
                     Agent Team（内部 Agents，非 IM Bot）
@@ -170,6 +176,47 @@ MetaBot 文档里统一使用下面几类名字，避免把 Bot、Agent 和 Work
 ```
 
 引擎层已抽象 —— Kimi 事件流和 Codex JSONL 都被翻译成 Claude 形状的 `SDKMessage`，流式卡片、工具调用追踪、MetaMemory/调度/Bot 总线在三种引擎下表现一致。
+
+## 自动科研与统一记忆核心
+
+MetaBot 现在可以把科研项目作为长期运行对象管理：用户在飞书里找 `research-pm` 或 `admin` 描述研究目标，MetaBot 负责生成 context pack、派发 AutoResearchClaw worker、收集结构化输出，并把可靠结论沉淀到项目本地的 Research Memory Core。
+
+飞书端不需要输入命令行。常用说法如下：
+
+```
+请在 /root/workspaces/proj-alpha 启动一次 AutoResearchClaw 研究循环。
+projectId 是 proj-alpha，domain 是 metabot。
+目标：验证 context pack 是否能减少重复 prompt。
+产出需要包含实验结论、负结果、决策和下一步问题。记忆先进入 review。
+```
+
+```
+帮我检索 proj-alpha 里关于 context pack 的研究记忆，
+只返回可追溯的结论，并说明对应 evidence。
+```
+
+```
+把这条结论提升为 domain memory：context pack 应在 worker 启动前生成，
+worker 不能直接写长期记忆。请先给我看证据，等我批准后再提升。
+```
+
+系统架构分为四层：
+
+| 层 | 组件 | 职责 |
+|----|------|------|
+| Control Plane | 飞书 / Web / Bot 总线 / PM Agent | 接收用户意图、调度 Agent Team 和 worker、发起审批，不保存科研事实 |
+| Execution Engine | AutoResearchClaw worker | 单项目 research loop：文献/假设/实验/代码/结果/报告，产出固定 JSON contract |
+| Memory Core | Event Ledger + Curator + Context Pack Builder + ProjectMem/Semantic Provider | 保存项目本地 append-only memory events，生成 memory units，检索和压缩上下文，控制 promotion/supersede/redaction |
+| Human Memory | MetaMemory + 飞书知识库 + 项目 `AGENTS.md` | 保存人类可读总结、周报、架构记录和稳定项目规则，不作为执行关键事实源 |
+
+设计边界：
+
+- worker 和 AutoResearchClaw 只产出结构化结果，不直接写 domain/global 长期记忆。
+- project/private 记忆可以由 curator 写入；domain/global 记忆必须通过 promotion 和用户审批。
+- context pack 是低 token 运行上下文，默认只注入 active、未 redacted、未 superseded 的记忆。
+- MetaMemory 保存人类可读总结；Research Memory Core 保存可追溯、可审计、可检索的执行记忆。
+
+详细使用说明见 [自动科研系统](docs/features/auto-research.zh.md) 和 [Memory Core](docs/features/memory-core.zh.md)。
 
 ## 仓库布局（Monorepo）
 
@@ -240,6 +287,8 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 | **三引擎内核** | 每个 Bot 独立选 Claude Code / Kimi Code / Codex CLI — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行 |
 | **常驻会话与目标循环** | 每个会话一个常驻引擎会话 — `/goal` 让 Bot 在多轮之间持续自驱直到目标达成；Agent Team 成员和后台任务跨轮存活 |
 | **Agent Team（内部 Agents）** | 主导 Bot 并行派遣专家 Agent，路由任务、汇总结果 —— 全部可在一个飞书会话中完成 |
+| **AutoResearchClaw** | 通过 `research-pm` 从飞书启动单项目 research loop，自动生成 context pack、派发 worker、收集结构化科研结果 |
+| **Research Memory Core** | 项目本地 append-only 科研记忆核心，沉淀 facts、decisions、negative results、open questions，并为 worker 生成低 token context pack |
 | **CC 原生调度** | 直接用 Claude Code 内置的 `CronCreate` / `/loop` —— 即开即用，会话内最简单 |
 | **MetaMemory** | 由 metabot-core 服务（本地自托管，默认 `http://localhost:9200`）提供的共享知识库，全文搜索；MetaBot 通过 `/api/memory/*` 读写，并可同步到飞书知识库 |
 | **IM Bridge** | 飞书、Telegram、微信（含手机端）对话任意 Bot，流式卡片 + 工具调用追踪 |
@@ -406,6 +455,10 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 
 `feishuBots` / `telegramBots` / `webBots` 是用户可直接对话的入口 Bot；`agentTeams` 是内部 Agent 配置，不会自动创建新的飞书机器人；`workers` 只定义一次性后台任务的默认值。
 
+`agentTeams` 更准确地说是 Agent Team Template seed。一个飞书聊天/项目应解析成独立 Agent Team Instance；`metabot teams instances resolve` 返回的 `instanceId` 可作为后续 `metabot teams` 命令里的 `<team>` 参数。
+
+如果项目经验需要沉淀成共享 template/rules，Agent/manager 先创建 promotion proposal，再由 PM、用户或 admin 批准；worker 不直接创建 proposal。批准只写入新的版本，不会自动改变正在跑的科研项目。
+
 <details>
 <summary><strong>所有 Bot 配置字段</strong></summary>
 
@@ -421,7 +474,7 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 | `effort` | 否 | Claude 默认 | Claude 推理强度：`low` / `medium` / `high` / `xhigh` / `max` |
 | `permissionMode` | 否 | root 下 `auto`，非 root 下 `bypassPermissions` | Claude Code 工具权限模式：`default` / `acceptEdits` / `bypassPermissions` / `plan` / `dontAsk` / `auto` |
 | `apiKey` | 否 | — | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
-| `pmPrompt` | 否 | `false` | 启用研究 PM 行为契约和 40 分钟 worker 巡检提醒 |
+| `pmPrompt` | 否 | `false` | 启用研究 PM 行为契约和 1 小时 worker 巡检提醒 |
 | `visible` | 否 | `true` | Bot 是否对其他 bot / Bot 总线可见，可被 `metabot talk` 触达。每次 bridge bulk-register 都按 bots.json 回写（不 sticky）|
 | `memoryPublic` | 否 | `true` | `metabot memory create/mkdir` 不带 `--path` 时的默认落点：`true` = `/shared/<bot>`（其他人可读），`false` = `/users/<bot>`（私有）。显式传 `--path` 永远以传入为准。bots.json 不写则保留 `metabot memory visibility` CLI 上次设置（sticky）|
 
@@ -453,7 +506,10 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 | `API_PORT` | 9100 | HTTP API 端口 |
 | `API_SECRET` | — | Bearer 认证（同时保护 API 和 Web UI） |
 | `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core 服务地址（MetaMemory + Skill Hub + Agents + T5T），本地自托管或填你自己的远程地址 |
+| `METABOT_CORE_PUBLIC_URL` | 读 `METABOT_CORE_URL` | metabot-core 对外可访问地址；用于分发安装脚本和 core→bridge 回调，反向代理场景建议显式设置 |
 | `METABOT_CORE_TOKEN` | 读 `~/.metabot-core/token` | metabot-core Bearer Token（在 `<METABOT_CORE_URL>/cli` 自助生成） |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许写入的顶层路径，逗号分隔 |
+| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | `/api/talk?async=true` 任务超过该时长仍未完成时标记为 `task_expired` |
 | `WIKI_SYNC_ENABLED` | true | 启用 MetaMemory→飞书知识库同步 |
 | `WIKI_SPACE_NAME` | MetaMemory | 飞书知识库空间名称 |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Wiki 同步映射 SQLite 存放目录 |
@@ -574,7 +630,8 @@ metabot status                      # PM2 进程状态
 
 # 2. bridge 守护进程 API（curl 本地 localhost:9100）
 metabot bots                        # 列出所有 Bot
-metabot talk <bot> <chatId> <prompt> # 与 Bot 对话
+metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <prompt> # 与 Bot 对话；默认最多等 25 秒，超时返回 taskId
+metabot talk-status <taskId>        # 查询 async talk 任务状态
 metabot stats                       # 费用和使用统计
 metabot voice tts "你好世界" --play  # 文字转语音
 
@@ -603,7 +660,7 @@ metabot voice tts "你好世界" --play
 
 `metabot update` 会自动更新已安装的 `lark-cli` 和飞书/Lark skills，并同步到 bot 工作目录；新机器首次安装时仍由安装器引导是否启用飞书 skills。
 
-CLI 支持连接远程 MetaBot 服务器，在 `~/.metabot/.env` 配置 `METABOT_URL` 即可；MetaMemory / Skill Hub / Agents / T5T 由 metabot-core 统一提供，配置 `METABOT_CORE_URL` + `METABOT_CORE_TOKEN`，在 `<METABOT_CORE_URL>/cli` 自助获取 Token。
+CLI 支持连接远程 MetaBot 服务器，在 `~/.metabot/.env` 配置 `METABOT_URL` 即可；MetaMemory / Skill Hub / Agents / T5T 由 metabot-core 统一提供，配置 `METABOT_CORE_URL` + `METABOT_CORE_TOKEN`，在 `<METABOT_CORE_URL>/cli` 自助获取 Token。从中心 metabot-core 的 `/install/install.sh` 安装新服务器时，脚本会自动把请求来源注入为默认 `METABOT_CORE_URL`；反向代理或内外网地址不一致时，在中心 core 上显式设置 `METABOT_CORE_PUBLIC_URL`。
 
 </details>
 

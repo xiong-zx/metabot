@@ -179,3 +179,37 @@ describe('createDocument route: default shared from agent memoryPublic', () => {
     expect((res.body as { shared: boolean }).shared).toBe(false);
   });
 });
+
+describe('memory routes: writable namespace guard', () => {
+  it('rejects arbitrary top-level document paths even for admin credentials', () => {
+    kit = makeKit('route-write-namespace-doc');
+    const admin = issue(kit, 'admin', 'admin');
+
+    const rejected = memoryRoutes.createDocument(kit.memory, kit.agents, {
+      title: 'invalid-root',
+      path: '/etc/pm-codex-ux-smoke-error/metabot/invalid-root',
+      content: 'x',
+    }, admin);
+    expect(rejected.status).toBe(403);
+    expect(rejected.body).toMatchObject({ error: 'memory_namespace_not_allowed' });
+
+    const accepted = memoryRoutes.createDocument(kit.memory, kit.agents, {
+      title: 'ops-note',
+      path: '/metabot/ops/valid-note',
+      content: 'x',
+    }, admin);
+    expect(accepted.status).toBe(201);
+  });
+
+  it('rejects arbitrary top-level folders through the public memory route', () => {
+    kit = makeKit('route-write-namespace-folder');
+    const admin = issue(kit, 'admin', 'admin');
+
+    const rejected = memoryRoutes.createFolder(kit.memory, { path: '/etc/pm-codex-ux-smoke-error' }, admin);
+    expect(rejected.status).toBe(403);
+    expect(rejected.body).toMatchObject({ error: 'memory_namespace_not_allowed' });
+
+    const accepted = memoryRoutes.createFolder(kit.memory, { path: '/metabot/ops' }, admin);
+    expect(accepted.status).toBe(201);
+  });
+});

@@ -24,9 +24,15 @@ import http from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  RESEARCH_MEMORY_MCP_TOOLS,
+  callResearchMemoryMcpTool,
+  isResearchMemoryMcpTool,
+} from './research-memory-mcp-tools.js';
 
 const API_URL = process.env.METABOT_API_URL || 'http://localhost:9100';
 const API_SECRET = process.env.METABOT_API_SECRET || process.env.API_SECRET || '';
+const MEMORY_ADMIN_TOKEN = process.env.METABOT_MEMORY_ADMIN_TOKEN || '';
 const DEFAULT_BOT_NAME = process.env.METABOT_BOT_NAME || '';
 const DEFAULT_CHAT_ID = process.env.METABOT_CHAT_ID || '';
 
@@ -51,6 +57,9 @@ function apiRequest(method: string, path: string, body?: unknown): Promise<{ sta
     };
     if (API_SECRET) {
       headers['Authorization'] = `Bearer ${API_SECRET}`;
+    }
+    if (MEMORY_ADMIN_TOKEN) {
+      headers['X-Metabot-Memory-Admin-Token'] = MEMORY_ADMIN_TOKEN;
     }
     if (postData) {
       headers['Content-Length'] = Buffer.byteLength(postData).toString();
@@ -251,6 +260,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    ...RESEARCH_MEMORY_MCP_TOOLS,
   ],
 }));
 
@@ -258,6 +268,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    if (isResearchMemoryMcpTool(name)) {
+      return await callResearchMemoryMcpTool(name, args, apiRequest);
+    }
 
     switch (name) {
       case 'worker_dispatch': {

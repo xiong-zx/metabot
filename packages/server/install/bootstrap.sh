@@ -106,6 +106,11 @@ if [[ -d "$METABOT_HOME/.git" ]]; then
 fi
 
 # ----- 5. download + extract tarball (always) -----
+PACKAGED_METABOT_CORE_URL="${PACKAGED_METABOT_CORE_URL:-}"
+# __METABOT_CORE_URL_INJECT__
+if [[ -z "${METABOT_CORE_URL:-}" && -n "$PACKAGED_METABOT_CORE_URL" ]]; then
+  export METABOT_CORE_URL="$PACKAGED_METABOT_CORE_URL"
+fi
 CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
 TARBALL_URL="$CORE_URL/install/latest.tgz"
 TMPDIR_BOOT="$(mktemp -d -t metabot-install.XXXXXX)"

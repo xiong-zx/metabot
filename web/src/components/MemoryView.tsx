@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
+import { useStore } from '../store';
 import type { MemoryDocument, MemoryFolder } from '../types';
 import styles from './MemoryView.module.css';
 
@@ -72,6 +73,10 @@ interface FolderTreeNode {
 }
 
 /** Flatten nested folder tree into a flat array with parent_id */
+function authHeaders(token: string | null): HeadersInit {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 function flattenTree(node: FolderTreeNode, parentId: string | null): MemoryFolder[] {
   const result: MemoryFolder[] = [];
   // Skip the root node itself, only add its children
@@ -84,8 +89,8 @@ function flattenTree(node: FolderTreeNode, parentId: string | null): MemoryFolde
   return result;
 }
 
-async function fetchFolders(): Promise<MemoryFolder[]> {
-  const res = await fetch(`${MEMORY_BASE}/api/folders`);
+async function fetchFolders(token: string | null): Promise<MemoryFolder[]> {
+  const res = await fetch(`${MEMORY_BASE}/api/folders`, { headers: authHeaders(token) });
   if (!res.ok) return [];
   const data = await res.json();
   // API returns a nested tree {id, name, children: [...]}
@@ -95,25 +100,26 @@ async function fetchFolders(): Promise<MemoryFolder[]> {
   return data.folders || data || [];
 }
 
-async function fetchDocuments(folderId?: string): Promise<MemoryDocument[]> {
+async function fetchDocuments(token: string | null, folderId?: string): Promise<MemoryDocument[]> {
   const url = folderId
     ? `${MEMORY_BASE}/api/documents?folder_id=${folderId}`
     : `${MEMORY_BASE}/api/documents`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: authHeaders(token) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.documents || data || [];
 }
 
-async function fetchDocument(docId: string): Promise<MemoryDocument | null> {
-  const res = await fetch(`${MEMORY_BASE}/api/documents/${docId}`);
+async function fetchDocument(token: string | null, docId: string): Promise<MemoryDocument | null> {
+  const res = await fetch(`${MEMORY_BASE}/api/documents/${docId}`, { headers: authHeaders(token) });
   if (!res.ok) return null;
   return res.json();
 }
 
-async function searchDocuments(query: string): Promise<MemoryDocument[]> {
+async function searchDocuments(token: string | null, query: string): Promise<MemoryDocument[]> {
   const res = await fetch(
     `${MEMORY_BASE}/api/search?q=${encodeURIComponent(query)}`,
+    { headers: authHeaders(token) },
   );
   if (!res.ok) return [];
   const data = await res.json();
@@ -123,6 +129,7 @@ async function searchDocuments(query: string): Promise<MemoryDocument[]> {
 /* ---- Component ---- */
 
 export function MemoryView() {
+  const token = useStore((s) => s.token);
   const [folders, setFolders] = useState<MemoryFolder[]>([]);
   const [documents, setDocuments] = useState<MemoryDocument[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -131,16 +138,11 @@ export function MemoryView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Load folders on mount
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [f, d] = await Promise.all([fetchFolders(), fetchDocuments()]);
+      const [f, d] = await Promise.all([fetchFolders(token), fetchDocuments(token)]);
       setFolders(f);
       setDocuments(d);
     } catch {
@@ -148,47 +150,52 @@ export function MemoryView() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
+
+  // Load folders on mount and when the login token changes.
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleFolderClick = useCallback(async (folderId: string) => {
     setSelectedFolder(folderId);
     setSelectedDoc(null);
     setLoading(true);
     try {
-      const docs = await fetchDocuments(folderId);
+      const docs = await fetchDocuments(token, folderId);
       setDocuments(docs);
     } catch {
       setError('Failed to load documents');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   const handleShowAll = useCallback(async () => {
     setSelectedFolder(null);
     setSelectedDoc(null);
     setLoading(true);
     try {
-      const docs = await fetchDocuments();
+      const docs = await fetchDocuments(token);
       setDocuments(docs);
     } catch {
       setError('Failed to load documents');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   const handleDocClick = useCallback(async (doc: MemoryDocument) => {
     setLoading(true);
     try {
-      const full = await fetchDocument(doc.id);
+      const full = await fetchDocument(token, doc.id);
       setSelectedDoc(full);
     } catch {
       setError('Failed to load document');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [token]);
 
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim()) {
@@ -198,14 +205,14 @@ export function MemoryView() {
     setLoading(true);
     setSelectedDoc(null);
     try {
-      const results = await searchDocuments(searchQuery);
+      const results = await searchDocuments(token, searchQuery);
       setDocuments(results);
     } catch {
       setError('Search failed');
     } finally {
       setLoading(false);
     }
-  }, [searchQuery, handleShowAll]);
+  }, [token, searchQuery, handleShowAll]);
 
   // Root folders (no parent)
   const rootFolders = folders.filter((f) => !f.parent_id);
