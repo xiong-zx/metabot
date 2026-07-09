@@ -46,7 +46,7 @@
 | 层级 | 生命周期 | 面向对象 | 主要职责 |
 | --- | --- | --- | --- |
 | Bot | 长期驻留，接 IM/API 入口 | 用户、外部系统、Agent Bus | 鉴权、会话入口、工作目录边界、引擎默认配置、可见性 |
-| Agent Team Agent | 长期或半长期，存在于团队 store | lead/PM 与其他队友 | 持久角色、任务队列、邮箱、runs、协作状态 |
+| Agent Team Agent | 长期或半长期，存在于团队 store | lead/PM 与其他 Agent | 持久角色、任务队列、邮箱、runs、协作状态 |
 | Worker | 短期后台任务 | PM 或 lead agent | 单次实现、实验、验证、长任务，完成后回报结果 |
 
 这个分层的核心思想是：**Bot 是入口和权限边界，Agent 是组织角色，Worker 是一次性执行单元。**
