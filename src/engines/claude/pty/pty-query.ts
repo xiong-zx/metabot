@@ -195,6 +195,8 @@ export const ptyQuery = (args: {
   let turnInFlight = false;
   let currentTurnId = 0;
   let currentTurnStarted = false;
+  let terminalResultTurnId = 0;
+  let errorClosingTurnId = 0;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
@@ -231,9 +233,12 @@ export const ptyQuery = (args: {
     // Stop-hook → synthesize a terminal `result` after a short drain delay.
     hookBridge.onTurnComplete(() => {
       if (disposed) return;
+      const turnId = currentTurnId;
+      if (!turnInFlight || errorClosingTurnId === turnId || !claimTerminalResult(turnId)) return;
       // Mark the turn complete IMMEDIATELY (not in the drain timeout below) so
       // the slash-command idle watchdog stands down and never double-emits.
       turnInFlight = false;
+      currentTurnStarted = false;
       const usage = { ...lastUsage };
       // Reset for the next turn.
       lastUsage = {};
@@ -340,9 +345,10 @@ export const ptyQuery = (args: {
       // (claude stays alive in plan mode; the next message revises the plan).
       if (tool.name === 'ExitPlanMode' && response.kind === 'cancel' && turnInFlight && !disposed) {
         await sleep(500); // let claude's interrupt line land first
-        if (turnInFlight && !disposed) {
+        if (turnInFlight && !disposed && claimTerminalResult(currentTurnId)) {
           logger.info('ptyQuery: keep-planning — synthesizing terminal result to end turn');
           turnInFlight = false;
+          currentTurnStarted = false;
           const usage = { ...lastUsage };
           lastUsage = {};
           out.enqueue(
@@ -474,6 +480,12 @@ export const ptyQuery = (args: {
     if (typeof model === 'string' && model) lastUsage.model = model;
   }
 
+  function claimTerminalResult(turnId: number): boolean {
+    if (turnId <= 0 || terminalResultTurnId >= turnId) return false;
+    terminalResultTurnId = turnId;
+    return true;
+  }
+
   // ── Prompt loop ──────────────────────────────────────────────────────────
   async function runPromptLoop(): Promise<void> {
     try {
@@ -490,6 +502,7 @@ export const ptyQuery = (args: {
         if (!session || disposed) break;
         turnInFlight = true; // a new turn starts the moment we submit the prompt
         currentTurnStarted = false;
+        errorClosingTurnId = 0;
         const turnId = ++currentTurnId;
         try {
           await session.typePrompt(text);
@@ -527,10 +540,15 @@ export const ptyQuery = (args: {
   const RUNNING_MARKER = 'esctointerrupt';
   const TURN_START_TIMEOUT_MS = envPositiveInt('METABOT_CLAUDE_TURN_START_TIMEOUT_MS', 30_000);
 
-  function finishTurnWithError(resultText: string, err?: unknown): void {
+  function finishTurnWithError(resultText: string, err?: unknown, turnId = currentTurnId): void {
     if (!turnInFlight || disposed) return;
+    if (!claimTerminalResult(turnId)) {
+      if (errorClosingTurnId === turnId) errorClosingTurnId = 0;
+      return;
+    }
     turnInFlight = false;
     currentTurnStarted = false;
+    if (errorClosingTurnId === turnId) errorClosingTurnId = 0;
     const usage = { ...lastUsage };
     lastUsage = {};
     out.enqueue(
@@ -562,7 +580,9 @@ export const ptyQuery = (args: {
       if (sawRunning) return; // real model turn — let the Stop-hook path finish it
       if (elapsed > SLASH_GRACE_MS) {
         // No model turn ever started → client-side command. Complete the turn.
+        if (!claimTerminalResult(currentTurnId)) return;
         turnInFlight = false;
+        currentTurnStarted = false;
         logger.info('ptyQuery: slash command ran with no model turn — synthesizing result');
         out.enqueue(
           synthesizeResult({
@@ -601,6 +621,8 @@ export const ptyQuery = (args: {
           { turnId, timeoutMs: TURN_START_TIMEOUT_MS },
           'ptyQuery: prompt submitted but no model turn started — interrupting and closing turn',
         );
+        if (terminalResultTurnId >= turnId) return;
+        errorClosingTurnId = turnId;
         try {
           await session?.interrupt();
         } catch (err) {
@@ -608,7 +630,10 @@ export const ptyQuery = (args: {
         }
         finishTurnWithError(
           `Claude Code did not start a model turn within ${Math.round(TURN_START_TIMEOUT_MS / 1000)}s after prompt submission. MetaBot interrupted the PTY and closed this turn instead of leaving the Feishu card in thinking. Please retry the message; if it repeats, reset the Claude session.`,
+          undefined,
+          turnId,
         );
+        if (errorClosingTurnId === turnId) errorClosingTurnId = 0;
         return;
       }
       await sleep(500);
@@ -628,8 +653,10 @@ export const ptyQuery = (args: {
   function handleSessionExit(info: { exitCode: number; signal?: number }): void {
     if (disposed) return; // normal teardown via dispose()
     logger.warn({ ...info, turnInFlight }, 'ptyQuery: claude exited unexpectedly');
-    if (turnInFlight) {
+    if (turnInFlight && claimTerminalResult(currentTurnId)) {
+      if (errorClosingTurnId === currentTurnId) errorClosingTurnId = 0;
       turnInFlight = false;
+      currentTurnStarted = false;
       out.enqueue(
         synthesizeResult({
           sessionId,
@@ -665,8 +692,10 @@ export const ptyQuery = (args: {
     // message wedges with "turn <id> is in flight" (blank reply in Feishu).
     // Synthesize the terminal result here, guarded by turnInFlight so we never
     // double-emit against the Stop-hook path (mirrors handleSessionExit).
-    if (turnInFlight && !disposed) {
+    if (turnInFlight && !disposed && claimTerminalResult(currentTurnId)) {
+      if (errorClosingTurnId === currentTurnId) errorClosingTurnId = 0;
       turnInFlight = false;
+      currentTurnStarted = false;
       logger.info('ptyQuery: turn interrupted — synthesizing terminal result');
       out.enqueue(
         synthesizeResult({
