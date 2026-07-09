@@ -27,6 +27,30 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
 
+export interface ClaudeInputReadiness {
+  hasInputBox: boolean;
+  running: boolean;
+  menuUp: boolean;
+  idle: boolean;
+}
+
+export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness {
+  const sq = tail.toLowerCase().replace(/\s+/g, '');
+  const running = sq.includes('esctointerrupt');
+  const menuUp =
+    sq.includes('entertoselect') ||
+    sq.includes('ctrl-gtoedit') ||
+    sq.includes('shift+tabtoapprove') ||
+    /❯\d\./.test(sq); // pointer on a numbered menu option
+  const hasInputBox = tail.includes('❯');
+  return {
+    hasInputBox,
+    running,
+    menuUp,
+    idle: hasInputBox && !running && !menuUp,
+  };
+}
+
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
   readonly jsonlPath: string;
@@ -257,9 +281,22 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // (ExitPlanMode cancel) claude is briefly settling the interrupt and is NOT
     // at a clean input box; keystrokes typed then are dropped and the prompt is
     // never submitted. Wait for the TUI to actually return to an idle input box
-    // before typing (best-effort: proceeds after a timeout so a session never
-    // wedges on a missed heuristic).
-    await this.waitForIdleInput();
+    // before typing. If the idle heuristic cannot confirm a clean prompt, do
+    // not type into a potentially running/menu state: that produces zero-stream
+    // turns where Feishu stays in "thinking" forever. Try one interrupt-based
+    // recovery, then fail the turn explicitly so the caller can close the card.
+    let idle = await this.waitForIdleInput();
+    if (!idle) {
+      this.log.warn('pty-session: idle-input wait timed out — interrupting before retry');
+      await this.interrupt();
+      idle = await this.waitForIdleInput({ timeoutMs: 5_000, stableMs: 500 });
+    }
+    if (!idle) {
+      throw new Error(
+        `pty-session: cannot type prompt — Claude TUI did not return to idle input. ` +
+          `Last 500 chars: ${this.snapshot().slice(-500)}`,
+      );
+    }
     if (!this.term || this.disposed) {
       throw new Error('pty-session: cannot type — session disposed');
     }
@@ -290,34 +327,32 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
    *     (driven separately; never type a prompt into it).
    *   - otherwise, with the `❯` input box present ⟶ idle and ready.
    * We require the idle state to hold across a couple polls so a single
-   * mid-redraw frame doesn't trip us, and cap the wait so a missed heuristic
-   * degrades to today's behaviour (type anyway) rather than wedging the turn.
+   * mid-redraw frame doesn't trip us. Callers decide how to recover if the
+   * timeout expires; this function must not type into an unconfirmed state.
    */
-  private async waitForIdleInput(): Promise<void> {
-    const TIMEOUT = 15_000;
-    const POLL = 200;
-    const STABLE_MS = 700;
+  private async waitForIdleInput(opts: {
+    timeoutMs?: number;
+    pollMs?: number;
+    stableMs?: number;
+  } = {}): Promise<boolean> {
+    const TIMEOUT = opts.timeoutMs ?? 15_000;
+    const POLL = opts.pollMs ?? 200;
+    const STABLE_MS = opts.stableMs ?? 700;
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
       const tail = this.snapshot().slice(-700);
-      const sq = tail.toLowerCase().replace(/\s+/g, '');
-      const running = sq.includes('esctointerrupt');
-      const menuUp =
-        sq.includes('entertoselect') ||
-        sq.includes('ctrl-gtoedit') ||
-        sq.includes('shift+tabtoapprove') ||
-        /❯\d\./.test(sq); // pointer on a numbered menu option
-      const hasInputBox = tail.includes('❯');
-      if (hasInputBox && !running && !menuUp) {
+      const readiness = classifyClaudeInputReadiness(tail);
+      if (readiness.idle) {
         if (!idleSince) idleSince = Date.now();
-        if (Date.now() - idleSince >= STABLE_MS) return;
+        if (Date.now() - idleSince >= STABLE_MS) return true;
       } else {
         idleSince = 0;
       }
       await sleep(POLL);
     }
-    this.log.warn('pty-session: idle-input wait timed out — typing anyway');
+    this.log.warn({ timeoutMs: TIMEOUT }, 'pty-session: idle-input wait timed out');
+    return false;
   }
 
   async interrupt(): Promise<void> {
