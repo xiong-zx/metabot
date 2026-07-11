@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
-import { parseArgs, resolveContentTypeFlag, resolveShareFlag, cmdCreate, cmdMkdir, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
+import { parseArgs, resolveContentTypeFlag, resolveShareFlag, cmdCreate, cmdMkdir, cmdMoveFolder, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
 
 describe('parseArgs', () => {
   it('splits positional and flags', () => {
@@ -263,6 +263,14 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     await cmdMkdir(cfg, parseArgs(['smoke-folder']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
     expect(bodyOf(post).path).toBeUndefined();
+  });
+
+  it('move-folder: sends a PATCH with the target path', async () => {
+    const calls = stubFetch();
+    await cmdMoveFolder(cfg, parseArgs(['/metabot', '--path', '/cargo1']));
+    const patch = calls.find((c) => c.url.endsWith('/api/memory/folders/%2Fmetabot'))!;
+    expect(patch.init.method).toBe('PATCH');
+    expect(bodyOf(patch).path).toBe('/cargo1');
   });
 
   // ---- write target is always the self namespace (independent of memoryPublic) ----
