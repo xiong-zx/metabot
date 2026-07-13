@@ -110,6 +110,82 @@ describe('ChatStore', () => {
     ]);
   });
 
+  it('requires DMs to contain exactly two participants', () => {
+    kit = makeKit('chat-store-dm-participant-count');
+    const store = new ChatStore(kit.db, kit.logger);
+
+    expect(() => store.createConversation({
+      kind: 'dm',
+      createdBy: 'alice@xvirobotics.com',
+      participants: [
+        { kind: 'user', ref: 'bob@xvirobotics.com' },
+        { kind: 'agent', ref: 'metabot' },
+      ],
+    })).toThrow('dm_participant_count_invalid');
+  });
+
+  it('does not add participants to an existing DM', () => {
+    kit = makeKit('chat-store-dm-immutable');
+    const store = new ChatStore(kit.db, kit.logger);
+    const dm = store.createConversation({
+      kind: 'dm',
+      createdBy: 'alice@xvirobotics.com',
+      participants: [{ kind: 'agent', ref: 'metabot' }],
+    });
+
+    expect(() => store.addParticipant(
+      dm.id,
+      'alice@xvirobotics.com',
+      { kind: 'user', ref: 'eve@xvirobotics.com' },
+    )).toThrow('dm_participants_immutable');
+    expect(store.listParticipants(dm.id, 'alice@xvirobotics.com')).toHaveLength(2);
+  });
+
+  it('does not reuse legacy three-participant DMs', () => {
+    kit = makeKit('chat-store-legacy-dm');
+    const store = new ChatStore(kit.db, kit.logger);
+    const legacyAgentDm = store.createConversation({
+      kind: 'group',
+      createdBy: 'alice@xvirobotics.com',
+      participants: [
+        { kind: 'user', ref: 'eve@xvirobotics.com' },
+        { kind: 'agent', ref: 'metabot' },
+      ],
+    });
+    const legacyUserDm = store.createConversation({
+      kind: 'group',
+      createdBy: 'alice@xvirobotics.com',
+      participants: [
+        { kind: 'user', ref: 'bob@xvirobotics.com' },
+        { kind: 'user', ref: 'eve@xvirobotics.com' },
+      ],
+    });
+    kit.db.prepare("UPDATE chat_conversations SET kind = 'dm' WHERE id IN (?, ?)")
+      .run(legacyAgentDm.id, legacyUserDm.id);
+
+    const agentDm = store.findOrCreateAgentDm({
+      userRef: 'alice@xvirobotics.com',
+      agentRef: 'metabot',
+    });
+    const userDm = store.findOrCreateUserDm({
+      userRef: 'alice@xvirobotics.com',
+      otherUserRef: 'bob@xvirobotics.com',
+    });
+
+    expect(agentDm.id).not.toBe(legacyAgentDm.id);
+    expect(userDm.id).not.toBe(legacyUserDm.id);
+    expect(agentDm.participants).toHaveLength(2);
+    expect(userDm.participants).toHaveLength(2);
+    expect(store.findOrCreateAgentDm({
+      userRef: 'alice@xvirobotics.com',
+      agentRef: 'metabot',
+    }).id).toBe(agentDm.id);
+    expect(store.findOrCreateUserDm({
+      userRef: 'alice@xvirobotics.com',
+      otherUserRef: 'bob@xvirobotics.com',
+    }).id).toBe(userDm.id);
+  });
+
   it('persists idempotent run events and writes complete output as assistant message', () => {
     kit = makeKit('chat-store-runs');
     const store = new ChatStore(kit.db, kit.logger);

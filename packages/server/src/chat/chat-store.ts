@@ -307,6 +307,9 @@ export class ChatStore {
       { kind: 'user', ref: input.createdBy, displayName: input.createdBy },
       ...input.participants,
     ]);
+    if (input.kind === 'dm' && participants.length !== 2) {
+      throw Object.assign(new Error('dm_participant_count_invalid'), { statusCode: 400 });
+    }
     const title = normalizeTitle(input.title, input.kind, participants, input.createdBy);
 
     const insert = this.db.transaction(() => {
@@ -337,6 +340,7 @@ export class ChatStore {
         JOIN chat_participants a
           ON a.conversation_id = c.id AND a.kind = 'agent' AND a.ref = ?
        WHERE c.kind = 'dm'
+         AND (SELECT COUNT(*) FROM chat_participants p WHERE p.conversation_id = c.id) = 2
        ORDER BY c.updated_at DESC
        LIMIT 1
     `).get(userRef, agentRef) as RawConversationRow | undefined;
@@ -372,6 +376,7 @@ export class ChatStore {
         JOIN chat_participants o
           ON o.conversation_id = c.id AND o.kind = 'user' AND o.ref = ?
        WHERE c.kind = 'dm'
+         AND (SELECT COUNT(*) FROM chat_participants p WHERE p.conversation_id = c.id) = 2
        ORDER BY c.updated_at DESC
        LIMIT 1
     `).get(normalizedUser, normalizedOther) as RawConversationRow | undefined;
@@ -448,11 +453,14 @@ export class ChatStore {
     participant: { kind: ChatParticipantKind; ref: string; displayName?: string },
   ): ChatParticipant {
     this.assertParticipant(conversationId, 'user', actorUserRef);
-    const conv = this.db.prepare('SELECT created_by FROM chat_conversations WHERE id = ?')
-      .get(conversationId) as { created_by: string } | undefined;
+    const conv = this.db.prepare('SELECT kind, created_by FROM chat_conversations WHERE id = ?')
+      .get(conversationId) as { kind: ChatConversationKind; created_by: string } | undefined;
     if (!conv) throw new ChatNotFoundError(conversationId);
     if (conv.created_by !== actorUserRef) {
       throw Object.assign(new Error('chat_owner_required'), { statusCode: 403 });
+    }
+    if (conv.kind === 'dm') {
+      throw Object.assign(new Error('dm_participants_immutable'), { statusCode: 409 });
     }
     const now = new Date().toISOString();
     this.db.prepare(`
