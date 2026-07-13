@@ -523,6 +523,9 @@ export const ptyQuery = (args: {
         // stands down and the normal Stop-hook path completes the turn.
         if (text.trim().startsWith('/')) void watchSlashCommandCompletion();
         else void watchTurnStart(turnId);
+        // Applies to both: a slash command that invokes the model can be aborted
+        // by the same upstream failure as an ordinary prompt.
+        void watchApiError(turnId);
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: prompt loop ended with error');
@@ -539,6 +542,20 @@ export const ptyQuery = (args: {
   /** "Model is actively running" signal in the (squished) TUI footer. */
   const RUNNING_MARKER = 'esctointerrupt';
   const TURN_START_TIMEOUT_MS = envPositiveInt('METABOT_CLAUDE_TURN_START_TIMEOUT_MS', 30_000);
+  /**
+   * Claude Code aborts a turn mid-stream by printing this line and returning to
+   * the prompt — no Stop hook, so no terminal `result`. Anchored to a line start
+   * and restricted to claude's own wordings so an answer that merely *quotes* an
+   * API error (a turn diagnosing this very bug does) cannot trip the watchdog.
+   */
+  const API_ERROR_LINE =
+    /^[^\S\n]*API Error:[^\S\n]*(?:\d{3}\b|Connection closed mid-response|Request (?:timed out|was aborted)|Internal server error)[^\n]*/gim;
+  /** Idle time after the error line before we accept the turn as dead. */
+  const API_ERROR_IDLE_MS = envPositiveInt('METABOT_CLAUDE_API_ERROR_IDLE_MS', 8_000);
+
+  function apiErrorLines(text: string): string[] {
+    return text.match(API_ERROR_LINE) ?? [];
+  }
 
   function finishTurnWithError(resultText: string, err?: unknown, turnId = currentTurnId): void {
     if (!turnInFlight || disposed) return;
@@ -637,6 +654,65 @@ export const ptyQuery = (args: {
         return;
       }
       await sleep(500);
+    }
+  }
+
+  /**
+   * Guard against the abort-mid-stream failure mode: the model turn starts and
+   * streams, then Claude Code gives up on the upstream request ("API Error:
+   * Connection closed mid-response."), prints the error and returns to the
+   * prompt WITHOUT firing the Stop hook. No terminal `result` is emitted, so the
+   * bridge keeps the turn in flight until its 1h no-stream timeout — the Feishu
+   * card sits wedged in "running" for an hour and the chat stays busy.
+   *
+   * Close the turn ourselves once claude's error line is on screen AND the TUI
+   * has been idle (no "esc to interrupt") past API_ERROR_IDLE_MS. The idle wait
+   * is what keeps a legitimate answer safe: while the model streams, the running
+   * marker is up, and a real completion fires Stop within ~RESULT_DRAIN_MS — long
+   * before the idle window elapses. claimTerminalResult() still arbitrates if the
+   * Stop hook lands late, so at worst we lose the race, never double-emit.
+   */
+  async function watchApiError(turnId: number): Promise<void> {
+    // Errors already on screen when the prompt was submitted (an earlier turn's,
+    // or an echo of the user's own text) must not close this turn. The snapshot
+    // is a bounded ring, so old matches can only age out — the count never rises
+    // on its own, which makes "more than the baseline" a safe new-error signal.
+    const baseline = apiErrorLines(session?.snapshot() ?? '').length;
+    let idleSince = 0;
+    while (!disposed && turnInFlight && currentTurnId === turnId) {
+      const matches = apiErrorLines(session?.snapshot() ?? '');
+      // Liveness must come from screen(), the rendered viewport — NOT from the
+      // snapshot ring. The ring is an append-log: the spinner's "esc to
+      // interrupt" frames stay in its tail for a while after claude has already
+      // returned to the prompt, so a ring-based check would read a dead turn as
+      // still running and never fire. An empty screen() means the emulator gave
+      // us nothing to judge on; treat that as running and wait rather than risk
+      // closing a live turn.
+      const screen = session?.screen() ?? '';
+      const running = !screen || screen.toLowerCase().replace(/\s+/g, '').includes(RUNNING_MARKER);
+
+      if (matches.length > baseline && !running) {
+        if (!idleSince) idleSince = Date.now();
+        else if (Date.now() - idleSince >= API_ERROR_IDLE_MS) {
+          if (terminalResultTurnId >= turnId) return;
+          const line = matches[matches.length - 1].trim();
+          logger.warn(
+            { turnId, line },
+            'ptyQuery: claude aborted the turn with an API error and never fired Stop — closing turn',
+          );
+          errorClosingTurnId = turnId;
+          finishTurnWithError(
+            `${line}\n\nClaude Code aborted this turn mid-response and returned to the prompt without completing it. MetaBot closed the turn instead of leaving the Feishu card running until the 1h idle timeout. The reply above (if any) may be incomplete — please retry.`,
+            undefined,
+            turnId,
+          );
+          if (errorClosingTurnId === turnId) errorClosingTurnId = 0;
+          return;
+        }
+      } else {
+        idleSince = 0; // model resumed, or the error scrolled out of the ring
+      }
+      await sleep(1_000);
     }
   }
 
