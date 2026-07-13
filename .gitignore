@@ -37,3 +37,8 @@ ios/AuthKey*.p8
 # Parallel local projects living alongside metabot (not part of this repo)
 naruto-finance-agents/
 bots.test-trunks.json
+
+# Local runtime/worktree artifacts
+.metabot-memory/
+tmp/
+worktrees/
