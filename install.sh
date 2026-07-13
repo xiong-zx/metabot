@@ -936,12 +936,13 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       const engine = process.argv[5];
       const bot = {
         name: process.argv[1],
+        engine,
         feishuAppId: process.argv[2],
         feishuAppSecret: process.argv[3],
         defaultWorkingDirectory: process.argv[4],
       };
-      if (engine === 'kimi') { bot.engine = 'kimi'; bot.kimi = { thinking: true }; }
-      if (engine === 'codex') { bot.engine = 'codex'; bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
+      if (engine === 'kimi') { bot.kimi = { thinking: true }; }
+      if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
     " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
@@ -953,11 +954,12 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       const engine = process.argv[4];
       const bot = {
         name: process.argv[1],
+        engine,
         telegramBotToken: process.argv[2],
         defaultWorkingDirectory: process.argv[3],
       };
-      if (engine === 'kimi') { bot.engine = 'kimi'; bot.kimi = { thinking: true }; }
-      if (engine === 'codex') { bot.engine = 'codex'; bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
+      if (engine === 'kimi') { bot.kimi = { thinking: true }; }
+      if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
     " "$TG_NAME" "$TELEGRAM_BOT_TOKEN" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
@@ -970,10 +972,11 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       const engine = process.argv[3];
       const bot = {
         name: process.argv[1],
+        engine,
         defaultWorkingDirectory: process.argv[2],
       };
-      if (engine === 'kimi') { bot.engine = 'kimi'; bot.kimi = { thinking: true }; }
-      if (engine === 'codex') { bot.engine = 'codex'; bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
+      if (engine === 'kimi') { bot.kimi = { thinking: true }; }
+      if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
     " "$WX_NAME" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
