@@ -38,7 +38,7 @@ ios/AuthKey*.p8
 naruto-finance-agents/
 bots.test-trunks.json
 
-# Local generated research/run artifacts
+# Local generated runtime/worktree artifacts
 .metabot-memory/
 tmp/
 worktrees/
