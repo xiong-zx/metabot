@@ -1241,15 +1241,17 @@ export function Chat() {
                 ))}
               </div>
             </div>
-            <details className="chat-thread-settings">
-              <summary>Manage participants</summary>
-              <ParticipantManager
-                selected={selected}
-                agents={availableAgents}
-                userSuggestions={users}
-                onChanged={(conv) => void participantChanged(conv)}
-              />
-            </details>
+            {selected.kind === 'group' && (
+              <details className="chat-thread-settings">
+                <summary>Manage participants</summary>
+                <ParticipantManager
+                  selected={selected}
+                  agents={availableAgents}
+                  userSuggestions={users}
+                  onChanged={(conv) => void participantChanged(conv)}
+                />
+              </details>
+            )}
             <div className="chat-timeline">
               {!messages && <div className="state"><span className="cursor">loading</span></div>}
               {messages && messages.length === 0 && (
