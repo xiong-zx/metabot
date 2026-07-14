@@ -839,6 +839,11 @@ export function startServer(options: ServerOptions): ServerHandle {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.getFolder(memoryStore, idOrPath, cred));
       }
+      if (pathname.startsWith('/api/memory/folders/') && (method === 'PATCH' || method === 'PUT')) {
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.updateFolder(memoryStore, idOrPath, body, cred));
+      }
       if (pathname.startsWith('/api/memory/folders/') && method === 'DELETE') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.deleteFolder(memoryStore, idOrPath, cred));

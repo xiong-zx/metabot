@@ -438,9 +438,13 @@ Global fields:
 | `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core service URL (MetaMemory + Skill Hub + Agents + T5T) — self-host locally or point at your own remote host |
 | `METABOT_CORE_TOKEN` | reads `~/.metabot-core/token` | Bearer token for metabot-core |
 | `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API write calls may create/update; comma-separated |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's top-level MetaMemory namespace, for example `/cargo1`; appended to Memory API writable roots when set |
 | `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | Mark `/api/talk?async=true` tasks as `task_expired` when they exceed this runtime without completing |
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
+| `WIKI_AUTO_SYNC` | true | Poll MetaMemory changes and trigger sync automatically |
+| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | MetaMemory snapshot polling interval |
+| `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Auto-sync debounce delay |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Directory holding the wiki-sync mapping SQLite |
 | `VOLCENGINE_TTS_APPID` | — | Doubao voice (TTS + STT) |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao voice key |

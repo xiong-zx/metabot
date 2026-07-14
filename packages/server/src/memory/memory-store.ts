@@ -103,6 +103,12 @@ export interface FolderCreateInput {
   path?: string;
 }
 
+export interface FolderUpdateInput {
+  name?: string;
+  parent_id?: string;
+  path?: string;
+}
+
 function nowISO(): string {
   return new Date().toISOString();
 }
@@ -368,6 +374,92 @@ export class MemoryStore {
     const children = this.db.prepare('SELECT id FROM folders WHERE parent_id = ?').all(folder.id) as { id: string }[];
     for (const child of children) this.deleteFolder(child.id, cred);
     this.db.prepare('DELETE FROM folders WHERE id = ?').run(folder.id);
+  }
+
+  updateFolder(folderIdOrPath: string, data: FolderUpdateInput, cred: Credential): Folder | null {
+    const folder = this.resolveFolder(folderIdOrPath);
+    if (!folder) return null;
+    if (folder.id === 'root') throw Object.assign(new Error('cannot_update_root'), { statusCode: 400 });
+    if (!canWritePath(cred, folder.path)) {
+      throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+    }
+
+    const target = this.resolveFolderUpdateTarget(folder, data);
+    if (!canWritePath(cred, target.path)) {
+      throw Object.assign(new Error('forbidden'), { statusCode: 403 });
+    }
+
+    const existing = this.findFolderByPath(target.path);
+    if (existing && existing.id !== folder.id) {
+      throw Object.assign(new Error('already_exists'), { statusCode: 409 });
+    }
+
+    if (
+      target.path === folder.path
+      && target.name === folder.name
+      && target.parent_id === folder.parent_id
+    ) {
+      return folder;
+    }
+
+    const oldPath = folder.path;
+    const oldPrefix = oldPath === '/' ? '/' : `${oldPath}/`;
+    const newPrefix = target.path === '/' ? '/' : `${target.path}/`;
+    const now = nowISO();
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        'UPDATE folders SET name = ?, parent_id = ?, path = ?, updated_at = ? WHERE id = ?',
+      ).run(target.name, target.parent_id, target.path, now, folder.id);
+
+      const descendants = this.db.prepare(
+        'SELECT id, path FROM folders WHERE path LIKE ? ORDER BY length(path) ASC',
+      ).all(`${oldPrefix}%`) as { id: string; path: string }[];
+      for (const descendant of descendants) {
+        const nextPath = `${newPrefix}${descendant.path.slice(oldPrefix.length)}`;
+        this.db.prepare('UPDATE folders SET path = ?, updated_at = ? WHERE id = ?')
+          .run(nextPath, now, descendant.id);
+      }
+
+      const docs = this.db.prepare(
+        'SELECT id, path FROM documents WHERE path LIKE ? ORDER BY path',
+      ).all(`${oldPrefix}%`) as { id: string; path: string }[];
+      for (const doc of docs) {
+        const nextPath = `${newPrefix}${doc.path.slice(oldPrefix.length)}`;
+        this.db.prepare('UPDATE documents SET path = ?, updated_at = ? WHERE id = ?')
+          .run(nextPath, now, doc.id);
+      }
+    });
+    tx();
+
+    return this.findFolderById(folder.id);
+  }
+
+  private resolveFolderUpdateTarget(folder: Folder, data: FolderUpdateInput): { name: string; parent_id: string | null; path: string } {
+    if (data.path !== undefined) {
+      const path = normalizePath(data.path);
+      if (path === '/') throw Object.assign(new Error('cannot_update_root'), { statusCode: 400 });
+      const segments = path.slice(1).split('/');
+      const name = segments[segments.length - 1] || folder.name;
+      const parentPath = segments.length <= 1 ? '/' : '/' + segments.slice(0, -1).join('/');
+      if (parentPath === folder.path || parentPath.startsWith(folder.path + '/')) {
+        throw Object.assign(new Error('cannot_move_folder_into_itself'), { statusCode: 400 });
+      }
+      const parent = this.ensureFolderPath(parentPath);
+      return { name, parent_id: parent.id, path };
+    }
+
+    const name = data.name ?? folder.name;
+    const parentId = data.parent_id ?? folder.parent_id ?? 'root';
+    if (parentId === folder.id) {
+      throw Object.assign(new Error('cannot_move_folder_into_itself'), { statusCode: 400 });
+    }
+    const parent = this.findFolderById(parentId);
+    if (!parent) throw Object.assign(new Error('folder_not_found'), { statusCode: 404 });
+    if (parent.path === folder.path || parent.path.startsWith(folder.path + '/')) {
+      throw Object.assign(new Error('cannot_move_folder_into_itself'), { statusCode: 400 });
+    }
+    return { name, parent_id: parent.id, path: joinPath(parent.path, name) };
   }
 
   private resolveFolder(idOrPath: string): Folder | null {

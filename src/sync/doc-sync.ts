@@ -253,6 +253,14 @@ export class DocSync {
 
     // Check if folder already has a mapping
     let folderMapping = this.store.getFolderMapping(node.id);
+    if (folderMapping && folderMapping.memoryPath !== node.path) {
+      this.logger.info({
+        folderId: node.id,
+        oldPath: folderMapping.memoryPath,
+        newPath: node.path,
+      }, 'Folder path changed; creating a new wiki folder mapping');
+      folderMapping = undefined;
+    }
 
     if (!folderMapping) {
       // Create wiki node for this folder (as a shortcut page)
@@ -364,8 +372,16 @@ export class DocSync {
     parentNodeToken: string,
     result?: SyncResult,
   ): Promise<void> {
-    const hash = contentHash(doc.content + doc.title);
-    const existing = this.store.getDocMapping(doc.id);
+    const hash = contentHash(this.buildDocumentMarkdown(doc));
+    let existing = this.store.getDocMapping(doc.id);
+    if (existing && existing.memoryPath !== doc.path) {
+      this.logger.info({
+        docId: doc.id,
+        oldPath: existing.memoryPath,
+        newPath: doc.path,
+      }, 'Document path changed; creating a new wiki document mapping');
+      existing = undefined;
+    }
 
     // Skip if content hasn't changed
     if (existing && existing.contentHash === hash) {
