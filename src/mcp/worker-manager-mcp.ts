@@ -330,7 +330,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const engineTag = w.engine
             ? `${w.engine}/${w.model}${w.reasoningEffort ? `@${w.reasoningEffort}` : ''}`
             : w.model;
-          return `- [${w.id}] ${w.status} | ${w.label || 'no-label'} | ${engineTag} | ${dur} ${cost} | ${w.workingDirectory}`;
+          const detail = [
+            w.executionStatus && w.executionStatus !== w.status ? `exec:${w.executionStatus}` : '',
+            w.artifactStatus && w.artifactStatus !== 'unknown' ? `artifact:${w.artifactStatus}` : '',
+          ].filter(Boolean).join(',');
+          return `- [${w.id}] ${w.status}${detail ? ` (${detail})` : ''} | ${w.label || 'no-label'} | ${engineTag} | ${dur} ${cost} | ${w.workingDirectory}`;
         });
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
@@ -351,8 +355,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `Duration: ${dur}`,
           w.costUsd ? `Cost: $${w.costUsd.toFixed(2)}` : '',
           `Workdir: ${w.workingDirectory}`,
+          w.executionStatus ? `Execution status: ${w.executionStatus}` : '',
+          w.artifactStatus ? `Artifact status: ${w.artifactStatus}${w.artifactPath ? ` (${w.artifactPath})` : ''}` : '',
           w.resultSummary ? `Result (truncated): ${w.resultSummary.slice(0, 200)}` : '',
           w.error ? `Error: ${w.error}` : '',
+          w.terminalError ? `Terminal warning: ${w.terminalError}` : '',
           '',
           '⚠️ This is a quick metadata-level status only.',
           "For detailed information, inspect the worker's workdir yourself:",
