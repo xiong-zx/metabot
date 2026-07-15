@@ -26,6 +26,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
+const PROMPT_MARKER_RE = /[❯⏵]/u;
 
 export interface ClaudeInputReadiness {
   hasInputBox: boolean;
@@ -41,8 +42,8 @@ export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness
     sq.includes('entertoselect') ||
     sq.includes('ctrl-gtoedit') ||
     sq.includes('shift+tabtoapprove') ||
-    /❯\d\./.test(sq); // pointer on a numbered menu option
-  const hasInputBox = tail.includes('❯');
+    /[❯⏵]\d\./u.test(sq); // pointer on a numbered menu option
+  const hasInputBox = PROMPT_MARKER_RE.test(tail);
   return {
     hasInputBox,
     running,
@@ -259,7 +260,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
 
     while (Date.now() - start < TIMEOUT) {
-      if (/❯/.test(this.ring)) {
+      if (PROMPT_MARKER_RE.test(this.ring)) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
         return;
@@ -268,7 +269,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     throw new Error(
-      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯). ` +
+      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯/⏵). ` +
         `Last 500 chars: ${this.ring.slice(-500)}`,
     );
   }
