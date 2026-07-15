@@ -15,6 +15,8 @@ import type { EngineName } from '../config.js';
 export type WorkerReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+export type WorkerExecutionStatus = 'running' | 'completed' | 'failed' | 'timed_out' | 'idle_timed_out' | 'transport_error' | 'aborted';
+export type WorkerArtifactStatus = 'unknown' | 'missing' | 'invalid' | 'valid_partial' | 'valid_complete';
 
 export interface WorkerRecord {
   id: string;
@@ -32,6 +34,12 @@ export interface WorkerRecord {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   status: 'running' | 'completed' | 'failed' | 'aborted';
+  /** Process/stream outcome. This can differ from `status` when a valid artifact recovered a failed stream. */
+  executionStatus?: WorkerExecutionStatus;
+  /** Best-effort validation of durable worker output files under the workdir. */
+  artifactStatus?: WorkerArtifactStatus;
+  artifactPath?: string;
+  terminalError?: string;
   startTime: number;
   endTime?: number;
   resultSummary?: string;
@@ -113,6 +121,9 @@ export function resolveWorkerModel(
 // production) can fully isolate its state.
 const PERSISTENCE_DIR = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
 const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, 'workers.json');
+const MIN_DURABLE_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
+const MIN_DURABLE_WORKER_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+const DURABLE_WORKER_PATTERN = /(autoresearchclaw|auto[-_\s]?research|research[-_\s]?worker|dashboard[-_\s]?research|调研)/i;
 
 function loadRecords(): WorkerRecord[] {
   try {
@@ -126,6 +137,89 @@ function loadRecords(): WorkerRecord[] {
 function saveRecords(records: WorkerRecord[]): void {
   fs.mkdirSync(PERSISTENCE_DIR, { recursive: true });
   fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(records, null, 2));
+}
+
+function isDurableWorkerTask(input: Pick<DispatchInput, 'prompt' | 'label'>): boolean {
+  return DURABLE_WORKER_PATTERN.test(`${input.label || ''}\n${input.prompt || ''}`);
+}
+
+function normalizeWorkerTimeouts(input: DispatchInput): { timeoutMs?: number; idleTimeoutMs?: number; adjusted: boolean } {
+  if (!isDurableWorkerTask(input)) {
+    return { timeoutMs: input.timeoutMs, idleTimeoutMs: input.idleTimeoutMs, adjusted: false };
+  }
+  const timeoutMs = input.timeoutMs === undefined
+    ? undefined
+    : Math.max(input.timeoutMs, MIN_DURABLE_WORKER_TIMEOUT_MS);
+  const idleTimeoutMs = input.idleTimeoutMs === undefined
+    ? undefined
+    : Math.max(input.idleTimeoutMs, MIN_DURABLE_WORKER_IDLE_TIMEOUT_MS);
+  return {
+    timeoutMs,
+    idleTimeoutMs,
+    adjusted: timeoutMs !== input.timeoutMs || idleTimeoutMs !== input.idleTimeoutMs,
+  };
+}
+
+function classifyExecutionStatus(error: string | undefined): WorkerExecutionStatus {
+  const text = error || '';
+  if (/no activity|idle timeout/i.test(text)) return 'idle_timed_out';
+  if (/timed out|timeout/i.test(text)) return 'timed_out';
+  if (/stream disconnected|transport error|network error|decoding response body/i.test(text)) return 'transport_error';
+  return 'failed';
+}
+
+function appendSummary(existing: string | undefined, addition: string): string {
+  const prefix = existing?.trim();
+  return (prefix ? `${prefix}\n${addition}` : addition).slice(0, 500);
+}
+
+function readJsonFile(filePath: string): any | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch {
+    return undefined;
+  }
+}
+
+function artifactStatusFromJson(value: any): WorkerArtifactStatus {
+  if (!value || typeof value !== 'object') return 'invalid';
+  const contractVersion = value.contract_version;
+  const status = typeof value.status === 'string' ? value.status.toLowerCase() : '';
+  if (typeof contractVersion !== 'string' || !status) return 'invalid';
+  if (status === 'complete' || status === 'completed') return 'valid_complete';
+  if (status === 'partial') return 'valid_partial';
+  return 'invalid';
+}
+
+function inspectArtifactFile(filePath: string): { status: WorkerArtifactStatus; path: string } {
+  return { status: artifactStatusFromJson(readJsonFile(filePath)), path: filePath };
+}
+
+function inspectWorkerArtifacts(workDir: string): { status: WorkerArtifactStatus; path?: string } {
+  const resolvedWorkDir = path.resolve(workDir);
+  const candidates: string[] = [path.join(resolvedWorkDir, 'results.json')];
+  const autoResearchDir = path.join(resolvedWorkDir, '.metabot-memory', 'autoresearchclaw');
+  try {
+    for (const entry of fs.readdirSync(autoResearchDir)) {
+      if (entry.endsWith('.json')) candidates.push(path.join(autoResearchDir, entry));
+    }
+  } catch {
+    // Missing AutoResearchClaw artifact directory is common for non-research workers.
+  }
+
+  let sawInvalid = false;
+  let partialPath: string | undefined;
+  for (const candidate of candidates) {
+    if (!candidate.startsWith(resolvedWorkDir + path.sep) && candidate !== path.join(resolvedWorkDir, 'results.json')) continue;
+    if (!fs.existsSync(candidate)) continue;
+    const inspected = inspectArtifactFile(candidate);
+    if (inspected.status === 'valid_complete') return inspected;
+    if (inspected.status === 'valid_partial') partialPath = partialPath || inspected.path;
+    else if (inspected.status === 'invalid') sawInvalid = true;
+  }
+
+  if (partialPath) return { status: 'valid_partial', path: partialPath };
+  return { status: sawInvalid ? 'invalid' : 'missing' };
 }
 
 // --- Worker CLAUDE.md injection ---
@@ -208,6 +302,7 @@ export class WorkerManager {
 
     const { model, engine } = resolveWorkerModel(input.model, input.engine, this.config.defaultModel);
     const id = crypto.randomUUID().slice(0, 8);
+    const effectiveTimeouts = normalizeWorkerTimeouts(input);
 
     const record: WorkerRecord = {
       id,
@@ -222,9 +317,11 @@ export class WorkerManager {
       reasoningEffort: input.reasoningEffort,
       approvalPolicy: input.approvalPolicy,
       sandbox: input.sandbox,
-      timeoutMs: input.timeoutMs,
-      idleTimeoutMs: input.idleTimeoutMs,
+      timeoutMs: effectiveTimeouts.timeoutMs,
+      idleTimeoutMs: effectiveTimeouts.idleTimeoutMs,
       status: 'running',
+      executionStatus: 'running',
+      artifactStatus: 'unknown',
       startTime: Date.now(),
     };
 
@@ -245,6 +342,7 @@ export class WorkerManager {
     this.logger.info({
       workerId: id, botName, pmChatId, workerChatId: record.workerChatId,
       workDir: workingDirectory, model, engine, reasoningEffort: input.reasoningEffort, label,
+      timeoutAdjusted: effectiveTimeouts.adjusted, timeoutMs: record.timeoutMs, idleTimeoutMs: record.idleTimeoutMs,
     }, 'Worker dispatched');
 
     return record;
@@ -375,21 +473,42 @@ export class WorkerManager {
 
       if (result.success) {
         record.status = 'completed';
+        record.executionStatus = 'completed';
         record.resultSummary = result.responseText?.slice(0, 500) || '';
       } else {
         record.status = 'failed';
         record.error = result.error || 'Worker task failed';
+        record.executionStatus = classifyExecutionStatus(record.error);
         record.resultSummary = result.responseText?.slice(0, 500) || '';
+        this.reconcileTerminalArtifact(record);
       }
     } catch (err: any) {
       record.endTime = Date.now();
       record.durationMs = record.endTime - startTime;
       record.status = record.status === 'aborted' ? 'aborted' : 'failed';
       record.error = err.message || 'Unknown error';
+      record.executionStatus = record.status === 'aborted' ? 'aborted' : classifyExecutionStatus(record.error);
+      if (record.status === 'failed') this.reconcileTerminalArtifact(record);
     }
 
     this.persist();
     await this.notifyPm(record);
+  }
+
+  private reconcileTerminalArtifact(record: WorkerRecord): void {
+    const artifact = inspectWorkerArtifacts(record.workingDirectory);
+    record.artifactStatus = artifact.status;
+    if (artifact.path) record.artifactPath = artifact.path;
+
+    if (record.status === 'failed' && artifact.status === 'valid_complete') {
+      record.terminalError = record.error;
+      delete record.error;
+      record.status = 'completed';
+      record.resultSummary = appendSummary(
+        record.resultSummary,
+        `Recovered: valid completed artifact found at ${path.relative(record.workingDirectory, artifact.path!)}.`,
+      );
+    }
   }
 
   private async notifyPm(record: WorkerRecord): Promise<void> {
@@ -410,8 +529,11 @@ export class WorkerManager {
       `Duration: ${durationMin}min | Cost: ${costStr}`,
       `Working directory: ${record.workingDirectory}`,
       `Original task: ${record.prompt.slice(0, 200)}`,
+      record.executionStatus && record.executionStatus !== record.status ? `Execution status: ${record.executionStatus}` : '',
+      record.artifactStatus && record.artifactStatus !== 'unknown' ? `Artifact status: ${record.artifactStatus}${record.artifactPath ? ` (${record.artifactPath})` : ''}` : '',
       record.resultSummary ? `Result summary: ${record.resultSummary.slice(0, 300)}` : '',
       record.error ? `Error: ${record.error}` : '',
+      record.terminalError ? `Terminal warning: ${record.terminalError}` : '',
       '',
       'Please review the worker\'s output in the working directory and decide next steps.',
       'Check: worker-progress.json, results.json, train.log, and code changes.',
