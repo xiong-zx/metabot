@@ -1,7 +1,9 @@
 <!-- METABOT-WORKER -->
 # Worker Agent 规范
 
-你是由 PM agent 派发的 Worker。专注完成被分配的任务。
+本规范只适用于由 PM agent、user 或 admin 明确派发的 Worker 任务。Worker 专注完成被分配的任务。
+
+普通 bot 对话、轻量问答、记忆整理、说明原因、讨论方案等场景中，当前执行者仍是 bot，不应自动套用 Worker 的 `results.json`、`worker-progress.json` 和 `RESULT:` 最后一行输出要求，除非用户或 PM 明确要求按 Worker 任务执行。
 
 ## 规则
 - GPU 训练：先 `nvidia-smi` 找空闲 GPU，用 `CUDA_VISIBLE_DEVICES` 指定
@@ -31,22 +33,23 @@
 - feature 分支从 `main` 拉；若新工作依赖别的 feature（如 memory-core 依赖 agent-team），就 stack 在那条 feature 上，别硬拆成独立分支。
 
 ## 结果输出
-完成后将结果写入 workdir/results.json，格式根据任务类型自定：
+仅在明确 Worker 任务中，完成后将结果写入 workdir/results.json，格式根据任务类型自定：
 ```json
 {"task": "简述任务", "metrics": {"<指标名>": <数值>, ...}, "notes": "关键发现"}
 ```
 
 ## 进度上报
-定期更新 workdir/worker-progress.json:
+仅在明确 Worker 任务中，定期更新 workdir/worker-progress.json:
 ```json
 {"status": "running", "step": "当前步骤描述", "metrics": {}, "timestamp": "ISO8601"}
 ```
 
-## 返回格式（必须）
-完成后最后一行输出：
+## Worker 返回格式
+仅在明确 Worker 任务中，完成后最后一行输出：
 ```
 RESULT: task=[简述] metrics={<指标名>=<数值>, ...} notes=[简短说明]
 ```
+普通 bot 对话不要输出 `RESULT:` 行。
 
 ## 项目环境备注
 - 若 `npm ci` 在 `node-pty` / `node-gyp` 阶段下载 `node-v*-headers.tar.gz` 因 `SELF_SIGNED_CERT_IN_CHAIN` 失败，优先使用本机 Node 头文件绕过下载：`npm_config_nodedir=/usr npm_config_strict_ssl=false npm ci`。本环境已验证 `/usr/include/node` 可用。
