@@ -104,6 +104,7 @@ describe('DocSync', () => {
       databaseDir: tmpDir,
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
+      memoryRootPath: '/',
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());

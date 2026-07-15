@@ -45,6 +45,8 @@ export interface DocSyncConfig {
   wikiSpaceId?: string;
   /** Throttle delay between API calls (ms). Default 300. */
   throttleMs?: number;
+  /** Optional MetaMemory path prefix to sync, e.g. /savio. */
+  memoryRootPath?: string;
 }
 
 const DEFAULT_THROTTLE_MS = 300;
@@ -55,6 +57,7 @@ export class DocSync {
   private store: SyncStore;
   private throttleMs: number;
   private wikiSpaceName: string;
+  private memoryRootPath: string;
   private syncing = false;
 
   constructor(
@@ -70,6 +73,7 @@ export class DocSync {
     this.store = new SyncStore(config.databaseDir, logger);
     this.throttleMs = config.throttleMs ?? DEFAULT_THROTTLE_MS;
     this.wikiSpaceName = config.wikiSpaceName ?? WIKI_SPACE_NAME;
+    this.memoryRootPath = normalizeMemoryRootPath(config.memoryRootPath ?? process.env.METABOT_CORE_MEMORY_SERVER_ROOT);
   }
 
   /** Check if a sync is currently running. */
@@ -109,7 +113,11 @@ export class DocSync {
       }
 
       // Step 2: Fetch MetaMemory folder tree
-      const folderTree = await this.memoryClient.listFolderTree();
+      const folderTree = this.scopeFolderTree(await this.memoryClient.listFolderTree());
+      if (!folderTree) {
+        result.errors.push(`Configured MetaMemory root not found: ${this.memoryRootPath}`);
+        return result;
+      }
 
       // Step 3: Sync folder structure (create wiki nodes for folders)
       await this.syncFolders(spaceId, folderTree, '', result);
@@ -147,9 +155,15 @@ export class DocSync {
       if (!doc) {
         return { success: false, error: 'Document not found in MetaMemory' };
       }
+      if (!this.isPathInScope(doc.path)) {
+        return { success: false, error: `Document is outside configured MetaMemory root: ${this.memoryRootPath}` };
+      }
 
       // Ensure parent folder is synced
-      const folderTree = await this.memoryClient.listFolderTree();
+      const folderTree = this.scopeFolderTree(await this.memoryClient.listFolderTree());
+      if (!folderTree) {
+        return { success: false, error: `Configured MetaMemory root not found: ${this.memoryRootPath}` };
+      }
       const parentNodeToken = await this.resolveParentNodeToken(spaceId, doc.folder_id, folderTree);
 
       await this.syncSingleDocument(spaceId, doc, parentNodeToken);
@@ -329,35 +343,38 @@ export class DocSync {
     result: SyncResult,
   ): Promise<void> {
     const isRoot = node.id === 'root' || node.path === '/';
+    const shouldListCurrentFolder = !(isRoot && this.memoryRootPath !== '/');
     // For root: listDocuments(undefined) returns ALL docs globally.
     // Filter to only root-folder docs to avoid double-traversal with child folders.
     const folderId = isRoot ? undefined : node.id;
-    try {
-      const docs = await this.memoryClient.listDocuments(folderId, 200);
-      const parentNodeToken = this.resolveFolderNodeToken(node.id);
+    if (shouldListCurrentFolder) {
+      try {
+        const docs = await this.memoryClient.listDocuments(folderId, 200);
+        const parentNodeToken = this.resolveFolderNodeToken(node.id);
 
-      for (const docSummary of docs) {
-        // When listing from root, skip docs that belong to subfolders
-        // (they'll be synced when we recurse into that folder)
-        if (isRoot && docSummary.folder_id && docSummary.folder_id !== 'root') {
-          continue;
-        }
-
-        try {
-          const doc = await this.fetchDocument(docSummary.id);
-          if (!doc) {
-            result.errors.push(`Document "${docSummary.title}": not found`);
+        for (const docSummary of docs) {
+          // When listing from root, skip docs that belong to subfolders
+          // (they'll be synced when we recurse into that folder)
+          if (isRoot && docSummary.folder_id && docSummary.folder_id !== 'root') {
             continue;
           }
-          await this.syncSingleDocument(spaceId, doc, parentNodeToken, result);
-        } catch (err: any) {
-          this.logger.error({ err: err.message, doc: docSummary.title }, 'Failed to sync document');
-          result.errors.push(`Document "${docSummary.title}": ${err.message}`);
+
+          try {
+            const doc = await this.fetchDocument(docSummary.id);
+            if (!doc) {
+              result.errors.push(`Document "${docSummary.title}": not found`);
+              continue;
+            }
+            await this.syncSingleDocument(spaceId, doc, parentNodeToken, result);
+          } catch (err: any) {
+            this.logger.error({ err: err.message, doc: docSummary.title }, 'Failed to sync document');
+            result.errors.push(`Document "${docSummary.title}": ${err.message}`);
+          }
         }
+      } catch (err: any) {
+        this.logger.error({ err: err.message, folder: node.name }, 'Failed to list folder documents');
+        result.errors.push(`Folder "${node.name}" listing: ${err.message}`);
       }
-    } catch (err: any) {
-      this.logger.error({ err: err.message, folder: node.name }, 'Failed to list folder documents');
-      result.errors.push(`Folder "${node.name}" listing: ${err.message}`);
     }
 
     // Recurse into child folders
@@ -587,6 +604,31 @@ export class DocSync {
     return undefined;
   }
 
+  private scopeFolderTree(tree: FolderTreeNode): FolderTreeNode | undefined {
+    if (this.memoryRootPath === '/') return tree;
+    const scopedRoot = this.findFolderByPath(tree, this.memoryRootPath);
+    if (!scopedRoot) return undefined;
+    return {
+      ...tree,
+      children: [scopedRoot],
+      document_count: 0,
+    };
+  }
+
+  private findFolderByPath(node: FolderTreeNode, folderPath: string): FolderTreeNode | undefined {
+    if (normalizeMemoryRootPath(node.path) === folderPath) return node;
+    for (const child of node.children || []) {
+      const found = this.findFolderByPath(child, folderPath);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private isPathInScope(memoryPath: string): boolean {
+    const normalized = normalizeMemoryRootPath(memoryPath);
+    return this.memoryRootPath === '/' || normalized === this.memoryRootPath || normalized.startsWith(`${this.memoryRootPath}/`);
+  }
+
   /** Fetch full document content from the central metabot-core service. */
   private async fetchDocument(docId: string): Promise<FullDocument | null> {
     return this.memoryClient.getDocument(docId);
@@ -602,4 +644,11 @@ export class DocSync {
   destroy(): void {
     this.store.close();
   }
+}
+
+function normalizeMemoryRootPath(value?: string): string {
+  const raw = (value || '/').trim();
+  if (!raw || raw === '/') return '/';
+  const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLeadingSlash.replace(/\/+$/, '') || '/';
 }

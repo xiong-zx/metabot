@@ -13,6 +13,13 @@ const noProxyEntries = [
   'wisemodel.cn',
 ];
 
+const memoryWriteRoots = [
+  '/users',
+  '/shared',
+  '/metabot',
+  '/savio',
+];
+
 module.exports = {
   apps: [
     {
@@ -48,6 +55,28 @@ module.exports = {
         CLAUDE_MAX_TURNS: '',  // unlimited turns (override any inherited shell env)
         no_proxy: noProxyEntries.join(','),
         NO_PROXY: noProxyEntries.join(','),
+      },
+    },
+    {
+      name: 'metabot-core',
+      script: 'packages/server/src/index.ts',
+      interpreter: 'node',
+      interpreter_args: '--import tsx',
+      cwd: __dirname,
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 3000,
+      error_file: path.join(__dirname, 'logs', 'metabot-core-error.log'),
+      out_file: path.join(__dirname, 'logs', 'metabot-core-out.log'),
+      merge_logs: true,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+      env: {
+        NODE_ENV: 'production',
+        METABOT_CORE_HOST: '127.0.0.1',
+        METABOT_CORE_PORT: '9200',
+        METABOT_CORE_MEMORY_WRITE_ROOTS: memoryWriteRoots.join(','),
       },
     },
   ],
