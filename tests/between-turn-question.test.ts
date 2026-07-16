@@ -12,7 +12,7 @@ import {
  * `state.pendingQuestion` on the streaming CardState and renders a dedicated
  * question card via the existing runOneTurn path.
  *
- * When the hook fires BETWEEN user turns (teammate / `/goal` / continuation
+ * When the hook fires BETWEEN user turns (Agent Team / `/goal` / continuation
  * follow-up), `activeTurn` is null and there is no streaming CardState to
  * piggy-back on — the question text would otherwise only land in the
  * coalesced "Agent activity" body, and the user's typed reply would be

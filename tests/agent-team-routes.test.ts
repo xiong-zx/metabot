@@ -422,4 +422,62 @@ describe('handleAgentTeamRoutes', () => {
     expect(instanceResolveWithoutRole.statusCode).toBe(403);
     store.close();
   });
+
+  it('requires PM authority for legacy team and agent lifecycle routes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-routes-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+    store.createTeam('secure', 'Secure team');
+    store.createAgent('secure', { name: 'planner', actorRole: 'pm' });
+    const run = store.createRun('secure', { agentName: 'planner' });
+
+    const createWithoutRole = await call(store, 'POST', '/api/agent-teams', {
+      name: 'unexpected',
+    });
+    expect(createWithoutRole.statusCode).toBe(403);
+    expect(store.getTeam('unexpected')).toBeUndefined();
+
+    const createAsPm = await call(store, 'POST', '/api/agent-teams', {
+      name: 'approved',
+      actorRole: 'pm',
+    });
+    expect(createAsPm.statusCode).toBe(201);
+    expect(store.getTeam('approved')).toBeDefined();
+
+    const managerStopTeam = await call(store, 'POST', '/api/agent-teams/secure/stop', {
+      actorRole: 'manager',
+    });
+    expect(managerStopTeam.statusCode).toBe(403);
+    expect(store.getTeam('secure')).toMatchObject({ status: 'active' });
+
+    const managerStopAgent = await call(store, 'POST', '/api/agent-teams/secure/agents/planner/stop', {
+      actorRole: 'manager',
+    });
+    expect(managerStopAgent.statusCode).toBe(403);
+    expect(store.getAgent('secure', 'planner')).toMatchObject({ status: 'idle' });
+
+    const managerStopRun = await call(store, 'POST', `/api/agent-teams/secure/runs/${run.id}/stop`, {
+      actorRole: 'manager',
+    });
+    expect(managerStopRun.statusCode).toBe(403);
+    expect(store.getRun('secure', run.id)).toMatchObject({ status: 'running' });
+
+    const pmStopRun = await call(store, 'POST', `/api/agent-teams/secure/runs/${run.id}/stop`, {
+      actorRole: 'pm',
+    });
+    expect(pmStopRun.statusCode).toBe(200);
+    expect(pmStopRun.json()).toMatchObject({ status: 'stopped' });
+
+    const pmStopAgent = await call(store, 'POST', '/api/agent-teams/secure/agents/planner/stop', {
+      actorRole: 'pm',
+    });
+    expect(pmStopAgent.statusCode).toBe(200);
+    expect(pmStopAgent.json()).toMatchObject({ status: 'stopped' });
+
+    const pmDeleteTeam = await call(store, 'DELETE', '/api/agent-teams/secure', {
+      actorRole: 'pm',
+    });
+    expect(pmDeleteTeam.statusCode).toBe(200);
+    expect(store.getTeam('secure')).toBeUndefined();
+    store.close();
+  });
 });

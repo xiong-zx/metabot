@@ -907,7 +907,7 @@ describe('MessageBridge chatId cleanup (memory leak guard)', () => {
     bridge.messageQueues.set('chat-1', []);
     const clearedTimers: Array<ReturnType<typeof setTimeout>> = [];
     const bufTimer = setTimeout(() => {}, 60_000);
-    bridge.spontaneousBuffers.set('chat-1', { teamState: { teammates: [], tasks: [] }, snippets: [], timer: bufTimer });
+    bridge.spontaneousBuffers.set('chat-1', { teamState: { agents: [], tasks: [] }, snippets: [], timer: bufTimer });
     const qTimer = setTimeout(() => {}, 60_000);
     bridge.pendingBetweenTurnQuestions.set('chat-1', {
       toolUseId: 't', questions: [], cardMessageId: 'm', currentQuestionIndex: 0,
@@ -1047,7 +1047,7 @@ describe('formatSpontaneousCardBody', () => {
   // The card body renders ALL snippets (chronological), separated by a
   // horizontal rule. Earlier behavior was "show only the latest + a
   // (N coalesced) footer" — that turned out to drop most of the useful
-  // content (the "经常显示不全" bug) because teammate pings, /loop
+  // content (the "经常显示不全" bug) because Agent Team pings, /loop
   // iterations, and cron tasks each emit their own snippet and the user
   // needs to see all of them. Total length is capped at
   // SPONTANEOUS_BODY_MAX_CHARS; overflow drops the oldest snippets and
@@ -1107,7 +1107,7 @@ describe('formatSpontaneousCardBody', () => {
 /**
  * Burst-source classifier — distinguishes SDK-initiated continuation turns
  * (the agent waking up to summarise a `run_in_background` Bash return) from
- * everything else that arrives between user turns (teammate pings, /goal
+ * everything else that arrives between user turns (Agent Team pings, /goal
  * Stop-hook user messages, system status events).
  *
  * The classification matters for UX:
@@ -1140,10 +1140,10 @@ describe('classifyBurstSource', () => {
     expect(classifyBurstSource(msg)).toBe('spontaneous');
   });
 
-  it('returns spontaneous for a user message with peer origin (teammate SendMessage)', () => {
+  it('returns spontaneous for a user message with peer origin (Agent Team SendMessage)', () => {
     const msg = {
       type: 'user',
-      message: { role: 'user', content: 'hi from teammate' },
+      message: { role: 'user', content: 'hi from agent' },
       origin: { kind: 'peer', from: 'researcher' },
     };
     expect(classifyBurstSource(msg)).toBe('spontaneous');
@@ -1161,10 +1161,10 @@ describe('classifyBurstSource', () => {
     expect(classifyBurstSource(msg)).toBe('spontaneous');
   });
 
-  it('returns spontaneous for assistant text (e.g. teammate burst opening with assistant)', () => {
+  it('returns spontaneous for assistant text (e.g. Agent Team burst opening with assistant)', () => {
     // origin is on USER messages, not assistant. An assistant-led burst is
     // either a continuation already in progress (handled by activeTurn) or
-    // a teammate ping (spontaneous).
+    // an Agent Team ping (spontaneous).
     const msg = {
       type: 'assistant',
       message: { content: [{ type: 'text', text: 'doing the thing' }] },

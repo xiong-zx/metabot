@@ -8,7 +8,7 @@ export interface AgentTeamSupervisorOptions {
   store: AgentTeamStore;
   logger: Logger;
   intervalMs?: number;
-  /** Explicit bridge bot used to execute teammate runs. */
+  /** Explicit bridge bot used to execute Agent Team runs. */
   executionBotName?: string;
 }
 

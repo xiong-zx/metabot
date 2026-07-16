@@ -225,13 +225,13 @@ describe('buildCard', () => {
       toolCalls:    [],
       teamState: {
         name:      'feishu-ux-review',
-        teammates: [{ name: 'ux-researcher', status: 'working', lastSubject: 'audit' }],
-        tasks:     [{ taskId: 't1', subject: 'UX audit', status: 'in_progress', teammate: 'ux-researcher' }],
+        agents: [{ name: 'ux-researcher', status: 'working', lastSubject: 'audit' }],
+        tasks:  [{ taskId: 't1', subject: 'UX audit', status: 'in_progress', agent: 'ux-researcher' }],
       },
     };
     const json = JSON.parse(buildCard(state));
     const team = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Agents/.test(e.content),
     );
     expect(team).toBeDefined();
     expect(team.content).toContain('feishu-ux-review');
@@ -247,8 +247,8 @@ describe('buildCard', () => {
       toolCalls: [],
       teamState: {
         name: 'demo',
-        teammates: [{ name: 'lead', status: 'idle' }],
-        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
+        agents: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' }],
       },
     };
     const json = JSON.parse(buildCard(state));

@@ -155,7 +155,7 @@ export interface BotConfigBase {
    * ExecutorRegistry) instead of spawning a fresh process per turn.
    *
    * Benefits:
-   *   - Agent Teams teammates survive between user messages
+   *   - Agent Team agents survive between user messages
    *   - /goal multi-turn auto-drive works (Stop hook fires the next turn)
    *   - /background tasks and agentProgressSummaries actually persist
    *
@@ -261,7 +261,7 @@ export interface AppConfig {
   /** Resident MetaBot Agent Teams reconciled into the bridge runtime. */
   agentTeams: AgentTeamConfig[];
   /**
-   * Bot used by the Agent Team supervisor when executing teammate runs.
+   * Bot used by the Agent Team supervisor when executing agent runs.
    * Set this to a non-privileged PM/internal worker bot so teams do not
    * accidentally run under the first registered bot (often manager).
    */

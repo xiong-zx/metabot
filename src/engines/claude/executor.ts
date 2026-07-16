@@ -229,7 +229,7 @@ function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string
     }
 
     // Default-enable Claude Code Agent Teams. Without a real terminal there's
-    // no tmux/iTerm2, so teammates must run in-process (controlled via the
+    // no tmux/iTerm2, so Agent Team agents must run in-process (controlled via the
     // `teammateMode` setting passed in queryOptions). Users can disable by
     // setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 in MetaBot's parent env.
     if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === undefined) {
@@ -549,8 +549,8 @@ export class ClaudeExecutor {
       // entrypoints it's the Node executable.
       spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, apiContextEnv(apiContext)),
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
-      // MetaBot has no terminal — split-pane (tmux/iTerm2) teammate display
-      // doesn't apply. Force in-process so teammates run inside the same
+      // MetaBot has no terminal — split-pane (tmux/iTerm2) Agent Team display
+      // doesn't apply. Force in-process so Agent Team agents run inside the same
       // session and surface via SDK message origin / TeammateIdle hooks.
       settings: { teammateMode: 'in-process' },
       // Periodic AI summaries for foreground/background subagents. The SDK
@@ -584,7 +584,7 @@ export class ClaudeExecutor {
         [
           '## Agent Teams (experimental)',
           `When the user asks you to create an agent team, ALWAYS prefix the team name with \`${teamNs}-\` to avoid collisions with other MetaBot chats sharing this machine. For example: \`${teamNs}-research\`, \`${teamNs}-refactor\`.`,
-          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Teammates show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
+          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Agent Team agents show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
           'Clean up the team yourself when work is done so resources don\'t leak (`Clean up the team`).',
         ].join('\n')
       );

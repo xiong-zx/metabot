@@ -223,8 +223,8 @@ for Codex-first delegation. New CLI-spawned agents default to `codex`; pass
 Lead path:
 
 ```bash
-metabot teams create <team> --description "..."
-metabot teams agents spawn <team> <agent> --role "runtime" --prompt "Own runtime work."
+metabot teams create <team> --description "..." --actor-role pm
+metabot teams agents spawn <team> <agent> --role "runtime" --actor-role pm --prompt "Own runtime work."
 metabot teams dispatch <team> <agent> "Fix update package" --description "Self-contained scope." --plain
 metabot teams status <team> --summary
 metabot teams runs list <team>

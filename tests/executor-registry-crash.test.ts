@@ -31,8 +31,8 @@ vi.mock('../src/engines/claude/persistent-executor.js', async () => {
  *
  * When a PersistentClaudeExecutor exhausts its in-process restart budget it
  * emits 'crashed' and then transitions to a terminal 'closed'. The registry
- * must NOT discard the pool slot in that case — doing so loses Agent-Team
- * teammates, in-progress tasks and conversation context. Instead the slot is
+ * must NOT discard the pool slot in that case — doing so loses Agent Team
+ * agents, in-progress tasks and conversation context. Instead the slot is
  * PARKED (crashed=true, last sessionId captured) and respawned on the next
  * acquire, resuming the same Claude session, with exponential backoff and a
  * respawn cap. Intentional release / LRU eviction must NOT trigger respawn.

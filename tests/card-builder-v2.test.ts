@@ -50,7 +50,7 @@ describe('buildCardV2', () => {
     expect(goal.content).toContain('Ship the persistent executor PR');
   });
 
-  it('renders 🧑‍🤝‍🧑 Team panel with teammates and tasks (regression)', () => {
+  it('renders 🧑‍🤝‍🧑 Team panel with agents and tasks (regression)', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'investigate',
@@ -58,24 +58,24 @@ describe('buildCardV2', () => {
       toolCalls:    [],
       teamState: {
         name: 'feishu-ux-review',
-        teammates: [
+        agents: [
           { name: 'ux-researcher',  status: 'working', lastSubject: 'auditing card UX' },
           { name: 'arch-reviewer',  status: 'idle' },
         ],
         tasks: [
-          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', teammate: 'ux-researcher' },
-          { taskId: 't2', subject: 'Arch review', status: 'completed',  teammate: 'arch-reviewer' },
+          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', agent: 'ux-researcher' },
+          { taskId: 't2', subject: 'Arch review', status: 'completed',  agent: 'arch-reviewer' },
         ],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content) && /Teammates/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content) && /Agents/.test(e.content),
     );
     expect(team).toBeDefined();
     // Team name
     expect(team.content).toContain('feishu-ux-review');
-    // Teammates with both statuses
+    // Agents with both statuses
     expect(team.content).toContain('ux-researcher');
     expect(team.content).toContain('arch-reviewer');
     expect(team.content).toContain('⏳');                  // working icon
@@ -96,8 +96,8 @@ describe('buildCardV2', () => {
       toolCalls:    [],
       teamState: {
         name: 'demo',
-        teammates: [{ name: 'lead', status: 'idle' }],
-        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
+        agents: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' }],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
@@ -109,19 +109,39 @@ describe('buildCardV2', () => {
     expect(team?.content).toContain('Plan work');
   });
 
-  it('omits Team panel when teamState has no teammates and no tasks', () => {
+  it('omits Team panel when teamState has no agents and no tasks', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'x',
       responseText: '',
       toolCalls:    [],
-      teamState:    { teammates: [], tasks: [] },
+      teamState:    { agents: [], tasks: [] },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Agents/.test(e.content),
     );
     expect(team).toBeUndefined();
+  });
+
+  it('renders legacy teammate card state as Agents for persisted compatibility', () => {
+    const state = {
+      status:       'running',
+      userPrompt:   'x',
+      responseText: '',
+      toolCalls:    [],
+      teamState: {
+        name: 'legacy',
+        teammates: [{ name: 'reviewer', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Review legacy card', status: 'pending', teammate: 'reviewer' }],
+      },
+    } as CardState;
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const team = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Agents/.test(e.content),
+    );
+    expect(team?.content).toContain('reviewer');
+    expect(team?.content).toContain('Review legacy card');
   });
 
   // Cards from flushSpontaneous (between-turn agent activity) get the

@@ -82,11 +82,31 @@ metabot peers                       # 列出 peer 及状态
 
 ```bash
 metabot teams list
-metabot teams create <team> [--description <text>]
+metabot teams create <team> [--description <text>] [--actor-role admin|user|pm]
 metabot teams status <team>
-metabot teams start <team>
-metabot teams stop <team>
-metabot teams delete <team>
+metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
+metabot teams start <team> [--actor-role admin|user|pm]
+metabot teams stop <team> [--actor-role admin|user|pm]
+metabot teams delete <team> [--actor-role admin|user|pm]
+
+metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+metabot teams activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
+metabot teams templates list [name]
+metabot teams templates export <name> [--version <n>]
+metabot teams templates diff <name> --from <n> [--to <n>]
+metabot teams templates import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams proposals list [--status pending|approved|rejected]
+metabot teams proposals create [template|ruleset] '<json>' [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
+metabot teams proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+metabot teams instances list [--template <name>]
+metabot teams instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--actor-role admin|user|pm]
+metabot teams rules list [name]
+metabot teams rules export <name> [--version <n>]
+metabot teams rules diff <name> --from <n> [--to <n>]
+metabot teams rules import '<json>' [--source <name>] [--actor-role admin|user|pm]
+metabot teams rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--actor-role admin|user|pm]
+metabot teams rules context --ref <name[@version]> [--rule <text>]
 
 metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
 metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
@@ -110,8 +130,8 @@ metabot teams rules context --ref <name[@version]> [--rule <text>]
 
 metabot teams agents list <team>
 metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
-metabot teams agents stop <team> <name>
-metabot teams agents delete <team> <name>
+metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
+metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
 
 metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
 metabot teams inbox <team> <name> [--unread] [--read]
@@ -125,14 +145,14 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId>
+metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]
 ```
 
 `runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应 Agent chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
 
 Template/rule 命令是 Phase 1 控制面，用于 versioned Agent Team template、chat/project scoped runtime instance、pinned RuleSet refs、versioned RuleSet 和 promotion proposal。manager 或 agent 可以创建 proposal，但只有 PM、用户或 admin 可以 approve/reject；批准后写入新的 template 或 RuleSet 版本，并且不会自动升级已 pinned 的 instance。`instances resolve --rule-ref ...` 用于在创建时 pin 额外的 project/runtime RuleSet，`teams config ... --rule-ref ...` 用于显式更新当前 instance，`rules export/diff/import` 则让 RuleSet 具备和 template 对称的审查与迁移流程。现有 `<team>` 参数可以传 team name，也可以传 `instanceId`；chat/project scoped team 建议优先使用 `instances resolve` 返回的 `instanceId`。底层存储 schema 仍以 `teamName` 保存行，runtime 会继续逐步迁移到 first-class `instanceId`。
 
-对于有权限影响的 CLI 操作，`--actor-role` 表示调用者权限身份（`admin`、`user` 或 `pm`）。直接创建 Agent、直接 import/set template 或 rules、resolve instance、更新 team config、批准/拒绝 proposal 都需要显式传入。`agents spawn` 的 `--role` 是被创建 Agent 的职责标签，不是权限身份。
+对于有权限影响的 CLI 操作，`--actor-role` 表示调用者权限身份（`admin`、`user` 或 `pm`）。team 生命周期变更、绑定/config 更新、直接创建或停止/删除 Agent、停止 run、直接 import/set template 或 rules、resolve instance、批准/拒绝 proposal 都需要显式传入。`agents spawn` 的 `--role` 是被创建 Agent 的职责标签，不是权限身份。
 
 同一套命令同时实现在 `bin/metabot` 和 `packages/cli` 的 TypeScript 功能 CLI 中。Bridge 从 `.env` 读取 `API_PORT` / `API_SECRET` 和可选的 `METABOT_URL`。
 
