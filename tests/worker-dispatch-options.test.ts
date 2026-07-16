@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -63,5 +63,117 @@ describe('WorkerManager dispatch execution options', () => {
       timeoutMs: 12_345,
       idleTimeoutMs: 6_789,
     });
+  });
+
+  it('raises too-short timeouts for durable research workers', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nValidate a minimal artifact.',
+      label: 'autoresearchclaw-smoke',
+      model: 'gpt-5.5',
+      timeoutMs: 120_000,
+      idleTimeoutMs: 60_000,
+    });
+
+    await vi.waitFor(() => expect(executeApiTask).toHaveBeenCalled());
+    expect(record.timeoutMs).toBe(300_000);
+    expect(record.idleTimeoutMs).toBe(120_000);
+    expect(executeApiTask.mock.calls[0][0]).toMatchObject({
+      timeoutMs: 300_000,
+      idleTimeoutMs: 120_000,
+    });
+  });
+
+  it('recovers a failed worker when a completed authoritative artifact exists', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    writeFileSync(join(workdir, 'results.json'), JSON.stringify({
+      contract_version: '1.0',
+      status: 'complete',
+      summary: 'durable result was written before the stream failed',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? {
+            success: false,
+            responseText: 'I wrote the JSON and then the stream failed.',
+            error: 'stream disconnected before completion: Transport error: network error: error decoding response body',
+          }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.timeoutMs).toBeUndefined();
+    expect(finalRecord.idleTimeoutMs).toBeUndefined();
+    expect(finalRecord.executionStatus).toBe('transport_error');
+    expect(finalRecord.artifactStatus).toBe('valid_complete');
+    expect(finalRecord.artifactPath).toBe(join(workdir, 'results.json'));
+    expect(finalRecord.error).toBeUndefined();
+    expect(finalRecord.terminalError).toContain('stream disconnected');
+    expect(finalRecord.resultSummary).toContain('Recovered: valid completed artifact');
+  });
+
+  it('recovers a timed-out worker from a completed AutoResearchClaw artifact', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, JSON.stringify({
+      contract_version: 'autoresearchclaw.output.v2',
+      project_id: 'metabot-smoke',
+      run_id: 'run-smoke',
+      status: 'completed',
+      summary: 'AutoResearchClaw artifact was completed before timeout.',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? {
+            success: false,
+            responseText: 'The progress file is now marked completed.',
+            error: 'Task timed out (2 minutes limit)',
+          }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nWrite the contract artifact.',
+      model: 'gpt-5.5',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.executionStatus).toBe('timed_out');
+    expect(finalRecord.artifactStatus).toBe('valid_complete');
+    expect(finalRecord.artifactPath).toBe(artifactPath);
+    expect(finalRecord.terminalError).toContain('2 minutes');
   });
 });
