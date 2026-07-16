@@ -47,6 +47,9 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `MEMORY_ADMIN_TOKEN` | — | Admin token (full access) |
 | `MEMORY_TOKEN` | — | Reader token (shared folders only) |
 | `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory URL (for CLI remote access) |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API write calls may create/update; comma-separated |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's top-level MetaMemory namespace, for example `/cargo1`; appended to Memory API writable roots when set |
+| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | Mark `/api/talk?async=true` tasks as `task_expired` when they exceed this runtime without completing |
 
 ## Feishu Service App
 
@@ -65,6 +68,8 @@ Falls back to the first Feishu bot's credentials if not set.
 | `WIKI_SPACE_ID` | — | Feishu Wiki space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name |
 | `WIKI_AUTO_SYNC` | `true` | Auto-sync on changes |
+| `WIKI_AUTO_SYNC_ON_START` | `true` | Run one sync after the startup baseline is captured |
+| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | Snapshot polling interval |
 | `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Debounce delay |
 | `WIKI_SYNC_THROTTLE_MS` | `300` | Delay between API calls |
 

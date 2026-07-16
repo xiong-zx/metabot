@@ -170,8 +170,8 @@ describe('/api/talk async UX', () => {
       statusUrl: `/api/talk/${taskId}`,
       statusCommand: `metabot talk-status ${taskId}`,
       message:
-        'Task is still running. Check statusUrl again later.',
-      nextAction: `Run metabot talk-status ${taskId} again after 2s.`,
+        'Task is still running. Check statusUrl again later; long research tasks may expose more detail in their Memory Core run lifecycle.',
+      nextAction: `Run metabot talk-status ${taskId} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`,
     });
     expect(typeof status.json().elapsedMs).toBe('number');
 
@@ -198,6 +198,35 @@ describe('/api/talk async UX', () => {
       error: 'Task not found or no longer retained',
       message: expect.stringContaining('expired after retention'),
       nextAction: expect.stringContaining('metabot talk --wait-ms'),
+    });
+  });
+
+  it('adds AutoResearchClaw preflight to async bot-bus accepted responses', async () => {
+    const executeApiTask = vi.fn(() => new Promise(() => {}));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'Start AutoResearchClaw research loop. projectId=metabot-r6 projectRoot=/root/workspaces/r6 domain=metabot',
+      sendCards: false,
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toMatchObject({
+      preflight: {
+        projectId: 'metabot-r6',
+        projectRoot: '/root/workspaces/r6',
+        domain: 'metabot',
+        stages: expect.arrayContaining([
+          expect.objectContaining({ phase: 'context_pack' }),
+          expect.objectContaining({ phase: 'worker_dispatch' }),
+          expect.objectContaining({ phase: 'output_contract' }),
+          expect.objectContaining({ phase: 'ingest_review' }),
+        ]),
+        outputContract: expect.arrayContaining(['contract_version', 'hypotheses', 'tool_trace']),
+      },
     });
   });
 

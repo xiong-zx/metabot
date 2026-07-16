@@ -75,6 +75,8 @@ plugins:
               - MetaSkill: features/metaskill.md
               - 目标循环: features/goal-loops.md
               - Agent 团队: features/agent-teams.md
+              - 自动科研系统: features/auto-research.md
+              - Memory Core: features/memory-core.md
               - MetaMemory: features/metamemory.md
               - Web UI: features/web-ui.md
               - Peers 联邦: features/peers.md
@@ -127,6 +129,8 @@ nav:
     - MetaSkill: features/metaskill.md
     - Goal Loops: features/goal-loops.md
     - Agent Teams: features/agent-teams.md
+    - Auto Research: features/auto-research.md
+    - Memory Core: features/memory-core.md
     - MetaMemory: features/metamemory.md
     - Web UI: features/web-ui.md
     - Peers Federation: features/peers.md

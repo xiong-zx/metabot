@@ -7,12 +7,20 @@ function parseTimeoutMs(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const hours = ms / (60 * 60 * 1000);
   if (hours >= 1 && Number.isInteger(hours)) return `${hours} hour${hours === 1 ? '' : 's'}`;
   const minutes = ms / (60 * 1000);
   if (minutes >= 1 && Number.isInteger(minutes)) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
   return `${ms}ms`;
+}
+
+export function formatTaskTimeoutMessage(ms: number): string {
+  return `Task timed out (${formatDuration(ms)} limit)`;
+}
+
+export function formatIdleTimeoutMessage(ms: number): string {
+  return `Task aborted: no activity for ${formatDuration(ms)}`;
 }
 
 export const TASK_TIMEOUT_MS = parseTimeoutMs('METABOT_TASK_TIMEOUT_MS', 24 * 60 * 60 * 1000);
@@ -23,8 +31,8 @@ export const SPONTANEOUS_SNIPPET_MAX_CHARS = 4000;
 export const SPONTANEOUS_BODY_MAX_CHARS = 12000;
 export const FINAL_CARD_RETRIES = 3;
 export const FINAL_CARD_BASE_DELAY_MS = 2000;
-export const TASK_TIMEOUT_MESSAGE = `Task timed out (${formatDuration(TASK_TIMEOUT_MS)} limit)`;
-export const IDLE_TIMEOUT_MESSAGE = `Task aborted: no activity for ${formatDuration(IDLE_TIMEOUT_MS)}`;
+export const TASK_TIMEOUT_MESSAGE = formatTaskTimeoutMessage(TASK_TIMEOUT_MS);
+export const IDLE_TIMEOUT_MESSAGE = formatIdleTimeoutMessage(IDLE_TIMEOUT_MS);
 export const BATCH_DEBOUNCE_MS = 2000;
 export const DEFAULT_IMAGE_TEXT = '请分析这张图片';
 export const DEFAULT_FILE_TEXT = '请分析这个文件';

@@ -19,7 +19,9 @@ import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { WorkerManager } from './workers/worker-manager.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
+import { WikiAutoSync } from './sync/auto-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { checkMetabotCoreMemoryConnection } from './memory/core-connection.js';
 import { recoverInterruptedTasksAfterRestart } from './bridge/restart-recovery.js';
 
 import { SessionRegistry } from './session/session-registry.js';
@@ -34,6 +36,36 @@ interface FeishuBotHandle {
   lastEventAt: { value: number };
   dispatcher: lark.EventDispatcher;
   feishuCreds: { appId: string; appSecret: string };
+}
+
+function envFlag(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return defaultValue;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  return defaultValue;
+}
+
+function envPositiveInt(name: string, defaultValue: number, logger: Logger): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn({ name, value: raw, defaultValue }, 'Invalid positive integer env value; using default');
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function envNonNegativeInt(name: string, defaultValue: number, logger: Logger): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    logger.warn({ name, value: raw, defaultValue }, 'Invalid non-negative integer env value; using default');
+    return defaultValue;
+  }
+  return parsed;
 }
 
 /**
@@ -379,6 +411,26 @@ async function main() {
   );
   await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
 
+  const memoryCheck = await checkMetabotCoreMemoryConnection({ timeoutMs: 4_000 });
+  if (memoryCheck.ok) {
+    logger.info({
+      baseUrl: memoryCheck.baseUrl,
+      tokenSource: memoryCheck.tokenSource,
+      folderCount: memoryCheck.folderCount,
+      documentCount: memoryCheck.documentCount,
+      durationMs: memoryCheck.durationMs,
+    }, 'MetaMemory connected via metabot-core');
+  } else {
+    logger.warn({
+      baseUrl: memoryCheck.baseUrl,
+      tokenPresent: memoryCheck.tokenPresent,
+      tokenSource: memoryCheck.tokenSource,
+      status: memoryCheck.status,
+      error: memoryCheck.error,
+      durationMs: memoryCheck.durationMs,
+    }, 'MetaMemory is not reachable; memory features will fail until METABOT_CORE_URL/METABOT_CORE_TOKEN are fixed');
+  }
+
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the
   // central server URL) lets the bridge boot peerManager even with zero
@@ -418,7 +470,8 @@ async function main() {
 
   // Initialize wiki sync service (uses dedicated service app credentials)
   let docSync: DocSync | undefined;
-  if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
+  let wikiAutoSync: WikiAutoSync | undefined;
+  if (appConfig.feishuService && envFlag('WIKI_SYNC_ENABLED', true)) {
     const syncMemoryClient = new MemoryClient(logger);
     const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
       ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
@@ -439,7 +492,29 @@ async function main() {
     for (const handle of feishuHandles) {
       handle.bridge.setDocSync(docSync);
     }
-    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
+    const autoSyncEnabled = envFlag('WIKI_AUTO_SYNC', true);
+    if (autoSyncEnabled) {
+      const autoSyncPollMs = envPositiveInt('WIKI_AUTO_SYNC_POLL_MS', 60_000, logger);
+      const autoSyncDebounceMs = envNonNegativeInt('WIKI_AUTO_SYNC_DEBOUNCE_MS', 5_000, logger);
+      const autoSyncOnStart = envFlag('WIKI_AUTO_SYNC_ON_START', true);
+      wikiAutoSync = new WikiAutoSync(
+        {
+          pollMs: autoSyncPollMs,
+          debounceMs: autoSyncDebounceMs,
+          syncOnStart: autoSyncOnStart,
+        },
+        docSync,
+        syncMemoryClient,
+        logger,
+      );
+      wikiAutoSync.start();
+      logger.info({
+        pollMs: autoSyncPollMs,
+        debounceMs: autoSyncDebounceMs,
+        syncOnStart: autoSyncOnStart,
+      }, 'Wiki auto-sync service initialized');
+    }
+    logger.info({ autoSyncEnabled }, 'Wiki sync service initialized');
   }
 
   // Initialize cross-platform session registry
@@ -481,6 +556,7 @@ async function main() {
     }
     apiServer.close();
     if (docSync) {
+      wikiAutoSync?.destroy();
       docSync.destroy();
     }
     sessionRegistry.close();

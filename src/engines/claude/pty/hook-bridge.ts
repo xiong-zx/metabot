@@ -96,7 +96,18 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
       ];
     }
 
-    const settings = { hooks };
+    // Claude Code 2.1.20x introduced a blocking startup consent dialog for
+    // `--dangerously-skip-permissions` ("You accept all responsibility for
+    // actions taken while running in Bypass Permissions mode. 1. No, exit /
+    // 2. Yes, I accept"). Our PTY driver's waitForReady() sees that dialog's
+    // `❯` pointer, types the prompt into it, and the leading keystroke selects
+    // the default option "1. No, exit" — so claude quits immediately after the
+    // prompt is typed (exit 1), and typePrompt() then crashes on the disposed
+    // pty. Setting skipDangerousModePermissionPrompt in the CLI --settings file
+    // (loaded as the "flagSettings" source) makes claude's gate return true and
+    // suppresses the dialog entirely. Safe here: the whole point of this backend
+    // is unattended bypass-permissions execution.
+    const settings = { hooks, skipDangerousModePermissionPrompt: true };
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
     return settingsPath;

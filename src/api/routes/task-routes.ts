@@ -373,7 +373,7 @@ function parseWaitMs(bodyValue: unknown, queryValue: string | null): number {
 }
 
 function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: string): Record<string, unknown> {
-  void prompt;
+  const preflight = prompt === undefined ? undefined : researchLoopPreflightFromPrompt(prompt);
   return {
     taskId,
     status,
@@ -388,6 +388,7 @@ function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: strin
     statusCommand: `metabot talk-status ${taskId}`,
     retryAfterMs: 2000,
     nextAction: `Run metabot talk-status ${taskId} after 2s to check progress.`,
+    ...(preflight === undefined ? {} : { preflight }),
   };
 }
 
@@ -428,10 +429,10 @@ function taskStatusResponse(task: {
     statusCommand: `metabot talk-status ${task.id}`,
     retryAfterMs,
     message: running
-      ? 'Task is still running. Check statusUrl again later.'
+      ? 'Task is still running. Check statusUrl again later; long research tasks may expose more detail in their Memory Core run lifecycle.'
       : 'Task finished. See result for the final response or error.',
     nextAction: running
-      ? `Run metabot talk-status ${task.id} again after 2s.`
+      ? `Run metabot talk-status ${task.id} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
       : 'Inspect result for the final response or error.',
     result: task.result,
   };
@@ -451,7 +452,7 @@ function taskNotFoundResponse(taskId: string): Record<string, unknown> {
     message:
       'Task status is unavailable. The task may never have existed, may have expired after retention, or may have been lost before persistence during service restart.',
     nextAction:
-      'If this was a wake/check request, resend it with metabot talk --wait-ms so the response is observed directly.',
+      'If this was a wake/check request, resend it with metabot talk --wait-ms so the response is observed directly. For AutoResearchClaw tasks, inspect the Memory Core run lifecycle if a run id was returned.',
   };
 }
 
@@ -461,6 +462,57 @@ function taskStatusPhase(status: string): string {
   if (status === 'completed') return 'completed';
   if (status === 'failed') return 'failed';
   return status;
+}
+
+function researchLoopPreflightFromPrompt(prompt: string): Record<string, unknown> | undefined {
+  if (!/\b(AutoResearchClaw|research\s+loop|自动科研|研究循环)\b/i.test(prompt)) return undefined;
+  const projectId = extractPromptField(prompt, ['projectId', 'project_id', '项目ID', '项目']);
+  const projectRoot = extractPromptField(prompt, ['projectRoot', 'project_root', 'root', '项目目录']);
+  const domain = extractPromptField(prompt, ['domain', '领域']);
+  return {
+    summary: 'AutoResearchClaw research loop request accepted by the bot bus.',
+    projectId,
+    projectRoot,
+    domain,
+    stages: [
+      { phase: 'context_pack', status: 'planned', description: 'Build a Memory Core context pack before dispatch.' },
+      { phase: 'worker_dispatch', status: 'planned', description: 'Dispatch AutoResearchClaw through WorkerManager.' },
+      { phase: 'output_contract', status: 'required', description: 'Require autoresearchclaw.output.v2 JSON artifact.' },
+      { phase: 'ingest_review', status: 'planned', description: 'Validate artifact, then ingest or stage candidate memory.' },
+    ],
+    outputContract: [
+      'contract_version',
+      'project_id',
+      'run_id',
+      'status',
+      'summary',
+      'hypotheses',
+      'experiments',
+      'findings',
+      'negative_results',
+      'decisions',
+      'artifacts',
+      'open_questions',
+      'memory_event_candidates',
+      'recommended_followups',
+      'tool_trace',
+    ],
+    completionCriteria: [
+      'worker writes a valid autoresearchclaw.output.v2 artifact',
+      'run lifecycle reaches completed, partial, or failed',
+      'ingest/review result is traceable by memory/event ids',
+    ],
+    nextAction: `Run metabot talk-status for this task id; if a run id is returned, inspect Memory Core run lifecycle with metabot research runs.`,
+  };
+}
+
+function extractPromptField(prompt: string, names: string[]): string | undefined {
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = prompt.match(new RegExp(`${escaped}\\s*[=:：是]\\s*([^\\s,，。;；]+)`, 'iu'));
+    if (match?.[1]) return match[1].trim();
+  }
+  return undefined;
 }
 
 async function waitForTalkTask(task: Promise<void>, waitMs: number): Promise<boolean> {

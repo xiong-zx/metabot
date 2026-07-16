@@ -447,7 +447,27 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // resume: prefer the most-recent observed sessionId; fall back to the
     // one supplied at construction. This way, a restart picks up the live
     // session even if the SDK forked sessionId mid-life.
-    const resume = this.sessionId ?? this.options.resumeSessionId;
+    let resume = this.sessionId ?? this.options.resumeSessionId;
+    // Guard against a stored session id whose transcript no longer exists: if
+    // an earlier turn died before persisting (or ~/.claude was cleaned), a
+    // `claude --resume <id>` prints "No conversation found with session ID" and
+    // exits immediately — the PTY driver then hangs 30s in waitForReady and the
+    // turn fails with "claude process exited before the turn completed". Claude
+    // derives the transcript path from cwd: ~/.claude/projects/<escaped-cwd>/<id>.jsonl
+    // (every '/' in the absolute cwd replaced by '-'). If that file is missing,
+    // drop the resume and start a fresh session instead of a doomed one.
+    if (resume) {
+      const escaped = path.resolve(this.options.cwd).replace(/\//g, '-');
+      const transcript = path.join(os.homedir(), '.claude', 'projects', escaped, `${resume}.jsonl`);
+      if (!fs.existsSync(transcript)) {
+        const warn = this.options.logger?.warn?.bind(this.options.logger) ?? console.warn.bind(console);
+        warn(
+          { resume, transcript },
+          'persistent-executor: stored session transcript missing — starting a fresh session (no --resume)',
+        );
+        resume = undefined;
+      }
+    }
     if (resume) queryOptions.resume = resume;
 
     // System prompt: bake in MetaBot context + outputs dir + team namespace

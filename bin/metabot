@@ -588,6 +588,15 @@ file_env = load_env(home / ".env")
 def env(name, default=None):
     return os.environ.get(name) or file_env.get(name) or default
 
+def read_first_line(path: Path):
+    try:
+        for raw in path.read_text(errors="ignore").splitlines():
+            line = raw.strip()
+            if line:
+                return line
+    except Exception:
+        return None
+    return None
 
 def run(cmd, timeout=4):
     try:
@@ -694,7 +703,9 @@ check("bridge_health", bridge_health["ok"], "bridge_health_failed" if not bridge
       {"url": metabot_url, "status": bridge_health["status"], "response": bridge_health["json"] or bridge_health["bodyPreview"]})
 
 core_url = env("METABOT_CORE_URL", "http://localhost:9200").rstrip("/")
-core_token_present = bool(env("METABOT_CORE_TOKEN") or (Path.home() / ".metabot-core" / "token").exists())
+core_token_file = Path.home() / ".metabot-core" / "token"
+core_token = env("METABOT_CORE_TOKEN") or read_first_line(core_token_file)
+core_token_present = bool(core_token)
 core_health = http_json(f"{core_url}/health")
 check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["ok"] else "ok",
       "metabot-core health endpoint is reachable." if core_health["ok"] else "metabot-core health endpoint is not reachable.",
@@ -702,6 +713,21 @@ check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["
       False,
       {"url": core_url, "status": core_health["status"], "tokenPresent": core_token_present, "response": core_health["json"] or core_health["bodyPreview"]})
 
+if core_token:
+    core_memory = http_json(f"{core_url}/api/memory/folders/tree", core_token)
+    core_memory_ok = core_memory["ok"]
+    core_memory_code = "ok" if core_memory_ok else ("core_memory_auth_failed" if core_memory["status"] in (401, 403) else "core_memory_unreachable")
+    check("metabot_core_memory", core_memory_ok, core_memory_code,
+          "MetaMemory API is reachable with the configured metabot-core token." if core_memory_ok else "MetaMemory API is not reachable with the configured metabot-core token.",
+          "Check METABOT_CORE_TOKEN, token ACL, and METABOT_CORE_URL.",
+          False,
+          {"url": f"{core_url}/api/memory/folders/tree", "status": core_memory["status"], "response": core_memory["json"] or core_memory["bodyPreview"]})
+else:
+    check("metabot_core_memory", False, "core_token_missing",
+          "No metabot-core token is configured, so MetaMemory cannot be used.",
+          f"Set METABOT_CORE_TOKEN in {home / '.env'} or write the token to {core_token_file}.",
+          False,
+          {"url": f"{core_url}/api/memory/folders/tree", "tokenFile": str(core_token_file)})
 
 bots_data = []
 bots_path = home / "bots.json"

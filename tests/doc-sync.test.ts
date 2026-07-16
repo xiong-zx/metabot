@@ -55,9 +55,11 @@ function createMockMemoryClient(docs: FullDocument[] = [], tree?: FolderTreeNode
     token: 'test-token',
     secret: 'test-token',
     listFolderTree: vi.fn().mockResolvedValue(tree || defaultTree),
-    listDocuments: vi.fn().mockResolvedValue(
-      docs.map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at })),
-    ),
+    listDocuments: vi.fn().mockImplementation(async (folderId?: string) => (
+      docs
+        .filter((d) => !folderId || d.folder_id === folderId)
+        .map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at }))
+    )),
     getDocument: vi.fn().mockImplementation(async (docId: string) => docs.find((d) => d.id === docId) || null),
   } as any;
 }
@@ -102,6 +104,7 @@ describe('DocSync', () => {
       databaseDir: tmpDir,
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
+      memoryRootPath: '/',
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());
@@ -195,6 +198,53 @@ describe('DocSync', () => {
 
     const stats = docSync.getStats();
     expect(stats.folderCount).toBe(1);
+  });
+
+  it('creates new wiki mappings when MetaMemory paths move under a server root', async () => {
+    const doc = makeSampleDoc({
+      folder_id: 'f-dev',
+      path: '/metabot/dev/git-workflow',
+      title: 'Git Workflow',
+    });
+    const tree: FolderTreeNode = {
+      id: 'root',
+      name: 'Root',
+      path: '/',
+      children: [
+        {
+          id: 'f-metabot',
+          name: 'metabot',
+          path: '/metabot',
+          children: [
+            {
+              id: 'f-dev',
+              name: 'dev',
+              path: '/metabot/dev',
+              children: [],
+              document_count: 1,
+            },
+          ],
+          document_count: 0,
+        },
+      ],
+      document_count: 0,
+    };
+
+    setup([doc], tree);
+    await docSync.syncAll();
+
+    tree.children[0].name = 'cargo1';
+    tree.children[0].path = '/cargo1';
+    tree.children[0].children[0].path = '/cargo1/dev';
+    doc.path = '/cargo1/dev/git-workflow';
+
+    const result = await docSync.syncAll();
+
+    expect(result.created).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect((docSync as any).store.getFolderMapping('f-metabot')?.memoryPath).toBe('/cargo1');
+    expect((docSync as any).store.getDocMapping('doc1')?.memoryPath).toBe('/cargo1/dev/git-workflow');
+    expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledTimes(6);
   });
 
   it('detects and cleans up deleted documents', async () => {

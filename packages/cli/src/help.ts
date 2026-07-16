@@ -15,6 +15,8 @@ Subcommands:
                         e.g. metabot inbox register | metabot inbox poll --loop
   teams <cmd> [args]    MetaBot Agent Teams (local bridge)
                         e.g. metabot teams dispatch demo worker "review PR" | metabot teams next demo worker
+  research <cmd> [args] Unified Memory Core / AutoResearchClaw memory (local bridge)
+                        e.g. metabot research search "negative result" | metabot research context-pack "agent memory"
   t5t <cmd> [args]      daily team status portal (board / projects / entries)
                         e.g. metabot t5t board | metabot t5t push <slug> <date> "<item>"
   help                  this message (also --help, -h, or bare invocation)
@@ -25,6 +27,7 @@ Each subcommand has its own help; pass --help through to see it:
   metabot agents --help
   metabot inbox --help
   metabot teams --help
+  metabot research --help
   metabot t5t --help
 
 Env:

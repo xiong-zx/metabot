@@ -66,6 +66,8 @@ import {
   SPONTANEOUS_COALESCE_MS,
   TASK_TIMEOUT_MS,
   TASK_TIMEOUT_MESSAGE,
+  formatIdleTimeoutMessage,
+  formatTaskTimeoutMessage,
 } from './bridge-constants.js';
 import { CodexCommandController } from './codex-command-controller.js';
 import { buildCodexGoalPrompt } from './codex-goal-policy.js';
@@ -3436,9 +3438,9 @@ export class MessageBridge {
 
       if (lastState.status !== 'complete' && lastState.status !== 'error') {
         if (timedOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: TASK_TIMEOUT_MESSAGE };
+          lastState = { ...lastState, status: 'error', errorMessage: formatTaskTimeoutMessage(taskTimeoutMs) };
         } else if (idledOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: IDLE_TIMEOUT_MESSAGE };
+          lastState = { ...lastState, status: 'error', errorMessage: formatIdleTimeoutMessage(idleTimeoutMs) };
         } else if (abortController.signal.aborted) {
           lastState = { ...lastState, status: 'error', errorMessage: 'Task was stopped' };
         } else {

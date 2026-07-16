@@ -188,6 +188,76 @@ function serveStaticFile(
   return true;
 }
 
+function serveInstallScript(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  absPath: string,
+  method: string = 'GET',
+): boolean {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(absPath);
+  } catch {
+    return false;
+  }
+  if (!stat.isFile()) return false;
+
+  const raw = fs.readFileSync(absPath, 'utf-8');
+  const body = raw.replace(
+    '# __METABOT_CORE_URL_INJECT__',
+    `PACKAGED_METABOT_CORE_URL=${shellSingleQuote(distributionCoreBaseUrl(req))}`,
+  );
+  const buf = Buffer.from(body);
+  res.writeHead(200, {
+    'Content-Type': 'text/x-shellscript; charset=utf-8',
+    'Content-Length': buf.length,
+    'Cache-Control': 'no-cache',
+  });
+  if (method === 'HEAD') {
+    res.end();
+    return true;
+  }
+  res.end(buf);
+  return true;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw?.split(',')[0]?.trim() || undefined;
+}
+
+function normalizeBaseUrl(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
+function distributionCoreBaseUrl(req: http.IncomingMessage): string {
+  const configured = normalizeBaseUrl(process.env.METABOT_CORE_PUBLIC_URL || '')
+    || normalizeBaseUrl(process.env.METABOT_CORE_URL || '');
+  if (configured) return configured;
+
+  const host = firstHeaderValue(req.headers['x-forwarded-host']) || firstHeaderValue(req.headers.host);
+  const proto = firstHeaderValue(req.headers['x-forwarded-proto'])
+    || (Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted) ? 'https' : 'http');
+  if (host) {
+    const inferred = normalizeBaseUrl(`${proto}://${host}`);
+    if (inferred) return inferred;
+  }
+  return 'http://localhost:9200';
+}
+
 /**
  * Try to serve a static file (or SPA fallback to index.html) from STATIC_DIR.
  * Returns true if a response was sent (including a 404 when index.html is
@@ -240,7 +310,7 @@ function tryServeStatic(
 }
 
 function corePublicBaseUrl(): string {
-  const raw = process.env.METABOT_CORE_URL || 'http://localhost:9200';
+  const raw = process.env.METABOT_CORE_PUBLIC_URL || process.env.METABOT_CORE_URL || 'http://localhost:9200';
   return raw.replace(/\/+$/, '');
 }
 
@@ -596,7 +666,10 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      if (!serveStaticFile(res, abs, false, method)) {
+      const served = distPath === '/cli/install.sh'
+        ? serveInstallScript(req, res, abs, method)
+        : serveStaticFile(res, abs, false, method);
+      if (!served) {
         jsonResponse(res, 404, { error: 'cli_not_installed' });
       }
       return;
@@ -626,7 +699,10 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      if (!serveStaticFile(res, abs, false, method)) {
+      const served = distPath === '/install/install.sh'
+        ? serveInstallScript(req, res, abs, method)
+        : serveStaticFile(res, abs, false, method);
+      if (!served) {
         jsonResponse(res, 404, { error: 'install_not_built' });
       }
       return;
@@ -762,6 +838,11 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname.startsWith('/api/memory/folders/') && method === 'GET') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.getFolder(memoryStore, idOrPath, cred));
+      }
+      if (pathname.startsWith('/api/memory/folders/') && (method === 'PATCH' || method === 'PUT')) {
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.updateFolder(memoryStore, idOrPath, body, cred));
       }
       if (pathname.startsWith('/api/memory/folders/') && method === 'DELETE') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
