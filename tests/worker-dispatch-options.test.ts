@@ -66,6 +66,29 @@ describe('WorkerManager dispatch execution options', () => {
     });
   });
 
+  it('rejects unsupported explicit output contracts before starting a worker', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    expect(() => manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment',
+      model: 'gpt-5.4',
+      outputContract: {
+        name: 'not_a_real_contract',
+        requiredArtifact: true,
+      } as any,
+    } as any)).toThrow(/Invalid outputContract\.name/);
+
+    expect(executeApiTask).not.toHaveBeenCalled();
+    expect(manager.listWorkers('pm-chat')).toEqual([]);
+  });
+
   it('prepends worker rules context when a provider is configured', async () => {
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));

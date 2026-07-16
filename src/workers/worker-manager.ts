@@ -236,6 +236,25 @@ export function normalizeWorkerOutputContract(value: WorkerOutputContract | unde
   };
 }
 
+function validateDispatchOutputContract(value: WorkerOutputContract | undefined): WorkerOutputContract | undefined {
+  if (!value) return undefined;
+  if (!isWorkerOutputContractName(value.name)) {
+    throw new Error(`Invalid outputContract.name: unsupported contract "${String(value.name)}"`);
+  }
+  if (typeof value.requiredArtifact !== 'boolean') {
+    throw new Error('Invalid outputContract.requiredArtifact: expected a boolean');
+  }
+  if (value.expectedArtifacts !== undefined) {
+    const validArtifacts = Array.isArray(value.expectedArtifacts)
+      && value.expectedArtifacts.length > 0
+      && value.expectedArtifacts.every((item) => typeof item === 'string' && item.trim().length > 0);
+    if (!validArtifacts) {
+      throw new Error('Invalid outputContract.expectedArtifacts: expected a non-empty array of non-empty strings');
+    }
+  }
+  return normalizeWorkerOutputContract(value);
+}
+
 function normalizeWorkerTimeouts(input: DispatchInput): { timeoutMs?: number; idleTimeoutMs?: number; adjusted: boolean } {
   if (!isDurableWorkerTask(input)) {
     return { timeoutMs: input.timeoutMs, idleTimeoutMs: input.idleTimeoutMs, adjusted: false };
@@ -597,7 +616,7 @@ export class WorkerManager {
       timeoutMs: effectiveTimeouts.timeoutMs,
       idleTimeoutMs: effectiveTimeouts.idleTimeoutMs,
       dedupeKey,
-      outputContract: normalizeWorkerOutputContract(input.outputContract) ?? inferOutputContract(input),
+      outputContract: validateDispatchOutputContract(input.outputContract) ?? inferOutputContract(input),
       status: 'running',
       executionStatus: 'running',
       artifactStatus: 'unknown',
