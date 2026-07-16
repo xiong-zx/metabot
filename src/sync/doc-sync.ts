@@ -47,6 +47,8 @@ export interface DocSyncConfig {
   throttleMs?: number;
   /** Optional MetaMemory path prefix to sync, e.g. /savio. */
   memoryRootPath?: string;
+  /** Delete mapped Feishu wiki nodes when their MetaMemory document disappears. Default true. */
+  deleteStaleDocuments?: boolean;
 }
 
 const DEFAULT_THROTTLE_MS = 300;
@@ -58,6 +60,7 @@ export class DocSync {
   private throttleMs: number;
   private wikiSpaceName: string;
   private memoryRootPath: string;
+  private deleteStaleDocuments: boolean;
   private syncing = false;
 
   constructor(
@@ -74,6 +77,7 @@ export class DocSync {
     this.throttleMs = config.throttleMs ?? DEFAULT_THROTTLE_MS;
     this.wikiSpaceName = config.wikiSpaceName ?? WIKI_SPACE_NAME;
     this.memoryRootPath = normalizeMemoryRootPath(config.memoryRootPath ?? process.env.METABOT_CORE_MEMORY_SERVER_ROOT);
+    this.deleteStaleDocuments = config.deleteStaleDocuments ?? true;
   }
 
   /** Check if a sync is currently running. */
@@ -126,7 +130,7 @@ export class DocSync {
       await this.syncDocumentsInTree(spaceId, folderTree, result);
 
       // Step 5: Clean up deleted documents
-      await this.cleanupDeleted(result);
+      await this.cleanupDeleted(spaceId, result);
 
       this.store.setConfig('last_full_sync_at', new Date().toISOString());
     } catch (err: any) {
@@ -391,12 +395,14 @@ export class DocSync {
   ): Promise<void> {
     const hash = contentHash(this.buildDocumentMarkdown(doc));
     let existing = this.store.getDocMapping(doc.id);
+    let staleExisting: typeof existing;
     if (existing && existing.memoryPath !== doc.path) {
       this.logger.info({
         docId: doc.id,
         oldPath: existing.memoryPath,
         newPath: doc.path,
       }, 'Document path changed; creating a new wiki document mapping');
+      staleExisting = existing;
       existing = undefined;
     }
 
@@ -452,6 +458,17 @@ export class DocSync {
           });
           if (result) result.created++;
           this.logger.info({ doc: doc.title, nodeToken, docId }, 'Created wiki document');
+          if (staleExisting) {
+            const deleted = await this.deleteStaleWikiNode(spaceId, staleExisting, result);
+            if (deleted) {
+              if (result) result.deleted++;
+              this.logger.info({
+                doc: doc.title,
+                oldPath: staleExisting.memoryPath,
+                oldNodeToken: staleExisting.feishuNodeToken,
+              }, 'Deleted stale wiki document node after path change');
+            }
+          }
         }
         await this.throttle();
       } catch (err: any) {
@@ -544,26 +561,78 @@ export class DocSync {
 
   // --- Cleanup ---
 
-  private async cleanupDeleted(result: SyncResult): Promise<void> {
+  private async cleanupDeleted(spaceId: string, result: SyncResult): Promise<void> {
     const allMappings = this.store.getAllDocMappings();
 
     for (const mapping of allMappings) {
+      let doc: FullDocument | null = null;
       try {
-        const doc = await this.fetchDocument(mapping.memoryDocId);
-        if (!doc) {
-          // Document deleted from MetaMemory, remove from wiki
-          this.store.deleteDocMapping(mapping.memoryDocId);
-          if (result) result.deleted++;
-          this.logger.info({ doc: mapping.memoryPath }, 'Removed mapping for deleted document');
-          // Note: We don't delete the wiki page itself to avoid data loss.
-          // The orphaned page can be manually cleaned up.
-        }
+        doc = await this.fetchDocument(mapping.memoryDocId);
       } catch {
-        // If we can't fetch, assume it's deleted
+        // If we can't fetch, keep the previous behavior and treat the mapping
+        // as stale so a permanently deleted MetaMemory doc can be cleaned up.
+        doc = null;
+      }
+
+      if (!doc || !this.isPathInScope(doc.path)) {
+        const deleted = await this.deleteStaleWikiNode(spaceId, mapping, result);
+        if (!deleted) {
+          continue;
+        }
+
         this.store.deleteDocMapping(mapping.memoryDocId);
-        if (result) result.deleted++;
+        result.deleted++;
+        this.logger.info({
+          doc: mapping.memoryPath,
+          deletedFromWiki: this.deleteStaleDocuments,
+        }, 'Removed mapping for deleted document');
       }
     }
+  }
+
+  private async deleteStaleWikiNode(
+    spaceId: string,
+    mapping: { memoryDocId?: string; feishuNodeToken: string; memoryPath: string },
+    result?: SyncResult,
+  ): Promise<boolean> {
+    if (!this.deleteStaleDocuments) {
+      return true;
+    }
+
+    try {
+      await this.deleteWikiNode(spaceId, mapping);
+      return true;
+    } catch (err: any) {
+      const detail = err.response?.data || err.data || err.msg || err.message || err;
+      this.logger.error({
+        err: detail,
+        memoryDocId: mapping.memoryDocId,
+        memoryPath: mapping.memoryPath,
+        nodeToken: mapping.feishuNodeToken,
+      }, 'Failed to delete stale wiki document node');
+      if (result) {
+        result.errors.push(`Delete stale "${mapping.memoryPath}": ${typeof detail === 'object' ? JSON.stringify(detail) : detail}`);
+      }
+      return false;
+    }
+  }
+
+  private async deleteWikiNode(spaceId: string, mapping: { feishuNodeToken: string; memoryPath: string }): Promise<void> {
+    const resp = await (this.client as any).request({
+      method: 'DELETE',
+      url: `/open-apis/wiki/v2/spaces/${spaceId}/nodes/${mapping.feishuNodeToken}`,
+      data: {
+        include_children: true,
+        obj_type: 'wiki',
+      },
+    });
+    const taskId = resp?.data?.task_id;
+    this.logger.info({
+      memoryPath: mapping.memoryPath,
+      nodeToken: mapping.feishuNodeToken,
+      taskId,
+    }, 'Requested deletion for stale wiki document node');
+    await this.throttle();
   }
 
   // --- Helpers ---

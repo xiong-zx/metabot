@@ -30,6 +30,7 @@ function createMockLarkClient() {
         },
       },
     },
+    request: vi.fn().mockResolvedValue({ data: { task_id: 'delete_task_1' } }),
     docx: {
       v1: {
         documentBlockChildren: {
@@ -94,7 +95,7 @@ describe('DocSync', () => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode) {
+  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode, configOverrides: Partial<DocSyncConfig> = {}) {
     mockClient = createMockLarkClient();
     mockMemory = createMockMemoryClient(docs, tree);
 
@@ -105,6 +106,7 @@ describe('DocSync', () => {
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
       memoryRootPath: '/',
+      ...configOverrides,
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());
@@ -247,7 +249,29 @@ describe('DocSync', () => {
     expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledTimes(6);
   });
 
-  it('detects and cleans up deleted documents', async () => {
+  it('deletes the previous wiki node when a document path changes', async () => {
+    const doc = makeSampleDoc();
+    setup([doc]);
+
+    await docSync.syncAll();
+
+    doc.path = '/renamed-test-doc';
+    const result = await docSync.syncAll();
+
+    expect(result.created).toBe(1);
+    expect(result.deleted).toBe(1);
+    expect(mockClient.request).toHaveBeenCalledWith({
+      method: 'DELETE',
+      url: '/open-apis/wiki/v2/spaces/space_123/nodes/node_1',
+      data: {
+        include_children: true,
+        obj_type: 'wiki',
+      },
+    });
+    expect((docSync as any).store.getDocMapping('doc1')?.memoryPath).toBe('/renamed-test-doc');
+  });
+
+  it('deletes stale wiki nodes for deleted documents by default', async () => {
     const doc = makeSampleDoc();
     setup([doc]);
 
@@ -260,6 +284,30 @@ describe('DocSync', () => {
 
     const result = await docSync.syncAll();
     expect(result.deleted).toBe(1);
+    expect(mockClient.request).toHaveBeenCalledWith({
+      method: 'DELETE',
+      url: '/open-apis/wiki/v2/spaces/space_123/nodes/node_1',
+      data: {
+        include_children: true,
+        obj_type: 'wiki',
+      },
+    });
+    expect((docSync as any).store.getDocMapping('doc1')).toBeUndefined();
+  });
+
+  it('can clean stale mappings without deleting wiki nodes', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { deleteStaleDocuments: false });
+
+    await docSync.syncAll();
+
+    (docSync as any).fetchDocument = vi.fn().mockResolvedValue(null);
+    mockMemory.listDocuments.mockResolvedValue([]);
+
+    const result = await docSync.syncAll();
+    expect(result.deleted).toBe(1);
+    expect(mockClient.request).not.toHaveBeenCalled();
+    expect((docSync as any).store.getDocMapping('doc1')).toBeUndefined();
   });
 
   it('finds existing wiki space by name', async () => {

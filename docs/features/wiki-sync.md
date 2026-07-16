@@ -30,6 +30,7 @@ When enabled, MetaMemory content automatically syncs to a Feishu Wiki space:
 | `WIKI_AUTO_SYNC_POLL_MS` | `60000` | Snapshot polling interval |
 | `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Debounce delay |
 | `WIKI_SYNC_THROTTLE_MS` | `300` | Delay between API calls |
+| `WIKI_SYNC_DELETE_STALE_DOCS` | `true` | Delete mapped Feishu Wiki document nodes when the source MetaMemory document disappears |
 | `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's top-level MetaMemory namespace, for example `/cargo1`; also appended to Memory API writable roots |
 | `FEISHU_SERVICE_APP_ID` | — | Dedicated Feishu app for sync (falls back to first bot) |
 | `FEISHU_SERVICE_APP_SECRET` | — | Service app secret |
@@ -56,7 +57,7 @@ Migrate old data from `/metabot` into the server root:
 metabot memory move-folder /metabot --path /cargo1
 ```
 
-Folder and document IDs are preserved. After paths move, the next sync creates new Wiki mappings under the new hierarchy; old `/metabot` Wiki pages are not deleted automatically and should be cleaned up manually after verification.
+Folder and document IDs are preserved. After document paths move, the next sync creates the new Wiki mapping and, when `WIKI_SYNC_DELETE_STALE_DOCS=true`, asks Feishu to delete the previous mapped document node. Stale mappings for documents that disappeared from MetaMemory are also deleted from Feishu Wiki during full sync using the service app identity. If the service app lacks delete permission, sync records an error and keeps the mapping so a later sync can retry after permissions are fixed.
 
 ## Create a Wiki Space
 
@@ -111,6 +112,7 @@ Add these in the Feishu Developer Console:
 
 - `wiki:wiki` — Read/write wiki pages
 - `wiki:space:retrieve` — Read wiki space lists (optional when `wiki:wiki` already covers this ability)
+- `wiki:node:create` — Create/delete Wiki nodes; required for stale-node deletion during full sync
 - `docx:document` — Create/edit documents
 - `docx:document:readonly` — Read documents
 - `drive:drive` — Access drive files
@@ -135,6 +137,7 @@ pm2 restart metabot --update-env
 - Multiple rapid changes are coalesced
 - Auto-sync calls the same full-sync pipeline as `/sync`
 - Full sync uses content hashes to skip unchanged documents, so only changed pages are rewritten
+- Full sync prunes stale document mappings. With `WIKI_SYNC_DELETE_STALE_DOCS=true`, it also deletes the mapped Feishu Wiki node through the service app, without user OAuth.
 - Manual `/sync` is always available
 
 ## API
