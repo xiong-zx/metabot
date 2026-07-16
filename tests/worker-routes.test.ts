@@ -116,6 +116,39 @@ describe('handleWorkerRoutes authority', () => {
     }));
   });
 
+  it('passes explicit output contracts through the API', async () => {
+    const dispatch = vi.fn(() => ({ id: 'w1', status: 'running' }));
+    const workerManager = {
+      listWorkers: vi.fn(() => []),
+      dispatch,
+      getWorker: vi.fn(),
+      abortWorker: vi.fn(),
+      redirectWorker: vi.fn(),
+    };
+
+    const res = await call(workerManager, 'POST', '/api/workers', {
+      botName: 'pm-codex',
+      pmChatId: 'oc_pm',
+      workingDirectory: '/root/metabot',
+      prompt: 'run focused tests',
+      actorRole: 'pm',
+      outputContract: {
+        name: 'generic_results_v1',
+        requiredArtifact: true,
+        idempotent: true,
+      },
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      outputContract: {
+        name: 'generic_results_v1',
+        requiredArtifact: true,
+        idempotent: true,
+      },
+    }));
+  });
+
   it('requires PM/user/admin authority to abort and redirect workers', async () => {
     const workerManager = {
       listWorkers: vi.fn(() => []),

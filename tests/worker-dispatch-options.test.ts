@@ -254,4 +254,103 @@ describe('WorkerManager dispatch execution options', () => {
     expect(finalRecord.artifactPath).toBe(artifactPath);
     expect(finalRecord.terminalError).toContain('2 minutes');
   });
+
+  it('marks a completed research worker missing results.json as contract violated', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed without durable output.' }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: summarize findings',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.outputContract).toMatchObject({ name: 'generic_results_v1', requiredArtifact: true });
+    expect(finalRecord.artifactStatus).toBe('missing');
+    expect(finalRecord.contractStatus).toBe('violated');
+    expect(finalRecord.recoveryStatus).toBe('none');
+  });
+
+  it('accepts a valid generic results.json artifact and stores full detail refs', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(resultsPath, JSON.stringify({
+      task: 'Summarize benchmark deltas',
+      metrics: { accuracy: 0.91, latency_ms: 12 },
+      notes: 'Model B improved accuracy without violating the latency budget.',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed with durable output.'.repeat(40) }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.artifactStatus).toBe('valid_complete');
+    expect(finalRecord.contractStatus).toBe('satisfied');
+    expect(finalRecord.artifactPath).toBe(resultsPath);
+    expect(finalRecord.finalPayloadRef).toBe(`file://${resultsPath}`);
+    expect(finalRecord.finalTranscriptRef).toBe(`worker-chat:${finalRecord.workerChatId}`);
+    expect(finalRecord.detailRoute).toBe(`/api/workers/${finalRecord.id}`);
+  });
+
+  it('marks an invalid generic results.json artifact as contract violated', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    writeFileSync(join(workdir, 'results.json'), JSON.stringify({
+      task: 'Summarize benchmark deltas',
+      metrics: ['not-an-object'],
+      notes: '',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed with malformed output.' }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.artifactStatus).toBe('invalid');
+    expect(finalRecord.contractStatus).toBe('violated');
+    expect(finalRecord.finalPayloadRef).toBe(`file://${join(workdir, 'results.json')}`);
+  });
 });

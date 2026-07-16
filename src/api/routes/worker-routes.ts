@@ -4,6 +4,7 @@ import type { RouteContext } from './types.js';
 import type {
   CodexApprovalPolicy,
   CodexSandbox,
+  WorkerOutputContract,
   WorkerReasoningEffort,
 } from '../../workers/worker-manager.js';
 import type { EngineName } from '../../config.js';
@@ -68,6 +69,7 @@ export async function handleWorkerRoutes(
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
           idleTimeoutMs: typeof body.idleTimeoutMs === 'number' ? body.idleTimeoutMs : undefined,
           dedupeKey: typeof body.dedupeKey === 'string' ? body.dedupeKey : undefined,
+          outputContract: isWorkerOutputContract(body.outputContract) ? body.outputContract : undefined,
         });
         jsonResponse(res, 202, record);
       } catch (err: any) {
@@ -204,4 +206,10 @@ function actorRoleField(value: unknown): TeamActorRole | undefined {
     || value === 'worker'
     ? value
     : undefined;
+}
+
+function isWorkerOutputContract(value: unknown): value is WorkerOutputContract {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.name === 'string' && typeof candidate.requiredArtifact === 'boolean';
 }
