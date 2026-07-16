@@ -98,6 +98,13 @@ export interface WorkerBackfillResult {
   changes: WorkerBackfillChange[];
 }
 
+export const SUPPORTED_WORKER_OUTPUT_CONTRACT_NAMES = [
+  'generic_results_v1',
+  'autoresearchclaw_output_v2',
+  'chat_only_result_v1',
+  'custom_optional',
+] as const satisfies readonly WorkerOutputContractName[];
+
 export interface WorkerManagerConfig {
   /** Default worker model (alias-resolved). Default: gpt-5.4 (codex, real 1M ctx). */
   defaultModel: string;
@@ -213,8 +220,14 @@ function inferOutputContract(input: Pick<DispatchInput, 'prompt' | 'label'>): Wo
   return undefined;
 }
 
-function normalizeOutputContract(value: WorkerOutputContract | undefined): WorkerOutputContract | undefined {
+export function isWorkerOutputContractName(value: unknown): value is WorkerOutputContractName {
+  return typeof value === 'string'
+    && (SUPPORTED_WORKER_OUTPUT_CONTRACT_NAMES as readonly string[]).includes(value);
+}
+
+export function normalizeWorkerOutputContract(value: WorkerOutputContract | undefined): WorkerOutputContract | undefined {
   if (!value) return undefined;
+  if (!isWorkerOutputContractName(value.name)) return undefined;
   return {
     name: value.name,
     requiredArtifact: value.requiredArtifact !== false,
@@ -388,7 +401,7 @@ function syncWorkerDetailRefs(record: WorkerRecord): void {
 function reconcileTerminalWorkerRecord(record: WorkerRecord): void {
   if (!isTerminalWorkerStatus(record.status)) return;
 
-  const contract = normalizeOutputContract(record.outputContract) ?? inferOutputContract(record);
+  const contract = normalizeWorkerOutputContract(record.outputContract) ?? inferOutputContract(record);
   if (contract) {
     record.outputContract = contract;
   }
@@ -584,7 +597,7 @@ export class WorkerManager {
       timeoutMs: effectiveTimeouts.timeoutMs,
       idleTimeoutMs: effectiveTimeouts.idleTimeoutMs,
       dedupeKey,
-      outputContract: normalizeOutputContract(input.outputContract) ?? inferOutputContract(input),
+      outputContract: normalizeWorkerOutputContract(input.outputContract) ?? inferOutputContract(input),
       status: 'running',
       executionStatus: 'running',
       artifactStatus: 'unknown',

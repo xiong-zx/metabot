@@ -7,6 +7,7 @@ import type {
   WorkerOutputContract,
   WorkerReasoningEffort,
 } from '../../workers/worker-manager.js';
+import { isWorkerOutputContractName } from '../../workers/worker-manager.js';
 import type { EngineName } from '../../config.js';
 import { hasTeamCapability, type TeamActorRole, type TeamCapabilityAction } from '../../agent-teams/team-store.js';
 
@@ -52,6 +53,10 @@ export async function handleWorkerRoutes(
       const prompt = body.prompt as string;
       if (!botName || !pmChatId || !workingDirectory || !prompt) {
         jsonResponse(res, 400, { error: 'Missing required fields: botName, pmChatId, workingDirectory, prompt' });
+        return true;
+      }
+      if (body.outputContract !== undefined && !isWorkerOutputContract(body.outputContract)) {
+        jsonResponse(res, 400, { error: 'Invalid outputContract: expected a supported contract name and optional expectedArtifacts as non-empty strings' });
         return true;
       }
       try {
@@ -211,5 +216,9 @@ function actorRoleField(value: unknown): TeamActorRole | undefined {
 function isWorkerOutputContract(value: unknown): value is WorkerOutputContract {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return typeof candidate.name === 'string' && typeof candidate.requiredArtifact === 'boolean';
+  if (!isWorkerOutputContractName(candidate.name) || typeof candidate.requiredArtifact !== 'boolean') return false;
+  if (candidate.expectedArtifacts === undefined) return true;
+  return Array.isArray(candidate.expectedArtifacts)
+    && candidate.expectedArtifacts.length > 0
+    && candidate.expectedArtifacts.every((item) => typeof item === 'string' && item.trim().length > 0);
 }

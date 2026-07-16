@@ -149,6 +149,65 @@ describe('handleWorkerRoutes authority', () => {
     }));
   });
 
+  it('rejects unsupported output contract names at the API boundary', async () => {
+    const dispatch = vi.fn(() => ({ id: 'w1', status: 'running' }));
+    const workerManager = {
+      listWorkers: vi.fn(() => []),
+      dispatch,
+      getWorker: vi.fn(),
+      abortWorker: vi.fn(),
+      redirectWorker: vi.fn(),
+    };
+
+    const res = await call(workerManager, 'POST', '/api/workers', {
+      botName: 'pm-codex',
+      pmChatId: 'oc_pm',
+      workingDirectory: '/root/metabot',
+      prompt: 'run focused tests',
+      actorRole: 'pm',
+      outputContract: {
+        name: 'not_a_real_contract',
+        requiredArtifact: true,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: expect.stringContaining('Invalid outputContract'),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed expectedArtifacts at the API boundary', async () => {
+    const dispatch = vi.fn(() => ({ id: 'w1', status: 'running' }));
+    const workerManager = {
+      listWorkers: vi.fn(() => []),
+      dispatch,
+      getWorker: vi.fn(),
+      abortWorker: vi.fn(),
+      redirectWorker: vi.fn(),
+    };
+
+    const res = await call(workerManager, 'POST', '/api/workers', {
+      botName: 'pm-codex',
+      pmChatId: 'oc_pm',
+      workingDirectory: '/root/metabot',
+      prompt: 'run focused tests',
+      actorRole: 'pm',
+      outputContract: {
+        name: 'generic_results_v1',
+        requiredArtifact: true,
+        expectedArtifacts: ['results.json', '', 123],
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: expect.stringContaining('expectedArtifacts'),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it('requires PM/user/admin authority to abort and redirect workers', async () => {
     const workerManager = {
       listWorkers: vi.fn(() => []),
