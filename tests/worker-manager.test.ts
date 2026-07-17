@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveWorkerModel, injectWorkerTemplates } from '../src/workers/worker-manager.js';
+import { resolveWorkerModel, injectWorkerTemplates, normalizeWorkerOutputContract } from '../src/workers/worker-manager.js';
 
 describe('resolveWorkerModel', () => {
   const DEFAULT = 'gpt-5.4';
@@ -62,5 +62,28 @@ describe('injectWorkerTemplates', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('normalizeWorkerOutputContract', () => {
+  it('drops unsupported internal contract names instead of preserving them', () => {
+    expect(normalizeWorkerOutputContract({
+      name: 'not_a_real_contract' as any,
+      requiredArtifact: true,
+      expectedArtifacts: ['results.json'],
+    })).toBeUndefined();
+  });
+
+  it('preserves supported contracts and normalized expectedArtifacts', () => {
+    expect(normalizeWorkerOutputContract({
+      name: 'generic_results_v1',
+      requiredArtifact: true,
+      expectedArtifacts: ['results.json', 'artifacts/report.md'],
+    })).toEqual({
+      name: 'generic_results_v1',
+      requiredArtifact: true,
+      expectedArtifacts: ['results.json', 'artifacts/report.md'],
+      idempotent: undefined,
+    });
   });
 });

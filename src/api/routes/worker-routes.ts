@@ -4,8 +4,10 @@ import type { RouteContext } from './types.js';
 import type {
   CodexApprovalPolicy,
   CodexSandbox,
+  WorkerOutputContract,
   WorkerReasoningEffort,
 } from '../../workers/worker-manager.js';
+import { isWorkerOutputContractName } from '../../workers/worker-manager.js';
 import type { EngineName } from '../../config.js';
 import { hasTeamCapability, type TeamActorRole, type TeamCapabilityAction } from '../../agent-teams/team-store.js';
 
@@ -53,6 +55,10 @@ export async function handleWorkerRoutes(
         jsonResponse(res, 400, { error: 'Missing required fields: botName, pmChatId, workingDirectory, prompt' });
         return true;
       }
+      if (body.outputContract !== undefined && !isWorkerOutputContract(body.outputContract)) {
+        jsonResponse(res, 400, { error: 'Invalid outputContract: expected a supported contract name and optional expectedArtifacts as non-empty strings' });
+        return true;
+      }
       try {
         const record = workerManager.dispatch({
           botName,
@@ -68,6 +74,7 @@ export async function handleWorkerRoutes(
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
           idleTimeoutMs: typeof body.idleTimeoutMs === 'number' ? body.idleTimeoutMs : undefined,
           dedupeKey: typeof body.dedupeKey === 'string' ? body.dedupeKey : undefined,
+          outputContract: isWorkerOutputContract(body.outputContract) ? body.outputContract : undefined,
         });
         jsonResponse(res, 202, record);
       } catch (err: any) {
@@ -204,4 +211,14 @@ function actorRoleField(value: unknown): TeamActorRole | undefined {
     || value === 'worker'
     ? value
     : undefined;
+}
+
+function isWorkerOutputContract(value: unknown): value is WorkerOutputContract {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (!isWorkerOutputContractName(candidate.name) || typeof candidate.requiredArtifact !== 'boolean') return false;
+  if (candidate.expectedArtifacts === undefined) return true;
+  return Array.isArray(candidate.expectedArtifacts)
+    && candidate.expectedArtifacts.length > 0
+    && candidate.expectedArtifacts.every((item) => typeof item === 'string' && item.trim().length > 0);
 }
