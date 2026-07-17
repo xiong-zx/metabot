@@ -33,6 +33,7 @@ export class AgentTeamSupervisor {
   private readonly inFlight = new Set<string>();
   private readonly inFlightRuns = new Map<string, { teamName: string; agentName: string; chatId: string; bridge: MessageBridge; taskIds: number[] }>();
   private readonly teamsAwaitingIdleDigest = new Set<string>();
+  private readonly teamsSuppressNextIdleDigest = new Set<string>();
 
   constructor(private readonly options: AgentTeamSupervisorOptions) {
     this.logger = options.logger.child({ module: 'agent-team-supervisor' });
@@ -295,16 +296,19 @@ export class AgentTeamSupervisor {
       const memberLeadMessage = agent.name === 'lead'
         ? undefined
         : this.findLatestMemberLeadMessage(teamName, agent.name, leadMessageIdsBeforeRun);
+      let emittedRunActivity = false;
       if (memberLeadMessage && !this.hasActiveLeadAgent(teamName)) {
-        this.options.store.markMessagesRead(teamName, 'lead');
-        this.notifyTeamActivity(
+        emittedRunActivity = this.notifyTeamActivity(
           teamName,
           'lead',
           truncateActivity(memberLeadMessage.body),
           { runId: run.id, taskIds: tasks.map((task) => task.id) },
         );
+        if (emittedRunActivity) {
+          this.options.store.markMessagesRead(teamName, 'lead');
+        }
       } else if (agent.name !== 'lead' || messages.length > 0) {
-        this.notifyTeamActivity(
+        emittedRunActivity = this.notifyTeamActivity(
           teamName,
           agent.name,
           result.success
@@ -312,6 +316,9 @@ export class AgentTeamSupervisor {
             : `Run ${run.id} failed${result.error ? `: ${result.error}` : ''}.\n\n${truncateActivity(result.responseText)}`,
           { runId: run.id, taskIds: tasks.map((task) => task.id) },
         );
+      }
+      if (emittedRunActivity) {
+        this.teamsSuppressNextIdleDigest.add(teamName);
       }
       if (result.success) {
         for (const task of tasks) {
@@ -326,7 +333,7 @@ export class AgentTeamSupervisor {
       } else {
         this.requeueInProgressTasks(teamName, tasks, `Run ${run.id} failed${result.error ? `: ${result.error}` : ''}`);
       }
-      if (agent.name !== 'lead' && !memberLeadMessage) {
+      if (agent.name !== 'lead' && !memberLeadMessage && (!emittedRunActivity || this.hasActiveLeadAgent(teamName))) {
         this.options.store.sendMessage(teamName, {
           fromName: agent.name,
           toName: 'lead',
@@ -349,13 +356,16 @@ export class AgentTeamSupervisor {
         error: err?.message || String(err),
       });
       this.requeueInProgressTasks(teamName, tasks, `Run ${run.id} crashed: ${err?.message || String(err)}`);
-      this.notifyTeamActivity(
+      const emittedCrashActivity = this.notifyTeamActivity(
         teamName,
         agent.name,
         `Run ${run.id} crashed: ${err?.message || String(err)}`,
         { runId: run.id, taskIds: tasks.map((task) => task.id) },
       );
-      if (agent.name !== 'lead') {
+      if (emittedCrashActivity) {
+        this.teamsSuppressNextIdleDigest.add(teamName);
+      }
+      if (agent.name !== 'lead' && (!emittedCrashActivity || this.hasActiveLeadAgent(teamName))) {
         this.options.store.sendMessage(teamName, {
           fromName: agent.name,
           toName: 'lead',
@@ -440,6 +450,7 @@ export class AgentTeamSupervisor {
     }
     if (this.hasOpenWork(teamName)) return;
     this.teamsAwaitingIdleDigest.delete(teamName);
+    if (this.teamsSuppressNextIdleDigest.delete(teamName)) return;
     this.notifyTeamActivity(teamName, 'idle digest', this.buildIdleDigest(teamName));
   }
 
@@ -511,16 +522,16 @@ export class AgentTeamSupervisor {
     agentName: string,
     body: string,
     metadata?: Omit<AgentActivityCardMetadata, 'teamName' | 'instanceId' | 'agentName'>,
-  ): void {
+  ): boolean {
     const team = this.options.store.getTeam(teamName);
-    if (!team || team.status !== 'active') return;
+    if (!team || team.status !== 'active') return false;
     const chatIds = team.displayChatIds;
-    if (chatIds.length === 0) return;
+    if (chatIds.length === 0) return false;
     const bot = this.selectExecutionBot();
     const bridge = bot?.bridge as MessageBridge & {
       sendAgentActivityCard?: (chatId: string, body: string, metadata?: AgentActivityCardMetadata) => Promise<void>;
     };
-    if (!bridge?.sendAgentActivityCard) return;
+    if (!bridge?.sendAgentActivityCard) return false;
     const cardBody = [
       `**${teamName} / ${agentName}**`,
       body,
@@ -537,6 +548,7 @@ export class AgentTeamSupervisor {
         this.logger.warn({ err, teamName, agentName, chatId }, 'Agent team activity card failed');
       });
     }
+    return true;
   }
 
   private buildPrompt(teamName: string, agent: TeamAgent, messages: TeamMessage[], tasks: TeamTask[]): string {

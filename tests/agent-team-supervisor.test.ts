@@ -289,11 +289,19 @@ describe('AgentTeamSupervisor', () => {
     });
     expect(sendAgentActivityCard.mock.calls[0][1]).toContain('member report');
     expect(sendAgentActivityCard.mock.calls[0][1]).not.toContain('Completed run');
+    await waitFor(() => {
+      expect(store.listRuns('demo').some((run) => run.agentName === 'worker' && run.status === 'completed')).toBe(true);
+    });
+    await supervisor.tick();
+    expect(sendAgentActivityCard).toHaveBeenCalledTimes(1);
+    expect(sendAgentActivityCard.mock.calls[0][1]).not.toContain('demo / lead');
+    expect(sendAgentActivityCard.mock.calls[0][1]).not.toContain('demo / idle digest');
+    expect(store.listMessages('demo', 'lead', true)).toHaveLength(0);
     supervisor.destroy();
     store.close();
   });
 
-  it('emits one idle digest when a busy team drains all open work', async () => {
+  it('does not emit an idle digest when visible run activity already reports drained work', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
     store.createAgent('demo', { name: 'worker', engine: 'codex' });
@@ -310,25 +318,18 @@ describe('AgentTeamSupervisor', () => {
 
     await supervisor.tick();
     await waitFor(() => {
-      expect(store.listMessages('demo', 'lead', true)).toHaveLength(1);
+      expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('demo / worker'))).toBe(true);
     });
     expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('demo / idle digest'))).toBe(false);
+    expect(store.listMessages('demo', 'lead', true)).toHaveLength(0);
 
     await supervisor.tick();
-    await waitFor(() => {
-      expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('demo / idle digest'))).toBe(true);
-    });
-
     const digestCalls = sendAgentActivityCard.mock.calls.filter((call) => call[1].includes('demo / idle digest'));
-    expect(digestCalls).toHaveLength(1);
-    expect(digestCalls[0][0]).toBe('oc_main');
-    expect(digestCalls[0][1]).toContain('Team is idle.');
-    expect(digestCalls[0][1]).toContain('Open tasks: 0');
-    expect(digestCalls[0][1]).toContain('Running runs: 0');
+    expect(digestCalls).toHaveLength(0);
 
     await supervisor.tick();
     const digestCallsAfterSecondTick = sendAgentActivityCard.mock.calls.filter((call) => call[1].includes('demo / idle digest'));
-    expect(digestCallsAfterSecondTick).toHaveLength(1);
+    expect(digestCallsAfterSecondTick).toHaveLength(0);
     supervisor.destroy();
     store.close();
   });
