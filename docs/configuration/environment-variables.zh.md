@@ -36,6 +36,13 @@
 | `CODEX_SANDBOX` | `danger-full-access` | 沙箱模式（`read-only`、`workspace-write`、`danger-full-access`） |
 | `CODEX_EXECUTABLE_PATH` | 自动检测 | `codex` 二进制路径 |
 
+`read-only` 和 `workspace-write` 依赖 Codex CLI 的 Bubblewrap namespace
+sandbox。在 Docker/Kubernetes 运行环境中，如果 user namespace、seccomp 或
+AppArmor 受限，工具调用可能报 `bwrap: No permissions to create new namespace`。
+给 Codex worker/agent 分配沙箱模式前，先运行 `metabot doctor --json` 并查看
+`codex_sandbox_namespaces`。受限宿主机上应使用 `danger-full-access` / Bot 级
+bypass，或调整容器/宿主机策略以允许 user namespace。
+
 ## MetaMemory
 
 | 变量 | 默认 | 说明 |

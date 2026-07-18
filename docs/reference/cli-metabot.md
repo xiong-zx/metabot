@@ -174,6 +174,7 @@ metabot schedule cancel <id>                                   # cancel a task
 metabot stats                       # cost & usage statistics
 metabot metrics                     # Prometheus metrics
 metabot health                      # health check
+metabot doctor --json               # runtime diagnostics, including Codex sandbox namespace readiness
 ```
 
 ### Voice
