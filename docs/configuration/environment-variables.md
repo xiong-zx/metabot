@@ -37,6 +37,14 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `CODEX_SANDBOX` | `danger-full-access` | Sandbox mode (`read-only`, `workspace-write`, `danger-full-access`) |
 | `CODEX_EXECUTABLE_PATH` | auto-detect | Path to `codex` binary |
 
+`read-only` and `workspace-write` rely on Codex CLI's Bubblewrap namespace
+sandbox. In Docker/Kubernetes runtimes with restricted user namespaces,
+seccomp, or AppArmor, tool calls can fail with `bwrap: No permissions to create
+new namespace`. Run `metabot doctor --json` and check
+`codex_sandbox_namespaces` before assigning sandboxed Codex workers. Use
+`danger-full-access` / bot-level bypass on restricted hosts, or run the
+container with user namespaces allowed by host policy.
+
 ## MetaMemory
 
 | Variable | Default | Description |

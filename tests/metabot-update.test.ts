@@ -82,6 +82,23 @@ describe('metabot doctor command', () => {
     expect(source).toContain('"skillsDirExists"');
     expect(source).toContain('"mcpServerCount"');
   });
+
+  it('checks Codex sandbox namespace readiness', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('codex_sandbox_namespaces');
+    expect(source).toContain('bwrap_namespace_unavailable');
+    expect(source).toContain('kernelUnprivilegedUsernsClone');
+    expect(source).toContain('userMaxUserNamespaces');
+    expect(source).toContain('Seccomp');
+    expect(source).toContain('apparmor');
+    // bwrap file permission / setuid / capabilities fields
+    expect(source).toContain('bwrapFileMode');
+    expect(source).toContain('bwrapSetuid');
+    expect(source).toContain('bwrapCapabilities');
+    expect(source).toContain('getcap');
+    expect(source).toContain('st_mode');
+    expect(source).toContain('0o4000');
+  });
 });
 
 describe('Codex install defaults', () => {

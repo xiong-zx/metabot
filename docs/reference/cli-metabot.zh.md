@@ -173,6 +173,7 @@ metabot schedule cancel <id>                                   # 取消
 metabot stats                       # 费用与使用统计
 metabot metrics                     # Prometheus 指标
 metabot health                      # 健康检查
+metabot doctor --json               # 运行时诊断，包含 Codex sandbox namespace 可用性
 ```
 
 ### 语音

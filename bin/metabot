@@ -605,6 +605,20 @@ def run(cmd, timeout=4):
     except Exception as e:
         return {"ok": False, "code": None, "stdout": "", "stderr": str(e)}
 
+def read_text(path):
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except Exception:
+        return None
+
+def proc_status_value(key):
+    status = read_text("/proc/self/status") or ""
+    prefix = f"{key}:"
+    for raw in status.splitlines():
+        if raw.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return None
+
 def http_json(url, token=None, timeout=4):
     req = urllib.request.Request(url)
     if token:
@@ -861,6 +875,67 @@ check("codex_agent_features", codex_agent_features_ok,
           "memoryDbExists": codex_data["memoryDbExists"],
           "mcpServerCount": codex_data["mcpServerCount"],
       })
+
+bwrap_path = shutil.which("bwrap")
+bwrap_version = run([bwrap_path, "--version"], timeout=3) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+unshare_path = shutil.which("unshare")
+unshare_user = run([unshare_path, "-Ur", "true"], timeout=3) if unshare_path else {"ok": False, "stdout": "", "stderr": "unshare not found"}
+bwrap_smoke = run([
+    bwrap_path,
+    "--unshare-user",
+    "--uid", "0",
+    "--gid", "0",
+    "--ro-bind", "/", "/",
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    "/bin/sh", "-lc", "true",
+], timeout=5) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+cap_eff = proc_status_value("CapEff")
+try:
+    has_cap_sys_admin = bool(int(cap_eff or "0", 16) & (1 << 21))
+except Exception:
+    has_cap_sys_admin = None
+# bwrap file permissions: mode octal string, setuid bit, and Linux capabilities via getcap
+bwrap_filemode = None
+bwrap_setuid = None
+if bwrap_path:
+    try:
+        st = os.stat(bwrap_path)
+        bwrap_filemode = oct(st.st_mode)
+        bwrap_setuid = bool(st.st_mode & 0o4000)
+    except Exception:
+        pass
+getcap_path = shutil.which("getcap")
+bwrap_capabilities = None
+if bwrap_path and getcap_path:
+    _gc = run([getcap_path, bwrap_path], timeout=3)
+    bwrap_capabilities = (_gc["stdout"] or _gc["stderr"] or "").strip() or None
+codex_sandbox_data = {
+    "bwrap": bwrap_path,
+    "bwrapVersion": bwrap_version["stdout"] or bwrap_version["stderr"],
+    "bwrapSmokeOk": bwrap_smoke["ok"],
+    "bwrapSmokeStderr": bwrap_smoke["stderr"][:500],
+    "bwrapFileMode": bwrap_filemode,
+    "bwrapSetuid": bwrap_setuid,
+    "bwrapCapabilities": bwrap_capabilities,
+    "unshare": unshare_path,
+    "unshareUserOk": unshare_user["ok"],
+    "unshareUserStderr": unshare_user["stderr"][:500],
+    "kernelUnprivilegedUsernsClone": read_text("/proc/sys/kernel/unprivileged_userns_clone"),
+    "userMaxUserNamespaces": read_text("/proc/sys/user/max_user_namespaces"),
+    "seccomp": proc_status_value("Seccomp"),
+    "apparmor": read_text("/proc/self/attr/current"),
+    "cgroup": read_text("/proc/1/cgroup"),
+    "capEff": cap_eff,
+    "hasCapSysAdmin": has_cap_sys_admin,
+}
+check("codex_sandbox_namespaces", bwrap_smoke["ok"],
+      "ok" if bwrap_smoke["ok"] else ("bwrap_missing" if not bwrap_path else "bwrap_namespace_unavailable"),
+      "Codex read-only/workspace-write sandbox namespaces are available." if bwrap_smoke["ok"] else "Codex read-only/workspace-write sandbox namespaces are not available on this host/container.",
+      "Use Codex danger-full-access/bypass for this runtime, or run the container/host with user namespaces allowed by seccomp/AppArmor and kernel policy, then re-run metabot doctor --json.",
+      False,
+      codex_sandbox_data)
 
 team_base = None
 for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
