@@ -10,6 +10,8 @@ export interface FeishuMessageSnapshot {
 }
 
 export class MessageSender {
+  private chatOwnerCache = new Map<string, { ownerId?: string; expiresAt: number }>();
+
   constructor(
     private client: lark.Client,
     private logger: Logger,
@@ -232,6 +234,29 @@ export class MessageSender {
       };
     } catch (err) {
       this.logger.error({ err, messageId }, 'Failed to get referenced message');
+      return undefined;
+    }
+  }
+
+  async isChatOwner(chatId: string, userId: string): Promise<boolean | undefined> {
+    const cached = this.chatOwnerCache.get(chatId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.ownerId === userId;
+    }
+
+    try {
+      const resp: any = await this.client.im.v1.chat.get({
+        params: { user_id_type: 'open_id' },
+        path: { chat_id: chatId },
+      });
+      const ownerId = resp?.data?.owner_id ?? resp?.owner_id;
+      this.chatOwnerCache.set(chatId, {
+        ownerId: typeof ownerId === 'string' ? ownerId : undefined,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return typeof ownerId === 'string' ? ownerId === userId : undefined;
+    } catch (err) {
+      this.logger.error({ err, chatId, userId }, 'Failed to verify Feishu chat owner');
       return undefined;
     }
   }

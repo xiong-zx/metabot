@@ -2,6 +2,10 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender, type FeishuMessageSnapshot } from './message-sender.js';
+import {
+  type FeishuGroupReplyMode,
+  FeishuGroupReplyModeStore,
+} from './group-reply-mode-store.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -19,6 +23,12 @@ export interface CardActionEvent {
 }
 
 export type CardActionHandler = (event: CardActionEvent) => void;
+export type GroupReplyModeNoticeHandler = (
+  chatId: string,
+  title: string,
+  content: string,
+  color: string,
+) => Promise<void>;
 
 // Cache for group member counts (to avoid calling Feishu API on every message)
 const MEMBER_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -206,6 +216,135 @@ async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promis
   return false;
 }
 
+export function isBotMentioned(mentions: unknown, botOpenId?: string): boolean {
+  if (!botOpenId || !Array.isArray(mentions)) {
+    return false;
+  }
+
+  return mentions.some((mention) => {
+    if (!mention || typeof mention !== 'object') {
+      return false;
+    }
+    const id = (mention as { id?: { open_id?: unknown } }).id;
+    return id?.open_id === botOpenId;
+  });
+}
+
+export interface GroupReplyModeCommand {
+  action: 'status' | 'set' | 'help';
+  mode?: FeishuGroupReplyMode;
+}
+
+export function parseGroupReplyModeCommand(text: string): GroupReplyModeCommand | undefined {
+  const match = text.trim().match(/^\/(?:group-reply|group_mode|群回复)(?:\s+(.+))?$/i);
+  if (!match) return undefined;
+  const arg = match[1]?.trim().toLowerCase();
+  if (!arg || arg === 'status' || arg === '状态') return { action: 'status' };
+  if (['mention', 'at', '@', '仅@', '只@', '必须@'].includes(arg)) {
+    return { action: 'set', mode: 'mention' };
+  }
+  if (['all', '全部', '所有消息', '全量'].includes(arg)) {
+    return { action: 'set', mode: 'all' };
+  }
+  return { action: 'help' };
+}
+
+export function shouldProcessGroupMessage(options: {
+  botMentioned: boolean;
+  storedMode?: FeishuGroupReplyMode;
+  configGroupNoMention?: boolean;
+  privateLikeGroup?: boolean;
+}): boolean {
+  if (options.botMentioned) return true;
+  if (options.storedMode) return options.storedMode === 'all';
+  return options.configGroupNoMention === true || options.privateLikeGroup === true;
+}
+
+function groupReplyModeDescription(mode: FeishuGroupReplyMode): string {
+  return mode === 'all' ? '回复群里的所有消息' : '只有被 @ 时才回复';
+}
+
+export async function handleGroupReplyModeCommand(options: {
+  text: string;
+  botName: string;
+  chatId: string;
+  userId: string;
+  defaultMode: FeishuGroupReplyMode;
+  canChangeMode: boolean;
+  store: FeishuGroupReplyModeStore;
+  sendNotice: GroupReplyModeNoticeHandler;
+}): Promise<boolean> {
+  const command = parseGroupReplyModeCommand(options.text);
+  if (!command) return false;
+  const storedMode = options.store.get(options.botName, options.chatId);
+  const currentMode = storedMode ?? options.defaultMode;
+
+  if (command.action === 'set' && command.mode) {
+    if (!options.canChangeMode) {
+      await options.sendNotice(
+        options.chatId,
+        '无权限切换群回复模式',
+        '只有当前飞书群的群主可以修改回复模式。所有群成员都可以 @ 当前 Bot 并使用 `/group-reply status` 查看状态。',
+        'red',
+      );
+      return true;
+    }
+    options.store.set(options.botName, options.chatId, command.mode, options.userId);
+    await options.sendNotice(
+      options.chatId,
+      '群回复模式已更新',
+      `当前 Agent：\`${options.botName}\`\n当前群模式：**${groupReplyModeDescription(command.mode)}**\n\n命令：@ 当前 Bot 后使用 \`/group-reply mention\` 或 \`/group-reply all\``,
+      'green',
+    );
+    return true;
+  }
+
+  if (command.action === 'status') {
+    await options.sendNotice(
+      options.chatId,
+      '群回复模式',
+      `当前 Agent：\`${options.botName}\`\n当前群模式：**${groupReplyModeDescription(currentMode)}**\n模式来源：${storedMode ? '当前群显式设置' : 'Agent 默认设置'}\n\n命令：@ 当前 Bot 后使用 \`/group-reply mention\` 或 \`/group-reply all\``,
+      'blue',
+    );
+    return true;
+  }
+
+  await options.sendNotice(
+    options.chatId,
+    '群回复模式命令',
+    '请先 @ 当前 Bot。用法：\n- `/group-reply mention` — 只有被 @ 时回复\n- `/group-reply all` — 回复群里的所有消息\n- `/group-reply status` — 查看当前模式',
+    'orange',
+  );
+  return true;
+}
+
+function resolveGroupReplyArgs(
+  onAnyEventOrStore?: (() => void) | FeishuGroupReplyModeStore,
+  groupReplyModeStoreOrNotice?: FeishuGroupReplyModeStore | GroupReplyModeNoticeHandler,
+  onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
+): {
+  onAnyEvent?: () => void;
+  groupReplyModeStore?: FeishuGroupReplyModeStore;
+  groupReplyModeNotice?: GroupReplyModeNoticeHandler;
+} {
+  if (typeof onAnyEventOrStore === 'function') {
+    return {
+      onAnyEvent: onAnyEventOrStore,
+      groupReplyModeStore: groupReplyModeStoreOrNotice instanceof FeishuGroupReplyModeStore
+        ? groupReplyModeStoreOrNotice
+        : undefined,
+      groupReplyModeNotice: onGroupReplyModeNotice,
+    };
+  }
+
+  return {
+    groupReplyModeStore: onAnyEventOrStore,
+    groupReplyModeNotice: typeof groupReplyModeStoreOrNotice === 'function'
+      ? groupReplyModeStoreOrNotice
+      : onGroupReplyModeNotice,
+  };
+}
+
 export function createEventDispatcher(
   config: BotConfig,
   logger: Logger,
@@ -213,9 +352,15 @@ export function createEventDispatcher(
   botOpenId?: string,
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
-  /** Fired for every Feishu event before filtering; used by the WS watchdog. */
-  onAnyEvent?: () => void,
+  onAnyEventOrStore?: (() => void) | FeishuGroupReplyModeStore,
+  groupReplyModeStoreOrNotice?: FeishuGroupReplyModeStore | GroupReplyModeNoticeHandler,
+  onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
 ): lark.EventDispatcher {
+  const {
+    onAnyEvent,
+    groupReplyModeStore,
+    groupReplyModeNotice,
+  } = resolveGroupReplyArgs(onAnyEventOrStore, groupReplyModeStoreOrNotice, onGroupReplyModeNotice);
   const dispatcher = new lark.EventDispatcher({});
   // Each Feishu app gets an independent dispatcher. Keep routing state local so
   // one bot cannot consume another bot's pending attachment or dedupe entry.
@@ -292,7 +437,7 @@ export function createEventDispatcher(
         // Feishu chat is a user-facing ingress; bot-to-bot work belongs on the
         // agent bus and must not silently consume model context here.
         const senderType = sender?.sender_type;
-        if (senderType !== 'user') {
+        if (senderType && senderType !== 'user') {
           logger.info({ messageId, chatId, senderType }, 'Ignoring non-user message event');
           return;
         }
@@ -303,20 +448,61 @@ export function createEventDispatcher(
           return;
         }
 
-        // In group chats, only respond when the bot is @mentioned
-        // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
         const mentions = message.mentions;
+        let botMentioned = false;
+        let commandText = '';
         if (chatType === 'group') {
-          const botMentioned = botOpenId
-            ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
+          botMentioned = isBotMentioned(mentions, botOpenId);
+        }
+        if (chatType === 'group' && msgType === 'text') {
+          try {
+            const content = JSON.parse(message.content);
+            commandText = String(content.text || '').replace(/@_\w+\s*/g, '').trim();
+          } catch {
+            commandText = '';
+          }
+
+          const groupReplyCommand = parseGroupReplyModeCommand(commandText);
+          if (groupReplyCommand && !botMentioned) {
+            logger.debug({ chatId, botName: config.name }, 'Ignoring group reply mode command not addressed to this Bot');
+            return;
+          }
+          if (groupReplyCommand && groupReplyModeStore && groupReplyModeNotice) {
+            const storedMode = groupReplyModeStore.get(config.name, chatId);
+            const inheritedPrivateLike = !storedMode && !config.groupNoMention
+              && messageSender && typeof messageSender.getChatMemberCount === 'function'
+              ? await isPrivateLikeGroup(chatId, messageSender)
+              : false;
+            const canChangeMode = groupReplyCommand.action !== 'set'
+              || (await messageSender?.isChatOwner(chatId, userId)) === true;
+            await handleGroupReplyModeCommand({
+              text: commandText,
+              botName: config.name,
+              chatId,
+              userId,
+              defaultMode: config.groupNoMention || inheritedPrivateLike ? 'all' : 'mention',
+              canChangeMode,
+              store: groupReplyModeStore,
+              sendNotice: groupReplyModeNotice,
+            });
+            logger.info({ chatId, userId, botName: config.name }, 'Handled group reply mode command');
+            return;
+          }
+        }
+
+        if (chatType === 'group') {
+          const storedMode = groupReplyModeStore?.get(config.name, chatId);
+          const privateLikeGroup = !storedMode && !config.groupNoMention
+            && messageSender && typeof messageSender.getChatMemberCount === 'function'
+            ? await isPrivateLikeGroup(chatId, messageSender)
             : false;
-          if (!botMentioned) {
-            // groupNoMention mode: respond to all messages without @mention
-            if (config.groupNoMention) {
-              logger.debug({ chatId }, 'Group no-mention mode enabled, processing without @mention');
-            } else if (messageSender && await isPrivateLikeGroup(chatId, messageSender)) {
-              logger.debug({ chatId }, 'Private-like group (2 members), processing without @mention');
-            } else if (msgType === 'image' || msgType === 'file') {
+          if (!shouldProcessGroupMessage({
+            botMentioned,
+            storedMode,
+            configGroupNoMention: config.groupNoMention,
+            privateLikeGroup,
+          })) {
+            if (msgType === 'image' || msgType === 'file') {
               // Cache media messages for later retrieval when user @mentions bot
               const media = parseMediaMessage(message, msgType, logger);
               if (media) {
@@ -324,11 +510,11 @@ export function createEventDispatcher(
                 logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for later @mention');
               }
               return;
-            } else {
-              logger.debug('Ignoring group message without @mention');
-              return;
             }
+            logger.debug({ chatId, botName: config.name, storedMode }, 'Ignoring group message under mention-only mode');
+            return;
           }
+          logger.debug({ chatId, botName: config.name, storedMode }, 'Processing group message under reply mode');
         }
 
         let text = '';

@@ -37,9 +37,17 @@ metabot restart
 
 ## Bot 在群聊中不回复
 
-Bot 在群聊中仅在被 **@提及** 时响应。私聊中回复所有消息。这是设计如此。
+多人群默认使用 `mention` 模式。请确认准确 @ 了期望回复的 Bot；@ 其他 Bot
+或其他用户不会把消息路由给当前 Bot。私聊中 Bot 回复所有消息。
 
-例外：**2 人群**（1 个用户 + 1 个 Bot）视为私聊 — 无需 @提及。
+**2 人群**（1 个用户 + 1 个 Bot）默认使用类私聊的 `all` 模式。群主可以用
+`@Bot /group-reply status` 查看生效模式，用 `@Bot /group-reply mention` 或
+`@Bot /group-reply all` 切换模式。
+
+如果修改被拒绝，请检查发送者是否为群主，以及飞书/Lark 应用是否已开通
+`im:chat:readonly`。群主身份通过公开的 Lark 群信息 API 查询，并采用失败
+关闭策略，因此查询失败或权限不足时绝不会修改模式。已保存的 Bot + 群聊
+设置优先于 `groupNoMention` 和两人群默认规则。
 
 ## 常见问题
 
