@@ -259,6 +259,100 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
+  it('prefers the instance pmBot over the globally configured execution bot (AT-007)', async () => {
+    const store = makeStore();
+    store.createTeam('scoped', 'Scoped', {
+      displayChatIds: ['oc_main'],
+      scopeType: 'chat',
+      scopeKey: 'oc_main',
+      pmBot: 'pm-claude',
+    });
+    store.createAgent('scoped', { name: 'worker', engine: 'claude', model: 'claude-opus-4-8' });
+    store.createTask('scoped', { subject: 'Run on pm-claude', owner: 'worker' });
+
+    const codexExecute = vi.fn(async () => ({ success: true, responseText: 'pm-codex' }));
+    const claudeExecute = vi.fn(async () => ({ success: true, responseText: 'pm-claude' }));
+    const claudeSetSessionEngine = vi.fn();
+    const claudeSendActivityCard = vi.fn();
+    const registry = new BotRegistry();
+    const makeBridge = (executeApiTask: any, extras: any = {}) => ({
+      getSessionManager: () => ({
+        setSessionEngine: extras.setSessionEngine ?? vi.fn(),
+        setSessionModel: vi.fn(),
+        setSessionId: vi.fn(),
+      }),
+      executeApiTask,
+      stopChatTask: vi.fn(),
+      sendAgentActivityCard: extras.sendAgentActivityCard ?? vi.fn(),
+    });
+    registry.register({
+      name: 'pm-codex',
+      platform: 'feishu',
+      bridge: makeBridge(codexExecute),
+      sender: {},
+      config: { name: 'pm-codex', engine: 'codex', claude: { defaultWorkingDirectory: process.cwd() } },
+    } as any);
+    registry.register({
+      name: 'pm-claude',
+      platform: 'feishu',
+      bridge: makeBridge(claudeExecute, {
+        setSessionEngine: claudeSetSessionEngine,
+        sendAgentActivityCard: claudeSendActivityCard,
+      }),
+      sender: {},
+      config: { name: 'pm-claude', engine: 'claude', claude: { defaultWorkingDirectory: process.cwd() } },
+    } as any);
+
+    const supervisor = new AgentTeamSupervisor({
+      registry,
+      store,
+      logger,
+      intervalMs: 60_000,
+      executionBotName: 'pm-codex',
+    });
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(claudeExecute).toHaveBeenCalledWith(expect.objectContaining({
+        chatId: 'team:scoped:worker',
+        // Per-agent Claude overrides still ride along to the pmBot bridge.
+        model: 'claude-opus-4-8',
+      }));
+    });
+    expect(codexExecute).not.toHaveBeenCalled();
+    expect(claudeSetSessionEngine).toHaveBeenCalledWith('team:scoped:worker', 'claude');
+    // Activity delivery uses the same pmBot bridge.
+    await waitFor(() => {
+      expect(claudeSendActivityCard).toHaveBeenCalledWith('oc_main', expect.stringContaining('scoped / worker'), expect.anything());
+    });
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('falls back to the configured execution bot when pmBot is not registered (AT-007)', async () => {
+    const store = makeStore();
+    store.createTeam('scoped', 'Scoped', { pmBot: 'pm-missing' });
+    store.createAgent('scoped', { name: 'worker', engine: 'codex' });
+    store.createTask('scoped', { subject: 'Fallback', owner: 'worker' });
+
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'ok' }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({
+      registry,
+      store,
+      logger,
+      intervalMs: 60_000,
+      executionBotName: 'metabot',
+    });
+    await supervisor.tick();
+
+    await waitFor(() => {
+      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'team:scoped:worker' }));
+    });
+    supervisor.destroy();
+    store.close();
+  });
+
   it('sends an agent activity card to display chats when a member finishes', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });

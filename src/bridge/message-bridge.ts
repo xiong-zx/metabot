@@ -64,6 +64,8 @@ import {
   MAX_QUEUE_SIZE,
   QUESTION_TIMEOUT_MS,
   SPONTANEOUS_COALESCE_MS,
+  SPONTANEOUS_DEFER_MS,
+  MAX_SPONTANEOUS_DEFERRALS,
   TASK_TIMEOUT_MS,
   TASK_TIMEOUT_MESSAGE,
   formatIdleTimeoutMessage,
@@ -327,6 +329,8 @@ export class MessageBridge {
     teamState: TeamState;
     snippets: string[];
     timer: ReturnType<typeof setTimeout>;
+    /** How many times this batch was requeued because a user turn was busy. */
+    deferrals?: number;
   }>();
   /**
    * In-flight continuation cards — main-line agent bursts triggered by an
@@ -1437,10 +1441,28 @@ export class MessageBridge {
     this.spontaneousBuffers.delete(chatId);
     clearTimeout(buf.timer);
 
-    // If a user turn just started, drop the spontaneous batch — its content
-    // is about to land in the live card anyway.
+    // A user turn is in flight. Agent Team results and other between-turn
+    // activity are NOT part of that turn's output, so dropping them here lost
+    // completion messages whenever the PM chat happened to be busy. Requeue
+    // instead and retry once the foreground turn settles; the foreground card
+    // is untouched either way. Bounded so a permanently busy chat can't hold
+    // a buffer forever.
     if (this.runningTasks.has(chatId)) {
-      this.logger.debug({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: drop spontaneous (active turn)');
+      const deferrals = (buf.deferrals ?? 0) + 1;
+      if (deferrals > MAX_SPONTANEOUS_DEFERRALS) {
+        this.logger.warn(
+          { chatId, snippetCount: buf.snippets.length, deferrals },
+          'MessageBridge: drop spontaneous (chat busy past deferral limit)',
+        );
+        return;
+      }
+      buf.deferrals = deferrals;
+      buf.timer = setTimeout(() => {
+        void this.flushSpontaneous(chatId);
+      }, SPONTANEOUS_DEFER_MS);
+      buf.timer.unref?.();
+      this.spontaneousBuffers.set(chatId, buf);
+      this.logger.debug({ chatId, snippetCount: buf.snippets.length, deferrals }, 'MessageBridge: defer spontaneous (active turn)');
       return;
     }
 
