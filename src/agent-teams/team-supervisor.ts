@@ -97,11 +97,15 @@ export class AgentTeamSupervisor {
     if (this.stopped || this.tickInProgress) return;
     this.tickInProgress = true;
     try {
-      const bot = this.selectExecutionBot();
-      if (!bot) return;
+      const fallbackBot = this.selectExecutionBot();
+      if (!fallbackBot) return;
       this.recycleExpiredTemporaryAgents();
       for (const team of this.options.store.listTeams()) {
         if (team.status !== 'active') continue;
+        // A chat/project-scoped instance runs through its own PM bot so a
+        // pm-claude-owned team is not forced through the globally configured
+        // execution bot. Teams without pmBot keep the legacy selection.
+        const bot = this.selectExecutionBotForTeam(team) ?? fallbackBot;
         this.markOpenWorkForIdleDigest(team.name);
         if (!this.hasActiveLeadAgent(team.name)) {
           this.drainLeaderActivityInbox(team.name);
@@ -124,6 +128,20 @@ export class AgentTeamSupervisor {
     } finally {
       this.tickInProgress = false;
     }
+  }
+
+  /**
+   * Prefer the team instance's own `pmBot` when it is registered. Returns
+   * `undefined` so the caller falls back to the globally configured execution
+   * bot (and then the legacy fallback chain) when there is no usable pmBot.
+   */
+  private selectExecutionBotForTeam(team: AgentTeam): RegisteredBot | undefined {
+    const pmBot = team.pmBot?.trim();
+    if (!pmBot) return undefined;
+    const bot = this.options.registry.get(pmBot);
+    if (bot) return bot;
+    this.logger.warn({ team: team.name, pmBot }, 'Agent Team pmBot not registered; falling back to configured execution bot');
+    return undefined;
   }
 
   private selectExecutionBot(): RegisteredBot | undefined {
@@ -527,7 +545,7 @@ export class AgentTeamSupervisor {
     if (!team || team.status !== 'active') return false;
     const chatIds = team.displayChatIds;
     if (chatIds.length === 0) return false;
-    const bot = this.selectExecutionBot();
+    const bot = this.selectExecutionBotForTeam(team) ?? this.selectExecutionBot();
     const bridge = bot?.bridge as MessageBridge & {
       sendAgentActivityCard?: (chatId: string, body: string, metadata?: AgentActivityCardMetadata) => Promise<void>;
     };

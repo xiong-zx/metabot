@@ -217,7 +217,7 @@ describe('buildCard', () => {
     expect(goal.content).toContain('Ship the PR by Friday');
   });
 
-  it('renders 🧑‍🤝‍🧑 Team panel when teamState has members or tasks (regression)', () => {
+  it('renders a compact 🧑‍🤝‍🧑 Team panel when teamState has members or tasks (regression)', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   't',
@@ -225,18 +225,23 @@ describe('buildCard', () => {
       toolCalls:    [],
       teamState: {
         name:      'feishu-ux-review',
-        agents: [{ name: 'ux-researcher', status: 'working', lastSubject: 'audit' }],
+        agents: [
+          { name: 'ux-researcher', status: 'working', lastSubject: 'audit' },
+          { name: 'arch-reviewer', status: 'idle' },
+        ],
         tasks:  [{ taskId: 't1', subject: 'UX audit', status: 'in_progress', agent: 'ux-researcher' }],
       },
     };
     const json = JSON.parse(buildCard(state));
     const team = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Agents/.test(e.content),
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
     );
     expect(team).toBeDefined();
     expect(team.content).toContain('feishu-ux-review');
+    expect(team.content).toContain('1/2 working');
     expect(team.content).toContain('ux-researcher');
-    expect(team.content).toContain('UX audit');
+    expect(team.content).toContain('audit');
+    expect(team.content).not.toContain('arch-reviewer');
   });
 
   it('renders pending Agent Team tasks', () => {

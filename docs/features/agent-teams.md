@@ -218,7 +218,8 @@ Failed-run handling:
 
 The bridge builds a team snapshot from the Agent Teams store:
 
-- The **Team** panel shows active agents, their working or idle state, and visible tasks.
+- The **Team** panel is deliberately compact. When agents are working it shows a `⏳ 2/4 working` count plus one short activity line for each working agent (up to two, then `+N more working`); idle agents are not listed. When nothing is working the whole panel collapses to a single `💤 idle (4 agents)` line plus, if there is open work, a task count and up to two open task subjects.
+- Long team ids are shortened for display: `research-codex@chat:oc_abc…` renders as `research-codex`.
 - The **Background activity** panel shows runs with status and the latest output or error.
 - Task statuses shown on cards are `pending`, `in_progress`, and `completed`; deleted tasks are hidden.
 
@@ -235,7 +236,8 @@ Operational details:
 - Disable the loop with `METABOT_AGENT_TEAM_SUPERVISOR=0`.
 - Tune the polling interval with `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS`.
 - Set `agentTeamExecutionBot` in `bots.json` or `METABOT_AGENT_TEAM_EXECUTION_BOT` to pin which bridge bot executes agent runs. Use a non-privileged PM/internal worker bot such as `research-pm`; do not rely on registration order when `manager` is first.
-- Without an explicit execution bot, the supervisor falls back to `metabot`, then `research-pm`, then the first non-`manager` bot, then the first registered bot.
+- A team instance that has a `pmBot` (chat/project-scoped runtime instances created by a PM) executes through that bot when it is registered, ahead of the global `agentTeamExecutionBot`. This keeps a `pm-claude`-owned instance on `pm-claude` without changing global config. Agent activity cards for the team use the same bot.
+- Without a usable `pmBot` or an explicit execution bot, the supervisor falls back to `metabot`, then `research-pm`, then the first non-`manager` bot, then the first registered bot.
 - Assigned pending tasks are moved to `in_progress` when the supervisor starts the run.
 - The supervisor sets the configured session engine for the agent chat, but it does not yet validate per-engine capabilities before dispatching work. Keep resident teams on engines known to work in the local bridge until runtime capability checks or per-engine adapters are added.
 
