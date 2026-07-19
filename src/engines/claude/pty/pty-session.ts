@@ -153,6 +153,13 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     args.push('--settings', opts.settingsPath);
+    // MCP servers (worker-manager: worker_dispatch / remind_me / ...). NOT
+    // --strict-mcp-config: that would suppress every other MCP source, taking
+    // the user's claude.ai connectors down with it. We want ours ON TOP of
+    // whatever else the CLI resolves.
+    if (opts.mcpConfigPath) {
+      args.push('--mcp-config', opts.mcpConfigPath);
+    }
     args.push('--dangerously-skip-permissions');
 
     if (opts.appendSystemPrompt) {

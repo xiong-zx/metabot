@@ -105,6 +105,20 @@ export interface PtyQueryOptions {
   env?: NodeJS.ProcessEnv;
   /** Path to the claude executable (defaults to resolveClaudePath()). */
   pathToClaudeExecutable?: string;
+  /**
+   * MCP servers to expose to the spawned `claude` (the worker-manager server
+   * that provides worker_dispatch / remind_me, plus anything configured in
+   * ~/.claude/settings.json `mcpServers`). Same object the SDK backend passes
+   * as `queryOptions.mcpServers`.
+   *
+   * The CLI does NOT read `mcpServers` out of a --settings file, so ptyQuery
+   * materializes this into a temp `{"mcpServers": {...}}` json and passes it
+   * via `claude --mcp-config <file>`. Without this the PTY backend silently
+   * runs with no metabot MCP tools at all while the SDK backend has them —
+   * the exact asymmetry that left claude-engine bots unable to dispatch
+   * workers while codex-engine bots (which read ~/.codex/config.toml) could.
+   */
+  mcpServers?: Record<string, unknown>;
   /** PTY geometry. Defaults: 120x40. */
   cols?: number;
   rows?: number;
@@ -231,6 +245,11 @@ export interface PtyClaudeSessionOptions {
   appendSystemPrompt?: string;
   /** Absolute path to a settings.json (contains Stop + team hooks). */
   settingsPath: string;
+  /**
+   * Absolute path to a `{"mcpServers": {...}}` json, passed as
+   * `claude --mcp-config <file>`. Omitted when there are no servers to expose.
+   */
+  mcpConfigPath?: string;
   env?: NodeJS.ProcessEnv;
   pathToClaudeExecutable?: string;
   cols?: number;
@@ -338,6 +357,8 @@ export type SynthesizeResult = (args: SynthesizeResultArgs) => SDKMessage;
 export interface PtyHookBridge {
   /** Absolute path of the generated settings.json (with command hooks). */
   writeSettings(): Promise<string>;
+  /** Absolute path of a generated `{"mcpServers":{...}}` json for --mcp-config. */
+  writeMcpConfig(servers: Record<string, unknown>): Promise<string>;
   /** Register the per-turn completion callback (Stop hook sentinel). */
   onTurnComplete(cb: () => void): void;
   /** Register team-event callback (TaskCreated/Completed/TeammateIdle). */

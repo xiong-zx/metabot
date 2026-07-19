@@ -54,6 +54,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
   const sentinelPath = join(bridgeDir, 'stop.flag');
   const teamEventPath = join(bridgeDir, 'team-events.jsonl');
   const settingsPath = join(bridgeDir, 'settings.json');
+  const mcpConfigPath = join(bridgeDir, 'mcp-config.json');
 
   let turnCb: (() => void) | null = null;
   let teamCb: ((event: { kind: string; payload: unknown }) => void) | null = null;
@@ -111,6 +112,21 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
     return settingsPath;
+  }
+
+  // ── writeMcpConfig ───────────────────────────────────────────────────────
+
+  /**
+   * Materialize MCP server definitions for `claude --mcp-config <file>`.
+   *
+   * These cannot ride along in the --settings file: the CLI reads MCP servers
+   * only from --mcp-config / .mcp.json / ~/.claude.json, never from a settings
+   * json. Lives in the bridge's temp dir so it is removed by dispose() with
+   * everything else.
+   */
+  async function writeMcpConfig(servers: Record<string, unknown>): Promise<string> {
+    writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: servers }, null, 2), 'utf8');
+    return mcpConfigPath;
   }
 
   // ── onTurnComplete ───────────────────────────────────────────────────────
@@ -225,6 +241,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
   return {
     writeSettings,
+    writeMcpConfig,
     onTurnComplete,
     onTeamEvent,
     dispose,
