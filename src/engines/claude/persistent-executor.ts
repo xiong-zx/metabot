@@ -553,6 +553,11 @@ export class PersistentClaudeExecutor extends EventEmitter {
         logger: this.options.logger,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
         env: queryOptions.env as NodeJS.ProcessEnv | undefined,
+        // ptyOptions is built field-by-field (PtyQueryOptions is a subset of
+        // the SDK options), so anything not named here is dropped. mcpServers
+        // was being dropped: the SDK branch below gets it via queryOptions,
+        // the PTY branch got nothing.
+        mcpServers: mcpServers as Record<string, unknown> | undefined,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
       };
       const stream = ptyQuery({
