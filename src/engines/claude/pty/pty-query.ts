@@ -208,6 +208,12 @@ export const ptyQuery = (args: {
   // ── Boot: write settings, spawn session, start scanner ───────────────────
   const boot = (async () => {
     const settingsPath = await hookBridge.writeSettings();
+    // Only materialize a config when there is something to expose; an empty
+    // {"mcpServers":{}} would still make claude spend startup on it.
+    const mcpConfigPath =
+      options.mcpServers && Object.keys(options.mcpServers).length > 0
+        ? await hookBridge.writeMcpConfig(options.mcpServers)
+        : undefined;
 
     session = createPtyClaudeSession({
       cwd: options.cwd,
@@ -215,6 +221,7 @@ export const ptyQuery = (args: {
       model: options.model,
       appendSystemPrompt,
       settingsPath,
+      mcpConfigPath,
       env: options.env,
       pathToClaudeExecutable: options.pathToClaudeExecutable,
       cols: options.cols,
