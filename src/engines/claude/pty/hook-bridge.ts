@@ -49,7 +49,9 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
   const bridgeId = randomUUID().slice(0, 8);
   const bridgeDir = join(tmpdir(), `metabot-pty-${bridgeId}`);
-  mkdirSync(bridgeDir, { recursive: true });
+  // 0700: mcp-config.json below carries METABOT_API_SECRET in plaintext, so
+  // nothing in this dir may be readable by other users on the machine.
+  mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
 
   const sentinelPath = join(bridgeDir, 'stop.flag');
   const teamEventPath = join(bridgeDir, 'team-events.jsonl');
@@ -110,7 +112,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
     // is unattended bypass-permissions execution.
     const settings = { hooks, skipDangerousModePermissionPrompt: true };
 
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { encoding: 'utf8', mode: 0o600 });
     return settingsPath;
   }
 
@@ -125,7 +127,11 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
    * everything else.
    */
   async function writeMcpConfig(servers: Record<string, unknown>): Promise<string> {
-    writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: servers }, null, 2), 'utf8');
+    // 0600: the server env blocks embed METABOT_API_SECRET in plaintext.
+    writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: servers }, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     return mcpConfigPath;
   }
 
