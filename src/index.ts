@@ -23,6 +23,7 @@ import { WikiAutoSync } from './sync/auto-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
 import { checkMetabotCoreMemoryConnection } from './memory/core-connection.js';
 import { recoverInterruptedTasksAfterRestart } from './bridge/restart-recovery.js';
+import { cleanupStaleBridgeDirs } from './engines/claude/pty/hook-bridge.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -241,6 +242,16 @@ async function main() {
   // so the first turn in each chat after a restart can be reminded not to
   // restart again. Must run before any message can be handled.
   loadRestartBreadcrumb();
+
+  // Orphaned PTY hook-bridge temp dirs (`/tmp/metabot-pty-*`) accumulate
+  // across crashes/restarts because dispose() only runs on normal teardown.
+  // Safe to sweep unconditionally here: this process hasn't created any
+  // bridges yet, so everything matching the pattern belongs to a prior run.
+  // Must stay before any bot starts (claude-engine bots create bridges).
+  const staleBridgeDirs = cleanupStaleBridgeDirs(logger);
+  if (staleBridgeDirs > 0) {
+    logger.info({ count: staleBridgeDirs }, 'Cleaned up stale PTY hook-bridge temp dirs from a previous run');
+  }
 
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;
