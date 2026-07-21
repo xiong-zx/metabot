@@ -2,6 +2,13 @@ import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 
+export interface FeishuMessageSnapshot {
+  messageId: string;
+  chatId?: string;
+  messageType?: string;
+  content?: string;
+}
+
 export class MessageSender {
   constructor(
     private client: lark.Client,
@@ -201,6 +208,30 @@ export class MessageSender {
       return userCount + botCount;
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      return undefined;
+    }
+  }
+
+  async getMessage(messageId: string): Promise<FeishuMessageSnapshot | undefined> {
+    try {
+      const resp = await this.client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+      });
+      const item = resp?.data?.items?.find(candidate => candidate.message_id === messageId)
+        ?? resp?.data?.items?.[0];
+      if (!item?.message_id) {
+        this.logger.warn({ messageId }, 'Referenced message lookup returned no message');
+        return undefined;
+      }
+      return {
+        messageId: item.message_id,
+        chatId: item.chat_id,
+        messageType: item.msg_type,
+        content: item.body?.content,
+      };
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'Failed to get referenced message');
       return undefined;
     }
   }

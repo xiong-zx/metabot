@@ -52,6 +52,7 @@ function event(input: {
 function messageHandler(
   groupNoMention = false,
   botOpenId: string | undefined = 'bot-open-id',
+  messageSender?: any,
 ) {
   const received: IncomingMessage[] = [];
   const dispatcher = createEventDispatcher(
@@ -59,6 +60,7 @@ function messageHandler(
     logger(),
     msg => received.push(msg),
     botOpenId,
+    messageSender,
   );
   const handle = dispatcher.handles.get('im.message.receive_v1');
   if (!handle) throw new Error('message handler was not registered');
@@ -106,14 +108,151 @@ describe('Feishu inbound message routing', () => {
 
     await handle(event({
       messageId: 'reply-2',
-      text: 'read remaining files',
+      text: 'do not attach unreferenced files',
       mentions: ['bot-open-id'],
     }));
-    expect(received[1].extraMedia).toEqual([{
+    expect(received[1].extraMedia).toBeUndefined();
+
+    await handle(event({
+      messageId: 'reply-3',
+      text: 'read the first file',
+      parentId: 'file-1',
+      mentions: ['bot-open-id'],
+    }));
+    expect(received[2].extraMedia).toEqual([{
       messageId: 'file-1',
       fileKey: 'key-1',
       fileName: 'first.pdf',
     }]);
+  });
+
+  it('loads an unmentioned replied text message into explicit reply context', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'original-text',
+        chatId: 'chat-1',
+        messageType: 'text',
+        content: JSON.stringify({ text: 'original message without a mention' }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-text',
+      text: 'analyze the quoted message',
+      parentId: 'original-text',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(messageSender.getMessage).toHaveBeenCalledWith('original-text');
+    expect(received).toHaveLength(1);
+    expect(received[0].text).toBe('analyze the quoted message');
+    expect(received[0].replyContext).toEqual({
+      messageId: 'original-text',
+      messageType: 'text',
+      text: 'original message without a mention',
+    });
+  });
+
+  it('loads a referenced file through message lookup after the cache is unavailable', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'old-file',
+        chatId: 'chat-1',
+        messageType: 'file',
+        content: JSON.stringify({ file_key: 'old-key', file_name: 'old.pdf' }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-old-file',
+      text: 'read the referenced file',
+      parentId: 'old-file',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'old-file',
+      messageType: 'file',
+    });
+    expect(received[0].extraMedia).toEqual([{
+      messageId: 'old-file',
+      fileKey: 'old-key',
+      fileName: 'old.pdf',
+    }]);
+  });
+
+  it('accepts a reply that contains only the bot mention', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'mention-only-file',
+        chatId: 'chat-1',
+        messageType: 'file',
+        content: JSON.stringify({ file_key: 'mention-key', file_name: 'mention.pdf' }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'mention-only-reply',
+      text: '@_bot_open_id',
+      parentId: 'mention-only-file',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].text).toBe('请处理我回复的消息');
+    expect(received[0].extraMedia?.[0]).toMatchObject({
+      messageId: 'mention-only-file',
+      fileName: 'mention.pdf',
+    });
+  });
+
+  it('does not inject a referenced message from another chat', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'cross-chat-message',
+        chatId: 'another-chat',
+        messageType: 'text',
+        content: JSON.stringify({ text: 'private context from elsewhere' }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'cross-chat-reply',
+      text: 'try to quote another chat',
+      parentId: 'cross-chat-message',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].replyContext).toBeUndefined();
+    expect(received[0].extraMedia).toBeUndefined();
+  });
+
+  it('bounds quoted text before it enters model context', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'long-text',
+        chatId: 'chat-1',
+        messageType: 'text',
+        content: JSON.stringify({ text: 'x'.repeat(20_000) }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'long-reply',
+      text: 'summarize',
+      parentId: 'long-text',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext?.truncated).toBe(true);
+    expect(received[0].replyContext?.text).toHaveLength(16_031);
+    expect(received[0].replyContext?.text).toContain('[Referenced message truncated]');
   });
 
   it('ignores bot-authored messages even when no-mention mode is enabled', async () => {

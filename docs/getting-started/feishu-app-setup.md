@@ -61,7 +61,8 @@ Step-by-step procedure to configure a Feishu bot for MetaBot.
 ### Group Mentions And File Messages
 
 - `im:message.group_msg` delivers every user-message event from a group containing the bot. It enables the “send a file, then reply to that file and @mention the bot” workflow, but it does not decide which events should enter model context.
-- With the default `groupNoMention=false`, MetaBot drops ordinary group text that does not mention the current bot, so it never reaches the model. Unmentioned files and images are cached for five minutes; when the user replies to a file and mentions the bot, only the replied file is attached.
+- With the default `groupNoMention=false`, MetaBot drops ordinary group text that does not mention the current bot, so it never starts a model turn or consumes inference tokens. When the user explicitly replies to that message and mentions the bot, MetaBot retrieves the message named by Feishu's `parent_id` and adds its text or attachment to that bot's context. Referenced text is capped at 16,000 characters.
+- For files and images, use **Reply** on the attachment message and mention the intended bot. MetaBot retrieves the original message on demand and keeps a five-minute in-memory media fallback. A later bare mention does not attach unrelated cached files.
 - `groupNoMention=true` processes every delivered group user message and should only be used when a chat has one explicitly designated bot.
 - `im:message.group_at_msg.include_bot:readonly` allows other bots to mention the current bot. MetaBot ignores bot senders by default; use the Agent Bus for bot-to-bot coordination instead of a Feishu message loop.
 - Feishu can redeliver the same event. MetaBot deduplicates by `message_id` to avoid starting the same model turn twice.

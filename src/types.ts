@@ -124,6 +124,13 @@ export interface IncomingMessage {
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
+  /** Message explicitly referenced by a user reply. Added to the model prompt, not the card title. */
+  replyContext?: {
+    messageId: string;
+    messageType: string;
+    text?: string;
+    truncated?: boolean;
+  };
   /** Additional media from batched messages (smart debounce). */
   extraMedia?: Array<{
     messageId: string;
