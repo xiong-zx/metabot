@@ -442,6 +442,7 @@ function parseWaitMs(bodyValue: unknown, queryValue: string | null): number {
 function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: string): Record<string, unknown> {
   const preflight = prompt === undefined ? undefined : taskPreflightFromPrompt(prompt);
   const phasedProgress = preflight === undefined ? undefined : taskProgress(preflight, 0, 2000);
+  const statusCommand = talkStatusCommand(taskId);
   return {
     taskId,
     status,
@@ -454,11 +455,11 @@ function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: strin
     ...(preflight?.runId === undefined ? {} : { runId: preflight.runId }),
     message: 'Task accepted for async execution',
     statusUrl: `/api/talk/${encodeURIComponent(taskId)}`,
-    statusCommand: `metabot talk-status ${taskId}`,
+    statusCommand,
     retryAfterMs: 2000,
     nextAction:
       preflight === undefined
-        ? `Run metabot talk-status ${taskId} after 2s to check progress.`
+        ? `Run ${statusCommand} after 2s to check progress.`
         : taskNextAction(taskId, preflight, 0),
     ...(preflight === undefined ? {} : { preflight }),
   };
@@ -481,6 +482,7 @@ function taskStatusResponse(task: {
   const retryAfterMs = running ? 2000 : undefined;
   const preflight = taskPreflightFromPrompt(task.prompt);
   const terminalProgress = running ? undefined : terminalTaskProgress(task.status, preflight, elapsedMs, task.result);
+  const statusCommand = talkStatusCommand(task.id);
   return {
     taskId: task.id,
     status: task.status,
@@ -502,12 +504,12 @@ function taskStatusResponse(task: {
     completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : undefined,
     elapsedMs,
     statusUrl: `/api/talk/${encodeURIComponent(task.id)}`,
-    statusCommand: `metabot talk-status ${task.id}`,
+    statusCommand,
     retryAfterMs,
     message: running ? runningMessage(preflight, elapsedMs) : terminalMessage(task.status, preflight),
     nextAction: running
       ? preflight === undefined
-        ? `Run metabot talk-status ${task.id} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
+        ? `Run ${statusCommand} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
         : taskNextAction(task.id, preflight, elapsedMs)
       : terminalNextAction(preflight),
     ...(preflight === undefined ? {} : { preflight }),
@@ -524,13 +526,29 @@ function taskNotFoundResponse(taskId: string): Record<string, unknown> {
       kind: 'unavailable',
     },
     statusUrl: `/api/talk/${encodeURIComponent(taskId)}`,
-    statusCommand: `metabot talk-status ${taskId}`,
+    statusCommand: talkStatusCommand(taskId),
     error: 'Task not found or no longer retained',
     message:
       'Task status is unavailable. The task may never have existed, may have expired after retention, or may have been lost before persistence during service restart.',
     nextAction:
       'If this was a wake/check request, resend it with metabot talk --wait-ms so the response is observed directly. For AutoResearchClaw tasks, inspect the Memory Core run lifecycle if a run id was returned.',
   };
+}
+
+function shellQuoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function talkStatusCommand(taskId: string): string {
+  return `metabot talk-status ${shellQuoteArg(taskId)}`;
+}
+
+function researchRunsCommand(projectRoot: string, projectId: string): string {
+  return `metabot research runs --root ${shellQuoteArg(projectRoot)} --project ${shellQuoteArg(projectId)}`;
+}
+
+function researchEvidenceCommand(projectRoot: string, projectId: string): string {
+  return `metabot research events/search/context-pack --root ${shellQuoteArg(projectRoot)} --project ${shellQuoteArg(projectId)}`;
 }
 
 function taskStatusPhase(status: string): string {
@@ -640,8 +658,12 @@ function terminalNextAction(preflight: Record<string, unknown> | undefined): str
     typeof preflight.projectRoot === 'string' &&
     typeof preflight.projectId === 'string'
   ) {
-    const runHint = typeof preflight.runId === 'string' ? ` and locate run ${preflight.runId}` : '';
-    return `Inspect the Memory Core system-of-record with metabot research runs --root ${preflight.projectRoot} --project ${preflight.projectId}${runHint}; inspect result for the async response or error.`;
+    const runHint =
+      typeof preflight.runId === 'string' ? ` If needed, locate run ${shellQuoteArg(preflight.runId)}.` : '';
+    return `Inspect the Memory Core system-of-record with ${researchRunsCommand(
+      preflight.projectRoot,
+      preflight.projectId,
+    )};${runHint} Inspect result for the async response or error.`;
   }
   if (preflight?.kind === 'autoresearchclaw') {
     return 'Inspect result for the async response or error, then query the matching Memory Core run lifecycle using its project root and project id.';
@@ -799,14 +821,39 @@ function classifyMemoryOperation(prompt: string): string {
 function extractPromptField(prompt: string, names: string[]): string | undefined {
   for (const name of names) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const matches = prompt.matchAll(new RegExp(`${escaped}\\s*[=:：是]\\s*([^\\s,，。;；、]+)`, 'giu'));
+    const matches = prompt.matchAll(new RegExp(`${escaped}\\s*[=:：是]\\s*`, 'giu'));
     for (const match of matches) {
-      if (!match[1]) continue;
-      const sanitized = sanitizePromptField(match[1]);
+      const sanitized = parsePromptFieldValue(prompt.slice((match.index ?? 0) + match[0].length));
       if (sanitized.length > 0) return sanitized;
     }
   }
   return undefined;
+}
+
+function parsePromptFieldValue(source: string): string {
+  const value = source.trimStart();
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    let parsed = '';
+    let escaped = false;
+    for (let i = 1; i < value.length; i += 1) {
+      const char = value[i];
+      if (escaped) {
+        parsed += char;
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) return parsed.trim();
+      parsed += char;
+    }
+    return '';
+  }
+  const unquoted = value.match(/^[^\s,，。;；、]+/u)?.[0] ?? '';
+  return sanitizePromptField(unquoted);
 }
 
 function sanitizePromptField(value: string): string {
@@ -880,10 +927,14 @@ function memoryTimeoutBoundaryMs(preflight: Record<string, unknown>): number {
 }
 
 function researchNextAction(taskId: string, preflight: Record<string, unknown>): string {
+  const statusCommand = talkStatusCommand(taskId);
   if (typeof preflight.projectRoot === 'string' && typeof preflight.projectId === 'string') {
-    return `Run metabot talk-status ${taskId} again after 2s, or inspect Memory Core with metabot research runs --root ${preflight.projectRoot} --project ${preflight.projectId}.`;
+    return `Run ${statusCommand} again after 2s, or inspect Memory Core with ${researchRunsCommand(
+      preflight.projectRoot,
+      preflight.projectId,
+    )}.`;
   }
-  return `Run metabot talk-status ${taskId} again after 2s; inspect Memory Core run lifecycle when project root and project id are known.`;
+  return `Run ${statusCommand} again after 2s; inspect Memory Core run lifecycle when project root and project id are known.`;
 }
 
 function taskNextAction(taskId: string, preflight: Record<string, unknown>, elapsedMs: number): string {
@@ -894,16 +945,20 @@ function taskNextAction(taskId: string, preflight: Record<string, unknown>, elap
 }
 
 function memoryNextAction(taskId: string, preflight: Record<string, unknown>, elapsedMs: number): string {
+  const statusCommand = talkStatusCommand(taskId);
   if (elapsedMs >= memoryTimeoutBoundaryMs(preflight)) {
-    return `Run metabot talk-status ${taskId} once more, then ask the bot to return partial Memory Core evidence or split the operation if it is still running.`;
+    return `Run ${statusCommand} once more, then ask the bot to return partial Memory Core evidence or split the operation if it is still running.`;
   }
   if (elapsedMs >= memoryExpectedCompletionMs(preflight)) {
-    return `Run metabot talk-status ${taskId} again after 2s; if still running, ask for partial Memory Core evidence already created, then let finalization continue or split the remaining work.`;
+    return `Run ${statusCommand} again after 2s; if still running, ask for partial Memory Core evidence already created, then let finalization continue or split the remaining work.`;
   }
   if (typeof preflight.projectRoot === 'string' && typeof preflight.projectId === 'string') {
-    return `Run metabot talk-status ${taskId} again after 2s; for evidence, inspect Memory Core with metabot research events/search/context-pack --root ${preflight.projectRoot} --project ${preflight.projectId}.`;
+    return `Run ${statusCommand} again after 2s; for evidence, inspect Memory Core with ${researchEvidenceCommand(
+      preflight.projectRoot,
+      preflight.projectId,
+    )}.`;
   }
-  return `Run metabot talk-status ${taskId} again after 2s; ask for event ids, unit ids, pending review status, and contextPack id.`;
+  return `Run ${statusCommand} again after 2s; ask for event ids, unit ids, pending review status, and contextPack id.`;
 }
 
 async function waitForTalkTask(task: Promise<void>, waitMs: number): Promise<boolean> {

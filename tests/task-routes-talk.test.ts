@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -99,6 +100,43 @@ async function eventually(assertion: () => void): Promise<void> {
   throw lastError;
 }
 
+function shellQuoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function expectShellCommandArgs(command: string, expectedArgs: string[], markerFiles: string[] = []): void {
+  const argsFile = path.join(os.tmpdir(), `metabot-command-args-${process.pid}-${Math.random()}`);
+  const result = spawnSync(
+    'sh',
+    [
+      '-c',
+      `
+metabot() {
+  : > "$ARGS_FILE"
+  for arg do
+    printf '%s\\n' "$arg" >> "$ARGS_FILE"
+  done
+}
+${command}
+`,
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, ARGS_FILE: argsFile },
+    },
+  );
+  try {
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(fs.readFileSync(argsFile, 'utf8').trimEnd().split('\n')).toEqual(expectedArgs);
+    for (const markerFile of markerFiles) {
+      expect(fs.existsSync(markerFile)).toBe(false);
+    }
+  } finally {
+    fs.rmSync(argsFile, { force: true });
+  }
+}
+
 describe('/api/talk async UX', () => {
   it('accepts query async mode and exposes task status', async () => {
     const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done', durationMs: 12 }));
@@ -132,7 +170,7 @@ describe('/api/talk async UX', () => {
     expect(status.json()).toMatchObject({
       taskId,
       statusUrl: `/api/talk/${taskId}`,
-      statusCommand: `metabot talk-status ${taskId}`,
+      statusCommand: `metabot talk-status ${shellQuoteArg(taskId)}`,
       phase: 'completed',
       progress: expect.objectContaining({ kind: 'complete' }),
       message: 'Task finished. See result for the final response or error.',
@@ -172,10 +210,12 @@ describe('/api/talk async UX', () => {
       progress: expect.objectContaining({ kind: 'indeterminate', retryAfterMs: 2000 }),
       retryAfterMs: 2000,
       statusUrl: `/api/talk/${taskId}`,
-      statusCommand: `metabot talk-status ${taskId}`,
+      statusCommand: `metabot talk-status ${shellQuoteArg(taskId)}`,
       message:
         'Task is still running. Check statusUrl again later; long research tasks may expose more detail in their Memory Core run lifecycle.',
-      nextAction: `Run metabot talk-status ${taskId} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`,
+      nextAction: `Run metabot talk-status ${shellQuoteArg(
+        taskId,
+      )} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`,
     });
     expect(typeof status.json().elapsedMs).toBe('number');
 
@@ -198,7 +238,7 @@ describe('/api/talk async UX', () => {
       phase: 'not_found',
       progress: { kind: 'unavailable' },
       statusUrl: '/api/talk/missing-task',
-      statusCommand: 'metabot talk-status missing-task',
+      statusCommand: `metabot talk-status ${shellQuoteArg('missing-task')}`,
       error: 'Task not found or no longer retained',
       message: expect.stringContaining('expired after retention'),
       nextAction: expect.stringContaining('metabot talk --wait-ms'),
@@ -263,8 +303,104 @@ describe('/api/talk async UX', () => {
         runId: 'run-r6-001',
         domain: 'metabot',
       }),
-      nextAction: expect.stringContaining('metabot research runs --root /root/workspaces/r6 --project metabot-r6'),
+      nextAction: expect.stringContaining(
+        `metabot research runs --root ${shellQuoteArg('/root/workspaces/r6')} --project ${shellQuoteArg('metabot-r6')}`,
+      ),
     });
+  });
+
+  it('quotes prompt-derived Memory Core command arguments for copy-paste shell safety', async () => {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-shell-safe-'));
+    const rootMarker = path.join(markerDir, 'root-injected');
+    const rootTickMarker = path.join(markerDir, 'root-backtick-injected');
+    const projectMarker = path.join(markerDir, 'project-injected');
+    const projectTickMarker = path.join(markerDir, 'project-backtick-injected');
+    const runMarker = path.join(markerDir, 'run-injected');
+    const projectRoot = `/tmp/research root/quoted "dir" $(touch\${IFS}${rootMarker}) \`touch\${IFS}${rootTickMarker}\` '&`;
+    const projectId = `project $(touch\${IFS}${projectMarker}) \`touch\${IFS}${projectTickMarker}\` '& id`;
+    const runId = `run "quoted" $(touch\${IFS}${runMarker})`;
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: 'artifact ingested',
+      durationMs: 24,
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    try {
+      const res = await call(ctx, 'POST', '/api/talk?async=true', {
+        botName: 'pm',
+        chatId: 'private-test',
+        prompt: `Start AutoResearchClaw research loop. projectId="${projectId}" runId="${runId.replace(
+          /"/g,
+          '\\"',
+        )}" projectRoot="${projectRoot.replace(/"/g, '\\"')}" domain="memory core"`,
+        sendCards: false,
+      });
+
+      expect(res.json()).toMatchObject({
+        progress: expect.objectContaining({
+          projectId,
+          runId,
+          projectRoot,
+          domain: 'memory core',
+        }),
+        nextAction: expect.stringContaining(
+          `metabot research runs --root ${shellQuoteArg(projectRoot)} --project ${shellQuoteArg(projectId)}`,
+        ),
+      });
+      const runningCommand = String(res.json().nextAction).slice(
+        String(res.json().nextAction).indexOf('metabot research runs'),
+      );
+      expectShellCommandArgs(
+        runningCommand.replace(/\.$/, ''),
+        ['research', 'runs', '--root', projectRoot, '--project', projectId],
+        [rootMarker, rootTickMarker, projectMarker, projectTickMarker, runMarker],
+      );
+
+      const taskId = res.json().taskId;
+      await eventually(() => {
+        expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+      });
+
+      const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+      const terminalNextAction = String(status.json().nextAction);
+      expect(terminalNextAction).toContain(`locate run ${shellQuoteArg(runId)}`);
+      const terminalCommand = terminalNextAction
+        .slice(terminalNextAction.indexOf('metabot research runs'))
+        .split(';')[0];
+      expectShellCommandArgs(
+        terminalCommand,
+        ['research', 'runs', '--root', projectRoot, '--project', projectId],
+        [rootMarker, rootTickMarker, projectMarker, projectTickMarker, runMarker],
+      );
+    } finally {
+      fs.rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
+  it('quotes unavailable task ids so statusCommand cannot execute shell metacharacters', async () => {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-task-id-safe-'));
+    const subMarker = path.join(markerDir, 'substitution-injected');
+    const tickMarker = path.join(markerDir, 'backtick-injected');
+    const dangerousTaskId = `missing$(touch\${IFS}${subMarker})\`touch\${IFS}${tickMarker}\`'&x`;
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'unused' }));
+    const ctx = makeCtx(executeApiTask);
+
+    try {
+      const status = await call(ctx, 'GET', `/api/talk/${dangerousTaskId}`);
+
+      expect(status.statusCode).toBe(404);
+      const actualTaskId = status.json().taskId;
+      expect(actualTaskId).toContain('missing$(');
+      expect(actualTaskId).toContain('%7BIFS%7D');
+      expect(status.json()).toMatchObject({
+        taskId: actualTaskId,
+        statusCommand: `metabot talk-status ${shellQuoteArg(actualTaskId)}`,
+      });
+      expectShellCommandArgs(status.json().statusCommand, ['talk-status', actualTaskId], [subMarker, tickMarker]);
+    } finally {
+      fs.rmSync(markerDir, { recursive: true, force: true });
+    }
   });
 
   it('preserves AutoResearchClaw lifecycle context after async completion', async () => {
@@ -321,12 +457,16 @@ describe('/api/talk async UX', () => {
           systemOfRecord: 'memory_core',
         },
         nextAction: expect.stringContaining(
-          'metabot research runs --root /root/workspaces/terminal-pass --project terminal-pass',
+          `metabot research runs --root ${shellQuoteArg('/root/workspaces/terminal-pass')} --project ${shellQuoteArg(
+            'terminal-pass',
+          )}`,
         ),
       },
       message: expect.stringContaining('Memory Core remains the system of record'),
       nextAction: expect.stringContaining(
-        'metabot research runs --root /root/workspaces/terminal-pass --project terminal-pass',
+        `metabot research runs --root ${shellQuoteArg('/root/workspaces/terminal-pass')} --project ${shellQuoteArg(
+          'terminal-pass',
+        )}`,
       ),
       result: expect.objectContaining({ success: true, responseText: 'artifact ingested' }),
     });
@@ -382,12 +522,16 @@ describe('/api/talk async UX', () => {
           message: 'ingest rejected',
         },
         nextAction: expect.stringContaining(
-          'metabot research runs --root /root/workspaces/terminal-fail --project terminal-fail',
+          `metabot research runs --root ${shellQuoteArg('/root/workspaces/terminal-fail')} --project ${shellQuoteArg(
+            'terminal-fail',
+          )}`,
         ),
       }),
       message: expect.stringContaining('Memory Core run lifecycle'),
       nextAction: expect.stringContaining(
-        'metabot research runs --root /root/workspaces/terminal-fail --project terminal-fail',
+        `metabot research runs --root ${shellQuoteArg('/root/workspaces/terminal-fail')} --project ${shellQuoteArg(
+          'terminal-fail',
+        )}`,
       ),
       result: expect.objectContaining({
         success: false,

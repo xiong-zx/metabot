@@ -585,6 +585,7 @@ def load_env(path: Path):
 
 default_env_raw = os.environ.get("METABOT_DEFAULT_ENV_FILE")
 default_env_path = Path(default_env_raw).expanduser() if default_env_raw else None
+default_env_resolved_path = default_env_path.resolve() if default_env_path is not None and default_env_path.exists() else default_env_path
 home_env_path = home / ".env"
 file_env = {}
 if default_env_path is not None:
@@ -665,6 +666,7 @@ report = {
     "metabotHome": str(home),
     "configFiles": {
         "defaultEnv": str(default_env_path) if default_env_path is not None else None,
+        "defaultEnvResolved": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
         "worktreeEnv": str(home_env_path),
     },
     "checks": checks,
@@ -690,13 +692,15 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
 
 def core_cli_probe(source, entry):
     entry = Path(entry).expanduser()
+    resolved_entry = entry.resolve() if entry.exists() else entry
     artifact = None
-    if entry.as_posix().endswith("/packages/cli/bin/metabot"):
-        artifact = entry.parent.parent / "dist" / "index.js"
+    if resolved_entry.as_posix().endswith("/packages/cli/bin/metabot"):
+        artifact = resolved_entry.parent.parent / "dist" / "index.js"
     ready = entry.is_file() and (artifact is None or artifact.is_file())
     return {
         "source": source,
         "entry": str(entry),
+        "resolvedEntry": str(resolved_entry),
         "entryExists": entry.is_file(),
         "artifact": str(artifact) if artifact is not None else None,
         "artifactExists": artifact.is_file() if artifact is not None else None,
@@ -705,9 +709,10 @@ def core_cli_probe(source, entry):
 
 def append_core_cli_candidate(candidates, seen_entries, source, entry):
     probe = core_cli_probe(source, entry)
-    if probe["entry"] in seen_entries:
+    dedupe_entry = probe["resolvedEntry"]
+    if dedupe_entry in seen_entries:
         return
-    seen_entries.add(probe["entry"])
+    seen_entries.add(dedupe_entry)
     candidates.append(probe)
 
 explicit_core_cli = os.environ.get("METABOT_CORE_CLI")
@@ -717,12 +722,12 @@ if explicit_core_cli:
     append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "explicit", explicit_core_cli)
 else:
     append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "worktree", home / "packages/cli/bin/metabot")
-    if default_env_path is not None:
+    if default_env_resolved_path is not None:
         append_core_cli_candidate(
             core_cli_candidates,
             seen_core_cli_entries,
             "default_config_root",
-            default_env_path.parent / "packages/cli/bin/metabot",
+            default_env_resolved_path.parent / "packages/cli/bin/metabot",
         )
     append_core_cli_candidate(
         core_cli_candidates,
@@ -749,7 +754,9 @@ check("core_cli_artifact", selected_core_cli is not None,
       {
           "selected": selected_core_cli,
           "candidates": core_cli_candidates,
-          "configRoot": str(default_env_path.parent) if default_env_path is not None else str(home),
+          "configRoot": str(default_env_resolved_path.parent) if default_env_resolved_path is not None else str(home),
+          "configuredDefaultEnv": str(default_env_path) if default_env_path is not None else None,
+          "resolvedDefaultEnv": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
           "explicitOverride": bool(explicit_core_cli),
       })
 
@@ -1055,12 +1062,38 @@ PY
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
 # A source-tree launcher is usable only when its dist entry exists. This matters
 # when the bridge runs from a Git worktree that intentionally has not been built.
+_expand_user_path() {
+  local value="$1"
+  case "$value" in
+    "~"|"~/"*) printf '%s\n' "${HOME}${value#\~}" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+_canonical_existing_path() {
+  local path_value
+  path_value="$(_expand_user_path "$1")"
+  if [[ -e "$path_value" || -L "$path_value" ]]; then
+    if command -v readlink &>/dev/null; then
+      readlink -f "$path_value" 2>/dev/null || printf '%s\n' "$path_value"
+    else
+      printf '%s\n' "$path_value"
+    fi
+  else
+    printf '%s\n' "$path_value"
+  fi
+}
+
 _core_cli_is_ready() {
   local candidate="$1"
-  [[ -f "$candidate" ]] || return 1
-  case "$candidate" in
+  local expanded
+  expanded="$(_expand_user_path "$candidate")"
+  [[ -f "$expanded" ]] || return 1
+  local resolved
+  resolved="$(_canonical_existing_path "$expanded")"
+  case "$resolved" in
     */packages/cli/bin/metabot)
-      local package_root="${candidate%/bin/metabot}"
+      local package_root="${resolved%/bin/metabot}"
       [[ -f "$package_root/dist/index.js" ]] || return 1
       ;;
   esac
@@ -1070,11 +1103,10 @@ _core_cli_is_ready() {
 _core_cli_default_config_root() {
   local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
   if [[ -n "$default_env" ]]; then
-    case "$default_env" in
-      "~"|"~/"*) default_env="${HOME}${default_env#\~}" ;;
-    esac
+    default_env="$(_canonical_existing_path "$default_env")"
     dirname "$default_env"
   fi
+  return 0
 }
 
 # Order: explicit override > ready in-tree CLI > ready default-config checkout
@@ -1085,6 +1117,7 @@ _resolve_core_cli() {
   _append_core_cli_candidate() {
     candidate="$1"
     [[ -n "$candidate" ]] || return 0
+    candidate="$(_canonical_existing_path "$candidate")"
     local existing
     for existing in "${core_cli_candidates[@]}"; do
       [[ "$existing" == "$candidate" ]] && return 0
@@ -1092,10 +1125,12 @@ _resolve_core_cli() {
     core_cli_candidates+=("$candidate")
   }
   if [[ -n "${METABOT_CORE_CLI:-}" ]]; then
-    if _core_cli_is_ready "$METABOT_CORE_CLI"; then
-      echo "$METABOT_CORE_CLI"; return 0
+    local explicit_core_cli
+    explicit_core_cli="$(_canonical_existing_path "$METABOT_CORE_CLI")"
+    if _core_cli_is_ready "$explicit_core_cli"; then
+      echo "$explicit_core_cli"; return 0
     fi
-    echo "Explicit METABOT_CORE_CLI is not runnable or does not have a built dist entry: $METABOT_CORE_CLI" >&2
+    echo "Explicit METABOT_CORE_CLI is not runnable or does not have a built dist entry: $METABOT_CORE_CLI (resolved: $explicit_core_cli)" >&2
     return 2
   fi
   # In-tree (monorepo): packages/cli is shipped alongside this script.
@@ -1129,9 +1164,7 @@ _load_core_cli_config() {
   # Keep code resolution separate from backend selection. Explicit process env
   # wins; otherwise worktree .env overrides the shared default env file.
   local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
-  case "$default_env" in
-    "~"|"~/"*) default_env="${HOME}${default_env#\~}" ;;
-  esac
+  default_env="$(_expand_user_path "$default_env")"
   local worktree_env="$METABOT_HOME/.env"
   local k
   for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
