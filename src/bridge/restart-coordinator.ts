@@ -5,7 +5,14 @@ import type { ServiceRestartBlocker, ServiceRestartRequest } from './command-han
 import type { ActiveTaskRecord } from './restart-recovery.js';
 import { checkpointCardLifecycle } from './card-lifecycle-store.js';
 
-export type RestartCoordinationStatus = 'blocked' | 'scheduled' | 'forced' | 'timed_out';
+export type RestartCoordinationStatus =
+  | 'blocked'
+  | 'scheduled'
+  | 'forced'
+  | 'timed_out'
+  | 'restarting'
+  | 'healthy'
+  | 'failed';
 
 export interface RestartCoordinationRecord {
   requestId: string;
@@ -23,6 +30,16 @@ export interface RestartCoordinationRecord {
   deadlineAt?: number;
   scheduledAt?: number;
   timedOutAt?: number;
+  attemptedAt?: number;
+  attemptCount?: number;
+  healthyAt?: number;
+  failedAt?: number;
+  healthError?: string;
+  targetCwd?: string;
+  targetScript?: string;
+  runtimePid?: number;
+  proxyReachable?: boolean;
+  processListSavedAt?: number;
   reportedAt?: number;
 }
 
@@ -89,6 +106,8 @@ export function recordServiceRestartRequest(input: {
   status: RestartCoordinationStatus;
   blockers?: ServiceRestartBlocker[];
   timeoutMs?: number;
+  targetCwd?: string;
+  targetScript?: string;
   now?: number;
 }): RestartCoordinationRecord {
   const now = input.now ?? Date.now();
@@ -122,6 +141,16 @@ export function recordServiceRestartRequest(input: {
     ...(input.status === 'timed_out'
       ? { timedOutAt: existing?.timedOutAt ?? now }
       : existing?.timedOutAt ? { timedOutAt: existing.timedOutAt } : {}),
+    ...(existing?.attemptedAt ? { attemptedAt: existing.attemptedAt } : {}),
+    ...(existing?.attemptCount ? { attemptCount: existing.attemptCount } : {}),
+    ...(existing?.healthyAt ? { healthyAt: existing.healthyAt } : {}),
+    ...(existing?.failedAt ? { failedAt: existing.failedAt } : {}),
+    ...(existing?.healthError ? { healthError: existing.healthError } : {}),
+    ...(input.targetCwd || existing?.targetCwd ? { targetCwd: input.targetCwd || existing?.targetCwd } : {}),
+    ...(input.targetScript || existing?.targetScript ? { targetScript: input.targetScript || existing?.targetScript } : {}),
+    ...(existing?.runtimePid ? { runtimePid: existing.runtimePid } : {}),
+    ...(existing?.proxyReachable !== undefined ? { proxyReachable: existing.proxyReachable } : {}),
+    ...(existing?.processListSavedAt ? { processListSavedAt: existing.processListSavedAt } : {}),
     ...(existing?.reportedAt ? { reportedAt: existing.reportedAt } : {}),
   };
 
@@ -129,6 +158,57 @@ export function recordServiceRestartRequest(input: {
   withoutExisting.push(next);
   writeRestartRequests(withoutExisting);
   return next;
+}
+
+export function markServiceRestartHealthy(input: {
+  requestId: string;
+  runtimePid?: number;
+  targetCwd?: string;
+  targetScript?: string;
+  proxyReachable?: boolean;
+  processListSavedAt?: number;
+  now?: number;
+}): RestartCoordinationRecord | undefined {
+  return updateRestartRequest(input.requestId, (existing) => {
+    const now = input.now ?? Date.now();
+    return {
+      ...existing,
+      status: 'healthy',
+      healthyAt: existing.healthyAt ?? now,
+      updatedAt: now,
+      healthError: undefined,
+      ...(input.runtimePid ? { runtimePid: input.runtimePid } : {}),
+      ...(input.targetCwd ? { targetCwd: input.targetCwd } : {}),
+      ...(input.targetScript ? { targetScript: input.targetScript } : {}),
+      ...(input.proxyReachable !== undefined ? { proxyReachable: input.proxyReachable } : {}),
+      ...(input.processListSavedAt ? { processListSavedAt: input.processListSavedAt } : {}),
+    };
+  });
+}
+
+export function markServiceRestartFailed(input: {
+  requestId: string;
+  error: string;
+  runtimePid?: number;
+  targetCwd?: string;
+  targetScript?: string;
+  proxyReachable?: boolean;
+  now?: number;
+}): RestartCoordinationRecord | undefined {
+  return updateRestartRequest(input.requestId, (existing) => {
+    const now = input.now ?? Date.now();
+    return {
+      ...existing,
+      status: 'failed',
+      failedAt: existing.failedAt ?? now,
+      updatedAt: now,
+      healthError: input.error.slice(0, 1_000),
+      ...(input.runtimePid ? { runtimePid: input.runtimePid } : {}),
+      ...(input.targetCwd ? { targetCwd: input.targetCwd } : {}),
+      ...(input.targetScript ? { targetScript: input.targetScript } : {}),
+      ...(input.proxyReachable !== undefined ? { proxyReachable: input.proxyReachable } : {}),
+    };
+  });
 }
 
 export function markServiceRestartReportSent(input: {
@@ -326,6 +406,18 @@ function writeRestartRequests(records: RestartCoordinationRecord[]): void {
   fs.renameSync(tmp, file);
 }
 
+function updateRestartRequest(
+  requestId: string,
+  update: (record: RestartCoordinationRecord) => RestartCoordinationRecord,
+): RestartCoordinationRecord | undefined {
+  const records = readRestartRequests();
+  const existing = records.find((record) => record.requestId === requestId);
+  if (!existing) return undefined;
+  const next = update(existing);
+  writeRestartRequests(records.map((record) => record.requestId === requestId ? next : record));
+  return next;
+}
+
 function isRestartCoordinationRecord(value: unknown): value is RestartCoordinationRecord {
   const row = value as RestartCoordinationRecord;
   return !!row
@@ -334,7 +426,15 @@ function isRestartCoordinationRecord(value: unknown): value is RestartCoordinati
     && typeof row.requesterChatId === 'string'
     && typeof row.userId === 'string'
     && typeof row.force === 'boolean'
-    && (row.status === 'blocked' || row.status === 'scheduled' || row.status === 'forced' || row.status === 'timed_out')
+    && (
+      row.status === 'blocked'
+      || row.status === 'scheduled'
+      || row.status === 'forced'
+      || row.status === 'timed_out'
+      || row.status === 'restarting'
+      || row.status === 'healthy'
+      || row.status === 'failed'
+    )
     && Array.isArray(row.blockers)
     && (row.readiness === undefined || Array.isArray(row.readiness))
     && typeof row.createdAt === 'number'
@@ -343,5 +443,15 @@ function isRestartCoordinationRecord(value: unknown): value is RestartCoordinati
     && (row.deadlineAt === undefined || typeof row.deadlineAt === 'number')
     && (row.scheduledAt === undefined || typeof row.scheduledAt === 'number')
     && (row.timedOutAt === undefined || typeof row.timedOutAt === 'number')
+    && (row.attemptedAt === undefined || typeof row.attemptedAt === 'number')
+    && (row.attemptCount === undefined || typeof row.attemptCount === 'number')
+    && (row.healthyAt === undefined || typeof row.healthyAt === 'number')
+    && (row.failedAt === undefined || typeof row.failedAt === 'number')
+    && (row.healthError === undefined || typeof row.healthError === 'string')
+    && (row.targetCwd === undefined || typeof row.targetCwd === 'string')
+    && (row.targetScript === undefined || typeof row.targetScript === 'string')
+    && (row.runtimePid === undefined || typeof row.runtimePid === 'number')
+    && (row.proxyReachable === undefined || typeof row.proxyReachable === 'boolean')
+    && (row.processListSavedAt === undefined || typeof row.processListSavedAt === 'number')
     && (row.reportedAt === undefined || typeof row.reportedAt === 'number');
 }

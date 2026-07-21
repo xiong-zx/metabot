@@ -111,6 +111,7 @@ Bots、Agents 和 Workers 需要共享 rules，但 rules 不能只散落在 prom
 - 已实现 Web UI activity history：Team tab 会拉取 Agent Team 实例列表，并通过 `GET /api/agent-teams/<team>/activity` 展示 Agent Team lifecycle activity；选择具体 sub-agent 时按 `agentName` 过滤，同时保留原 bot task activity。
 - 已实现 UI lease/checkpoint 增量：`card-lifecycle.json` 记录现在包含 `leaseOwner`、`leaseExpiresAt`、`checkpointNote`、`checkpointBy`、`checkpointAt`、`restartRequestId`；非终态 card 自动刷新 lease，closed card 自动释放 lease。`/restart ready <requestId> [checkpoint note]` 会把 blocker 的 checkpoint 写回对应 lifecycle record。
 - 已实现 post-restart readiness report：受控重启后 recovery 会向 requester 和 blocker chats 汇报 requestId、状态、ready 进度、是否 timed out、queued continuations 和受影响 chats，并用 `reportedAt` 去重。
+- 已实现原子重启执行：restart request 会经过 `scheduled/forced -> restarting -> healthy/failed`，同一 `requestId` 只能认领一次 PM2 操作；旧 bridge 只提交一次同 runtime 的 `pm2 restart --update-env`，新 bridge 负责健康检查与 `pm2 save`。MetaBot 进程树内禁止切换 runtime/worktree，必须由外部 `metabot deploy-runtime` 执行。
 - 仍待实现：把主协调 key 从 legacy `teamName` surface 全量切到 `instanceId`，以及更完整的业务语义级 instance/run/message dedupe 审计视图。
 
 Phase 1：数据模型和解析器

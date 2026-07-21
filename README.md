@@ -628,7 +628,8 @@ MetaBot 默认以 root-aware 模式运行 Claude Code：root 进程使用 `auto`
 ```bash
 # 1. MetaBot 进程管理（bin/metabot 直接处理）
 metabot update                      # 拉取最新代码，重新构建，更新 skills，重启
-metabot start / stop / restart      # PM2 管理
+metabot start / stop / restart      # PM2 管理；restart 仅用于当前 runtime
+metabot deploy-runtime --runtime DIR # 从 SSH/独立控制器原子切换 worktree/runtime
 metabot logs                        # 查看实时日志
 metabot status                      # PM2 进程状态
 

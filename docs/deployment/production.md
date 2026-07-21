@@ -5,6 +5,8 @@
 ```bash
 metabot start                       # start with PM2
 metabot update                      # package refresh + rebuild + update skills + restart
+metabot restart --wait              # restart the current runtime
+metabot deploy-runtime --runtime /path/to/metabot # switch runtime from SSH
 ```
 
 ## PM2 Auto-Start
@@ -19,13 +21,23 @@ This registers MetaBot as a system service that starts automatically after reboo
 
 ## Manual PM2 Commands
 
+Prefer the MetaBot CLI because it persists the restart request, preserves proxy
+settings, verifies health, and saves the PM2 process list only after success.
+Never issue `pm2 delete metabot` followed by `pm2 start` from a MetaBot child
+process. The delete kills that command's own process tree before start can run.
+
 ```bash
 pm2 start ecosystem.config.cjs      # start
-pm2 restart metabot                  # restart
+pm2 restart metabot --update-env     # same-runtime emergency restart
 pm2 stop metabot                     # stop
 pm2 logs metabot                     # view logs
 pm2 status                           # process status
 ```
+
+Runtime/worktree changes use one PM2 daemon restart RPC through `metabot
+deploy-runtime`. The command resolves and verifies the target `cwd` and script
+without deleting the PM2 app entry. Run it from SSH or another supervisor
+outside the MetaBot process tree; it refuses an in-process runtime switch.
 
 ## Build for Production
 

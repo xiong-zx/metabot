@@ -127,7 +127,7 @@ The bridge reads `.env` on startup, but environment variables already present in
 set -a
 source /root/metabot/.env
 set +a
-pm2 restart metabot --update-env
+metabot restart --wait
 ```
 
 ## Auto-Sync Behavior

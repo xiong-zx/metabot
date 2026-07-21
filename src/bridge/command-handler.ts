@@ -1114,6 +1114,14 @@ function formatReadinessProgress(request: ReturnType<typeof listServiceRestartRe
   if (blockedCount > 0) suffixes.push(`blocker-acks=${blockedCount}`);
   if (request.status === 'timed_out') {
     suffixes.push(request.timedOutAt ? `timed_out=${formatDuration(now - request.timedOutAt)} ago` : 'timed_out');
+  } else if (request.status === 'restarting') {
+    suffixes.push(`attempt=${request.attemptCount || 1}`);
+  } else if (request.status === 'healthy') {
+    suffixes.push(request.healthyAt ? `healthy=${formatDuration(now - request.healthyAt)} ago` : 'healthy');
+    if (request.proxyReachable !== undefined) suffixes.push(`proxy=${request.proxyReachable ? 'reachable' : 'failed'}`);
+  } else if (request.status === 'failed') {
+    suffixes.push(request.failedAt ? `failed=${formatDuration(now - request.failedAt)} ago` : 'failed');
+    if (request.healthError) suffixes.push(`error="${truncateOneLine(request.healthError, 80)}"`);
   } else if (request.status === 'blocked' && typeof request.deadlineAt === 'number') {
     suffixes.push(request.deadlineAt > now
       ? `timeout_in=${formatDuration(request.deadlineAt - now)}`

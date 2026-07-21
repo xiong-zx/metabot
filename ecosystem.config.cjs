@@ -1,6 +1,16 @@
 const path = require('path');
 
+// PM2 evaluates this file before the bridge loads src/config.ts. Load the
+// deployment .env here as well so proxy settings are part of the process
+// contract, including runtime switches initiated from a minimal SSH shell.
+try {
+  require('dotenv').config({ path: path.join(__dirname, '.env'), override: false });
+} catch {
+  // Packaged installs may inject all settings through the supervisor instead.
+}
+
 const noProxyEntries = [
+  ...(process.env.NO_PROXY || process.env.no_proxy || '').split(',').map((item) => item.trim()).filter(Boolean),
   'localhost',
   '127.0.0.1',
   'open.feishu.cn',
@@ -12,6 +22,9 @@ const noProxyEntries = [
   'tencentyun.com',
   'wisemodel.cn',
 ];
+const mergedNoProxy = [...new Set(noProxyEntries)].join(',');
+const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy;
+const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || httpProxy;
 
 const memoryWriteRoots = [
   '/users',
@@ -52,9 +65,12 @@ module.exports = {
       // Environment
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         CLAUDE_MAX_TURNS: '',  // unlimited turns (override any inherited shell env)
-        no_proxy: noProxyEntries.join(','),
-        NO_PROXY: noProxyEntries.join(','),
+        ...(httpProxy ? { HTTP_PROXY: httpProxy, http_proxy: httpProxy } : {}),
+        ...(httpsProxy ? { HTTPS_PROXY: httpsProxy, https_proxy: httpsProxy } : {}),
+        no_proxy: mergedNoProxy,
+        NO_PROXY: mergedNoProxy,
       },
     },
     {

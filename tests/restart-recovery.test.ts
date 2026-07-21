@@ -20,6 +20,90 @@ afterEach(() => {
 });
 
 describe('restart recovery', () => {
+  it('marks a controlled restart healthy and saves PM2 only after startup health passes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
+    process.env.SESSION_STORE_DIR = dir;
+    vi.resetModules();
+
+    const restartNotice = await import('../src/bridge/restart-notice.js');
+    const recovery = await import('../src/bridge/restart-recovery.js');
+    const restartCoordinator = await import('../src/bridge/restart-coordinator.js');
+    writeFileSync(
+      join(dir, 'last-restart.json'),
+      JSON.stringify({
+        restartedAt: Math.floor(Date.now() / 1000),
+        requestId: 'restart-health-1',
+        botName: 'admin',
+        chatId: 'oc_restart',
+      }),
+    );
+    restartCoordinator.recordServiceRestartRequest({
+      requestId: 'restart-health-1',
+      requesterBotName: 'admin',
+      request: { chatId: 'oc_restart', userId: 'u1' },
+      status: 'restarting',
+    });
+    restartNotice.loadRestartBreadcrumb();
+    const persistProcessList = vi.fn().mockResolvedValue(undefined);
+
+    await recovery.finalizeControlledRestartAfterStartup({
+      logger,
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, proxyReachable: true }),
+      persistProcessList,
+      now: 5_000,
+    });
+
+    expect(persistProcessList).toHaveBeenCalledTimes(1);
+    expect(restartCoordinator.getServiceRestartRequest('restart-health-1')).toMatchObject({
+      status: 'healthy',
+      healthyAt: 5_000,
+      processListSavedAt: 5_000,
+      proxyReachable: true,
+      runtimePid: process.pid,
+    });
+  });
+
+  it('records failed startup health and does not save the PM2 process list', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
+    process.env.SESSION_STORE_DIR = dir;
+    vi.resetModules();
+
+    const restartNotice = await import('../src/bridge/restart-notice.js');
+    const recovery = await import('../src/bridge/restart-recovery.js');
+    const restartCoordinator = await import('../src/bridge/restart-coordinator.js');
+    writeFileSync(
+      join(dir, 'last-restart.json'),
+      JSON.stringify({ restartedAt: Math.floor(Date.now() / 1000), requestId: 'restart-health-failed' }),
+    );
+    restartCoordinator.recordServiceRestartRequest({
+      requestId: 'restart-health-failed',
+      requesterBotName: 'admin',
+      request: { chatId: 'oc_restart', userId: 'u1' },
+      status: 'restarting',
+    });
+    restartNotice.loadRestartBreadcrumb();
+    const persistProcessList = vi.fn().mockResolvedValue(undefined);
+
+    await recovery.finalizeControlledRestartAfterStartup({
+      logger,
+      healthCheck: vi.fn().mockResolvedValue({
+        ok: false,
+        proxyReachable: false,
+        error: 'Anthropic connectivity timed out',
+      }),
+      persistProcessList,
+      now: 6_000,
+    });
+
+    expect(persistProcessList).not.toHaveBeenCalled();
+    expect(restartCoordinator.getServiceRestartRequest('restart-health-failed')).toMatchObject({
+      status: 'failed',
+      failedAt: 6_000,
+      healthError: 'Anthropic connectivity timed out',
+      proxyReachable: false,
+    });
+  });
+
   it('updates interrupted card, notifies chat, queues continuation, and clears active task', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
     process.env.SESSION_STORE_DIR = dir;

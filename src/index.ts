@@ -22,7 +22,10 @@ import { DocSync } from './sync/doc-sync.js';
 import { WikiAutoSync } from './sync/auto-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
 import { checkMetabotCoreMemoryConnection } from './memory/core-connection.js';
-import { recoverInterruptedTasksAfterRestart } from './bridge/restart-recovery.js';
+import {
+  finalizeControlledRestartAfterStartup,
+  recoverInterruptedTasksAfterRestart,
+} from './bridge/restart-recovery.js';
 import { cleanupStaleBridgeDirs } from './engines/claude/pty/hook-bridge.js';
 
 import { SessionRegistry } from './session/session-registry.js';
@@ -420,8 +423,6 @@ async function main() {
     { defaultModel: appConfig.workers.defaultModel, maxPerPm: appConfig.workers.maxPerPm },
     'Worker manager initialized',
   );
-  await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
-
   const memoryCheck = await checkMetabotCoreMemoryConnection({ timeoutMs: 4_000 });
   if (memoryCheck.ok) {
     logger.info({
@@ -558,6 +559,13 @@ async function main() {
     agentTeamExecutionBot: appConfig.agentTeamExecutionBot,
     workerManager,
   });
+
+  // The old process can only submit the atomic PM2 operation; it cannot run
+  // post-restart commands because PM2 kills its whole descendant tree. The new
+  // process owns health verification, durable PM2 save, recovery reporting,
+  // and breadcrumb cleanup after the API endpoint is listening.
+  await finalizeControlledRestartAfterStartup({ logger });
+  await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
 
   // Graceful shutdown
   const shutdown = async () => {

@@ -1,5 +1,4 @@
 import * as crypto from 'node:crypto';
-import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -28,7 +27,7 @@ import { listClaudeSessions, type SessionSummary } from '../engines/claude/sessi
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
-import { shouldRemindRestart, markReminded, restartSecondsAgo, writeRestartBreadcrumb } from './restart-notice.js';
+import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
 import { clearActiveTask, listActiveTaskRecords, recordActiveTask } from './restart-recovery.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
@@ -49,6 +48,7 @@ import {
 import {
   collectServiceRestartBlockers,
   findReusableServiceRestartRequest,
+  markServiceRestartFailed,
   markServiceRestartRequestTimedOut,
   recordServiceRestartRequest,
   resolveRestartReadyTimeoutMs,
@@ -801,24 +801,36 @@ export class MessageBridge {
       };
     }
 
-    writeRestartBreadcrumb({
-      botName: this.config.name,
-      chatId: request.chatId,
-      reason: request.reason || 'chat-command',
-      source: 'chat-command',
-      requestId,
-      resume: true,
-    });
-
-    const cwd = process.env.METABOT_HOME || process.cwd();
-    const dataDir = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
+    const cwd = path.resolve(process.env.METABOT_HOME || process.cwd());
+    const cli = path.join(cwd, 'bin', 'metabot');
+    const dataDir = process.env.SESSION_STORE_DIR || path.join(process.env.HOME || cwd, '.metabot');
     const logFile = path.join(dataDir, 'restart-command.log');
+    const status = request.force === true && blockers.length > 0 ? 'forced' : 'scheduled';
+    recordServiceRestartRequest({
+      requestId,
+      requesterBotName: this.config.name,
+      request,
+      status,
+      blockers,
+      targetCwd: cwd,
+      targetScript: path.join(cwd, 'src', 'index.ts'),
+      now,
+    });
     const script = [
       'sleep 0.8',
-      `cd ${shellQuote(cwd)}`,
       `mkdir -p ${shellQuote(dataDir)}`,
-      `(pm2 restart metabot || pm2 start ecosystem.config.cjs) >> ${shellQuote(logFile)} 2>&1`,
-      `pm2 save --force >> ${shellQuote(logFile)} 2>&1 || true`,
+      [
+        'exec',
+        shellQuote(cli),
+        'restart',
+        '--request-id', shellQuote(requestId),
+        '--bot', shellQuote(this.config.name),
+        '--chat', shellQuote(request.chatId),
+        '--source', 'chat-command',
+        '--reason', shellQuote(request.reason || 'chat-command'),
+        '--resume',
+        `>> ${shellQuote(logFile)} 2>&1`,
+      ].join(' '),
     ].join('; ');
     const child = restartSpawn('/bin/sh', ['-lc', script], {
       detached: true,
@@ -833,14 +845,18 @@ export class MessageBridge {
         METABOT_RESTART_RESUME: '1',
       },
     });
+    if (typeof child.once === 'function') {
+      child.once('error', (err) => {
+        markServiceRestartFailed({
+          requestId,
+          error: `Failed to spawn controlled restart command: ${err.message}`,
+          targetCwd: cwd,
+          targetScript: path.join(cwd, 'src', 'index.ts'),
+        });
+        this.logger.error({ err, requestId, chatId: request.chatId }, 'Controlled service restart spawn failed');
+      });
+    }
     child.unref();
-    recordServiceRestartRequest({
-      requestId,
-      requesterBotName: this.config.name,
-      request,
-      status: request.force === true && blockers.length > 0 ? 'forced' : 'scheduled',
-      blockers,
-    });
     this.logger.info(
       {
         chatId: request.chatId,

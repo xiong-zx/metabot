@@ -352,14 +352,10 @@ cmd_update() {
     fi
   fi
 
-  info "Restarting MetaBot..."
-  _write_restart_breadcrumb
-  pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
-  pm2 save --force 2>/dev/null || true
-
-  success "MetaBot updated and restarted!"
-
   _update_core_workspace || true
+
+  info "Restarting MetaBot..."
+  cmd_restart --source update --reason "metabot update" --resume
 }
 
 # Optimization: if a sibling metabot-core checkout exists, pull + build it so
@@ -391,14 +387,34 @@ _update_core_workspace() {
   ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
 }
 
+_restart_state_dir() {
+  if [[ -n "${SESSION_STORE_DIR:-}" ]]; then
+    printf '%s\n' "$SESSION_STORE_DIR"
+    return
+  fi
+  local configured=""
+  if [[ -f "$METABOT_HOME/.env" ]]; then
+    configured="$(sed -n 's/^SESSION_STORE_DIR=//p' "$METABOT_HOME/.env" 2>/dev/null | tail -1)"
+    configured="${configured%\"}"; configured="${configured#\"}"
+    configured="${configured%\'}"; configured="${configured#\'}"
+  fi
+  if [[ -n "$configured" ]]; then
+    configured="${configured/#\~/$HOME}"
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' "$HOME/.metabot"
+  fi
+}
+
 # Drop a breadcrumb so the bridge knows it was just restarted. After
 # `pm2 restart` the node process (and every Claude session) is killed and
 # respawned, so the agent that issued the restart loses all memory of having
 # done so — without this it sees "please restart" in resumed history and
-# restarts again in a loop. The bridge reads + deletes this file at boot and
-# injects a one-shot "you just restarted, don't restart again" system-reminder.
+# restarts again in a loop. The bridge reads this file at boot, injects a
+# one-shot reminder, and deletes it only after startup health and recovery.
 _write_restart_breadcrumb() {
-  local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
+  local dir
+  dir="$(_restart_state_dir)"
   mkdir -p "$dir" 2>/dev/null || return 0
   python3 - "$dir/last-restart.json" <<'PY' 2>/dev/null || true
 import json
@@ -431,6 +447,162 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 PY
 }
 
+_new_restart_request_id() {
+  python3 - <<'PY'
+import time
+import uuid
+print(f"restart-{int(time.time() * 1000)}-{str(uuid.uuid4())[:8]}")
+PY
+}
+
+# Atomically claim one restart attempt for a requestId. This small standalone
+# state update must run before contacting PM2 because the current process tree
+# can disappear as soon as the daemon accepts the restart.
+_claim_restart_request() {
+  local request_id="$1"
+  local dir
+  dir="$(_restart_state_dir)"
+  mkdir -p "$dir"
+  python3 - "$dir/restart-requests.json" "$request_id" "${METABOT_BOT_NAME:-cli}" "${METABOT_CHAT_ID:-cli}" "${METABOT_RESTART_REASON:-cli restart}" "${METABOT_RESTART_SOURCE:-cli}" "$METABOT_HOME" "$METABOT_HOME/src/index.ts" <<'PY'
+import fcntl
+import json
+import os
+import sys
+import time
+
+path, request_id, bot, chat, reason, source, cwd, script = sys.argv[1:]
+lock_path = f"{path}.lock"
+now = int(time.time() * 1000)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(lock_path, "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(path, "r", encoding="utf-8") as src:
+            rows = json.load(src)
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    record = next((row for row in rows if row.get("requestId") == request_id), None)
+    if record and (int(record.get("attemptCount") or 0) >= 1 or record.get("status") in ("restarting", "healthy", "failed")):
+        print("duplicate")
+        raise SystemExit(0)
+    if record is None:
+        record = {
+            "requestId": request_id,
+            "requesterBotName": bot,
+            "requesterChatId": chat,
+            "userId": os.environ.get("METABOT_RESTART_USER_ID", "cli"),
+            "reason": reason,
+            "force": False,
+            "status": "scheduled",
+            "blockers": [],
+            "readiness": [],
+            "createdAt": now,
+            "updatedAt": now,
+            "scheduledAt": now,
+        }
+        rows.append(record)
+    record.update({
+        "status": "restarting",
+        "attemptCount": int(record.get("attemptCount") or 0) + 1,
+        "attemptedAt": record.get("attemptedAt") or now,
+        "updatedAt": now,
+        "targetCwd": os.path.realpath(cwd),
+        "targetScript": os.path.realpath(script),
+        "source": source,
+    })
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as dst:
+        json.dump(rows, dst, ensure_ascii=False, indent=2)
+        dst.write("\n")
+    os.replace(tmp, path)
+    print("claimed")
+PY
+}
+
+_mark_restart_request_failed() {
+  local request_id="$1"
+  local failure="$2"
+  local dir
+  dir="$(_restart_state_dir)"
+  python3 - "$dir/restart-requests.json" "$request_id" "$failure" <<'PY' 2>/dev/null || true
+import fcntl
+import json
+import os
+import sys
+import time
+
+path, request_id, failure = sys.argv[1:]
+with open(f"{path}.lock", "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(path, "r", encoding="utf-8") as src:
+            rows = json.load(src)
+    except Exception:
+        rows = []
+    now = int(time.time() * 1000)
+    for row in rows:
+        if row.get("requestId") == request_id:
+            row.update({"status": "failed", "failedAt": row.get("failedAt") or now, "updatedAt": now, "healthError": failure[:1000]})
+            break
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as dst:
+        json.dump(rows, dst, ensure_ascii=False, indent=2)
+        dst.write("\n")
+    os.replace(tmp, path)
+PY
+}
+
+_pm2_metabot_runtime() {
+  pm2 jlist 2>/dev/null | python3 -c '
+import json, sys
+try: rows=json.load(sys.stdin)
+except Exception: rows=[]
+app=next((row for row in rows if row.get("name") == "metabot"), None)
+if app:
+    env=app.get("pm2_env") or {}
+    print("\t".join([str(env.get("pm_cwd") or ""), str(env.get("pm_exec_path") or ""), str(app.get("pid") or "")]))
+'
+}
+
+_is_metabot_descendant() {
+  local runtime pid metabot_pid
+  runtime="$(_pm2_metabot_runtime || true)"
+  metabot_pid="$(printf '%s' "$runtime" | awk -F '\t' '{print $3}')"
+  [[ "$metabot_pid" =~ ^[0-9]+$ ]] || return 1
+  pid="$$"
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
+    [[ "$pid" == "$metabot_pid" ]] && return 0
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  done
+  return 1
+}
+
+_wait_restart_terminal_state() {
+  local request_id="$1"
+  local timeout="${2:-60}"
+  local dir
+  dir="$(_restart_state_dir)"
+  local i state
+  for ((i=0; i<timeout; i++)); do
+    state="$(python3 - "$dir/restart-requests.json" "$request_id" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    rows=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    rows=[]
+row=next((row for row in rows if row.get("requestId") == sys.argv[2]), {})
+print(row.get("status", ""))
+PY
+)"
+    [[ "$state" == "healthy" ]] && return 0
+    [[ "$state" == "failed" ]] && return 1
+    sleep 1
+  done
+  return 1
+}
+
 _wait_bridge_health() {
   local timeout="${1:-60}"
   _load_bridge_api_config
@@ -445,7 +617,15 @@ _wait_bridge_health() {
   return 1
 }
 
-cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
+cmd_start() {
+  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env
+  if _wait_bridge_health 60; then
+    pm2 save --force
+  else
+    error "MetaBot did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+}
 cmd_stop()    { pm2 stop metabot; }
 cmd_restart() {
   local wait=false
@@ -507,33 +687,128 @@ cmd_restart() {
   [[ -n "$chat_id" ]] && export METABOT_CHAT_ID="$chat_id"
   [[ -n "$reason" ]] && export METABOT_RESTART_REASON="$reason"
   [[ -n "$source" ]] && export METABOT_RESTART_SOURCE="$source"
-  [[ -n "$request_id" ]] && export METABOT_RESTART_REQUEST_ID="$request_id"
+  request_id="${request_id:-$(_new_restart_request_id)}"
+  export METABOT_RESTART_REQUEST_ID="$request_id"
   [[ -n "$resume" ]] && export METABOT_RESTART_RESUME="$resume"
+
+  local runtime current_cwd current_script
+  runtime="$(_pm2_metabot_runtime || true)"
+  current_cwd="$(printf '%s' "$runtime" | awk -F '\t' '{print $1}')"
+  current_script="$(printf '%s' "$runtime" | awk -F '\t' '{print $2}')"
+  if [[ -n "$current_cwd" && "$(readlink -f "$current_cwd")" != "$(readlink -f "$METABOT_HOME")" ]]; then
+    error "Refusing to switch the live runtime from inside 'metabot restart'."
+    echo "  Current cwd: $current_cwd"
+    echo "  Requested cwd: $METABOT_HOME"
+    echo "  Use 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree."
+    return 2
+  fi
+
+  local claim
+  claim="$(_claim_restart_request "$request_id")"
+  if [[ "$claim" == "duplicate" ]]; then
+    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s"}\n' "$request_id"
+    info "Restart request $request_id was already attempted; no second restart was issued."
+    return 0
+  fi
 
   _write_restart_breadcrumb
   local restart_ok=true
-  if ! pm2 restart metabot; then
-    restart_ok=false
-    if pm2 start "$METABOT_HOME/ecosystem.config.cjs"; then
-      restart_ok=true
-    fi
+  if [[ -n "$current_cwd" ]]; then
+    pm2 restart metabot --update-env || restart_ok=false
+  else
+    pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env || restart_ok=false
   fi
-  pm2 save --force 2>/dev/null || true
 
   local health_ok=true
   if [[ "$wait" == true ]]; then
     _wait_bridge_health "$wait_timeout" || health_ok=false
+    [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$request_id" "$wait_timeout" || health_ok=false
+  fi
+
+  if [[ "$restart_ok" != true ]]; then
+    _mark_restart_request_failed "$request_id" "PM2 rejected the atomic restart request"
+  elif [[ "$wait" == true && "$health_ok" != true ]]; then
+    _mark_restart_request_failed "$request_id" "Restart did not reach healthy state within ${wait_timeout}s"
   fi
 
   if [[ "$json" == true ]]; then
-    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s}\n' \
+    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s,"requestId":"%s"}\n' \
       "$([[ "$restart_ok" == true ]] && echo true || echo false)" \
       "$([[ "$health_ok" == true ]] && echo true || echo false)" \
       "$wait" \
-      "$wait_timeout"
+      "$wait_timeout" \
+      "$request_id"
   fi
 
   [[ "$restart_ok" == true && "$health_ok" == true ]]
+}
+
+cmd_deploy_runtime() {
+  local target=""
+  local wait_timeout=90
+  local reason="runtime deployment"
+  local json=false
+  local request_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --runtime) target="${2:-}"; shift 2 ;;
+      --timeout) wait_timeout="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --request-id) request_id="${2:-}"; shift 2 ;;
+      --json) json=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot deploy-runtime --runtime DIR [--timeout SEC] [--reason TEXT] [--request-id ID] [--json]"
+        echo "This command must run outside the MetaBot process tree (for example from SSH)."
+        return 0
+        ;;
+      *) error "Unknown deploy-runtime option: $1"; return 2 ;;
+    esac
+  done
+  [[ -n "$target" ]] || { error "--runtime DIR is required"; return 2; }
+  target="$(readlink -f "$target")"
+  [[ -f "$target/ecosystem.config.cjs" ]] || { error "No ecosystem.config.cjs at $target"; return 2; }
+  if _is_metabot_descendant; then
+    error "Runtime switching is refused inside the MetaBot process tree."
+    echo "Run this command from SSH or an independent deployment controller so a failed switch cannot kill its own recovery command."
+    return 3
+  fi
+
+  METABOT_HOME="$target"
+  export METABOT_HOME METABOT_RESTART_REASON="$reason" METABOT_RESTART_SOURCE="external-deploy" METABOT_RESTART_RESUME="1"
+  export METABOT_RESTART_REQUEST_ID="${request_id:-$(_new_restart_request_id)}"
+  local claim
+  claim="$(_claim_restart_request "$METABOT_RESTART_REQUEST_ID")"
+  if [[ "$claim" == "duplicate" ]]; then
+    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s","runtime":"%s"}\n' \
+      "$METABOT_RESTART_REQUEST_ID" "$target"
+    info "Deployment request $METABOT_RESTART_REQUEST_ID was already attempted; no second runtime switch was issued."
+    return 0
+  fi
+  [[ "$claim" == "claimed" ]] || { error "Could not claim deployment request"; return 1; }
+  _write_restart_breadcrumb
+
+  local switch_helper="$target/scripts/pm2-atomic-runtime-switch.cjs"
+  if [[ ! -f "$switch_helper" ]]; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Atomic runtime switch helper is missing at $switch_helper"
+    return 1
+  fi
+  if ! node "$switch_helper" "$target" metabot; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "PM2 rejected atomic runtime switch for $target"
+    return 1
+  fi
+  local health_ok=true
+  _wait_bridge_health "$wait_timeout" || health_ok=false
+  [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$METABOT_RESTART_REQUEST_ID" "$wait_timeout" || health_ok=false
+  if [[ "$health_ok" != true ]]; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Deployment did not reach healthy state within ${wait_timeout}s"
+  fi
+  if [[ "$json" == true ]]; then
+    printf '{"ok":%s,"healthOk":%s,"requestId":"%s","runtime":"%s"}\n' \
+      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
+      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
+      "$METABOT_RESTART_REQUEST_ID" "$target"
+  fi
+  [[ "$health_ok" == true ]]
 }
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
@@ -784,7 +1059,7 @@ if pm2:
             pm2_data["parseError"] = str(e)
 check("pm2_runtime", pm2_ok, "pm2_wrong_cwd_or_offline" if not pm2_ok else "ok",
       "PM2 metabot is online and running from METABOT_HOME." if pm2_ok else "PM2 metabot is missing, offline, or running from a different cwd.",
-      "Run from the desired runtime: pm2 delete metabot; cd $METABOT_HOME; pm2 start ecosystem.config.cjs --update-env.",
+      "For the same runtime use 'metabot restart --wait'. To switch runtimes, run 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree. Never use delete+start from a Bot/Agent/Worker.",
       True,
       pm2_data)
 
@@ -2162,6 +2437,7 @@ print_help() {
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
   echo "    metabot restart    Restart MetaBot"
+  echo "    metabot deploy-runtime --runtime DIR  Atomically switch runtime from an external controller"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
@@ -2188,6 +2464,7 @@ case "${1:-}" in
   start)        cmd_start ;;
   stop)         cmd_stop ;;
   restart|rs)   shift; cmd_restart "$@" ;;
+  deploy-runtime) shift; cmd_deploy_runtime "$@" ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;

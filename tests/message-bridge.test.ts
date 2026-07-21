@@ -501,8 +501,10 @@ describe('MessageBridge between-turn questions', () => {
       expect(spawned).toHaveLength(1);
       expect(spawned[0]).toMatchObject({
         command: '/bin/sh',
-        args: ['-lc', expect.stringContaining('pm2 restart metabot')],
+        args: ['-lc', expect.stringContaining("bin/metabot' restart --request-id")],
       });
+      expect(spawned[0].args[1]).not.toContain('pm2 delete');
+      expect(spawned[0].args[1]).not.toContain('pm2 save');
       expect(spawned[0].options.env.METABOT_RESTART_REQUEST_ID).toBe(blocked.requestId);
       expect(unref).toHaveBeenCalledTimes(1);
     } finally {

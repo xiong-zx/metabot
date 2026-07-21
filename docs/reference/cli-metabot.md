@@ -23,9 +23,20 @@ metabot update --git                # developer-only: git pull + rebuild + resta
 metabot start                       # start with PM2
 metabot stop                        # stop
 metabot restart                     # restart
+metabot restart --wait              # restart current runtime and wait for durable health
+metabot deploy-runtime --runtime DIR [--request-id ID] # atomically switch runtime externally
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
+
+`restart` never switches `cwd` or the script target. Runtime/worktree switching
+must use `deploy-runtime` from outside the MetaBot process tree. Never run
+`pm2 delete metabot` followed by `pm2 start`: deleting the app also kills the
+Bot/Agent/Worker shell that would have issued the second command. Restart state
+is persisted by `requestId`; callers can reuse that ID to make deployment
+retries idempotent. The new process verifies bridge and Anthropic
+connectivity, saves PM2 only after health passes, and reports `healthy` or
+`failed` through restart recovery.
 
 `metabot update` is the recommended way to update MetaBot. It performs:
 
@@ -35,7 +46,7 @@ metabot status                      # PM2 process status
 4. Copy bundled MetaBot skills into Claude/Codex skill directories
 5. If `lark-cli` or lark skills are already installed, update `@larksuite/cli` and refresh the lark AI Agent skills
 6. Sync skills into the configured bot workspace
-7. `pm2 restart` — restart the service
+7. A requestId-deduplicated atomic PM2 restart; the new process saves PM2 only after health passes
 
 All in one command. Source checkouts can still use `metabot update --git`, but that is a developer-only path and requires a clean Git remote.
 
