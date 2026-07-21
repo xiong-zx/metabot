@@ -49,7 +49,7 @@ Set `BOTS_CONFIG=./bots.json` in `.env` to enable multi-bot mode:
 | `maxTurns` | No | unlimited | Max turns per request |
 | `maxBudgetUsd` | No | unlimited | Max cost per request (Claude only — Kimi runs on subscription) |
 | `model` | No | SDK default | Default model ID (engine-specific) |
-| `pmPrompt` | No | `false` | Enable research-PM instructions and 40-minute worker check-in reminders |
+| `pmPrompt` | No | `false` | Enable research-PM instructions and 1-hour worker check-in reminders |
 | `allowedTools` | No | `Read,Edit,Write,Glob,Grep,Bash` | Tool whitelist (Claude only) |
 | `outputsBaseDir` | No | `/tmp/metabot-outputs` | Output files directory |
 | `kimi` | No | — | Kimi-specific options (only when `engine: "kimi"`) — see below |
@@ -60,7 +60,7 @@ Set `BOTS_CONFIG=./bots.json` in `.env` to enable multi-bot mode:
 |-------|---------|-------------|
 | `workers.defaultModel` | `gpt-5.4` | Default model for background workers dispatched by PM bots |
 | `workers.maxPerPm` | `8` | Maximum concurrent running workers per PM chat |
-| `agentTeamExecutionBot` | fallback | Bridge bot used by the Agent Team supervisor to execute teammate runs; pin to `research-pm` or an internal worker rather than relying on registration order |
+| `agentTeamExecutionBot` | fallback | Bridge bot used by the Agent Team supervisor to execute Agent runs; pin to `research-pm` or an internal worker rather than relying on registration order |
 
 ### Kimi engine options
 

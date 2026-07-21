@@ -6,7 +6,7 @@
  * truncation helpers.  This file is the single source of truth; import from
  * here — do NOT copy these into individual builder files.
  */
-import type { CardStatus } from '../types.js';
+import type { CardLifecycleStage, CardStatus } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Status display config
@@ -33,6 +33,21 @@ export const BG_ICON: Record<'running' | 'completed' | 'failed' | 'stopped', str
   completed: '✅',
   failed:    '❌',
   stopped:   '⏹️',
+};
+
+// ---------------------------------------------------------------------------
+// Card lifecycle display
+// ---------------------------------------------------------------------------
+
+export const LIFECYCLE_STAGE_LABELS: Record<CardLifecycleStage, string> = {
+  received:      'Received',
+  acknowledged:  'Acknowledged',
+  executing:     'Executing',
+  checkpointing: 'Checkpointing',
+  responding:    'Responding',
+  closed:        'Closed',
+  recovering:    'Recovering',
+  blocked:       'Blocked',
 };
 
 // ---------------------------------------------------------------------------
