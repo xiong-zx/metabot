@@ -136,6 +136,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'number',
             description: 'Optional no-stream idle timeout in milliseconds for long-running workers',
           },
+          output_contract: {
+            type: 'object',
+            description: 'Optional worker output contract declaration for durable artifacts and detail recovery.',
+            properties: {
+              name: {
+                type: 'string',
+                enum: ['generic_results_v1', 'autoresearchclaw_output_v2', 'chat_only_result_v1', 'custom_optional'],
+              },
+              requiredArtifact: { type: 'boolean' },
+              idempotent: { type: 'boolean' },
+              expectedArtifacts: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['name', 'requiredArtifact'],
+          },
           botName: {
             type: 'string',
             description: `Bot name (default: ${DEFAULT_BOT_NAME || 'from METABOT_BOT_NAME env'})`,
@@ -276,6 +293,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           timeoutMs: args?.timeout_ms,
           idleTimeoutMs: args?.idle_timeout_ms,
           dedupeKey: args?.dedupe_key,
+          outputContract: args?.output_contract,
         });
         if (status >= 400) {
           return { content: [{ type: 'text', text: `Error: ${data.error || JSON.stringify(data)}` }] };
@@ -341,10 +359,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           w.costUsd ? `Cost: $${w.costUsd.toFixed(2)}` : '',
           `Workdir: ${w.workingDirectory}`,
           w.executionStatus ? `Execution status: ${w.executionStatus}` : '',
+          w.outputContract ? `Output contract: ${w.outputContract.name}` : '',
           w.artifactStatus ? `Artifact status: ${w.artifactStatus}${w.artifactPath ? ` (${w.artifactPath})` : ''}` : '',
+          w.contractStatus ? `Contract status: ${w.contractStatus}` : '',
           w.resultSummary ? `Result (truncated): ${w.resultSummary.slice(0, 200)}` : '',
           w.error ? `Error: ${w.error}` : '',
           w.terminalError ? `Terminal warning: ${w.terminalError}` : '',
+          w.detailRoute ? `Detail route: ${w.detailRoute}` : '',
+          w.finalPayloadRef ? `Final payload ref: ${w.finalPayloadRef}` : '',
+          w.finalTranscriptRef ? `Final transcript ref: ${w.finalTranscriptRef}` : '',
           '',
           '⚠️ This is a quick metadata-level status only.',
           "For detailed information, inspect the worker's workdir yourself:",
