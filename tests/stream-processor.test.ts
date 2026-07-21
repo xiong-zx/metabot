@@ -22,6 +22,35 @@ describe('StreamProcessor', () => {
     expect(p.getSessionId()).toBe('abc-123');
   });
 
+  it('keeps configured and assistant JSONL runtime models distinct', () => {
+    const p = new StreamProcessor('hi', {
+      configuredModel: 'claude-fable-5',
+      spawnModel: 'claude-fable-5',
+      sessionMode: 'fresh',
+    });
+    const state = p.processMessage(msg({
+      type: 'assistant',
+      model: 'claude-sonnet-5',
+      modelTelemetry: {
+        configuredModel: 'claude-fable-5',
+        spawnModel: 'claude-fable-5',
+        runtimeModel: 'claude-sonnet-5',
+        runtimeModelSource: 'assistant_jsonl',
+        fallbackOriginalModel: 'claude-fable-5',
+        fallbackModel: 'claude-sonnet-5',
+      },
+      message: { content: [{ type: 'text', text: 'done' }] },
+    }));
+
+    expect(state.model).toBe('claude-sonnet-5');
+    expect(state.modelTelemetry).toMatchObject({
+      configuredModel: 'claude-fable-5',
+      runtimeModel: 'claude-sonnet-5',
+      runtimeModelSource: 'assistant_jsonl',
+      fallbackModel: 'claude-sonnet-5',
+    });
+  });
+
   it('accumulates text from stream_event deltas', () => {
     const p = new StreamProcessor('hi');
     p.processMessage(msg({

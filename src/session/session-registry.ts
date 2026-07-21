@@ -239,6 +239,22 @@ export class SessionRegistry {
     return null;
   }
 
+  /** Clear an unsafe engine resume pointer without deleting local chat history. */
+  clearClaudeSessionId(chatId: string, botName: string): boolean {
+    const session = this.findByChatId(chatId, botName);
+    if (!session) return false;
+    const result = this.db.prepare(
+      'UPDATE sessions SET claude_session_id = NULL, updated_at = ? WHERE id = ?',
+    ).run(Date.now(), session.id);
+    if (result.changes > 0) {
+      this.logger.warn(
+        { chatId, botName, sessionId: session.id },
+        'Cleared unsafe Claude resume pointer from session registry',
+      );
+    }
+    return result.changes > 0;
+  }
+
   private findLinkByChatId(chatId: string, botName?: string): { session_id: string } | undefined {
     if (botName) {
       return this.db.prepare(`

@@ -48,8 +48,8 @@ export class FeishuSenderAdapter implements IMessageSender {
     return this.sender.updateCard(messageId, buildCard(state));
   }
 
-  async sendTextNotice(chatId: string, title: string, content: string, color: string = 'blue'): Promise<void> {
-    await this.sender.sendCard(chatId, USE_V2 ? buildTextCardV2(title, content, color) : buildTextCard(title, content, color));
+  async sendTextNotice(chatId: string, title: string, content: string, color: string = 'blue'): Promise<string | undefined> {
+    return this.sender.sendCard(chatId, USE_V2 ? buildTextCardV2(title, content, color) : buildTextCard(title, content, color));
   }
 
   async sendText(chatId: string, text: string): Promise<void> {

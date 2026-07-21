@@ -655,6 +655,39 @@ describe('MessageBridge runtime rules context', () => {
 });
 
 describe('MessageBridge card lifecycle', () => {
+  it('invalidates retired Claude session mappings without resetting chat configuration', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const clearClaudeSessionId = vi.fn(() => true);
+    bridge.setSessionRegistry({ clearClaudeSessionId } as any);
+    const manager = bridge.getSessionManager();
+    manager.setSessionId('chat-retired', 'sess-unsafe', 'claude');
+    manager.setSessionModel('chat-retired', 'claude-fable-5', 'claude');
+
+    try {
+      const retired = bridge.updateSessionMappingFromStream(
+        'chat-retired',
+        'claude',
+        {
+          type: 'result',
+          session_id: 'sess-unsafe',
+          modelTelemetry: {
+            sessionDisposition: 'retired',
+            sessionRetireReason: 'turn_start_timeout',
+          },
+        },
+        { getSessionId: () => 'sess-unsafe' },
+      );
+
+      expect(retired).toBe(true);
+      expect(manager.getSession('chat-retired').sessionId).toBeUndefined();
+      expect(manager.getSession('chat-retired').model).toBe('claude-fable-5');
+      expect(clearClaudeSessionId).toHaveBeenCalledWith('chat-retired', 'test-bot');
+    } finally {
+      bridge.destroy();
+    }
+  });
+
   it('persists cardless API lifecycle records by lifecycleKey', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-message-bridge-lifecycle-'));
     const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
@@ -821,6 +854,16 @@ describe('MessageBridge card lifecycle', () => {
     try {
       bridge.handleSpontaneousMessage('chat-spontaneous', {
         type: 'assistant',
+        session_id: 'sess-spontaneous',
+        model: 'claude-sonnet-5',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          spawnModel: 'claude-fable-5',
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
         message: { content: [{ type: 'text', text: 'Background result ready.' }] },
       });
       await vi.runOnlyPendingTimersAsync();
@@ -829,6 +872,11 @@ describe('MessageBridge card lifecycle', () => {
       expect(sender.sent).toHaveLength(1);
       expect(sender.sent[0].state.lifecycleStage).toBe('closed');
       expect(sender.sent[0].state.lifecycleKey).toMatch(/^spontaneous:chat-spontaneous:\d+$/);
+      expect(sender.sent[0].state.model).toBe('claude-sonnet-5');
+      expect(sender.sent[0].state.modelTelemetry).toMatchObject({
+        configuredModel: 'claude-fable-5',
+        runtimeModel: 'claude-sonnet-5',
+      });
     } finally {
       bridge.destroy();
     }

@@ -7,6 +7,7 @@ export type {
   CardState,
   BackgroundEvent,
   BackgroundTaskStatus,
+  ModelTelemetry,
 } from '../types.js';
 import type { CardState } from '../types.js';
 import { buildTeamPanelMarkdown } from './team-panel.js';
@@ -14,6 +15,7 @@ import {
   STATUS_CONFIG,
   BG_ICON,
   LIFECYCLE_STAGE_LABELS,
+  formatModelTelemetry,
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
@@ -147,18 +149,19 @@ export function buildCard(state: CardState): string {
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
-    if (state.status === 'complete' || state.status === 'error') {
+    if (state.status === 'complete' || state.status === 'error' || state.status === 'agent_activity') {
       if (state.sessionCostUsd != null) {
         parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
       }
-      if (state.model) {
-        // Strip the claude- prefix (claude-opus-4-7 → opus-4-7) but keep the
-        // full Kimi model name since e.g. `for-coding` loses too much context.
-        parts.push(state.model.replace(/^claude-/, ''));
-      }
+      const modelLabel = formatModelTelemetry(state.modelTelemetry, state.model);
+      if (modelLabel) parts.push(modelLabel);
       if (state.durationMs !== undefined) {
         parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
       }
+    }
+    if (state.status === 'thinking' || state.status === 'running') {
+      const modelLabel = formatModelTelemetry(state.modelTelemetry, undefined);
+      if (modelLabel) parts.push(modelLabel);
     }
     if (parts.length > 0) {
       elements.push({

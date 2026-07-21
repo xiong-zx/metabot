@@ -12,13 +12,15 @@ const fakeSession = vi.hoisted(() => ({
   sessionId: 'sess-test',
 }));
 
+const scannerDrain = vi.hoisted(() => vi.fn((): Array<Record<string, unknown>> => []));
+
 vi.mock('../src/engines/claude/pty/pty-session.js', () => ({
   createPtyClaudeSession: vi.fn(() => fakeSession),
 }));
 
 vi.mock('../src/engines/claude/pty/jsonl-scanner.js', () => ({
   createJsonlScanner: vi.fn(() => ({
-    drainPending: vi.fn(() => []),
+    drainPending: scannerDrain,
     stop: vi.fn(),
     async *[Symbol.asyncIterator]() {
       // No assistant/system records: this simulates a prompt that never
@@ -73,6 +75,12 @@ describe('ptyQuery turn-start watchdog', () => {
     fakeSession.typePrompt.mockImplementation(async () => {});
     fakeSession.snapshot.mockReset();
     fakeSession.snapshot.mockImplementation(() => '❯ ');
+    fakeSession.screen.mockReset();
+    fakeSession.screen.mockImplementation(() => '');
+    fakeSession.dispose.mockReset();
+    fakeSession.dispose.mockImplementation(async () => {});
+    scannerDrain.mockReset();
+    scannerDrain.mockImplementation(() => []);
   });
 
   afterEach(() => {
@@ -102,10 +110,109 @@ describe('ptyQuery turn-start watchdog', () => {
       type: 'result',
       subtype: 'error',
       is_error: true,
+      modelTelemetry: {
+        sessionDisposition: 'retired',
+        sessionRetireReason: 'turn_start_timeout',
+      },
     });
     expect(String((result.value as any).result)).toContain('did not start a model turn');
     expect(fakeSession.interrupt).toHaveBeenCalled();
+    expect(fakeSession.dispose).toHaveBeenCalled();
 
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it('does not accept a historical append-log running marker as turn-start proof', async () => {
+    fakeSession.snapshot.mockImplementation(() => 'old output\nEsc to interrupt\n❯ ');
+    fakeSession.screen.mockImplementation(() => '❯ ');
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+
+    const next = query[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(next).resolves.toMatchObject({
+      value: { type: 'result', subtype: 'error', is_error: true },
+    });
+    await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
+  });
+
+  it('flushes a queued final assistant before the synthetic result', async () => {
+    const { hookBridge, fireTurnComplete } = createHookBridge();
+    scannerDrain.mockImplementationOnce(() => [
+      {
+        type: 'user',
+        sessionId: 'sess-test',
+        message: { content: 'hello' },
+      },
+      {
+        type: 'system',
+        subtype: 'model_consent_fallback',
+        sessionId: 'sess-test',
+        originalModel: 'claude-fable-5',
+        fallbackModel: 'claude-sonnet-5',
+        content: 'Fable 5 requires usage credits',
+      },
+      {
+        type: 'assistant',
+        sessionId: 'sess-test',
+        parentToolUseID: null,
+        message: {
+          model: 'claude-sonnet-5',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'final answer' }],
+        },
+      },
+    ]);
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: {
+        cwd: '/tmp',
+        logger,
+        hookBridge: hookBridge as any,
+        model: 'claude-fable-5',
+      },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fakeSession.typePrompt).toHaveBeenCalledWith('hello');
+    fireTurnComplete();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'user' } });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: 'system',
+        subtype: 'model_consent_fallback',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: 'assistant',
+        model: 'claude-sonnet-5',
+        message: { content: [{ type: 'text', text: 'final answer' }] },
+      },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: 'result',
+        modelTelemetry: {
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      },
+    });
     await query.dispose?.();
   });
 
@@ -134,16 +241,7 @@ describe('ptyQuery turn-start watchdog', () => {
     });
 
     fireTurnComplete();
-    const second = iterator.next();
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    let settled = false;
-    second.then(() => { settled = true; });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
-    await query.dispose?.();
-    await expect(second).resolves.toMatchObject({ done: true });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
   it('keeps the watchdog error authoritative when Stop fires during interrupt', async () => {
@@ -174,15 +272,51 @@ describe('ptyQuery turn-start watchdog', () => {
     });
     expect(String((result.value as any).result)).toContain('did not start a model turn');
 
-    const second = iterator.next();
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it('does not type a later prompt into a PTY retired after ambiguous submission', async () => {
+    let releaseSecond!: () => void;
+    const secondReady = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    async function* twoPrompts(): AsyncIterable<PtyUserMessage> {
+      yield {
+        type: 'user',
+        message: { role: 'user', content: 'first prompt' },
+        parent_tool_use_id: null,
+        session_id: 'input-session',
+      };
+      await secondReady;
+      yield {
+        type: 'user',
+        message: { role: 'user', content: 'second prompt' },
+        parent_tool_use_id: null,
+        session_id: 'input-session',
+      };
+    }
+
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: twoPrompts(),
+      options: {
+        cwd: '/tmp',
+        logger,
+        hookBridge: hookBridge as any,
+      },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+
     await vi.advanceTimersByTimeAsync(1_000);
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: 'result', subtype: 'error', is_error: true },
+    });
 
-    let settled = false;
-    second.then(() => { settled = true; });
-    await Promise.resolve();
-    expect(settled).toBe(false);
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(1);
 
-    await query.dispose?.();
-    await expect(second).resolves.toMatchObject({ done: true });
+    expect(fakeSession.typePrompt).toHaveBeenCalledTimes(1);
+    expect(fakeSession.typePrompt).toHaveBeenCalledWith('first prompt');
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 });

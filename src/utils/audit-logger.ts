@@ -10,6 +10,7 @@ export type AuditEvent =
   | 'task_queued'
   | 'queue_cleared'
   | 'command'
+  | 'command_confirmation'
   | 'bytheway_command'
   | 'bytheway_start'
   | 'bytheway_complete'

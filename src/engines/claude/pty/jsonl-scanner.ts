@@ -24,6 +24,11 @@ export const createJsonlScanner: CreateJsonlScanner = ({
   let stopped = false;
   let offset = 0;
   let partialLine = '';
+  // Records read in one filesystem poll but not yet handed to the async
+  // consumer. Keeping this queue on the scanner object (rather than in the
+  // generator's local `records` array) lets drainPending() form a real ordering
+  // barrier before a synthesized result.
+  const pendingRecords: RawJsonlRecord[] = [];
 
   function stop(): void {
     stopped = true;
@@ -131,9 +136,9 @@ export const createJsonlScanner: CreateJsonlScanner = ({
 
     // Main poll loop.
     while (!stopped) {
-      const records = readNewRecords(false);
-      for (const rec of records) {
-        yield rec;
+      pendingRecords.push(...readNewRecords(false));
+      while (pendingRecords.length > 0) {
+        yield pendingRecords.shift()!;
         if (stopped) return;
       }
       await sleep(pollMs);
@@ -143,7 +148,9 @@ export const createJsonlScanner: CreateJsonlScanner = ({
   const scanner: JsonlScanner = {
     stop,
     drainPending(includePartial = false): RawJsonlRecord[] {
-      return readNewRecords(includePartial);
+      const records = pendingRecords.splice(0, pendingRecords.length);
+      records.push(...readNewRecords(includePartial));
+      return records;
     },
     [Symbol.asyncIterator]() {
       return iterate();

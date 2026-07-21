@@ -63,6 +63,25 @@ describe('SessionManager', () => {
     expect(session.sessionIdEngine).toBeUndefined();
   });
 
+  it('invalidates only the unsafe engine session pointer', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'invalidate-test');
+    manager.setSessionId('chat1', 'sess-unsafe', 'claude');
+    manager.setSessionModel('chat1', 'claude-fable-5', 'claude');
+    manager.setGoal('chat1', 'finish the repair');
+    manager.addUsage('chat1', 123, 0.25, 456);
+
+    manager.invalidateSessionId('chat1', 'turn_start_timeout');
+
+    const session = manager.getSession('chat1');
+    expect(session.sessionId).toBeUndefined();
+    expect(session.sessionIdEngine).toBeUndefined();
+    expect(session.model).toBe('claude-fable-5');
+    expect(session.activeGoal).toBe('finish the repair');
+    expect(session.cumulativeTokens).toBe(123);
+    expect(session.cumulativeCostUsd).toBe(0.25);
+    expect(session.cumulativeDurationMs).toBe(456);
+  });
+
   it('tracks model engine and clears it with the model override', () => {
     manager = new SessionManager('/tmp/test-dir', createLogger());
     manager.setSessionModel('chat1', 'gpt-5.5-codex', 'codex');

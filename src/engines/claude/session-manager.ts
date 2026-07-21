@@ -143,6 +143,26 @@ export class SessionManager {
     this.saveToDisk();
   }
 
+  /**
+   * Remove only the resumable engine session pointer for a chat.
+   *
+   * Unlike resetSession(), this preserves the user's model override, active
+   * goal, usage counters, and working directory. Use it when the engine has
+   * proven that a transcript is unsafe to resume.
+   */
+  invalidateSessionId(chatId: string, reason: string): void {
+    const session = this.sessions.get(chatId);
+    if (!session) return;
+    const previousSessionId = session.sessionId;
+    session.sessionId = undefined;
+    session.sessionIdEngine = undefined;
+    this.logger.warn(
+      { chatId, sessionId: previousSessionId?.slice(0, 8), reason },
+      'Session ID invalidated without resetting chat configuration',
+    );
+    this.saveToDisk();
+  }
+
   /** Set per-session model override. Pass undefined to clear. */
   setSessionModel(chatId: string, model: string | undefined, engine?: EngineName): void {
     const session = this.getSession(chatId);

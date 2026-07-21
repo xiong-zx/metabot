@@ -6,7 +6,7 @@
  * truncation helpers.  This file is the single source of truth; import from
  * here — do NOT copy these into individual builder files.
  */
-import type { CardLifecycleStage, CardStatus } from '../types.js';
+import type { CardLifecycleStage, CardStatus, ModelTelemetry } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Status display config
@@ -49,6 +49,25 @@ export const LIFECYCLE_STAGE_LABELS: Record<CardLifecycleStage, string> = {
   recovering:    'Recovering',
   blocked:       'Blocked',
 };
+
+function shortModel(model: string): string {
+  return model.replace(/^claude-/, '');
+}
+
+/** Format configured/runtime model provenance without hiding fallback. */
+export function formatModelTelemetry(
+  telemetry: ModelTelemetry | undefined,
+  legacyModel: string | undefined,
+): string | undefined {
+  const configured = telemetry?.configuredModel || telemetry?.spawnModel;
+  const runtime = telemetry?.runtimeModel || legacyModel;
+  if (configured && runtime && configured !== runtime) {
+    const fallback = telemetry?.fallbackModel || telemetry?.fallbackOriginalModel ? ' (fallback)' : '';
+    return `model: ${shortModel(configured)} → ${shortModel(runtime)}${fallback}`;
+  }
+  const model = runtime || configured;
+  return model ? `model: ${shortModel(model)}` : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Content truncation
