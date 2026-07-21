@@ -247,6 +247,7 @@ describe('ResearchLoopRunner', () => {
   });
 
   it('normalizes legacy candidate aliases through artifact validation into review-required memory', async () => {
+    const deprecationTelemetry: unknown[] = [];
     const worker: AutoResearchClawWorkerAdapter = {
       async dispatch(): Promise<ResearchWorkerHandle> {
         return { workerId: 'worker-legacy-alias', artifactUri: 'file://autoresearchclaw-output.json' };
@@ -260,6 +261,11 @@ describe('ResearchLoopRunner', () => {
               summary: 'Legacy alias candidate remains review staged',
               evidence_ids: ['mem_evt_prior'],
               evidence_paths: ['notes/evidence.md', 'https://example.test/evidence'],
+              metadata: {
+                source: 'legacy-worker',
+                autoresearchclaw_deprecated_aliases: [{ alias: 'fake', canonical: 'fake' }],
+                autoresearchclaw_legacy_alias_values: { fake: ['forged'] },
+              },
             } as any,
           ] as any,
         });
@@ -269,6 +275,7 @@ describe('ResearchLoopRunner', () => {
       readEvents: () => ledger.readAll(),
       appendEvent: (event) => ledger.append(event),
       worker,
+      onLegacyAliasDeprecation: (event) => deprecationTelemetry.push(event),
     });
 
     const result = await runner.run({
@@ -292,12 +299,34 @@ describe('ResearchLoopRunner', () => {
     });
     expect(event?.evidence_event_ids).toEqual(expect.arrayContaining(['mem_evt_prior']));
     expect(event?.metadata).toMatchObject({
+      source: 'legacy-worker',
       autoresearchclaw_deprecated_aliases: [
         { alias: 'candidate_type', canonical: 'type' },
         { alias: 'evidence_ids', canonical: 'evidence_event_ids' },
         { alias: 'evidence_paths', canonical: 'subject.file_paths/source_uris' },
       ],
+      autoresearchclaw_legacy_alias_values: {
+        candidate_type: 'finding',
+        evidence_ids: ['mem_evt_prior'],
+        evidence_paths: ['notes/evidence.md', 'https://example.test/evidence'],
+      },
     });
+    expect(event?.metadata).not.toMatchObject({
+      autoresearchclaw_deprecated_aliases: [{ alias: 'fake', canonical: 'fake' }],
+    });
+    expect(deprecationTelemetry).toEqual([
+      {
+        project_id: 'proj-alpha',
+        run_id: 'run-alpha',
+        candidate_index: 0,
+        aliases: [
+          { alias: 'candidate_type', canonical: 'type' },
+          { alias: 'evidence_ids', canonical: 'evidence_event_ids' },
+          { alias: 'evidence_paths', canonical: 'subject.file_paths/source_uris' },
+        ],
+        alias_names: ['candidate_type', 'evidence_ids', 'evidence_paths'],
+      },
+    ]);
   });
 
   it('applies reviewer approvals and rejections through append-only replacement events', async () => {

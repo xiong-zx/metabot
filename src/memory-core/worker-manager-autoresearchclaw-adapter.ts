@@ -15,7 +15,10 @@ import type {
   ResearchWorkerHandle,
 } from './research-loop-runner.js';
 import { MemoryCoreError } from './event-ledger.js';
-import { validateAutoResearchClawOutput } from './autoresearchclaw-contract.js';
+import {
+  buildAutoResearchClawMemoryEventCandidateInstructions,
+  validateAutoResearchClawOutput,
+} from './autoresearchclaw-contract.js';
 
 export interface WorkerManagerLike {
   dispatch(input: DispatchInput): {
@@ -287,7 +290,8 @@ function withArtifactInstruction(prompt: string, outputFileName: string): string
     `Write the final AutoResearchClaw JSON object to ${outputFileName} in the project root.`,
     'Do not rely on chat text as the system-of-record output; the JSON artifact is required for ingestion.',
     'Do not dispatch nested workers, subagents, reminders, or metabot talk tasks. This worker must write the artifact itself before it exits.',
-    'Before claiming completion, validate the artifact against the same contract used by Memory Core: every memory_event_candidates item needs a non-empty type and summary; use [] when there are no candidates.',
+    'Before claiming completion, validate the artifact against the same contract used by Memory Core.',
+    ...buildAutoResearchClawMemoryEventCandidateInstructions(),
   ].join('\n');
 }
 

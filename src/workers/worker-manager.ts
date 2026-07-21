@@ -7,7 +7,12 @@ import type { Logger } from '../utils/logger.js';
 import type { BotRegistry } from '../api/bot-registry.js';
 import type { MessageBridge } from '../bridge/message-bridge.js';
 import type { EngineName } from '../config.js';
-import { AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION } from '../memory-core/autoresearchclaw-contract.js';
+import {
+  AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION,
+  validateAutoResearchClawOutput,
+  type AutoResearchClawLegacyAliasDeprecationTelemetry,
+} from '../memory-core/autoresearchclaw-contract.js';
+import { MemoryCoreError } from '../memory-core/event-ledger.js';
 
 // --- Types ---
 
@@ -16,12 +21,29 @@ import { AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION } from '../memory-core/autores
 export type WorkerReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
 export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
-export type WorkerExecutionStatus = 'running' | 'completed' | 'failed' | 'timed_out' | 'idle_timed_out' | 'transport_error' | 'aborted';
+export type WorkerExecutionStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'timed_out'
+  | 'idle_timed_out'
+  | 'transport_error'
+  | 'aborted';
 export type WorkerArtifactStatus = 'unknown' | 'missing' | 'invalid' | 'valid_partial' | 'valid_complete';
-export type WorkerOutputContractName = 'generic_results_v1' | 'autoresearchclaw_output_v2' | 'chat_only_result_v1' | 'custom_optional';
+export type WorkerOutputContractName =
+  | 'generic_results_v1'
+  | 'autoresearchclaw_output_v2'
+  | 'chat_only_result_v1'
+  | 'custom_optional';
 export type WorkerContractStatus = 'not_declared' | 'satisfied' | 'violated' | 'optional_missing';
 export type WorkerDeliveryStatus = 'full' | 'truncated' | 'chat_only' | 'file_only' | 'failed';
 export type WorkerRecoveryStatus = 'none' | 'recovered_from_artifact' | 'manual_required';
+
+export interface WorkerArtifactError {
+  code: string;
+  message: string;
+  path?: string;
+}
 
 export interface WorkerOutputContract {
   name: WorkerOutputContractName;
@@ -54,6 +76,7 @@ export interface WorkerRecord {
   contractStatus?: WorkerContractStatus;
   deliveryStatus?: WorkerDeliveryStatus;
   recoveryStatus?: WorkerRecoveryStatus;
+  artifactError?: WorkerArtifactError;
   artifactPath?: string;
   detailRoute?: string;
   finalPayloadRef?: string;
@@ -128,8 +151,8 @@ export type WorkerRulesContextProvider = (input: {
  * worker_dispatch MCP tool description (src/mcp/worker-manager-mcp.ts).
  */
 const WORKER_MODEL_ALIASES: Record<string, { model: string; engine: EngineName }> = {
-  'opus': { model: 'claude-opus-4-8', engine: 'claude' },
-  'sonnet': { model: 'claude-sonnet-4-6', engine: 'claude' },
+  opus: { model: 'claude-opus-4-8', engine: 'claude' },
+  sonnet: { model: 'claude-sonnet-4-6', engine: 'claude' },
 };
 
 /**
@@ -172,7 +195,8 @@ const PERSISTENCE_FILE = path.join(PERSISTENCE_DIR, 'workers.json');
 const WORKER_DEDUPE_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
 const MIN_DURABLE_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
 const MIN_DURABLE_WORKER_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
-const DURABLE_WORKER_PATTERN = /(autoresearchclaw|auto[-_\s]?research|research[-_\s]?worker|dashboard[-_\s]?research|调研)/i;
+const DURABLE_WORKER_PATTERN =
+  /(autoresearchclaw|auto[-_\s]?research|research[-_\s]?worker|dashboard[-_\s]?research|调研)/i;
 const AUTORESEARCH_WORKER_PATTERN = /(autoresearchclaw|auto[-_\s]?research|dashboard[-_\s]?research)/i;
 
 function loadRecords(): WorkerRecord[] {
@@ -180,7 +204,9 @@ function loadRecords(): WorkerRecord[] {
     if (fs.existsSync(PERSISTENCE_FILE)) {
       return JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf-8'));
     }
-  } catch { /* ignore corrupt file */ }
+  } catch {
+    /* ignore corrupt file */
+  }
   return [];
 }
 
@@ -221,18 +247,21 @@ function inferOutputContract(input: Pick<DispatchInput, 'prompt' | 'label'>): Wo
 }
 
 export function isWorkerOutputContractName(value: unknown): value is WorkerOutputContractName {
-  return typeof value === 'string'
-    && (SUPPORTED_WORKER_OUTPUT_CONTRACT_NAMES as readonly string[]).includes(value);
+  return typeof value === 'string' && (SUPPORTED_WORKER_OUTPUT_CONTRACT_NAMES as readonly string[]).includes(value);
 }
 
-export function normalizeWorkerOutputContract(value: WorkerOutputContract | undefined): WorkerOutputContract | undefined {
+export function normalizeWorkerOutputContract(
+  value: WorkerOutputContract | undefined,
+): WorkerOutputContract | undefined {
   if (!value) return undefined;
   if (!isWorkerOutputContractName(value.name)) return undefined;
   return {
     name: value.name,
     requiredArtifact: value.requiredArtifact !== false,
     idempotent: value.idempotent,
-    expectedArtifacts: Array.isArray(value.expectedArtifacts) ? value.expectedArtifacts.filter((item) => typeof item === 'string' && item.trim()) : undefined,
+    expectedArtifacts: Array.isArray(value.expectedArtifacts)
+      ? value.expectedArtifacts.filter((item) => typeof item === 'string' && item.trim())
+      : undefined,
   };
 }
 
@@ -245,9 +274,10 @@ function validateDispatchOutputContract(value: WorkerOutputContract | undefined)
     throw new Error('Invalid outputContract.requiredArtifact: expected a boolean');
   }
   if (value.expectedArtifacts !== undefined) {
-    const validArtifacts = Array.isArray(value.expectedArtifacts)
-      && value.expectedArtifacts.length > 0
-      && value.expectedArtifacts.every((item) => typeof item === 'string' && item.trim().length > 0);
+    const validArtifacts =
+      Array.isArray(value.expectedArtifacts) &&
+      value.expectedArtifacts.length > 0 &&
+      value.expectedArtifacts.every((item) => typeof item === 'string' && item.trim().length > 0);
     if (!validArtifacts) {
       throw new Error('Invalid outputContract.expectedArtifacts: expected a non-empty array of non-empty strings');
     }
@@ -255,16 +285,18 @@ function validateDispatchOutputContract(value: WorkerOutputContract | undefined)
   return normalizeWorkerOutputContract(value);
 }
 
-function normalizeWorkerTimeouts(input: DispatchInput): { timeoutMs?: number; idleTimeoutMs?: number; adjusted: boolean } {
+function normalizeWorkerTimeouts(input: DispatchInput): {
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  adjusted: boolean;
+} {
   if (!isDurableWorkerTask(input)) {
     return { timeoutMs: input.timeoutMs, idleTimeoutMs: input.idleTimeoutMs, adjusted: false };
   }
-  const timeoutMs = input.timeoutMs === undefined
-    ? undefined
-    : Math.max(input.timeoutMs, MIN_DURABLE_WORKER_TIMEOUT_MS);
-  const idleTimeoutMs = input.idleTimeoutMs === undefined
-    ? undefined
-    : Math.max(input.idleTimeoutMs, MIN_DURABLE_WORKER_IDLE_TIMEOUT_MS);
+  const timeoutMs =
+    input.timeoutMs === undefined ? undefined : Math.max(input.timeoutMs, MIN_DURABLE_WORKER_TIMEOUT_MS);
+  const idleTimeoutMs =
+    input.idleTimeoutMs === undefined ? undefined : Math.max(input.idleTimeoutMs, MIN_DURABLE_WORKER_IDLE_TIMEOUT_MS);
   return {
     timeoutMs,
     idleTimeoutMs,
@@ -285,11 +317,17 @@ function appendSummary(existing: string | undefined, addition: string): string {
   return (prefix ? `${prefix}\n${addition}` : addition).slice(0, 500);
 }
 
-function readJsonFile(filePath: string): any | undefined {
+function readJsonFile(filePath: string): { value?: unknown; error?: WorkerArtifactError } {
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  } catch {
-    return undefined;
+    return { value: JSON.parse(fs.readFileSync(filePath, 'utf-8')) };
+  } catch (err) {
+    return {
+      error: {
+        code: 'invalid_json_artifact',
+        message: err instanceof Error ? err.message : 'Artifact is not valid JSON',
+        path: filePath,
+      },
+    };
   }
 }
 
@@ -297,53 +335,125 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function artifactStatusFromAutoResearchJson(value: any): WorkerArtifactStatus {
-  if (!isPlainObject(value)) return 'invalid';
+interface ArtifactStatusResult {
+  status: WorkerArtifactStatus;
+  error?: WorkerArtifactError;
+}
+
+function artifactStatusFromAutoResearchJson(
+  value: unknown,
+  options: {
+    projectRoot?: string;
+    onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+  } = {},
+): ArtifactStatusResult {
+  if (!isPlainObject(value)) {
+    return {
+      status: 'invalid',
+      error: {
+        code: 'invalid_autoresearchclaw_field',
+        message: 'AutoResearchClaw output must be an object',
+      },
+    };
+  }
   const contractVersion = value.contract_version;
   const status = typeof value.status === 'string' ? value.status.toLowerCase() : '';
-  if (contractVersion !== AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION || !status) return 'invalid';
-  if (status === 'complete' || status === 'completed') return 'valid_complete';
-  if (status === 'partial') return 'valid_partial';
-  return 'invalid';
+  if (contractVersion !== AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION || !status) {
+    return {
+      status: 'invalid',
+      error: {
+        code: 'invalid_autoresearchclaw_contract',
+        message: `contract_version must be ${AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION} and status must be present`,
+      },
+    };
+  }
+  try {
+    const output = validateAutoResearchClawOutput(value, {
+      projectRoot: options.projectRoot,
+      onLegacyAliasDeprecation: options.onLegacyAliasDeprecation,
+    });
+    if (output.status === 'completed') return { status: 'valid_complete' };
+    if (output.status === 'partial' || output.status === 'failed') return { status: 'valid_partial' };
+  } catch (err) {
+    return {
+      status: 'invalid',
+      error: workerArtifactErrorFromUnknown(err),
+    };
+  }
+  return {
+    status: 'invalid',
+    error: {
+      code: 'invalid_autoresearchclaw_field',
+      message: `status has unsupported value: ${String(value.status)}`,
+    },
+  };
 }
 
-function artifactStatusFromGenericResultsJson(value: any): WorkerArtifactStatus {
-  if (!isPlainObject(value)) return 'invalid';
+function artifactStatusFromGenericResultsJson(value: any): ArtifactStatusResult {
+  if (!isPlainObject(value)) return { status: 'invalid' };
   const task = typeof value.task === 'string' ? value.task.trim() : '';
   const notes = typeof value.notes === 'string' ? value.notes.trim() : '';
-  if (task && notes && isPlainObject(value.metrics)) return 'valid_complete';
+  if (task && notes && isPlainObject(value.metrics)) return { status: 'valid_complete' };
   const legacySummary = typeof value.summary === 'string' ? value.summary.trim() : '';
   const legacyStatus = typeof value.status === 'string' ? value.status.toLowerCase() : '';
-  if (!legacySummary || !legacyStatus) return 'invalid';
-  if (legacyStatus === 'complete' || legacyStatus === 'completed') return 'valid_complete';
-  if (legacyStatus === 'partial') return 'valid_partial';
-  return 'invalid';
+  if (!legacySummary || !legacyStatus) return { status: 'invalid' };
+  if (legacyStatus === 'complete' || legacyStatus === 'completed') return { status: 'valid_complete' };
+  if (legacyStatus === 'partial') return { status: 'valid_partial' };
+  return { status: 'invalid' };
 }
 
-function artifactStatusForContract(filePath: string, contract: WorkerOutputContract | undefined): WorkerArtifactStatus {
-  const value = readJsonFile(filePath);
-  if (!contract) return artifactStatusFromAutoResearchJson(value);
+function workerArtifactErrorFromUnknown(err: unknown): WorkerArtifactError {
+  if (err instanceof MemoryCoreError) {
+    return { code: err.code, message: err.message };
+  }
+  if (err instanceof Error) {
+    return { code: 'invalid_artifact', message: err.message };
+  }
+  return { code: 'invalid_artifact', message: String(err) };
+}
+
+function artifactStatusForContract(
+  filePath: string,
+  contract: WorkerOutputContract | undefined,
+  options: {
+    projectRoot?: string;
+    onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+  } = {},
+): ArtifactStatusResult {
+  const read = readJsonFile(filePath);
+  if (read.error) return { status: 'invalid', error: read.error };
+  const value = read.value;
+  if (!contract) return artifactStatusFromAutoResearchJson(value, options);
   switch (contract.name) {
     case 'autoresearchclaw_output_v2':
-      return artifactStatusFromAutoResearchJson(value);
+      return artifactStatusFromAutoResearchJson(value, options);
     case 'generic_results_v1':
       return artifactStatusFromGenericResultsJson(value);
     default:
-      return 'unknown';
+      return { status: 'unknown' };
   }
 }
 
 interface WorkerArtifactInspection {
   status: WorkerArtifactStatus;
   contractStatus: WorkerContractStatus;
+  error?: WorkerArtifactError;
   path?: string;
 }
 
-function inspectArtifactFile(filePath: string, contract: WorkerOutputContract | undefined): WorkerArtifactInspection {
-  const status = artifactStatusForContract(filePath, contract);
+function inspectArtifactFile(
+  filePath: string,
+  contract: WorkerOutputContract | undefined,
+  options: {
+    projectRoot?: string;
+    onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+  } = {},
+): WorkerArtifactInspection {
+  const result = artifactStatusForContract(filePath, contract, options);
   return {
-    status,
-    contractStatus: contractStatusFromArtifact(contract, status),
+    status: result.status,
+    contractStatus: contractStatusFromArtifact(contract, result.status),
+    error: result.error === undefined ? undefined : { ...result.error, path: result.error.path ?? filePath },
     path: filePath,
   };
 }
@@ -359,7 +469,13 @@ function contractStatusFromArtifact(
   return 'not_declared';
 }
 
-function inspectWorkerArtifacts(workDir: string, contract: WorkerOutputContract | undefined): WorkerArtifactInspection {
+function inspectWorkerArtifacts(
+  workDir: string,
+  contract: WorkerOutputContract | undefined,
+  options: {
+    onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+  } = {},
+): WorkerArtifactInspection {
   const resolvedWorkDir = path.resolve(workDir);
   const autoResearchDir = path.join(resolvedWorkDir, '.metabot-memory', 'autoresearchclaw');
   const candidates: string[] = [];
@@ -378,22 +494,38 @@ function inspectWorkerArtifacts(workDir: string, contract: WorkerOutputContract 
 
   let sawInvalid = false;
   let invalidPath: string | undefined;
+  let invalidError: WorkerArtifactError | undefined;
   let partialPath: string | undefined;
   for (const candidate of candidates) {
-    if (!candidate.startsWith(resolvedWorkDir + path.sep) && candidate !== path.join(resolvedWorkDir, 'results.json')) continue;
+    if (!candidate.startsWith(resolvedWorkDir + path.sep) && candidate !== path.join(resolvedWorkDir, 'results.json'))
+      continue;
     if (!fs.existsSync(candidate)) continue;
-    const inspected = inspectArtifactFile(candidate, contract);
+    const inspected = inspectArtifactFile(candidate, contract, {
+      projectRoot: resolvedWorkDir,
+      onLegacyAliasDeprecation: options.onLegacyAliasDeprecation,
+    });
     if (inspected.status === 'valid_complete') return inspected;
     if (inspected.status === 'valid_partial') partialPath = partialPath || inspected.path;
     else if (inspected.status === 'invalid') {
       sawInvalid = true;
       invalidPath = invalidPath || inspected.path;
+      invalidError = invalidError || inspected.error;
     }
   }
 
-  if (partialPath) return { status: 'valid_partial', contractStatus: contractStatusFromArtifact(contract, 'valid_partial'), path: partialPath };
+  if (partialPath)
+    return {
+      status: 'valid_partial',
+      contractStatus: contractStatusFromArtifact(contract, 'valid_partial'),
+      path: partialPath,
+    };
   const status = sawInvalid ? 'invalid' : 'missing';
-  return { status, contractStatus: contractStatusFromArtifact(contract, status), path: invalidPath };
+  return {
+    status,
+    contractStatus: contractStatusFromArtifact(contract, status),
+    path: invalidPath,
+    error: invalidError,
+  };
 }
 
 function isTerminalWorkerStatus(status: WorkerRecord['status']): boolean {
@@ -417,7 +549,12 @@ function syncWorkerDetailRefs(record: WorkerRecord): void {
   record.deliveryStatus = record.resultSummary && record.resultSummary.length >= 500 ? 'truncated' : 'chat_only';
 }
 
-function reconcileTerminalWorkerRecord(record: WorkerRecord): void {
+function reconcileTerminalWorkerRecord(
+  record: WorkerRecord,
+  options: {
+    onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+  } = {},
+): void {
   if (!isTerminalWorkerStatus(record.status)) return;
 
   const contract = normalizeWorkerOutputContract(record.outputContract) ?? inferOutputContract(record);
@@ -427,10 +564,12 @@ function reconcileTerminalWorkerRecord(record: WorkerRecord): void {
 
   const shouldInspectArtifact = !!contract || record.status === 'failed';
   if (shouldInspectArtifact) {
-    const artifact = inspectWorkerArtifacts(record.workingDirectory, contract);
+    const artifact = inspectWorkerArtifacts(record.workingDirectory, contract, options);
     record.artifactStatus = artifact.status;
     record.contractStatus = artifact.contractStatus;
     if (artifact.path) record.artifactPath = artifact.path;
+    if (artifact.error) record.artifactError = artifact.error;
+    else delete record.artifactError;
     if (record.status === 'failed' && artifact.status === 'valid_complete') {
       record.terminalError = record.error;
       delete record.error;
@@ -446,6 +585,7 @@ function reconcileTerminalWorkerRecord(record: WorkerRecord): void {
   } else {
     record.contractStatus = record.contractStatus ?? 'not_declared';
     record.artifactStatus = record.artifactStatus ?? 'unknown';
+    delete record.artifactError;
     record.recoveryStatus = record.recoveryStatus ?? 'none';
   }
 
@@ -459,6 +599,7 @@ function trackedWorkerFields(record: WorkerRecord): Record<string, unknown> {
     contractStatus: record.contractStatus,
     deliveryStatus: record.deliveryStatus,
     recoveryStatus: record.recoveryStatus,
+    artifactError: record.artifactError,
     artifactPath: record.artifactPath,
     detailRoute: record.detailRoute,
     finalPayloadRef: record.finalPayloadRef,
@@ -478,7 +619,9 @@ export function backfillWorkerRecords(records: WorkerRecord[]): WorkerBackfillRe
     const before = trackedWorkerFields(record);
     reconcileTerminalWorkerRecord(record);
     const after = trackedWorkerFields(record);
-    const changedFields = Object.keys(after).filter((key) => JSON.stringify(before[key as keyof typeof before]) !== JSON.stringify(after[key as keyof typeof after]));
+    const changedFields = Object.keys(after).filter(
+      (key) => JSON.stringify(before[key as keyof typeof before]) !== JSON.stringify(after[key as keyof typeof after]),
+    );
     if (changedFields.length > 0) {
       changes.push({
         workerId: record.id,
@@ -576,9 +719,7 @@ export class WorkerManager {
       }
     }
 
-    const runningCount = this.records.filter(
-      (r) => r.pmChatId === pmChatId && r.status === 'running',
-    ).length;
+    const runningCount = this.records.filter((r) => r.pmChatId === pmChatId && r.status === 'running').length;
     if (runningCount >= this.config.maxPerPm) {
       throw new Error(`Max concurrent workers (${this.config.maxPerPm}) reached for this PM chat`);
     }
@@ -637,12 +778,24 @@ export class WorkerManager {
       this.logger.error({ err, workerId: id }, 'Worker execution failed unexpectedly');
     });
 
-    this.logger.info({
-      workerId: id, botName, pmChatId, workerChatId: record.workerChatId,
-      workDir: workingDirectory, model, engine, reasoningEffort: input.reasoningEffort, label,
-      dedupeKey,
-      timeoutAdjusted: effectiveTimeouts.adjusted, timeoutMs: record.timeoutMs, idleTimeoutMs: record.idleTimeoutMs,
-    }, 'Worker dispatched');
+    this.logger.info(
+      {
+        workerId: id,
+        botName,
+        pmChatId,
+        workerChatId: record.workerChatId,
+        workDir: workingDirectory,
+        model,
+        engine,
+        reasoningEffort: input.reasoningEffort,
+        label,
+        dedupeKey,
+        timeoutAdjusted: effectiveTimeouts.adjusted,
+        timeoutMs: record.timeoutMs,
+        idleTimeoutMs: record.idleTimeoutMs,
+      },
+      'Worker dispatched',
+    );
 
     return record;
   }
@@ -760,13 +913,16 @@ export class WorkerManager {
   }
 
   /** Update a synthetic record's terminal state. */
-  finishSyntheticTask(id: string, patch: {
-    status: 'completed' | 'failed' | 'aborted';
-    costUsd?: number;
-    durationMs?: number;
-    resultSummary?: string;
-    error?: string;
-  }): void {
+  finishSyntheticTask(
+    id: string,
+    patch: {
+      status: 'completed' | 'failed' | 'aborted';
+      costUsd?: number;
+      durationMs?: number;
+      resultSummary?: string;
+      error?: string;
+    },
+  ): void {
     const record = this.records.find((r) => r.id === id);
     if (!record) return;
     record.status = patch.status;
@@ -794,10 +950,16 @@ export class WorkerManager {
         record.durationMs = record.endTime - record.startTime;
         record.error = 'metabot restarted while worker was running; bot not found during worker recovery';
         this.persist();
-        this.logger.warn({ workerId: record.id, botName: record.botName }, 'Could not restart worker after bridge restart: bot not found');
+        this.logger.warn(
+          { workerId: record.id, botName: record.botName },
+          'Could not restart worker after bridge restart: bot not found',
+        );
         continue;
       }
-      this.logger.info({ workerId: record.id, botName: record.botName, workerChatId: record.workerChatId }, 'Restarting worker after bridge restart');
+      this.logger.info(
+        { workerId: record.id, botName: record.botName, workerChatId: record.workerChatId },
+        'Restarting worker after bridge restart',
+      );
       this.runWorker(record, bot).catch((err) => {
         this.logger.error({ err, workerId: record.id }, 'Restarted worker execution failed unexpectedly');
       });
@@ -857,16 +1019,28 @@ export class WorkerManager {
   }
 
   private reconcileTerminalArtifact(record: WorkerRecord): void {
-    reconcileTerminalWorkerRecord(record);
+    reconcileTerminalWorkerRecord(record, {
+      onLegacyAliasDeprecation: (event) => {
+        this.logger.warn(
+          {
+            workerId: record.id,
+            projectId: event.project_id,
+            runId: event.run_id,
+            candidateIndex: event.candidate_index,
+            aliasNames: event.alias_names,
+            aliases: event.aliases,
+          },
+          'AutoResearchClaw output used deprecated memory_event_candidates aliases',
+        );
+      },
+    });
   }
 
   private async notifyPm(record: WorkerRecord): Promise<void> {
     const bot = this.registry.get(record.botName);
     if (!bot) return;
 
-    const statusEmoji = record.status === 'completed' ? '✅'
-      : record.status === 'aborted' ? '⏹️'
-      : '❌';
+    const statusEmoji = record.status === 'completed' ? '✅' : record.status === 'aborted' ? '⏹️' : '❌';
     const durationMin = record.durationMs ? Math.round(record.durationMs / 60000) : '?';
     const costStr = record.costUsd ? `$${record.costUsd.toFixed(2)}` : 'unknown';
 
@@ -878,10 +1052,17 @@ export class WorkerManager {
       `Duration: ${durationMin}min | Cost: ${costStr}`,
       `Working directory: ${record.workingDirectory}`,
       `Original task: ${record.prompt.slice(0, 200)}`,
-      record.executionStatus && record.executionStatus !== record.status ? `Execution status: ${record.executionStatus}` : '',
+      record.executionStatus && record.executionStatus !== record.status
+        ? `Execution status: ${record.executionStatus}`
+        : '',
       record.outputContract ? `Output contract: ${record.outputContract.name}` : '',
-      record.artifactStatus && record.artifactStatus !== 'unknown' ? `Artifact status: ${record.artifactStatus}${record.artifactPath ? ` (${record.artifactPath})` : ''}` : '',
-      record.contractStatus && record.contractStatus !== 'not_declared' ? `Contract status: ${record.contractStatus}` : '',
+      record.artifactStatus && record.artifactStatus !== 'unknown'
+        ? `Artifact status: ${record.artifactStatus}${record.artifactPath ? ` (${record.artifactPath})` : ''}`
+        : '',
+      record.contractStatus && record.contractStatus !== 'not_declared'
+        ? `Contract status: ${record.contractStatus}`
+        : '',
+      record.artifactError ? `Artifact error: ${record.artifactError.code}: ${record.artifactError.message}` : '',
       record.detailRoute ? `Detail route: ${record.detailRoute}` : '',
       record.finalPayloadRef ? `Final payload ref: ${record.finalPayloadRef}` : '',
       record.finalTranscriptRef ? `Final transcript ref: ${record.finalTranscriptRef}` : '',
@@ -889,9 +1070,11 @@ export class WorkerManager {
       record.error ? `Error: ${record.error}` : '',
       record.terminalError ? `Terminal warning: ${record.terminalError}` : '',
       '',
-      'Please review the worker\'s output in the working directory and decide next steps.',
+      "Please review the worker's output in the working directory and decide next steps.",
       'Check: worker-progress.json, results.json, train.log, and code changes.',
-    ].filter(Boolean).join('\n');
+    ]
+      .filter(Boolean)
+      .join('\n');
 
     try {
       await bot.bridge.executeApiTask({

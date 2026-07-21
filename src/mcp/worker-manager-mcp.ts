@@ -111,7 +111,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           label: { type: 'string', description: 'Optional short label for this worker (e.g. "xgboost-exp")' },
           dedupe_key: {
             type: 'string',
-            description: 'Optional idempotency key. Reuses a running or recent completed worker with the same PM chat and key.',
+            description:
+              'Optional idempotency key. Reuses a running or recent completed worker with the same PM chat and key.',
           },
           model: {
             type: 'string',
@@ -326,7 +327,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 '',
                 'The worker is now running in the background. You will be notified when it completes.',
                 'Use worker_quick_status to check progress, or inspect the workdir directly for details.',
-              ].filter(Boolean).join('\n'),
+              ]
+                .filter(Boolean)
+                .join('\n'),
             },
           ],
         };
@@ -351,7 +354,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const detail = [
             w.executionStatus && w.executionStatus !== w.status ? `exec:${w.executionStatus}` : '',
             w.artifactStatus && w.artifactStatus !== 'unknown' ? `artifact:${w.artifactStatus}` : '',
-          ].filter(Boolean).join(',');
+          ]
+            .filter(Boolean)
+            .join(',');
           return `- [${w.id}] ${w.status}${detail ? ` (${detail})` : ''} | ${w.label || 'no-label'} | ${engineTag} | ${dur} ${cost} | ${w.workingDirectory}`;
         });
         return { content: [{ type: 'text', text: lines.join('\n') }] };
@@ -377,6 +382,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           w.outputContract ? `Output contract: ${w.outputContract.name}` : '',
           w.artifactStatus ? `Artifact status: ${w.artifactStatus}${w.artifactPath ? ` (${w.artifactPath})` : ''}` : '',
           w.contractStatus ? `Contract status: ${w.contractStatus}` : '',
+          w.artifactError ? `Artifact error: ${w.artifactError.code}: ${w.artifactError.message}` : '',
           w.resultSummary ? `Result (truncated): ${w.resultSummary.slice(0, 200)}` : '',
           w.error ? `Error: ${w.error}` : '',
           w.terminalError ? `Terminal warning: ${w.terminalError}` : '',

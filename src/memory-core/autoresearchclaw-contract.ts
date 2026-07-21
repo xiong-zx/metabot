@@ -16,7 +16,7 @@ import { MEMORY_EVENT_STATUSES, MEMORY_EVENT_TYPES } from './types.js';
 export const AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION = 'autoresearchclaw.output.v2' as const;
 export const AUTORESEARCHCLAW_REVIEW_CONTRACT_VERSION = 'autoresearchclaw.review.v1' as const;
 
-const DENIED_MEMORY_EVENT_CANDIDATE_TYPES = new Set<MemoryEventType>([
+export const AUTORESEARCHCLAW_DENIED_MEMORY_EVENT_CANDIDATE_TYPES = [
   'approval_requested',
   'approval_granted',
   'approval_rejected',
@@ -26,19 +26,61 @@ const DENIED_MEMORY_EVENT_CANDIDATE_TYPES = new Set<MemoryEventType>([
   'context_pack_created',
   'metamemory_summary_published',
   'metamemory_human_edit',
-]);
+] as const satisfies readonly MemoryEventType[];
 
-const MEMORY_EVENT_CANDIDATE_FIELDS = new Set([
-  'type',
-  'summary',
+const DENIED_MEMORY_EVENT_CANDIDATE_TYPES = new Set<MemoryEventType>(
+  AUTORESEARCHCLAW_DENIED_MEMORY_EVENT_CANDIDATE_TYPES,
+);
+
+export const AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_REQUIRED_FIELDS = ['type', 'summary'] as const;
+
+export const AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_OPTIONAL_FIELDS = [
   'body',
   'outcome',
   'confidence',
   'evidence_event_ids',
   'subject',
-  'supersedes',
   'status',
   'metadata',
+] as const;
+
+export const AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_CANONICAL_FIELDS = [
+  ...AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_REQUIRED_FIELDS,
+  ...AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_OPTIONAL_FIELDS,
+] as const;
+
+export const AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_EXAMPLE = {
+  type: 'finding',
+  summary: 'Context pack preserved the negative result evidence chain.',
+  body: 'Keep this as candidate memory until review confirms it generalizes beyond the current run.',
+  outcome: 'worked',
+  confidence: 0.82,
+  evidence_event_ids: ['mem_evt_context_pack_created'],
+  subject: {
+    file_paths: ['results/context-pack-eval.json'],
+    source_uris: ['https://example.test/paper'],
+    artifact_ids: ['artifact-results'],
+  },
+  status: 'candidate',
+  metadata: {
+    source: 'autoresearchclaw',
+  },
+} satisfies {
+  type: MemoryEventType;
+  summary: string;
+  body?: string;
+  outcome?: MemoryOutcome;
+  confidence?: number;
+  evidence_event_ids?: string[];
+  subject?: MemorySubject;
+  status?: MemoryEventStatus;
+  metadata?: Record<string, unknown>;
+};
+
+const MEMORY_EVENT_CANDIDATE_FIELDS = new Set([
+  ...AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_CANONICAL_FIELDS,
+  // Accepted only so the validator can emit a targeted prohibition error.
+  'supersedes',
 ]);
 
 const MEMORY_SUBJECT_FIELDS = new Set([
@@ -51,8 +93,23 @@ const MEMORY_SUBJECT_FIELDS = new Set([
   'paper_id',
 ]);
 
+const AUTORESEARCHCLAW_RESERVED_LEGACY_ALIAS_METADATA_KEYS = new Set([
+  'autoresearchclaw_deprecated_aliases',
+  'autoresearchclaw_legacy_alias_values',
+]);
+
+const NORMALIZED_AUTORESEARCHCLAW_OUTPUT = Symbol('normalized_autoresearchclaw_output');
+
 export type AutoResearchClawRunStatus = 'completed' | 'partial' | 'failed';
 export type AutoResearchClawReviewDecision = 'approved' | 'changes_requested' | 'rejected';
+
+export interface AutoResearchClawLegacyAliasDeprecationTelemetry {
+  project_id: string;
+  run_id: string;
+  candidate_index: number;
+  aliases: Array<{ alias: string; canonical: string }>;
+  alias_names: string[];
+}
 
 export interface AutoResearchClawInput {
   project_id: string;
@@ -177,6 +234,7 @@ export interface ValidateAutoResearchClawOutputOptions {
   expectedProjectId?: string;
   expectedRunId?: string;
   projectRoot?: string;
+  onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
 }
 
 export interface AutoResearchClawIngestOptions {
@@ -233,34 +291,12 @@ export function buildAutoResearchClawPrompt(input: AutoResearchClawInput): strin
     '- Every hypothesis, finding, negative_result, decision, open_question, metric, and pivot item must include a non-empty summary string.',
     '- Every experiment item must include a non-empty summary string; status may be completed, partial, or failed.',
     '- Every artifact item must include id, uri, and summary. Artifact paths must stay inside the project root.',
-    '- Every memory_event_candidates item must be canonical JSON with fields: type, summary, body, outcome, confidence, evidence_event_ids, subject, status, and metadata. Do not write legacy alias fields.',
-    '- memory_event_candidates[].type must be a supported ordinary memory event type such as note, finding, decision, negative_result, open_question, or hypothesis; do not use approval_requested, approval_granted, approval_rejected, memory_promoted, memory_superseded, memory_redacted, context_pack_created, or any other controlled event type.',
-    '- memory_event_candidates[].summary must be a non-empty string. Optional evidence_event_ids, subject.file_paths, subject.artifact_ids, and subject.source_uris must be arrays of non-empty strings.',
-    '- memory_event_candidates must not set supersedes. If there is no candidate memory, write an empty array.',
+    ...buildAutoResearchClawMemoryEventCandidateInstructions(),
     '- Every recommended_followups item must include summary.',
     '- Every tool_trace item must include tool and summary.',
     '',
     'Canonical memory_event_candidates item example:',
-    JSON.stringify(
-      {
-        type: 'finding',
-        summary: 'Context pack preserved the negative result evidence chain.',
-        body: 'Keep this as candidate memory until review confirms it generalizes beyond the current run.',
-        confidence: 0.82,
-        evidence_event_ids: ['mem_evt_context_pack_created'],
-        subject: {
-          file_paths: ['results/context-pack-eval.json'],
-          source_uris: ['https://example.test/paper'],
-          artifact_ids: ['artifact-results'],
-        },
-        status: 'candidate',
-        metadata: {
-          source: 'autoresearchclaw',
-        },
-      },
-      null,
-      2,
-    ),
+    JSON.stringify(AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_EXAMPLE, null, 2),
     '',
     'Minimal valid smoke output example:',
     JSON.stringify(
@@ -288,6 +324,19 @@ export function buildAutoResearchClawPrompt(input: AutoResearchClawInput): strin
     ),
     '',
   ].join('\n');
+}
+
+export function buildAutoResearchClawMemoryEventCandidateInstructions(): string[] {
+  const requiredFields = AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_REQUIRED_FIELDS.join(', ');
+  const optionalFields = AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_OPTIONAL_FIELDS.join(', ');
+  return [
+    `- Every memory_event_candidates item must be canonical JSON. Required fields: ${requiredFields}. Optional fields: ${optionalFields}. Do not write legacy alias fields.`,
+    '- memory_event_candidates[].type must be a supported ordinary memory event type such as note, finding, decision, negative_result, open_question, or hypothesis; do not use ' +
+      `${AUTORESEARCHCLAW_DENIED_MEMORY_EVENT_CANDIDATE_TYPES.join(', ')}, or any other controlled event type.`,
+    '- memory_event_candidates[].summary must be a non-empty string. Optional evidence_event_ids, subject.file_paths, subject.artifact_ids, and subject.source_uris must be arrays of non-empty strings.',
+    '- Optional outcome may be worked, failed, partial, or unknown. Optional status may be live, candidate, approved, rejected, superseded, or redacted, but ingest always records candidates as status=candidate and preserves the requested status in metadata.',
+    '- memory_event_candidates must not set supersedes. If there is no candidate memory, write an empty array.',
+  ];
 }
 
 export function normalizeAutoResearchClawOutput(value: unknown): AutoResearchClawOutput {
@@ -330,6 +379,15 @@ export function validateAutoResearchClawOutput(
   options: ValidateAutoResearchClawOutputOptions = {},
 ): AutoResearchClawOutput {
   const output = normalizeAutoResearchClawOutput(value);
+  validateAutoResearchClawOutputOptions(output, options);
+  emitLegacyAliasDeprecationTelemetry(output, options.onLegacyAliasDeprecation);
+  return markNormalizedAutoResearchClawOutput(output);
+}
+
+function validateAutoResearchClawOutputOptions(
+  output: AutoResearchClawOutput,
+  options: Pick<ValidateAutoResearchClawOutputOptions, 'expectedProjectId' | 'expectedRunId' | 'projectRoot'>,
+): void {
   if (options.expectedProjectId !== undefined && output.project_id !== options.expectedProjectId) {
     throw new MemoryCoreError(
       'autoresearchclaw_project_mismatch',
@@ -345,7 +403,22 @@ export function validateAutoResearchClawOutput(
   if (options.projectRoot !== undefined) {
     validateArtifactUris(output, options.projectRoot);
   }
+}
+
+function markNormalizedAutoResearchClawOutput(output: AutoResearchClawOutput): AutoResearchClawOutput {
+  Object.defineProperty(output, NORMALIZED_AUTORESEARCHCLAW_OUTPUT, {
+    value: true,
+    enumerable: false,
+  });
   return output;
+}
+
+function isNormalizedAutoResearchClawOutput(value: unknown): value is AutoResearchClawOutput {
+  return isRecord(value) && value[NORMALIZED_AUTORESEARCHCLAW_OUTPUT] === true;
+}
+
+function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function normalizeAutoResearchClawReviewOutput(value: unknown): AutoResearchClawReviewOutput {
@@ -371,11 +444,17 @@ export function autoResearchClawOutputToMemoryEvents(
   value: unknown,
   options: AutoResearchClawIngestOptions,
 ): AppendMemoryEventInput[] {
-  const output = validateAutoResearchClawOutput(value, {
+  const validationOptions = {
     expectedProjectId: options.scope.project_id,
     expectedRunId: options.scope.run_id,
     projectRoot: options.projectRoot,
-  });
+  };
+  const output = isNormalizedAutoResearchClawOutput(value)
+    ? value
+    : validateAutoResearchClawOutput(value, validationOptions);
+  if (isNormalizedAutoResearchClawOutput(value)) {
+    validateAutoResearchClawOutputOptions(output, validationOptions);
+  }
   const baseScope = canonicalResearchScope(options.scope, output);
   const eventOptions = { ...options, scope: baseScope };
   const events: AppendMemoryEventInput[] = [];
@@ -733,18 +812,80 @@ function validateArtifactUris(output: AutoResearchClawOutput, projectRoot: strin
       validateArtifactUri(sourceUri, projectRoot, `artifacts[${index}].source_uris[${sourceIndex}]`);
     }
   }
+  validateEvidenceItemsSourceUris(output.hypotheses, 'hypotheses', projectRoot);
+  validateEvidenceItemsSourceUris(output.experiments, 'experiments', projectRoot);
+  validateEvidenceItemsSourceUris(output.findings, 'findings', projectRoot);
+  validateEvidenceItemsSourceUris(output.negative_results, 'negative_results', projectRoot);
+  validateEvidenceItemsSourceUris(output.decisions, 'decisions', projectRoot);
+  validateEvidenceItemsSourceUris(output.open_questions, 'open_questions', projectRoot);
+  validateEvidenceItemsSourceUris(output.metrics ?? [], 'metrics', projectRoot);
+  validateEvidenceItemsSourceUris(output.pivots ?? [], 'pivots', projectRoot);
+  for (const [index, candidate] of output.memory_event_candidates.entries()) {
+    validateSubjectLocalEvidence(candidate.subject, `memory_event_candidates[${index}].subject`, projectRoot);
+  }
 }
 
 function validateArtifactUri(uri: string, projectRoot: string, field: string): void {
+  validateLocalEvidenceUri(uri, projectRoot, field, 'artifact_uri_outside_project_root');
+}
+
+function validateEvidenceItemsSourceUris(
+  items: AutoResearchClawEvidenceBearingItem[],
+  field: string,
+  projectRoot: string,
+): void {
+  for (const [index, item] of items.entries()) {
+    for (const [sourceIndex, sourceUri] of (item.source_uris ?? []).entries()) {
+      validateLocalEvidenceUri(
+        sourceUri,
+        projectRoot,
+        `${field}[${index}].source_uris[${sourceIndex}]`,
+        'autoresearchclaw_path_outside_project_root',
+      );
+    }
+  }
+}
+
+function validateSubjectLocalEvidence(subject: MemorySubject | undefined, field: string, projectRoot: string): void {
+  if (subject === undefined) return;
+  for (const [index, filePath] of (subject.file_paths ?? []).entries()) {
+    validateProjectRootPath(
+      filePath,
+      projectRoot,
+      `${field}.file_paths[${index}]`,
+      'autoresearchclaw_path_outside_project_root',
+    );
+  }
+  for (const [index, sourceUri] of (subject.source_uris ?? []).entries()) {
+    validateLocalEvidenceUri(
+      sourceUri,
+      projectRoot,
+      `${field}.source_uris[${index}]`,
+      'autoresearchclaw_path_outside_project_root',
+    );
+  }
+}
+
+function validateLocalEvidenceUri(uri: string, projectRoot: string, field: string, code: string): void {
   if (isExternalUri(uri)) {
     return;
   }
   const filePath = uri.startsWith('file://') ? uri.slice('file://'.length) : uri;
+  validateProjectRootPath(filePath, projectRoot, field, code, uri);
+}
+
+function validateProjectRootPath(
+  filePath: string,
+  projectRoot: string,
+  field: string,
+  code: string,
+  displayValue = filePath,
+): void {
   const resolved = path.resolve(projectRoot, filePath);
   const resolvedRoot = path.resolve(projectRoot);
   const relative = path.relative(resolvedRoot, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new MemoryCoreError('artifact_uri_outside_project_root', `${field} escapes project root: ${uri}`);
+    throw new MemoryCoreError(code, `${field} escapes project root: ${displayValue}`);
   }
 }
 
@@ -872,14 +1013,59 @@ function withLegacyAliasMetadata(
   metadata: Record<string, unknown> | undefined,
   legacyAliases: Array<{ alias: string; canonical: string; value: unknown }>,
 ): Record<string, unknown> | undefined {
+  const sanitizedMetadata = stripReservedLegacyAliasMetadata(metadata);
   if (legacyAliases.length === 0) {
-    return metadata;
+    return sanitizedMetadata;
   }
   return {
-    ...(metadata ?? {}),
+    ...(sanitizedMetadata ?? {}),
     autoresearchclaw_deprecated_aliases: legacyAliases.map(({ alias, canonical }) => ({ alias, canonical })),
     autoresearchclaw_legacy_alias_values: Object.fromEntries(legacyAliases.map(({ alias, value }) => [alias, value])),
   };
+}
+
+function stripReservedLegacyAliasMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (metadata === undefined) return undefined;
+  const sanitized = Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => !AUTORESEARCHCLAW_RESERVED_LEGACY_ALIAS_METADATA_KEYS.has(key)),
+  );
+  return Object.keys(sanitized).length === 0 ? undefined : sanitized;
+}
+
+function emitLegacyAliasDeprecationTelemetry(
+  output: AutoResearchClawOutput,
+  callback: ValidateAutoResearchClawOutputOptions['onLegacyAliasDeprecation'],
+): void {
+  if (callback === undefined) return;
+  output.memory_event_candidates.forEach((candidate, candidateIndex) => {
+    const aliases = readLegacyAliasMetadata(candidate.metadata);
+    if (aliases.length === 0) return;
+    callback({
+      project_id: output.project_id,
+      run_id: output.run_id,
+      candidate_index: candidateIndex,
+      aliases,
+      alias_names: aliases.map((item) => item.alias),
+    });
+  });
+}
+
+function readLegacyAliasMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Array<{ alias: string; canonical: string }> {
+  const value = metadata?.autoresearchclaw_deprecated_aliases;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is { alias: string; canonical: string } => {
+    return isPlainLegacyAliasMetadata(item);
+  });
+}
+
+function isPlainLegacyAliasMetadata(value: unknown): value is { alias: string; canonical: string } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.alias === 'string' && typeof record.canonical === 'string';
 }
 
 function normalizeSubject(value: unknown, field: string): MemorySubject {

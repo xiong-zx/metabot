@@ -7,6 +7,7 @@ import {
   buildAutoResearchClawPrompt,
   normalizeAutoResearchClawReviewOutput,
   validateAutoResearchClawOutput,
+  type AutoResearchClawLegacyAliasDeprecationTelemetry,
   type AutoResearchClawOutput,
   type AutoResearchClawReviewOutput,
 } from './autoresearchclaw-contract.js';
@@ -108,6 +109,7 @@ export interface ResearchLoopRunnerOptions {
     events: MemoryEvent[];
     contextPack: ContextPack;
   }) => Promise<unknown>;
+  onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
 }
 
 export interface ResearchLoopRunResult {
@@ -293,6 +295,7 @@ export class ResearchLoopRunner {
         expectedProjectId: input.projectId,
         expectedRunId: runId,
         projectRoot: input.projectRoot,
+        onLegacyAliasDeprecation: this.options.onLegacyAliasDeprecation,
       });
     } catch (error) {
       const failure = await append(
@@ -315,8 +318,7 @@ export class ResearchLoopRunner {
           worker_id: handle.workerId,
           worker_chat_id: handle.workerChatId,
           artifact_uri: handle.artifactUri,
-          next_action:
-            'Regenerate the artifact with the required AutoResearchClaw output contract, then retry ingest.',
+          next_action: 'Regenerate the artifact with the required AutoResearchClaw output contract, then retry ingest.',
         },
       });
       await this.rebuildAndPublish(input.projectId, runId, events, contextPack, errors);
@@ -893,9 +895,7 @@ function resolveRunStatus(
   return outputStatus === 'failed' ? 'failed' : 'partial';
 }
 
-function workerFinalizationMetadata(
-  result: ResearchWorkerFinalizeResult | undefined,
-): Record<string, unknown> {
+function workerFinalizationMetadata(result: ResearchWorkerFinalizeResult | undefined): Record<string, unknown> {
   if (result === undefined) return {};
   return {
     worker_status_before: result.workerStatusBefore,
@@ -916,8 +916,7 @@ function runStoreNextAction(
     return workerFinalization.nextAction;
   }
   const workerDone =
-    workerFinalization?.workerStatusAfter === 'completed' ||
-    workerFinalization?.completedFromExternal === true;
+    workerFinalization?.workerStatusAfter === 'completed' || workerFinalization?.completedFromExternal === true;
   if (status === 'partial') {
     return workerDone
       ? 'Memory Core finalized the artifact and staged candidate memory. Review pending candidates before promotion; no worker action is required.'
