@@ -79,6 +79,7 @@ function adaptAssistant(
     uuid: record.uuid as string | undefined,
     session_id: sessionId,
     parent_tool_use_id: (record.parentToolUseID as string | undefined) ?? null,
+    model: typeof msg.model === 'string' ? msg.model : undefined,
     message: { content },
   };
 }
@@ -133,11 +134,17 @@ function adaptSystem(
   // System records without a meaningful subtype are noise (e.g. stop_hook_summary).
   if (!subtype) return null;
 
-  return {
+  const adapted: SDKMessage & Record<string, unknown> = {
     type: 'system',
     subtype,
     session_id: sessionId,
   };
+  if (subtype === 'model_consent_fallback') {
+    adapted.originalModel = record.originalModel;
+    adapted.fallbackModel = record.fallbackModel;
+    adapted.content = record.content;
+  }
+  return adapted;
 }
 
 // ── Content block mapper ─────────────────────────────────────────────────────
@@ -199,6 +206,7 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     result: args.resultText ?? '',
     is_error: args.isError ?? false,
     num_turns: args.numTurns,
+    modelTelemetry: args.modelTelemetry,
   };
 
   if (args.usage) {

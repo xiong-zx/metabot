@@ -5,13 +5,14 @@ import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { BotConfigBase, ClaudeEffort, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import type { BackgroundEvent, IncomingMessage, CardLifecycleStage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
+import type { BackgroundEvent, IncomingMessage, CardLifecycleStage, CardState, ModelTelemetry, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type {
   Engine,
   Executor,
   ExecutionHandle,
+  SDKMessage,
   EngineName,
   TeamEvent,
   ApiContext,
@@ -328,6 +329,7 @@ export class MessageBridge {
   private spontaneousBuffers = new Map<string, {
     teamState: TeamState;
     snippets: string[];
+    modelTelemetry?: ModelTelemetry;
     timer: ReturnType<typeof setTimeout>;
     /** How many times this batch was requeued because a user turn was busy. */
     deferrals?: number;
@@ -509,12 +511,29 @@ export class MessageBridge {
         lifecycleStage: state.lifecycleStage,
         userPrompt: state.userPrompt,
         responseText: state.responseText || state.errorMessage,
+        modelTelemetry: state.modelTelemetry,
         finalDeliveryStatus: metadata?.finalDeliveryStatus,
         finalDeliveryMessageId: metadata?.finalDeliveryMessageId,
       });
     } catch (err) {
       this.logger.warn({ err, chatId, messageId, lifecycleKey: state.lifecycleKey }, 'MessageBridge: failed to persist card lifecycle');
     }
+  }
+
+  private initialClaudeModelTelemetry(
+    engineName: EngineName,
+    modelOverride: string | undefined,
+    sessionId: string | undefined,
+    sessionMode: ModelTelemetry['sessionMode'],
+  ): ModelTelemetry | undefined {
+    if (engineName !== 'claude') return undefined;
+    const configuredModel = modelOverride ?? this.config.claude.model;
+    return {
+      configuredModel,
+      spawnModel: configuredModel,
+      sessionId,
+      sessionMode,
+    };
   }
 
   /**
@@ -1418,6 +1437,17 @@ export class MessageBridge {
       };
       this.spontaneousBuffers.set(chatId, buf);
     }
+    const sdkMessage = msg as SDKMessage;
+    if (sdkMessage.modelTelemetry) {
+      buf.modelTelemetry = { ...sdkMessage.modelTelemetry };
+    } else if (sdkMessage.model) {
+      buf.modelTelemetry = {
+        sessionId: sdkMessage.session_id,
+        sessionMode: 'continue',
+        runtimeModel: sdkMessage.model,
+        runtimeModelSource: 'assistant_jsonl',
+      };
+    }
     buf.snippets.push(snippet);
     // Cap to prevent runaway growth in a single window
     if (buf.snippets.length > 25) buf.snippets.splice(0, buf.snippets.length - 25);
@@ -1484,6 +1514,8 @@ export class MessageBridge {
       teamState: buf.teamState,
       lifecycleStage: 'closed',
       lifecycleKey: buildCardLifecycleKey('spontaneous', chatId, Date.now()),
+      model: buf.modelTelemetry?.runtimeModel,
+      modelTelemetry: buf.modelTelemetry,
     };
     try {
       const messageId = await this.sender.sendCard(chatId, card);
@@ -1539,10 +1571,16 @@ export class MessageBridge {
     }
 
     const displayPrompt = '(agent continuation: background task return)';
-    const processor = new StreamProcessor(displayPrompt);
+    const session = this.sessionManager.getSession(chatId);
+    const initialModelTelemetry = this.initialClaudeModelTelemetry(
+      'claude',
+      session.model,
+      session.sessionId,
+      'continue',
+    );
+    const processor = new StreamProcessor(displayPrompt, initialModelTelemetry);
     const rateLimiter = new RateLimiter(1500);
     const abortController = new AbortController();
-    const session = this.sessionManager.getSession(chatId);
     const activeGoal = session.activeGoal;
     const turnId = (handle as unknown as { turnId?: string }).turnId ?? 'continuation';
     const lifecycleKey = buildCardLifecycleKey('continuation', chatId, turnId);
@@ -1555,6 +1593,7 @@ export class MessageBridge {
       goalCondition: activeGoal,
       lifecycleStage: 'received',
       lifecycleKey,
+      modelTelemetry: initialModelTelemetry,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -2428,7 +2467,13 @@ export class MessageBridge {
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
     const lifecycleKey = buildCardLifecycleKey('chat', chatId, msg.messageId);
-    const processor = new StreamProcessor(displayPrompt);
+    const initialModelTelemetry = this.initialClaudeModelTelemetry(
+      engineName,
+      session.model,
+      session.sessionId,
+      session.sessionId ? 'resume' : 'fresh',
+    );
+    const processor = new StreamProcessor(displayPrompt, initialModelTelemetry);
     // Capture mirrored goal once at task start. New /goal messages can't
     // arrive mid-task (handleMessage rejects them with "Task In Progress"),
     // so this stays stable for the whole run.
@@ -2441,6 +2486,7 @@ export class MessageBridge {
       goalCondition: activeGoal,
       lifecycleStage: 'received',
       lifecycleKey,
+      modelTelemetry: initialModelTelemetry,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -3042,7 +3088,13 @@ export class MessageBridge {
     const outputsDir = this.outputsManager.prepareDir(`${chatId}-btw-${Date.now()}`);
     const displayPrompt = (oneShotMode === 'continue' ? 'ByTheWay (continued): ' : 'ByTheWay: ') + question;
     const lifecycleKey = buildCardLifecycleKey('bytheway', chatId, syntheticRecord?.id ?? Date.now());
-    const processor = new StreamProcessor(displayPrompt);
+    const initialModelTelemetry = this.initialClaudeModelTelemetry(
+      engineName,
+      session.model,
+      btwSessionId,
+      btwSessionId ? 'resume' : 'fresh',
+    );
+    const processor = new StreamProcessor(displayPrompt, initialModelTelemetry);
     const initialState: CardState = {
       status: 'thinking',
       userPrompt: displayPrompt,
@@ -3050,6 +3102,7 @@ export class MessageBridge {
       toolCalls: [],
       lifecycleStage: 'received',
       lifecycleKey,
+      modelTelemetry: initialModelTelemetry,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -3249,7 +3302,13 @@ export class MessageBridge {
 
     const displayPrompt = prompt;
     const lifecycleKey = options.lifecycleKey ?? buildCardLifecycleKey('api', chatId, Date.now());
-    const processor = new StreamProcessor(displayPrompt);
+    const initialModelTelemetry = this.initialClaudeModelTelemetry(
+      engineName,
+      options.model ?? session.model,
+      session.sessionId,
+      session.sessionId ? 'resume' : 'fresh',
+    );
+    const processor = new StreamProcessor(displayPrompt, initialModelTelemetry);
     const rateLimiter = new RateLimiter(1500);
     const activeGoal = session.activeGoal;
 
@@ -3261,6 +3320,7 @@ export class MessageBridge {
       goalCondition: activeGoal,
       lifecycleStage: 'received',
       lifecycleKey,
+      modelTelemetry: initialModelTelemetry,
     };
 
     let messageId: string | undefined;
@@ -3390,6 +3450,7 @@ export class MessageBridge {
       goalCondition: activeGoal,
       lifecycleStage: 'received',
       lifecycleKey,
+      modelTelemetry: initialModelTelemetry,
     };
 
     try {

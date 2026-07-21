@@ -142,11 +142,19 @@ describe('ptyQuery turn-start watchdog', () => {
         message: { content: 'hello' },
       },
       {
+        type: 'system',
+        subtype: 'model_consent_fallback',
+        sessionId: 'sess-test',
+        originalModel: 'claude-fable-5',
+        fallbackModel: 'claude-sonnet-5',
+        content: 'Fable 5 requires usage credits',
+      },
+      {
         type: 'assistant',
         sessionId: 'sess-test',
         parentToolUseID: null,
         message: {
-          model: 'claude-fable-5',
+          model: 'claude-sonnet-5',
           stop_reason: 'end_turn',
           content: [{ type: 'text', text: 'final answer' }],
         },
@@ -154,7 +162,12 @@ describe('ptyQuery turn-start watchdog', () => {
     ]);
     const query = ptyQuery({
       prompt: onePromptThenWait('hello'),
-      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+      options: {
+        cwd: '/tmp',
+        logger,
+        hookBridge: hookBridge as any,
+        model: 'claude-fable-5',
+      },
     });
     const iterator = query[Symbol.asyncIterator]();
 
@@ -166,11 +179,33 @@ describe('ptyQuery turn-start watchdog', () => {
     await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'user' } });
     await expect(iterator.next()).resolves.toMatchObject({
       value: {
+        type: 'system',
+        subtype: 'model_consent_fallback',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
         type: 'assistant',
+        model: 'claude-sonnet-5',
         message: { content: [{ type: 'text', text: 'final answer' }] },
       },
     });
-    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'result' } });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: 'result',
+        modelTelemetry: {
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      },
+    });
     await query.dispose?.();
   });
 

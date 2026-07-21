@@ -83,6 +83,19 @@ export interface TeamState {
   tasks: TeamTask[];
 }
 
+/** Per-turn model provenance. Never populated from assistant natural-language claims. */
+export interface ModelTelemetry {
+  configuredModel?: string;
+  spawnModel?: string;
+  runtimeModel?: string;
+  runtimeModelSource?: 'assistant_jsonl' | 'result_model_usage';
+  sessionId?: string;
+  sessionMode?: 'fresh' | 'resume' | 'continue';
+  fallbackOriginalModel?: string;
+  fallbackModel?: string;
+  fallbackReason?: string;
+}
+
 export interface CardState {
   status: CardStatus;
   userPrompt: string;
@@ -98,6 +111,8 @@ export interface CardState {
   pendingQuestion?: PendingQuestion;
   /** Primary model used (e.g. "claude-fable-5") */
   model?: string;
+  /** Auditable configured/spawn/runtime model provenance for this turn. */
+  modelTelemetry?: ModelTelemetry;
   /** Total input+output tokens consumed */
   totalTokens?: number;
   /** Context window size of the primary model */

@@ -40,6 +40,7 @@
 
 import type { SDKMessage } from '../executor.js';
 import type { Logger } from '../../../utils/logger.js';
+import type { ModelTelemetry } from '../../../types.js';
 
 // SDKUserMessage is the SDK's input shape. We re-declare the structural subset
 // the PTY backend consumes so the pty module has no hard dependency on the SDK
@@ -342,6 +343,7 @@ export interface SynthesizeResultArgs {
   numTurns?: number;
   /** Real model name (from the assistant jsonl records), e.g. claude-fable-5. */
   model?: string;
+  modelTelemetry?: ModelTelemetry;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;

@@ -821,6 +821,16 @@ describe('MessageBridge card lifecycle', () => {
     try {
       bridge.handleSpontaneousMessage('chat-spontaneous', {
         type: 'assistant',
+        session_id: 'sess-spontaneous',
+        model: 'claude-sonnet-5',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          spawnModel: 'claude-fable-5',
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
         message: { content: [{ type: 'text', text: 'Background result ready.' }] },
       });
       await vi.runOnlyPendingTimersAsync();
@@ -829,6 +839,11 @@ describe('MessageBridge card lifecycle', () => {
       expect(sender.sent).toHaveLength(1);
       expect(sender.sent[0].state.lifecycleStage).toBe('closed');
       expect(sender.sent[0].state.lifecycleKey).toMatch(/^spontaneous:chat-spontaneous:\d+$/);
+      expect(sender.sent[0].state.model).toBe('claude-sonnet-5');
+      expect(sender.sent[0].state.modelTelemetry).toMatchObject({
+        configuredModel: 'claude-fable-5',
+        runtimeModel: 'claude-sonnet-5',
+      });
     } finally {
       bridge.destroy();
     }

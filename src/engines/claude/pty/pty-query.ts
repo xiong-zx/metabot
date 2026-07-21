@@ -31,6 +31,7 @@ import { openSync, readSync, statSync, closeSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { SDKMessage } from '../executor.js';
+import type { ModelTelemetry } from '../../../types.js';
 import { AsyncQueue } from '../../../utils/async-queue.js';
 import type {
   PtyQuery,
@@ -180,6 +181,7 @@ export const ptyQuery = (args: {
   // Mutable per-run state.
   let sessionId = options.resume ?? '';
   let lastUsage: UsageAccum = {};
+  let turnModelTelemetry: ModelTelemetry = createTurnModelTelemetry();
   let disposed = false;
   // True between the moment we type a prompt and the moment that turn's
   // terminal `result` is emitted (Stop hook). The exit watchdog uses it to
@@ -271,6 +273,7 @@ export const ptyQuery = (args: {
       terminalAssistantTurnId = currentTurnId;
     }
     trackUsage(rec);
+    trackModelTelemetry(rec);
     if (!sessionId) {
       const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
       if (sid) sessionId = sid;
@@ -278,10 +281,57 @@ export const ptyQuery = (args: {
     const adapted = adaptJsonlRecord(rec);
     if (!adapted) return;
     if (Array.isArray(adapted)) {
-      for (const m of adapted) out.enqueue(m);
+      for (const m of adapted) out.enqueue(withModelTelemetry(m));
     } else {
-      out.enqueue(adapted);
+      out.enqueue(withModelTelemetry(adapted));
     }
+  }
+
+  function createTurnModelTelemetry(): ModelTelemetry {
+    return {
+      configuredModel: options.model,
+      spawnModel: options.model,
+      sessionId: sessionId || undefined,
+      sessionMode: options.resume ? 'resume' : 'fresh',
+    };
+  }
+
+  function trackModelTelemetry(rec: RawJsonlRecord): void {
+    const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
+    if (sid) turnModelTelemetry.sessionId = sid;
+    if (rec.type === 'assistant') {
+      const model = (rec.message as Record<string, unknown> | undefined)?.model;
+      if (typeof model === 'string' && model) {
+        if (turnModelTelemetry.runtimeModel !== model) {
+          logger.info(
+            { turnId: currentTurnId, sessionId, configuredModel: options.model, runtimeModel: model },
+            'ptyQuery: assistant JSONL runtime model observed',
+          );
+        }
+        turnModelTelemetry.runtimeModel = model;
+        turnModelTelemetry.runtimeModelSource = 'assistant_jsonl';
+      }
+    }
+    if (rec.type === 'system' && rec.subtype === 'model_consent_fallback') {
+      if (typeof rec.originalModel === 'string') turnModelTelemetry.fallbackOriginalModel = rec.originalModel;
+      if (typeof rec.fallbackModel === 'string') turnModelTelemetry.fallbackModel = rec.fallbackModel;
+      if (typeof rec.content === 'string') turnModelTelemetry.fallbackReason = rec.content;
+      logger.warn(
+        {
+          turnId: currentTurnId,
+          sessionId,
+          configuredModel: options.model,
+          originalModel: rec.originalModel,
+          fallbackModel: rec.fallbackModel,
+          reason: rec.content,
+        },
+        'ptyQuery: Claude CLI model fallback observed',
+      );
+    }
+  }
+
+  function withModelTelemetry(message: SDKMessage): SDKMessage {
+    return { ...message, modelTelemetry: { ...turnModelTelemetry } };
   }
 
   async function finalizeTurnAfterStop(turnId: number): Promise<void> {
@@ -301,6 +351,10 @@ export const ptyQuery = (args: {
       logger.warn({ turnId }, 'ptyQuery: Stop hook completed without an observable terminal assistant record');
     }
     const usage = { ...lastUsage };
+    logger.info(
+      { turnId, ...turnModelTelemetry, usageModel: usage.model },
+      'ptyQuery: terminal model telemetry',
+    );
     turnInFlight = false;
     currentTurnStarted = false;
     currentTurnPrompt = '';
@@ -310,6 +364,7 @@ export const ptyQuery = (args: {
       synthesizeResult({
         sessionId,
         model: usage.model,
+        modelTelemetry: { ...turnModelTelemetry },
         usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
       }),
     );
@@ -387,6 +442,7 @@ export const ptyQuery = (args: {
             synthesizeResult({
               sessionId,
               model: usage.model,
+              modelTelemetry: { ...turnModelTelemetry },
               usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
             }),
           );
@@ -498,6 +554,8 @@ export const ptyQuery = (args: {
   function trackUsage(rec: RawJsonlRecord): void {
     if (rec.type !== 'assistant') return;
     const msg = rec.message as Record<string, unknown> | undefined;
+    const model = msg?.model as string | undefined;
+    if (typeof model === 'string' && model) lastUsage.model = model;
     const usage = msg?.usage as Record<string, unknown> | undefined;
     if (!usage) return;
     const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
@@ -508,8 +566,6 @@ export const ptyQuery = (args: {
     const outT = usage.output_tokens as number | undefined;
     if (totalInput > 0) lastUsage.inputTokens = totalInput;
     if (typeof outT === 'number') lastUsage.outputTokens = outT;
-    const model = msg?.model as string | undefined;
-    if (typeof model === 'string' && model) lastUsage.model = model;
   }
 
   function claimTerminalResult(turnId: number): boolean {
@@ -536,10 +592,22 @@ export const ptyQuery = (args: {
         currentTurnStarted = false;
         currentTurnPrompt = text;
         currentTurnPromptSeen = false;
+        turnModelTelemetry = createTurnModelTelemetry();
         errorClosingTurnId = 0;
         const turnId = ++currentTurnId;
         try {
-          await session.typePrompt(text);
+          const submission = await session.typePrompt(text);
+          logger.info(
+            {
+              turnId,
+              sessionId,
+              configuredModel: turnModelTelemetry.configuredModel,
+              spawnModel: turnModelTelemetry.spawnModel,
+              sessionMode: turnModelTelemetry.sessionMode,
+              acknowledgement: submission?.acknowledgement ?? 'legacy-mock',
+            },
+            'ptyQuery: prompt submission acknowledged',
+          );
         } catch (err) {
           logger.warn({ err }, 'ptyQuery: prompt submission failed');
           finishTurnWithError(
@@ -608,6 +676,7 @@ export const ptyQuery = (args: {
         isError: true,
         resultText,
         model: usage.model,
+        modelTelemetry: { ...turnModelTelemetry },
         usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
       }),
     );
@@ -639,6 +708,7 @@ export const ptyQuery = (args: {
           synthesizeResult({
             sessionId,
             model: lastUsage.model,
+            modelTelemetry: { ...turnModelTelemetry },
             usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
           }),
         );
@@ -773,6 +843,7 @@ export const ptyQuery = (args: {
           isError: true,
           resultText: 'claude process exited before the turn completed',
           model: lastUsage.model,
+          modelTelemetry: { ...turnModelTelemetry },
           usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
         }),
       );
@@ -813,6 +884,7 @@ export const ptyQuery = (args: {
           isError: true,
           resultText: 'turn interrupted',
           model: lastUsage.model,
+          modelTelemetry: { ...turnModelTelemetry },
           usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
         }),
       );

@@ -361,6 +361,32 @@ describe('buildCardV2', () => {
     expect(inner).toContain('ctx:');
   });
 
+  it('shows configured to runtime fallback provenance on complete and agent activity', () => {
+    for (const status of ['complete', 'agent_activity'] as const) {
+      const state: CardState = {
+        status,
+        userPrompt: 'task',
+        responseText: 'done',
+        toolCalls: [],
+        model: 'claude-sonnet-5',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          spawnModel: 'claude-fable-5',
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      };
+      const elements = findElements(JSON.parse(buildCardV2(state)));
+      const footer = elements.find((e) => e.tag === 'column_set');
+      const text = JSON.stringify(footer);
+      expect(text).toContain('model: fable-5');
+      expect(text).toContain('sonnet-5');
+      expect(text).toContain('fallback');
+    }
+  });
+
   it('truncates long content', () => {
     const state: CardState = {
       status:       'complete',

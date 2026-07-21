@@ -512,6 +512,10 @@ export type SDKMessage = {
     };
   };
   parent_tool_use_id?: string | null;
+  /** Runtime model from an assistant record, when the backend exposes it. */
+  model?: string;
+  /** Structured per-turn model provenance; PTY backend populates every turn. */
+  modelTelemetry?: import('../../types.js').ModelTelemetry;
 };
 
 export interface ExecutionHandle {
