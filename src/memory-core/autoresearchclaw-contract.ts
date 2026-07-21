@@ -378,6 +378,11 @@ export function validateAutoResearchClawOutput(
   value: unknown,
   options: ValidateAutoResearchClawOutputOptions = {},
 ): AutoResearchClawOutput {
+  if (isNormalizedAutoResearchClawOutput(value)) {
+    validateAutoResearchClawOutputOptions(value, options);
+    emitLegacyAliasDeprecationTelemetry(value, options.onLegacyAliasDeprecation);
+    return value;
+  }
   const output = normalizeAutoResearchClawOutput(value);
   validateAutoResearchClawOutputOptions(output, options);
   emitLegacyAliasDeprecationTelemetry(output, options.onLegacyAliasDeprecation);
