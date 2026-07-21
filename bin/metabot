@@ -583,7 +583,13 @@ def load_env(path: Path):
         env[k.strip()] = v
     return env
 
-file_env = load_env(home / ".env")
+default_env_raw = os.environ.get("METABOT_DEFAULT_ENV_FILE")
+default_env_path = Path(default_env_raw).expanduser() if default_env_raw else None
+home_env_path = home / ".env"
+file_env = {}
+if default_env_path is not None:
+    file_env.update(load_env(default_env_path))
+file_env.update(load_env(home_env_path))
 
 def env(name, default=None):
     return os.environ.get(name) or file_env.get(name) or default
@@ -657,6 +663,10 @@ report = {
     "schemaVersion": 1,
     "generatedAt": int(time.time()),
     "metabotHome": str(home),
+    "configFiles": {
+        "defaultEnv": str(default_env_path) if default_env_path is not None else None,
+        "worktreeEnv": str(home_env_path),
+    },
     "checks": checks,
 }
 
@@ -677,6 +687,71 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       "Package builds should include .metabot-package/manifest.json; package default env may include .metabot-package/default.env.",
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
+
+def core_cli_probe(source, entry):
+    entry = Path(entry).expanduser()
+    artifact = None
+    if entry.as_posix().endswith("/packages/cli/bin/metabot"):
+        artifact = entry.parent.parent / "dist" / "index.js"
+    ready = entry.is_file() and (artifact is None or artifact.is_file())
+    return {
+        "source": source,
+        "entry": str(entry),
+        "entryExists": entry.is_file(),
+        "artifact": str(artifact) if artifact is not None else None,
+        "artifactExists": artifact.is_file() if artifact is not None else None,
+        "ready": ready,
+    }
+
+def append_core_cli_candidate(candidates, seen_entries, source, entry):
+    probe = core_cli_probe(source, entry)
+    if probe["entry"] in seen_entries:
+        return
+    seen_entries.add(probe["entry"])
+    candidates.append(probe)
+
+explicit_core_cli = os.environ.get("METABOT_CORE_CLI")
+core_cli_candidates = []
+seen_core_cli_entries = set()
+if explicit_core_cli:
+    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "explicit", explicit_core_cli)
+else:
+    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "worktree", home / "packages/cli/bin/metabot")
+    if default_env_path is not None:
+        append_core_cli_candidate(
+            core_cli_candidates,
+            seen_core_cli_entries,
+            "default_config_root",
+            default_env_path.parent / "packages/cli/bin/metabot",
+        )
+    append_core_cli_candidate(
+        core_cli_candidates,
+        seen_core_cli_entries,
+        "stable_checkout",
+        Path.home() / "metabot/packages/cli/bin/metabot",
+    )
+    append_core_cli_candidate(
+        core_cli_candidates,
+        seen_core_cli_entries,
+        "sibling_workspace",
+        home / "../metabot-workspace/metabot-core/packages/cli/bin/metabot",
+    )
+    global_core_cli = shutil.which("metabot-core")
+    if global_core_cli:
+        append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "path", global_core_cli)
+
+selected_core_cli = next((candidate for candidate in core_cli_candidates if candidate["ready"]), None)
+check("core_cli_artifact", selected_core_cli is not None,
+      "core_cli_unbuilt" if selected_core_cli is None else "ok",
+      f"Feature CLI is ready at {selected_core_cli['entry']}." if selected_core_cli else "No runnable feature CLI with its required dist artifact was found.",
+      f"Build the worktree CLI with: cd {home} && npm ci && npm run build -w @xvirobotics/cli; or set METABOT_DEFAULT_ENV_FILE to a ready checkout's .env.",
+      False,
+      {
+          "selected": selected_core_cli,
+          "candidates": core_cli_candidates,
+          "configRoot": str(default_env_path.parent) if default_env_path is not None else str(home),
+          "explicitOverride": bool(explicit_core_cli),
+      })
 
 pm2 = shutil.which("pm2")
 pm2_data = {"installed": bool(pm2)}
@@ -978,52 +1053,115 @@ PY
 }
 
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
-# Order: explicit override > in-tree monorepo > sibling workspace > npm-global on PATH.
+# A source-tree launcher is usable only when its dist entry exists. This matters
+# when the bridge runs from a Git worktree that intentionally has not been built.
+_core_cli_is_ready() {
+  local candidate="$1"
+  [[ -f "$candidate" ]] || return 1
+  case "$candidate" in
+    */packages/cli/bin/metabot)
+      local package_root="${candidate%/bin/metabot}"
+      [[ -f "$package_root/dist/index.js" ]] || return 1
+      ;;
+  esac
+  return 0
+}
+
+_core_cli_default_config_root() {
+  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
+  if [[ -n "$default_env" ]]; then
+    case "$default_env" in
+      "~"|"~/"*) default_env="${HOME}${default_env#\~}" ;;
+    esac
+    dirname "$default_env"
+  fi
+}
+
+# Order: explicit override > ready in-tree CLI > ready default-config checkout
+# > ready stable checkout > sibling workspace > npm-global on PATH.
 _resolve_core_cli() {
-  if [[ -n "${METABOT_CORE_CLI:-}" && -x "$METABOT_CORE_CLI" ]]; then
-    echo "$METABOT_CORE_CLI"; return 0
+  local core_cli_candidates=()
+  local candidate
+  _append_core_cli_candidate() {
+    candidate="$1"
+    [[ -n "$candidate" ]] || return 0
+    local existing
+    for existing in "${core_cli_candidates[@]}"; do
+      [[ "$existing" == "$candidate" ]] && return 0
+    done
+    core_cli_candidates+=("$candidate")
+  }
+  if [[ -n "${METABOT_CORE_CLI:-}" ]]; then
+    if _core_cli_is_ready "$METABOT_CORE_CLI"; then
+      echo "$METABOT_CORE_CLI"; return 0
+    fi
+    echo "Explicit METABOT_CORE_CLI is not runnable or does not have a built dist entry: $METABOT_CORE_CLI" >&2
+    return 2
   fi
   # In-tree (monorepo): packages/cli is shipped alongside this script.
   local intree="$METABOT_HOME/packages/cli/bin/metabot"
-  if [[ -f "$intree" ]]; then
-    echo "$intree"; return 0
-  fi
+  _append_core_cli_candidate "$intree"
+  # Worktree deployments commonly share an env/config file with a stable,
+  # already-built checkout. Use its CLI code without deriving backend config
+  # from that code path.
+  local config_root
+  config_root="$(_core_cli_default_config_root)"
+  local config_cli="${config_root:+$config_root/packages/cli/bin/metabot}"
+  _append_core_cli_candidate "$config_cli"
+  local stable="$HOME/metabot/packages/cli/bin/metabot"
+  _append_core_cli_candidate "$stable"
   # Sibling workspace (legacy two-repo layout — kept during migration).
   local ws="$METABOT_HOME/../metabot-workspace/metabot-core/packages/cli/bin/metabot"
-  if [[ -f "$ws" ]]; then
-    echo "$ws"; return 0
-  fi
+  _append_core_cli_candidate "$ws"
   # npm-linked global: a `metabot-core` bin on PATH (NOT this script).
   local g
   g="$(command -v metabot-core 2>/dev/null || true)"
-  if [[ -n "$g" ]]; then echo "$g"; return 0; fi
+  _append_core_cli_candidate "$g"
+  for candidate in "${core_cli_candidates[@]}"; do
+    if _core_cli_is_ready "$candidate"; then
+      echo "$candidate"; return 0
+    fi
+  done
   return 1
+}
+
+_load_core_cli_config() {
+  # Keep code resolution separate from backend selection. Explicit process env
+  # wins; otherwise worktree .env overrides the shared default env file.
+  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
+  case "$default_env" in
+    "~"|"~/"*) default_env="${HOME}${default_env#\~}" ;;
+  esac
+  local worktree_env="$METABOT_HOME/.env"
+  local k
+  for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
+    [[ -n "${!k:-}" ]] && continue
+    local value=""
+    local envf
+    for envf in "$default_env" "$worktree_env"; do
+      [[ -n "$envf" && -f "$envf" ]] || continue
+      local line
+      line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
+      if [[ -n "$line" ]]; then
+        value="$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+      fi
+    done
+    [[ -n "$value" ]] && export "${k}=$value"
+  done
+  return 0
 }
 
 cmd_delegate() {
   local core_cli
   if ! core_cli="$(_resolve_core_cli)"; then
-    error "'metabot $1' needs the metabot-core CLI, which isn't installed here."
+    error "'metabot $1' needs the metabot-core CLI, which isn't installed here." >&2
     echo "  Fix one of:" >&2
-    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npx tsc -b" >&2
+    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npm run build -w @xvirobotics/cli" >&2
+    echo "    - Or set METABOT_DEFAULT_ENV_FILE to the .env of a ready checkout." >&2
     echo "    - Or point at it:        export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot" >&2
     exit 1
   fi
-  # Feed METABOT_CORE_URL / METABOT_CORE_TOKEN from the bridge .env WITHOUT
-  # clobbering values already set in the environment.
-  local envf="$METABOT_HOME/.env"
-  if [[ -f "$envf" ]]; then
-    local k
-    for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
-      if [[ -z "${!k:-}" ]]; then
-        local line
-        line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
-        if [[ -n "$line" ]]; then
-          export "${k}=$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
-        fi
-      fi
-    done
-  fi
+  _load_core_cli_config
   exec node "$core_cli" "$@"
 }
 

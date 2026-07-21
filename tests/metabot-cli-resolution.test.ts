@@ -1,0 +1,262 @@
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+const repoRoot = path.resolve(import.meta.dirname, '..');
+const metabotBin = path.join(repoRoot, 'bin', 'metabot');
+const tempRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of tempRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function makeTempRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-cli-resolution-'));
+  tempRoots.push(root);
+  return root;
+}
+
+function writeFeatureCli(root: string, built: boolean): string {
+  const binDir = path.join(root, 'packages', 'cli', 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const entry = path.join(binDir, 'metabot');
+  fs.writeFileSync(entry, "#!/usr/bin/env node\nrequire('../dist/index.js').main(process.argv.slice(2));\n");
+  if (built) {
+    const distDir = path.join(root, 'packages', 'cli', 'dist');
+    fs.mkdirSync(distDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(distDir, 'index.js'),
+      'exports.main = (argv) => console.log(JSON.stringify({ argv, coreUrl: process.env.METABOT_CORE_URL }));\n',
+    );
+  }
+  return entry;
+}
+
+function baseEnv(home: string, metabotHome: string, defaultEnvFile: string): NodeJS.ProcessEnv {
+  const env = {
+    ...process.env,
+    HOME: home,
+    METABOT_HOME: metabotHome,
+    METABOT_DEFAULT_ENV_FILE: defaultEnvFile,
+  };
+  delete env.METABOT_CORE_CLI;
+  delete env.METABOT_CORE_URL;
+  delete env.METABOT_CORE_TOKEN;
+  return env;
+}
+
+describe('metabot feature CLI resolution', () => {
+  it('falls back from an unbuilt worktree to the ready default-config checkout', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home');
+    const unbuilt = path.join(root, 'worktree');
+    const stable = path.join(root, 'stable');
+    fs.mkdirSync(home, { recursive: true });
+    writeFeatureCli(unbuilt, false);
+    writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://memory-core.example.test\n');
+
+    const result = spawnSync('bash', [metabotBin, 'memory', 'search', 'needle'], {
+      encoding: 'utf8',
+      env: baseEnv(home, unbuilt, defaultEnvFile),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      argv: ['memory', 'search', 'needle'],
+      coreUrl: 'http://memory-core.example.test',
+    });
+  });
+
+  it('keeps backend config selection separate from code-path selection, including spaced paths', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home dir');
+    const unbuilt = path.join(root, 'worktree with spaces');
+    const stable = path.join(root, 'ready checkout');
+    fs.mkdirSync(home, { recursive: true });
+    writeFeatureCli(unbuilt, false);
+    writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://stable-config.example.test\n');
+    fs.writeFileSync(path.join(unbuilt, '.env'), 'METABOT_CORE_URL=http://worktree-config.example.test\n');
+
+    const result = spawnSync('bash', [metabotBin, 'memory', 'search', 'needle'], {
+      encoding: 'utf8',
+      env: baseEnv(home, unbuilt, defaultEnvFile),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      argv: ['memory', 'search', 'needle'],
+      coreUrl: 'http://worktree-config.example.test',
+    });
+  });
+
+  it('fails closed when an explicit CLI override is missing its dist artifact', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home');
+    const unbuilt = path.join(root, 'worktree');
+    const stable = path.join(root, 'stable');
+    fs.mkdirSync(home, { recursive: true });
+    const brokenOverride = writeFeatureCli(unbuilt, false);
+    writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://memory-core.example.test\n');
+    const env = baseEnv(home, unbuilt, defaultEnvFile);
+    env.METABOT_CORE_CLI = brokenOverride;
+
+    const result = spawnSync('bash', [metabotBin, 'memory', 'health'], {
+      encoding: 'utf8',
+      env,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('Explicit METABOT_CORE_CLI is not runnable');
+    expect(result.stderr).toContain('npm run build -w @xvirobotics/cli');
+  });
+
+  it('reports CLI artifact and shared config roots in doctor preflight', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home');
+    const unbuilt = path.join(root, 'worktree');
+    const stable = path.join(root, 'stable');
+    fs.mkdirSync(home, { recursive: true });
+    writeFeatureCli(unbuilt, false);
+    const stableEntry = writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://127.0.0.1:1\nMETABOT_URL=http://127.0.0.1:1\n');
+    const env = baseEnv(home, unbuilt, defaultEnvFile);
+    env.METABOT_URL = 'http://127.0.0.1:1';
+    env.METABOT_CORE_URL = 'http://127.0.0.1:1';
+
+    const result = spawnSync('bash', [metabotBin, 'doctor', '--json'], {
+      encoding: 'utf8',
+      env,
+      timeout: 15_000,
+    });
+
+    expect(result.status).toBe(0);
+    const report = JSON.parse(result.stdout) as {
+      configFiles: { defaultEnv: string; worktreeEnv: string };
+      checks: Array<{ name: string; ok: boolean; data?: Record<string, unknown> }>;
+    };
+    expect(report.configFiles).toEqual({
+      defaultEnv: defaultEnvFile,
+      worktreeEnv: path.join(unbuilt, '.env'),
+    });
+    const cliCheck = report.checks.find((check) => check.name === 'core_cli_artifact');
+    expect(cliCheck).toMatchObject({
+      ok: true,
+      data: {
+        configRoot: stable,
+        selected: {
+          source: 'default_config_root',
+          entry: stableEntry,
+          ready: true,
+        },
+      },
+    });
+  });
+
+  it('deduplicates doctor CLI candidates when default-config and stable roots coincide', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home');
+    const unbuilt = path.join(root, 'worktree');
+    const stable = path.join(home, 'metabot');
+    fs.mkdirSync(home, { recursive: true });
+    writeFeatureCli(unbuilt, false);
+    const stableEntry = writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://127.0.0.1:1\nMETABOT_URL=http://127.0.0.1:1\n');
+    const env = baseEnv(home, unbuilt, defaultEnvFile);
+    env.METABOT_URL = 'http://127.0.0.1:1';
+    env.METABOT_CORE_URL = 'http://127.0.0.1:1';
+
+    const result = spawnSync('bash', [metabotBin, 'doctor', '--json'], {
+      encoding: 'utf8',
+      env,
+      timeout: 15_000,
+    });
+
+    expect(result.status).toBe(0);
+    const report = JSON.parse(result.stdout) as {
+      checks: Array<{ name: string; data?: { candidates?: Array<{ source: string; entry: string; ready: boolean }> } }>;
+    };
+    const cliCheck = report.checks.find((check) => check.name === 'core_cli_artifact');
+    expect(cliCheck?.data?.candidates).toEqual([
+      expect.objectContaining({
+        source: 'worktree',
+        entry: path.join(unbuilt, 'packages', 'cli', 'bin', 'metabot'),
+        ready: false,
+      }),
+      expect.objectContaining({
+        source: 'default_config_root',
+        entry: stableEntry,
+        ready: true,
+      }),
+      expect.objectContaining({
+        source: 'sibling_workspace',
+      }),
+    ]);
+  });
+
+  it('reports an explicit broken CLI override as not ready in doctor preflight', () => {
+    const root = makeTempRoot();
+    const home = path.join(root, 'home');
+    const unbuilt = path.join(root, 'worktree');
+    const stable = path.join(root, 'stable');
+    fs.mkdirSync(home, { recursive: true });
+    const brokenOverride = writeFeatureCli(unbuilt, false);
+    writeFeatureCli(stable, true);
+    const defaultEnvFile = path.join(stable, '.env');
+    fs.writeFileSync(defaultEnvFile, 'METABOT_CORE_URL=http://127.0.0.1:1\nMETABOT_URL=http://127.0.0.1:1\n');
+    const env = baseEnv(home, unbuilt, defaultEnvFile);
+    env.METABOT_CORE_CLI = brokenOverride;
+    env.METABOT_URL = 'http://127.0.0.1:1';
+    env.METABOT_CORE_URL = 'http://127.0.0.1:1';
+
+    const result = spawnSync('bash', [metabotBin, 'doctor', '--json'], {
+      encoding: 'utf8',
+      env,
+      timeout: 15_000,
+    });
+
+    expect(result.status).toBe(0);
+    const report = JSON.parse(result.stdout) as {
+      checks: Array<{
+        name: string;
+        ok: boolean;
+        code: string;
+        recommendedAction: string;
+        data?: Record<string, unknown>;
+      }>;
+    };
+    const cliCheck = report.checks.find((check) => check.name === 'core_cli_artifact');
+    expect(cliCheck).toMatchObject({
+      ok: false,
+      code: 'core_cli_unbuilt',
+      recommendedAction: expect.stringContaining('npm run build -w @xvirobotics/cli'),
+      data: {
+        selected: null,
+        explicitOverride: true,
+        candidates: [
+          {
+            source: 'explicit',
+            entry: brokenOverride,
+            entryExists: true,
+            artifactExists: false,
+            ready: false,
+          },
+        ],
+      },
+    });
+  });
+});

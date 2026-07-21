@@ -54,7 +54,7 @@ function makeCtx(executeApiTask: any, asyncTaskStore = new AsyncTaskStore()): Ro
   stores.push(asyncTaskStore);
   return {
     registry: {
-      get: (name: string) => name === 'pm' ? { bridge: { executeApiTask } } : undefined,
+      get: (name: string) => (name === 'pm' ? { bridge: { executeApiTask } } : undefined),
       list: () => [],
     } as any,
     scheduler: {} as any,
@@ -138,15 +138,19 @@ describe('/api/talk async UX', () => {
       message: 'Task finished. See result for the final response or error.',
       nextAction: 'Inspect result for the final response or error.',
     });
+    expect(status.json()).not.toHaveProperty('finalPhase');
     expect(typeof status.json().elapsedMs).toBe('number');
     expect(status.json().result).toMatchObject({ success: true, responseText: 'done' });
   });
 
   it('running task status includes retry guidance and elapsed time', async () => {
     let resolveTask!: (value: { success: true; responseText: string }) => void;
-    const executeApiTask = vi.fn(() => new Promise((resolve) => {
-      resolveTask = resolve as typeof resolveTask;
-    }));
+    const executeApiTask = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveTask = resolve as typeof resolveTask;
+        }),
+    );
     const ctx = makeCtx(executeApiTask);
 
     const res = await call(ctx, 'POST', '/api/talk?async=true', {
@@ -263,6 +267,136 @@ describe('/api/talk async UX', () => {
     });
   });
 
+  it('preserves AutoResearchClaw lifecycle context after async completion', async () => {
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: 'artifact ingested',
+      durationMs: 24,
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'Start AutoResearchClaw research loop. projectId=terminal-pass runId=run-terminal-pass projectRoot=/root/workspaces/terminal-pass domain=memory-core',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'autoresearchclaw_completed',
+      runId: 'run-terminal-pass',
+      finalPhase: 'completed',
+      progress: {
+        kind: 'phased',
+        currentPhase: 'completed',
+        finalPhase: 'completed',
+        projectId: 'terminal-pass',
+        runId: 'run-terminal-pass',
+        projectRoot: '/root/workspaces/terminal-pass',
+        domain: 'memory-core',
+        stages: expect.arrayContaining([
+          expect.objectContaining({ phase: 'context_pack' }),
+          expect.objectContaining({ phase: 'ingest_review' }),
+        ]),
+        ingestReviewPhase: expect.objectContaining({
+          phase: 'ingest_review',
+          status: 'memory_core_system_of_record_required',
+          systemOfRecord: 'memory_core',
+        }),
+        memoryCoreSystemOfRecord: expect.objectContaining({
+          status: 'inspect_required',
+          runId: 'run-terminal-pass',
+          projectId: 'terminal-pass',
+        }),
+        finalization: {
+          status: 'async_task_completed',
+          systemOfRecord: 'memory_core',
+        },
+        nextAction: expect.stringContaining(
+          'metabot research runs --root /root/workspaces/terminal-pass --project terminal-pass',
+        ),
+      },
+      message: expect.stringContaining('Memory Core remains the system of record'),
+      nextAction: expect.stringContaining(
+        'metabot research runs --root /root/workspaces/terminal-pass --project terminal-pass',
+      ),
+      result: expect.objectContaining({ success: true, responseText: 'artifact ingested' }),
+    });
+  });
+
+  it('preserves AutoResearchClaw lifecycle context after async failure', async () => {
+    const executeApiTask = vi.fn(async () => ({
+      success: false,
+      responseText: '',
+      error: 'ingest rejected',
+      errorCode: 'contract_invalid',
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'Start AutoResearchClaw research loop. projectId=terminal-fail runId=run-terminal-fail projectRoot=/root/workspaces/terminal-fail domain=memory-core',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('failed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'failed',
+      phase: 'autoresearchclaw_failed',
+      runId: 'run-terminal-fail',
+      finalPhase: 'failed',
+      progress: expect.objectContaining({
+        kind: 'phased',
+        currentPhase: 'failed',
+        finalPhase: 'failed',
+        projectId: 'terminal-fail',
+        runId: 'run-terminal-fail',
+        ingestReviewPhase: expect.objectContaining({
+          phase: 'ingest_review',
+          status: 'not_asserted_async_failed',
+          systemOfRecord: 'memory_core',
+        }),
+        memoryCoreSystemOfRecord: expect.objectContaining({
+          status: 'inspect_required',
+          runId: 'run-terminal-fail',
+          projectId: 'terminal-fail',
+        }),
+        error: {
+          status: 'async_task_failed',
+          code: 'contract_invalid',
+          message: 'ingest rejected',
+        },
+        nextAction: expect.stringContaining(
+          'metabot research runs --root /root/workspaces/terminal-fail --project terminal-fail',
+        ),
+      }),
+      message: expect.stringContaining('Memory Core run lifecycle'),
+      nextAction: expect.stringContaining(
+        'metabot research runs --root /root/workspaces/terminal-fail --project terminal-fail',
+      ),
+      result: expect.objectContaining({
+        success: false,
+        error: 'ingest rejected',
+        errorCode: 'contract_invalid',
+      }),
+    });
+  });
+
   it('adds phased Memory Core status to natural-language memory operations', async () => {
     const executeApiTask = vi.fn(() => new Promise(() => {}));
     const ctx = makeCtx(executeApiTask);
@@ -342,10 +476,13 @@ describe('/api/talk async UX', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-07T00:00:00.000Z'));
     const executeApiTask = vi.fn(() => new Promise(() => {}));
-    const ctx = makeCtx(executeApiTask, new AsyncTaskStore({
-      staleTaskMs: 1000,
-      cleanupIntervalMs: 60_000,
-    }));
+    const ctx = makeCtx(
+      executeApiTask,
+      new AsyncTaskStore({
+        staleTaskMs: 1000,
+        cleanupIntervalMs: 60_000,
+      }),
+    );
 
     const res = await call(ctx, 'POST', '/api/talk?async=true', {
       botName: 'pm',
@@ -366,6 +503,8 @@ describe('/api/talk async UX', () => {
     expect(status.json()).toMatchObject({
       taskId,
       status: 'failed',
+      phase: 'failed',
+      progress: expect.objectContaining({ kind: 'complete' }),
       message: 'Task finished. See result for the final response or error.',
       result: {
         success: false,
@@ -373,6 +512,7 @@ describe('/api/talk async UX', () => {
         errorCode: 'task_expired',
       },
     });
+    expect(status.json()).not.toHaveProperty('finalPhase');
     expect(status.json().elapsedMs).toBe(1001);
   });
 

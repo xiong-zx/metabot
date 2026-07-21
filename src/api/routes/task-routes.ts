@@ -34,9 +34,8 @@ export async function handleTaskRoutes(
     const body = await parseJsonBody(req);
     const rawBotName = body.botName as string;
     const chatId = body.chatId as string;
-    const prompt = (typeof body.prompt === 'string' && body.prompt.trim())
-      ? body.prompt as string
-      : (body.content as string);
+    const prompt =
+      typeof body.prompt === 'string' && body.prompt.trim() ? (body.prompt as string) : (body.content as string);
     const sendCards = body.sendCards as boolean | undefined;
     const asyncMode = body.async === true || requestUrl.searchParams.get('async') === 'true';
     const waitMs = parseWaitMs(body.waitMs, requestUrl.searchParams.get('waitMs'));
@@ -70,7 +69,10 @@ export async function handleTaskRoutes(
         jsonResponse(res, 404, { error: `Bot not found on peer "${targetPeerName}": ${botName}` });
         return true;
       }
-      logger.info({ botName, peerName: targetPeerName, chatId, promptLength: prompt.length }, 'Forwarding talk to peer (qualified)');
+      logger.info(
+        { botName, peerName: targetPeerName, chatId, promptLength: prompt.length },
+        'Forwarding talk to peer (qualified)',
+      );
       try {
         const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
         const statusCode = (result as any).success === false ? 500 : 200;
@@ -105,7 +107,11 @@ export async function handleTaskRoutes(
       // result when it finishes fast; otherwise return 202 with a status URL.
       if (asyncMode || waitMs > 0) {
         const asyncTask = asyncTaskStore.create({
-          botName, chatId, prompt, callbackChatId, callbackBotName,
+          botName,
+          chatId,
+          prompt,
+          callbackChatId,
+          callbackBotName,
         });
 
         const taskPromise = runTalkAsyncTask({
@@ -153,19 +159,21 @@ export async function handleTaskRoutes(
         chatId,
         userId: 'api',
         sendCards: sendCards ?? true,
-        ...(hasWsSubscribers ? {
-          onUpdate: (state, bridgeMessageId, final) => {
-            const msgType = final ? 'complete' : 'state';
-            subs!.broadcast(chatId, {
-              type: msgType,
-              chatId,
-              messageId: bridgeMessageId,
-              state,
-              botName,
-              ...(grouptalkGroupId ? { groupId: grouptalkGroupId } : {}),
-            });
-          },
-        } : {}),
+        ...(hasWsSubscribers
+          ? {
+              onUpdate: (state, bridgeMessageId, final) => {
+                const msgType = final ? 'complete' : 'state';
+                subs!.broadcast(chatId, {
+                  type: msgType,
+                  chatId,
+                  messageId: bridgeMessageId,
+                  state,
+                  botName,
+                  ...(grouptalkGroupId ? { groupId: grouptalkGroupId } : {}),
+                });
+              },
+            }
+          : {}),
       });
 
       if (result.success) {
@@ -186,7 +194,10 @@ export async function handleTaskRoutes(
     if (!origin && peerManager) {
       const peerMatch = peerManager.findBotPeer(botName);
       if (peerMatch) {
-        logger.info({ botName, peerName: peerMatch.peer.name, peerUrl: peerMatch.peer.url, chatId, promptLength: prompt.length }, 'Forwarding talk to peer');
+        logger.info(
+          { botName, peerName: peerMatch.peer.name, peerUrl: peerMatch.peer.url, chatId, promptLength: prompt.length },
+          'Forwarding talk to peer',
+        );
         try {
           const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
           const statusCode = (result as any).success === false ? 500 : 200;
@@ -228,23 +239,44 @@ export async function handleTaskRoutes(
 
     if (cronExpr) {
       const recurring = scheduler.scheduleRecurring({
-        botName, chatId, prompt, cronExpr, timezone, sendCards, label,
+        botName,
+        chatId,
+        prompt,
+        cronExpr,
+        timezone,
+        sendCards,
+        label,
       });
       jsonResponse(res, 201, {
-        id: recurring.id, type: 'recurring', botName: recurring.botName,
-        chatId: recurring.chatId, prompt: recurring.prompt, cronExpr: recurring.cronExpr,
-        timezone: recurring.timezone, nextExecuteAt: new Date(recurring.nextExecuteAt).toISOString(),
-        sendCards: recurring.sendCards, label: recurring.label, status: recurring.status,
+        id: recurring.id,
+        type: 'recurring',
+        botName: recurring.botName,
+        chatId: recurring.chatId,
+        prompt: recurring.prompt,
+        cronExpr: recurring.cronExpr,
+        timezone: recurring.timezone,
+        nextExecuteAt: new Date(recurring.nextExecuteAt).toISOString(),
+        sendCards: recurring.sendCards,
+        label: recurring.label,
+        status: recurring.status,
       });
     } else if (typeof delaySeconds === 'number' && delaySeconds > 0) {
       const task = scheduler.scheduleTask({ botName, chatId, prompt, delaySeconds, sendCards, label });
       jsonResponse(res, 201, {
-        id: task.id, type: 'one-time', botName: task.botName, chatId: task.chatId,
-        prompt: task.prompt, executeAt: new Date(task.executeAt).toISOString(),
-        sendCards: task.sendCards, label: task.label, status: task.status,
+        id: task.id,
+        type: 'one-time',
+        botName: task.botName,
+        chatId: task.chatId,
+        prompt: task.prompt,
+        executeAt: new Date(task.executeAt).toISOString(),
+        sendCards: task.sendCards,
+        label: task.label,
+        status: task.status,
       });
     } else {
-      jsonResponse(res, 400, { error: 'Provide either cronExpr (recurring) or delaySeconds (one-time, positive number)' });
+      jsonResponse(res, 400, {
+        error: 'Provide either cronExpr (recurring) or delaySeconds (one-time, positive number)',
+      });
     }
     return true;
   }
@@ -252,16 +284,31 @@ export async function handleTaskRoutes(
   // GET /api/schedule
   if (method === 'GET' && url === '/api/schedule') {
     const tasks = scheduler.listTasks().map((t) => ({
-      id: t.id, type: 'one-time', botName: t.botName, chatId: t.chatId,
-      prompt: t.prompt, executeAt: new Date(t.executeAt).toISOString(),
-      sendCards: t.sendCards, label: t.label, status: t.status, createdAt: new Date(t.createdAt).toISOString(),
+      id: t.id,
+      type: 'one-time',
+      botName: t.botName,
+      chatId: t.chatId,
+      prompt: t.prompt,
+      executeAt: new Date(t.executeAt).toISOString(),
+      sendCards: t.sendCards,
+      label: t.label,
+      status: t.status,
+      createdAt: new Date(t.createdAt).toISOString(),
     }));
     const recurringTasks = scheduler.listRecurringTasks().map((r) => ({
-      id: r.id, type: 'recurring', botName: r.botName, chatId: r.chatId,
-      prompt: r.prompt, cronExpr: r.cronExpr, timezone: r.timezone,
+      id: r.id,
+      type: 'recurring',
+      botName: r.botName,
+      chatId: r.chatId,
+      prompt: r.prompt,
+      cronExpr: r.cronExpr,
+      timezone: r.timezone,
       nextExecuteAt: new Date(r.nextExecuteAt).toISOString(),
       lastExecutedAt: r.lastExecutedAt ? new Date(r.lastExecutedAt).toISOString() : null,
-      sendCards: r.sendCards, label: r.label, status: r.status, createdAt: new Date(r.createdAt).toISOString(),
+      sendCards: r.sendCards,
+      label: r.label,
+      status: r.status,
+      createdAt: new Date(r.createdAt).toISOString(),
     }));
     jsonResponse(res, 200, { tasks, recurringTasks });
     return true;
@@ -271,7 +318,11 @@ export async function handleTaskRoutes(
   if (method === 'POST' && /^\/api\/schedule\/[^/]+\/pause$/.test(url)) {
     const id = url.split('/')[3];
     const paused = scheduler.pauseRecurring(id);
-    jsonResponse(res, paused ? 200 : 404, paused ? { id, status: 'paused' } : { error: `Recurring task not found or not pausable: ${id}` });
+    jsonResponse(
+      res,
+      paused ? 200 : 404,
+      paused ? { id, status: 'paused' } : { error: `Recurring task not found or not pausable: ${id}` },
+    );
     return true;
   }
 
@@ -281,7 +332,11 @@ export async function handleTaskRoutes(
     const resumed = scheduler.resumeRecurring(id);
     if (resumed) {
       const recurring = scheduler.getRecurringTask(id);
-      jsonResponse(res, 200, { id, status: 'active', nextExecuteAt: recurring ? new Date(recurring.nextExecuteAt).toISOString() : null });
+      jsonResponse(res, 200, {
+        id,
+        status: 'active',
+        nextExecuteAt: recurring ? new Date(recurring.nextExecuteAt).toISOString() : null,
+      });
     } else {
       jsonResponse(res, 404, { error: `Recurring task not found or not resumable: ${id}` });
     }
@@ -307,9 +362,15 @@ export async function handleTaskRoutes(
 
     if (updated) {
       jsonResponse(res, 200, {
-        id: updated.id, type: 'one-time', botName: updated.botName, chatId: updated.chatId,
-        prompt: updated.prompt, executeAt: new Date(updated.executeAt).toISOString(),
-        sendCards: updated.sendCards, label: updated.label, status: updated.status,
+        id: updated.id,
+        type: 'one-time',
+        botName: updated.botName,
+        chatId: updated.chatId,
+        prompt: updated.prompt,
+        executeAt: new Date(updated.executeAt).toISOString(),
+        sendCards: updated.sendCards,
+        label: updated.label,
+        status: updated.status,
       });
       return true;
     }
@@ -324,11 +385,17 @@ export async function handleTaskRoutes(
 
     if (updatedRecurring) {
       jsonResponse(res, 200, {
-        id: updatedRecurring.id, type: 'recurring', botName: updatedRecurring.botName,
-        chatId: updatedRecurring.chatId, prompt: updatedRecurring.prompt,
-        cronExpr: updatedRecurring.cronExpr, timezone: updatedRecurring.timezone,
+        id: updatedRecurring.id,
+        type: 'recurring',
+        botName: updatedRecurring.botName,
+        chatId: updatedRecurring.chatId,
+        prompt: updatedRecurring.prompt,
+        cronExpr: updatedRecurring.cronExpr,
+        timezone: updatedRecurring.timezone,
         nextExecuteAt: new Date(updatedRecurring.nextExecuteAt).toISOString(),
-        sendCards: updatedRecurring.sendCards, label: updatedRecurring.label, status: updatedRecurring.status,
+        sendCards: updatedRecurring.sendCards,
+        label: updatedRecurring.label,
+        status: updatedRecurring.status,
       });
       return true;
     }
@@ -389,9 +456,10 @@ function acceptedTalkTaskResponse(taskId: string, status: string, prompt?: strin
     statusUrl: `/api/talk/${encodeURIComponent(taskId)}`,
     statusCommand: `metabot talk-status ${taskId}`,
     retryAfterMs: 2000,
-    nextAction: preflight === undefined
-      ? `Run metabot talk-status ${taskId} after 2s to check progress.`
-      : taskNextAction(taskId, preflight, 0),
+    nextAction:
+      preflight === undefined
+        ? `Run metabot talk-status ${taskId} after 2s to check progress.`
+        : taskNextAction(taskId, preflight, 0),
     ...(preflight === undefined ? {} : { preflight }),
   };
 }
@@ -412,23 +480,22 @@ function taskStatusResponse(task: {
   const running = task.status === 'accepted' || task.status === 'running';
   const retryAfterMs = running ? 2000 : undefined;
   const preflight = taskPreflightFromPrompt(task.prompt);
+  const terminalProgress = running ? undefined : terminalTaskProgress(task.status, preflight, elapsedMs, task.result);
   return {
     taskId: task.id,
     status: task.status,
-    phase: running ? runningPhase(task.status, preflight) : taskStatusPhase(task.status),
+    phase: running ? runningPhase(task.status, preflight) : terminalPhase(task.status, preflight),
     progress: running
-      ? (preflight === undefined
-          ? {
-              kind: 'indeterminate',
-              elapsedMs,
-              retryAfterMs,
-            }
-          : taskProgress(preflight, elapsedMs, retryAfterMs))
-      : {
-          kind: 'complete',
-          elapsedMs,
-        },
+      ? preflight === undefined
+        ? {
+            kind: 'indeterminate',
+            elapsedMs,
+            retryAfterMs,
+          }
+        : taskProgress(preflight, elapsedMs, retryAfterMs)
+      : terminalProgress,
     ...(preflight?.runId === undefined ? {} : { runId: preflight.runId }),
+    ...(!running && preflight?.kind === 'autoresearchclaw' ? { finalPhase: task.status } : {}),
     botName: task.botName,
     chatId: task.chatId,
     createdAt: new Date(task.createdAt).toISOString(),
@@ -437,12 +504,12 @@ function taskStatusResponse(task: {
     statusUrl: `/api/talk/${encodeURIComponent(task.id)}`,
     statusCommand: `metabot talk-status ${task.id}`,
     retryAfterMs,
-    message: running ? runningMessage(preflight, elapsedMs) : 'Task finished. See result for the final response or error.',
+    message: running ? runningMessage(preflight, elapsedMs) : terminalMessage(task.status, preflight),
     nextAction: running
-      ? (preflight === undefined
-          ? `Run metabot talk-status ${task.id} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
-          : taskNextAction(task.id, preflight, elapsedMs))
-      : 'Inspect result for the final response or error.',
+      ? preflight === undefined
+        ? `Run metabot talk-status ${task.id} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
+        : taskNextAction(task.id, preflight, elapsedMs)
+      : terminalNextAction(preflight),
     ...(preflight === undefined ? {} : { preflight }),
     result: task.result,
   };
@@ -490,6 +557,98 @@ function runningPhase(status: string, preflight: Record<string, unknown> | undef
   return taskStatusPhase(status);
 }
 
+function terminalPhase(status: string, preflight: Record<string, unknown> | undefined): string {
+  if (preflight?.kind === 'autoresearchclaw') return `autoresearchclaw_${status}`;
+  if (preflight?.kind === 'memory_core') return `memory_operation_${status}`;
+  return taskStatusPhase(status);
+}
+
+function terminalTaskProgress(
+  status: string,
+  preflight: Record<string, unknown> | undefined,
+  elapsedMs: number,
+  result?: unknown,
+): Record<string, unknown> {
+  if (preflight?.kind !== 'autoresearchclaw') {
+    return {
+      kind: 'complete',
+      elapsedMs,
+    };
+  }
+  const terminalNext = terminalNextAction(preflight);
+  const resultRecord = isRecord(result) ? result : undefined;
+  const errorMessage = typeof resultRecord?.error === 'string' ? resultRecord.error : undefined;
+  const errorCode = typeof resultRecord?.errorCode === 'string' ? resultRecord.errorCode : undefined;
+  return {
+    kind: 'phased',
+    currentPhase: status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : status,
+    finalPhase: status,
+    elapsedMs,
+    projectId: preflight.projectId,
+    runId: preflight.runId,
+    projectRoot: preflight.projectRoot,
+    domain: preflight.domain,
+    stages: preflight.stages,
+    ingestReviewPhase: {
+      phase: 'ingest_review',
+      status: status === 'completed' ? 'memory_core_system_of_record_required' : 'not_asserted_async_failed',
+      systemOfRecord: 'memory_core',
+      description:
+        'The async talk lifecycle cannot certify ingest/review; inspect the Memory Core research run lifecycle for the authoritative outcome.',
+    },
+    memoryCoreSystemOfRecord: {
+      status: 'inspect_required',
+      runId: preflight.runId,
+      projectId: preflight.projectId,
+      projectRoot: preflight.projectRoot,
+      domain: preflight.domain,
+    },
+    ...(status === 'completed'
+      ? {
+          finalization: {
+            status: 'async_task_completed',
+            systemOfRecord: 'memory_core',
+          },
+        }
+      : {
+          error: {
+            status: 'async_task_failed',
+            ...(errorCode === undefined ? {} : { code: errorCode }),
+            ...(errorMessage === undefined ? {} : { message: errorMessage }),
+          },
+        }),
+    nextAction: terminalNext,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function terminalMessage(status: string, preflight: Record<string, unknown> | undefined): string {
+  if (preflight?.kind === 'autoresearchclaw') {
+    return status === 'completed'
+      ? 'AutoResearchClaw async execution completed. Memory Core remains the system of record for the research run and ingest/review outcome.'
+      : 'AutoResearchClaw async execution failed. Inspect the task error and the Memory Core run lifecycle for any collected artifact or partial ingest evidence.';
+  }
+  return 'Task finished. See result for the final response or error.';
+}
+
+function terminalNextAction(preflight: Record<string, unknown> | undefined): string {
+  if (
+    preflight?.kind === 'autoresearchclaw' &&
+    typeof preflight.projectRoot === 'string' &&
+    typeof preflight.projectId === 'string'
+  ) {
+    const runHint = typeof preflight.runId === 'string' ? ` and locate run ${preflight.runId}` : '';
+    return `Inspect the Memory Core system-of-record with metabot research runs --root ${preflight.projectRoot} --project ${preflight.projectId}${runHint}; inspect result for the async response or error.`;
+  }
+  if (preflight?.kind === 'autoresearchclaw') {
+    return 'Inspect result for the async response or error, then query the matching Memory Core run lifecycle using its project root and project id.';
+  }
+  return 'Inspect result for the final response or error.';
+}
+
 function runningMessage(preflight: Record<string, unknown> | undefined, elapsedMs: number): string {
   if (preflight?.kind === 'autoresearchclaw') {
     return 'AutoResearchClaw task is running. Progress includes the accepted project/run context and planned research stages.';
@@ -522,8 +681,16 @@ function researchLoopPreflightFromPrompt(prompt: string): Record<string, unknown
     stages: [
       { phase: 'context_pack', status: 'planned', description: 'Build a Memory Core context pack before dispatch.' },
       { phase: 'worker_dispatch', status: 'planned', description: 'Dispatch AutoResearchClaw through WorkerManager.' },
-      { phase: 'output_contract', status: 'required', description: 'Require autoresearchclaw.output.v2 JSON artifact.' },
-      { phase: 'ingest_review', status: 'planned', description: 'Validate artifact, then ingest or stage candidate memory.' },
+      {
+        phase: 'output_contract',
+        status: 'required',
+        description: 'Require autoresearchclaw.output.v2 JSON artifact.',
+      },
+      {
+        phase: 'ingest_review',
+        status: 'planned',
+        description: 'Validate artifact, then ingest or stage candidate memory.',
+      },
     ],
     outputContract: [
       'contract_version',
@@ -610,10 +777,16 @@ function memoryOperationPreflightFromPrompt(prompt: string): Record<string, unkn
 }
 
 function isMemoryOperationPrompt(prompt: string): boolean {
-  if (!/\b(Memory Core|Research Memory|context[-\s]?pack|memory unit|memory units|promotion approval|candidate\/promotion|candidate memory|MetaBot 2\.0 memory|记忆|候选|审批)\b/i.test(prompt)) {
+  if (
+    !/\b(Memory Core|Research Memory|context[-\s]?pack|memory unit|memory units|promotion approval|candidate\/promotion|candidate memory|MetaBot 2\.0 memory|记忆|候选|审批)\b/i.test(
+      prompt,
+    )
+  ) {
     return false;
   }
-  return /\b(projectId|projectRoot|Memory Core|Research Memory|context[-\s]?pack|promotion|candidate|finding|decision)\b/i.test(prompt);
+  return /\b(projectId|projectRoot|Memory Core|Research Memory|context[-\s]?pack|promotion|candidate|finding|decision)\b/i.test(
+    prompt,
+  );
 }
 
 function classifyMemoryOperation(prompt: string): string {
