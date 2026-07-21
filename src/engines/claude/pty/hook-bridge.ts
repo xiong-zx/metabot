@@ -84,7 +84,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
     if (enableTeamEvents) {
       const taskCreatedCommand = `{ printf '{"kind":"TaskCreated","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
       const taskCompletedCommand = `{ printf '{"kind":"TaskCompleted","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
-      const teammateIdleCommand = `{ printf '{"kind":"TeammateIdle","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
+      const agentIdleCommand = `{ printf '{"kind":"TeammateIdle","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
 
       hooks.TaskCreated = [
         { hooks: [{ type: 'command', command: taskCreatedCommand }] },
@@ -93,7 +93,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
         { hooks: [{ type: 'command', command: taskCompletedCommand }] },
       ];
       hooks.TeammateIdle = [
-        { hooks: [{ type: 'command', command: teammateIdleCommand }] },
+        { hooks: [{ type: 'command', command: agentIdleCommand }] },
       ];
     }
 

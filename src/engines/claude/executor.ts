@@ -2,9 +2,10 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import type { BotConfigBase, ClaudeEffort, CodexReasoningEffort } from '../../config.js';
+import type { BotConfigBase, ClaudeEffort, ClaudePermissionMode, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
@@ -81,6 +82,46 @@ export function applyNoProxyPolicy(env: Record<string, string>): void {
   if (process.env.METABOT_NO_PROXY_DISABLE === 'true') return;
   env.no_proxy = NO_PROXY_LIST;
   env.NO_PROXY = NO_PROXY_LIST;
+}
+
+/**
+ * Normalize proxy variables for Claude child processes. Some HTTP stacks prefer
+ * lowercase proxy vars; others prefer uppercase. The rest of MetaBot treats the
+ * uppercase value as authoritative when both are present, so mirror that here
+ * to avoid a stale lowercase proxy sending Claude traffic down the wrong route.
+ */
+export function applyProxyPolicy(env: Record<string, string>): void {
+  if (process.env.METABOT_PROXY_NORMALIZE_DISABLE === 'true') return;
+
+  for (const [upper, lower] of [
+    ['HTTP_PROXY', 'http_proxy'],
+    ['HTTPS_PROXY', 'https_proxy'],
+    ['ALL_PROXY', 'all_proxy'],
+  ] as const) {
+    const upperValue = env[upper];
+    const lowerValue = env[lower];
+    if (upperValue) {
+      env[lower] = upperValue;
+    } else if (lowerValue) {
+      env[upper] = lowerValue;
+    }
+  }
+}
+
+export function applyClaudeChildEnvPolicy(env: Record<string, string>): void {
+  applyProxyPolicy(env);
+  applyNoProxyPolicy(env);
+}
+
+export function resolveClaudePermissionOptions(
+  configuredPermissionMode: ClaudePermissionMode | undefined,
+  isRoot: boolean = process.getuid?.() === 0,
+): { permissionMode: ClaudePermissionMode; allowDangerouslySkipPermissions?: true } {
+  const permissionMode = configuredPermissionMode ?? (isRoot ? 'auto' : 'bypassPermissions');
+  return {
+    permissionMode,
+    ...(permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true as const } : {}),
+  };
 }
 
 export const BYTHEWAY_DISALLOWED_MCP_TOOLS = [
@@ -188,7 +229,7 @@ function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string
     }
 
     // Default-enable Claude Code Agent Teams. Without a real terminal there's
-    // no tmux/iTerm2, so teammates must run in-process (controlled via the
+    // no tmux/iTerm2, so Agent Team agents must run in-process (controlled via the
     // `teammateMode` setting passed in queryOptions). Users can disable by
     // setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 in MetaBot's parent env.
     if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === undefined) {
@@ -205,7 +246,7 @@ function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
-    applyNoProxyPolicy(env);
+    applyClaudeChildEnvPolicy(env);
 
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
@@ -349,26 +390,86 @@ export interface ExecutorOptions {
   onTeamEvent?: (event: TeamEvent) => void;
 }
 
+type McpServerConfig = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  [key: string]: unknown;
+};
+
+const EXECUTOR_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+function resolveWorkerManagerMcpServer(): McpServerConfig | undefined {
+  const builtCandidates = [
+    path.resolve(EXECUTOR_MODULE_DIR, '../../mcp/worker-manager-mcp.js'),
+    path.resolve(process.cwd(), 'dist/mcp/worker-manager-mcp.js'),
+  ];
+  for (const entrypoint of builtCandidates) {
+    if (fs.existsSync(entrypoint)) {
+      return {
+        command: process.execPath,
+        args: [entrypoint],
+      };
+    }
+  }
+
+  const sourceCandidates = [
+    path.resolve(EXECUTOR_MODULE_DIR, '../../mcp/worker-manager-mcp.ts'),
+    path.resolve(process.cwd(), 'src/mcp/worker-manager-mcp.ts'),
+  ];
+  for (const entrypoint of sourceCandidates) {
+    if (fs.existsSync(entrypoint)) {
+      return {
+        command: process.execPath,
+        args: ['--import', 'tsx', entrypoint],
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function applyApiContextToMcpServer(server: McpServerConfig, apiContext: ApiContext): McpServerConfig {
+  const apiPort = process.env.METABOT_API_PORT || process.env.API_PORT || '9100';
+  const apiSecret = process.env.METABOT_API_SECRET || process.env.API_SECRET;
+  return {
+    ...server,
+    env: {
+      ...(server.env ?? {}),
+      METABOT_API_URL: process.env.METABOT_API_URL || `http://localhost:${apiPort}`,
+      ...(apiSecret ? { METABOT_API_SECRET: apiSecret } : {}),
+      METABOT_BOT_NAME: apiContext.botName,
+      METABOT_CHAT_ID: apiContext.chatId,
+    },
+  };
+}
+
 export function loadMcpServersWithApiContext(apiContext: ApiContext | undefined): Record<string, unknown> | undefined {
   if (!apiContext) return undefined;
+  let configured: Record<string, McpServerConfig> = {};
   try {
     const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      mcpServers?: Record<string, { env?: Record<string, string> }>;
+      mcpServers?: Record<string, McpServerConfig>;
     };
-    if (!settings.mcpServers || Object.keys(settings.mcpServers).length === 0) return undefined;
-    const cloned = JSON.parse(JSON.stringify(settings.mcpServers)) as Record<string, { env?: Record<string, string> }>;
-    for (const server of Object.values(cloned)) {
-      server.env = {
-        ...(server.env ?? {}),
-        METABOT_BOT_NAME: apiContext.botName,
-        METABOT_CHAT_ID: apiContext.chatId,
-      };
+    if (settings.mcpServers && typeof settings.mcpServers === 'object') {
+      configured = JSON.parse(JSON.stringify(settings.mcpServers)) as Record<string, McpServerConfig>;
     }
-    return cloned;
   } catch {
-    return undefined;
+    configured = {};
   }
+
+  const defaultWorkerManager = resolveWorkerManagerMcpServer();
+  if (!configured['worker-manager'] && defaultWorkerManager) {
+    configured['worker-manager'] = defaultWorkerManager;
+  }
+
+  const names = Object.keys(configured);
+  if (names.length === 0) return undefined;
+  for (const name of names) {
+    configured[name] = applyApiContextToMcpServer(configured[name]!, apiContext);
+  }
+  return configured;
 }
 
 export type SDKMessage = {
@@ -435,8 +536,7 @@ export class ClaudeExecutor {
   private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
-      permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
-      ...(isRoot ? {} : { allowDangerouslySkipPermissions: true }),
+      ...resolveClaudePermissionOptions(this.config.claude.permissionMode, isRoot),
       cwd,
       abortController,
       includePartialMessages: true,
@@ -449,8 +549,8 @@ export class ClaudeExecutor {
       // entrypoints it's the Node executable.
       spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, apiContextEnv(apiContext)),
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
-      // MetaBot has no terminal — split-pane (tmux/iTerm2) teammate display
-      // doesn't apply. Force in-process so teammates run inside the same
+      // MetaBot has no terminal — split-pane (tmux/iTerm2) Agent Team display
+      // doesn't apply. Force in-process so Agent Team agents run inside the same
       // session and surface via SDK message origin / TeammateIdle hooks.
       settings: { teammateMode: 'in-process' },
       // Periodic AI summaries for foreground/background subagents. The SDK
@@ -484,7 +584,7 @@ export class ClaudeExecutor {
         [
           '## Agent Teams (experimental)',
           `When the user asks you to create an agent team, ALWAYS prefix the team name with \`${teamNs}-\` to avoid collisions with other MetaBot chats sharing this machine. For example: \`${teamNs}-research\`, \`${teamNs}-refactor\`.`,
-          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Teammates show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
+          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Agent Team agents show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
           'Clean up the team yourself when work is done so resources don\'t leak (`Clean up the team`).',
         ].join('\n')
       );

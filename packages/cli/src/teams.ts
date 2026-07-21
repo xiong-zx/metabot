@@ -40,6 +40,21 @@ interface TeamRun {
   error?: string;
 }
 
+interface TeamActivity {
+  lifecycleKey: string;
+  chatId: string;
+  source: string;
+  teamName?: string;
+  instanceId?: string;
+  agentName?: string;
+  runId?: string;
+  taskIds?: number[];
+  status: string;
+  lifecycleStage?: string;
+  responsePreview?: string;
+  updatedAt: number;
+}
+
 function loadBridgeConfig(): BridgeConfig {
   const port = process.env.API_PORT || '9100';
   const url = (process.env.METABOT_URL || `http://localhost:${port}`).replace(/\/+$/, '');
@@ -82,20 +97,38 @@ function usage(): string {
 
 Subcommands:
   list
-  create <team> [--description <text>]
-  delete <team>
+  create <team> [--description <text>] [--actor-role admin|user|pm]
+  config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
+  delete <team> [--actor-role admin|user|pm]
   status <team> [--summary|--plain]
-  bind <team> <chatId> [--display]
-  start <team>
-  stop <team>
+  bind <team> <chatId> [--display] [--actor-role admin|user|pm]
+  start <team> [--actor-role admin|user|pm]
+  stop <team> [--actor-role admin|user|pm]
+  activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
   dispatch <team> <agent> <subject> [--description <text>] [--message <text>] [--from <name>] [--summary|--plain]
   next <team> <agent> [--read] [--summary|--plain]
   watch <team> [--interval <sec>] [--count <n>] [--summary|--plain]
+  templates list [name]
+  templates export <name> [--version <n>]
+  templates diff <name> --from <n> [--to <n>]
+  templates import <json> [--source <name>] [--actor-role admin|user|pm]
+  proposals list [--status pending|approved|rejected]
+  proposals create [template|ruleset] <json> [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
+  proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+  proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
+  instances list [--template <name>]
+  instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--create] [--actor-role admin|user|pm]
+  rules list [name]
+  rules export <name> [--version <n>]
+  rules diff <name> --from <n> [--to <n>]
+  rules import <json> [--source <name>] [--actor-role admin|user|pm]
+  rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--rule <text>...] [--actor-role admin|user|pm]
+  rules context --ref <name[@version]> [--ref <name[@version]>...] [--rule <text>]
 
   agents list <team>
-  agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
-  agents stop <team> <name>
-  agents delete <team> <name>
+  agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
+  agents stop <team> <name> [--actor-role admin|user|pm]
+  agents delete <team> <name> [--actor-role admin|user|pm]
 
   send <team> <to> <message> [--from <name>] [--summary <text>]
   inbox <team> <name> [--unread] [--read] [--summary|--plain]
@@ -113,7 +146,9 @@ Subcommands:
   runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
   runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
   runs output <team> <runId>
-  runs stop <team> <runId>
+  runs stop <team> <runId> [--actor-role admin|user|pm]
+
+Note: <team> accepts either a team name or an Agent Team instanceId. Prefer instanceId for chat/project-scoped runtime teams.
 `;
 }
 
@@ -137,13 +172,19 @@ export async function run(argv: string[]): Promise<void> {
     print(await bridgeRequest(cfg, 'POST', '/api/agent-teams', {
       name,
       description: typeof flags.description === 'string' ? flags.description : undefined,
+      ...actorRolePayload(flags),
     }));
     return;
   }
+  if (cmd === 'config') {
+    await runConfig(cfg, rest);
+    return;
+  }
   if (cmd === 'delete') {
-    const team = rest[0];
+    const { positional, flags } = parseArgs(rest);
+    const team = positional[0];
     if (!team) throw new Error('metabot teams delete: <team> required');
-    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}`));
+    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}`, actorRolePayload(flags)));
     return;
   }
   if (cmd === 'status') {
@@ -169,17 +210,23 @@ export async function run(argv: string[]): Promise<void> {
     print(await bridgeRequest(cfg, 'PATCH', `/api/agent-teams/${encodeURIComponent(team)}`, {
       chatIds: key === 'chatIds' ? unique([...existingChatIds, chatId]) : existingChatIds,
       displayChatIds: key === 'displayChatIds' ? unique([...existingDisplayChatIds, chatId]) : existingDisplayChatIds,
+      ...actorRolePayload(flags),
     }));
     return;
   }
   if (cmd === 'start' || cmd === 'stop') {
-    const team = rest[0];
+    const { positional, flags } = parseArgs(rest);
+    const team = positional[0];
     if (!team) throw new Error(`metabot teams ${cmd}: <team> required`);
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/${cmd}`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/${cmd}`, actorRolePayload(flags)));
     return;
   }
   if (cmd === 'dispatch') {
     await runDispatch(cfg, rest);
+    return;
+  }
+  if (cmd === 'activity') {
+    await runActivity(cfg, rest);
     return;
   }
   if (cmd === 'next') {
@@ -188,6 +235,22 @@ export async function run(argv: string[]): Promise<void> {
   }
   if (cmd === 'watch') {
     await runWatch(cfg, rest);
+    return;
+  }
+  if (cmd === 'templates') {
+    await runTemplates(cfg, rest);
+    return;
+  }
+  if (cmd === 'proposals') {
+    await runProposals(cfg, rest);
+    return;
+  }
+  if (cmd === 'instances') {
+    await runInstances(cfg, rest);
+    return;
+  }
+  if (cmd === 'rules') {
+    await runRules(cfg, rest);
     return;
   }
   if (cmd === 'agents') {
@@ -229,6 +292,11 @@ function wantsSummary(flags: Record<string, string | true>): boolean {
   return boolFlag(flags, 'summary') || boolFlag(flags, 'plain');
 }
 
+function actorRolePayload(flags: Record<string, string | true>): { actorRole?: string } {
+  const actorRole = stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role');
+  return actorRole ? { actorRole } : {};
+}
+
 function parseNumberList(value: string | undefined): number[] | undefined {
   if (!value) return undefined;
   const nums = value.split(',')
@@ -237,8 +305,241 @@ function parseNumberList(value: string | undefined): number[] | undefined {
   return nums.length > 0 ? nums : undefined;
 }
 
+function arrayFlag(flags: Record<string, string | true>, name: string): string[] {
+  const value = flags[name];
+  if (typeof value === 'string') {
+    return value.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function parseRuleRef(value: string): { name: string; version?: number } {
+  const [name, versionRaw] = value.split('@');
+  const version = versionRaw ? Number(versionRaw) : undefined;
+  return {
+    name,
+    ...(Number.isInteger(version) && version! > 0 ? { version } : {}),
+  };
+}
+
+function buildQuotaPatch(flags: Record<string, string | true>): Record<string, number> | undefined {
+  const mapping: Array<[string, string]> = [
+    ['max-agents', 'maxAgents'],
+    ['max-temporary-agents', 'maxTemporaryAgents'],
+    ['max-parallel-runs', 'maxParallelRunsPerAgent'],
+    ['max-teams-per-scope', 'maxTeamsPerScope'],
+    ['max-queued-tasks', 'maxQueuedTasks'],
+    ['max-active-runs', 'maxActiveRuns'],
+  ];
+  const quotas: Record<string, number> = {};
+  for (const [flagName, key] of mapping) {
+    const raw = stringFlag(flags, flagName);
+    if (!raw) continue;
+    const value = Number(raw);
+    if (Number.isInteger(value) && value > 0) quotas[key] = value;
+  }
+  return Object.keys(quotas).length > 0 ? quotas : undefined;
+}
+
 function defaultAgentName(): string | undefined {
   return process.env.METABOT_TEAM_AGENT || process.env.METABOT_AGENT_NAME || undefined;
+}
+
+async function runTemplates(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  if (sub === 'list') {
+    const name = rest[0];
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/templates${name ? `/${encodeURIComponent(name)}` : ''}`));
+    return;
+  }
+  if (sub === 'export') {
+    const { positional, flags } = parseArgs(rest);
+    const name = positional[0];
+    if (!name) throw new Error('metabot teams templates export: <name> required');
+    const version = stringFlag(flags, 'version');
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/templates/${encodeURIComponent(name)}/export${version ? `?version=${encodeURIComponent(version)}` : ''}`));
+    return;
+  }
+  if (sub === 'diff') {
+    const { positional, flags } = parseArgs(rest);
+    const name = positional[0];
+    const from = stringFlag(flags, 'from');
+    if (!name || !from) throw new Error('metabot teams templates diff: <name> --from <n> required');
+    const params = new URLSearchParams({ from });
+    const to = stringFlag(flags, 'to');
+    if (to) params.set('to', to);
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/templates/${encodeURIComponent(name)}/diff?${params.toString()}`));
+    return;
+  }
+  if (sub === 'import') {
+    const { positional, flags } = parseArgs(rest);
+    const raw = positional.join(' ');
+    if (!raw) throw new Error('metabot teams templates import: <json> required');
+    const template = JSON.parse(raw);
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/templates', {
+      template,
+      source: stringFlag(flags, 'source') ?? 'cli',
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+    }));
+    return;
+  }
+  throw new Error('metabot teams templates: expected list|export|diff|import');
+}
+
+async function runProposals(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  if (sub === 'list') {
+    const { flags } = parseArgs(rest);
+    const status = stringFlag(flags, 'status');
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/proposals${status ? `?status=${encodeURIComponent(status)}` : ''}`));
+    return;
+  }
+  if (sub === 'create') {
+    const { positional, flags } = parseArgs(rest);
+    const explicitKind = positional[0] === 'template' || positional[0] === 'ruleset'
+      ? positional.shift()
+      : undefined;
+    const raw = positional.join(' ');
+    if (!raw) throw new Error('metabot teams proposals create: [template|ruleset] <json> required');
+    const parsed = JSON.parse(raw);
+    const payload = explicitKind
+      ? { kind: explicitKind, body: parsed } as Record<string, unknown>
+      : { ...(parsed as Record<string, unknown>) };
+    const summary = stringFlag(flags, 'summary');
+    const by = stringFlag(flags, 'by');
+    const role = stringFlag(flags, 'role');
+    if (summary) payload.summary = summary;
+    if (by) payload.requestedBy = by;
+    if (role) payload.requestedByRole = role;
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/proposals', payload));
+    return;
+  }
+  if (sub === 'approve' || sub === 'reject') {
+    const { positional, flags } = parseArgs(rest);
+    const id = positional[0];
+    if (!id) throw new Error(`metabot teams proposals ${sub}: <id> required`);
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/proposals/${encodeURIComponent(id)}/${sub}`, {
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+      decidedBy: stringFlag(flags, 'by'),
+      reason: stringFlag(flags, 'reason'),
+    }));
+    return;
+  }
+  throw new Error('metabot teams proposals: expected list|create|approve|reject');
+}
+
+async function runInstances(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  if (sub === 'list') {
+    const { flags } = parseArgs(rest);
+    const template = stringFlag(flags, 'template');
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/instances${template ? `?template=${encodeURIComponent(template)}` : ''}`));
+    return;
+  }
+  if (sub === 'resolve') {
+    const { positional, flags } = parseArgs(rest);
+    const templateName = positional[0];
+    if (!templateName) throw new Error('metabot teams instances resolve: <template> required');
+    const scopeType = boolFlag(flags, 'global') ? 'global' : stringFlag(flags, 'project') ? 'project' : 'chat';
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/instances/resolve', {
+      templateName,
+      scopeType,
+      chatId: stringFlag(flags, 'chat'),
+      projectId: stringFlag(flags, 'project'),
+      pmBot: stringFlag(flags, 'pm-bot'),
+      ruleSetRefs: arrayFlag(flags, 'rule-ref').map(parseRuleRef),
+      createIfMissing: flags.create === undefined || boolFlag(flags, 'create'),
+      allowGlobal: boolFlag(flags, 'global'),
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+    }));
+    return;
+  }
+  throw new Error('metabot teams instances: expected list|resolve');
+}
+
+async function runConfig(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const { positional, flags } = parseArgs(argv);
+  const team = positional[0];
+  if (!team) throw new Error('metabot teams config: <team> required');
+  const quotas = buildQuotaPatch(flags);
+  print(await bridgeRequest(cfg, 'PATCH', `/api/agent-teams/${encodeURIComponent(team)}`, {
+    ...(stringFlag(flags, 'chat') ? { chatIds: arrayFlag(flags, 'chat') } : {}),
+    ...(stringFlag(flags, 'display-chat') ? { displayChatIds: arrayFlag(flags, 'display-chat') } : {}),
+    ...(stringFlag(flags, 'pm-bot') ? { pmBot: stringFlag(flags, 'pm-bot') } : {}),
+    ...(flags['rule-ref'] !== undefined ? { ruleSetRefs: arrayFlag(flags, 'rule-ref').map(parseRuleRef) } : {}),
+    ...(quotas ? { quotas } : {}),
+    actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+  }));
+}
+
+async function runRules(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  if (sub === 'list') {
+    const name = rest[0];
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/rules${name ? `/${encodeURIComponent(name)}` : ''}`));
+    return;
+  }
+  if (sub === 'export') {
+    const { positional, flags } = parseArgs(rest);
+    const name = positional[0];
+    if (!name) throw new Error('metabot teams rules export: <name> required');
+    const version = stringFlag(flags, 'version');
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/rules/${encodeURIComponent(name)}/export${version ? `?version=${encodeURIComponent(version)}` : ''}`));
+    return;
+  }
+  if (sub === 'diff') {
+    const { positional, flags } = parseArgs(rest);
+    const name = positional[0];
+    const from = stringFlag(flags, 'from');
+    if (!name || !from) throw new Error('metabot teams rules diff: <name> --from <n> required');
+    const params = new URLSearchParams({ from });
+    const to = stringFlag(flags, 'to');
+    if (to) params.set('to', to);
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-teams/rules/${encodeURIComponent(name)}/diff?${params.toString()}`));
+    return;
+  }
+  if (sub === 'import') {
+    const { positional, flags } = parseArgs(rest);
+    const raw = positional.join(' ');
+    if (!raw) throw new Error('metabot teams rules import: <json> required');
+    const ruleSet = JSON.parse(raw);
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/rules', {
+      ...ruleSet,
+      source: stringFlag(flags, 'source') ?? ruleSet.source ?? 'cli',
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+    }));
+    return;
+  }
+  if (sub === 'set') {
+    const { positional, flags } = parseArgs(rest);
+    const name = positional[0];
+    const scope = stringFlag(flags, 'scope');
+    const rules = arrayFlag(flags, 'rule').map((text) => ({ text }));
+    if (!name || !scope || rules.length === 0) {
+      throw new Error('metabot teams rules set: <name> --scope <scope> --rule <text> required');
+    }
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/rules', {
+      name,
+      scope,
+      rules,
+      source: 'cli',
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role') ?? stringFlag(flags, 'role'),
+    }));
+    return;
+  }
+  if (sub === 'context') {
+    const { flags } = parseArgs(rest);
+    print(await bridgeRequest(cfg, 'POST', '/api/agent-teams/rules/context', {
+      refs: arrayFlag(flags, 'ref').map(parseRuleRef),
+      inlineRules: arrayFlag(flags, 'rule').map((text) => ({ text })),
+    }));
+    return;
+  }
+  throw new Error('metabot teams rules: expected list|export|diff|import|set|context');
 }
 
 function compact(value: string | undefined, limit = 120): string {
@@ -284,6 +585,27 @@ function formatRuns(body: unknown): string {
     ...runs.slice(0, 12).map((run) => `- ${runLine(run)}`),
   ];
   if (runs.length > 12) lines.push(`... ${runs.length - 12} more`);
+  return lines.join('\n');
+}
+
+function activityLine(item: TeamActivity): string {
+  const agent = item.agentName ? ` @${item.agentName}` : '';
+  const run = item.runId ? ` run=${item.runId}` : '';
+  const tasks = item.taskIds?.length ? ` tasks=#${item.taskIds.join(',#')}` : '';
+  const stage = item.lifecycleStage ? `/${item.lifecycleStage}` : '';
+  const preview = item.responsePreview ? ` - ${compact(item.responsePreview, 100)}` : '';
+  return `${item.lifecycleKey} ${item.status}${stage}${agent}${run}${tasks}${preview}`;
+}
+
+function formatActivity(body: unknown): string {
+  const activity = Array.isArray((body as { activity?: unknown }).activity)
+    ? ((body as { activity: TeamActivity[] }).activity)
+    : [];
+  const lines = [
+    `Activity: ${activity.length} records`,
+    ...activity.slice(0, 20).map((item) => `- ${activityLine(item)}`),
+  ];
+  if (activity.length > 20) lines.push(`... ${activity.length - 20} more`);
   return lines.join('\n');
 }
 
@@ -367,20 +689,30 @@ async function runAgents(cfg: BridgeConfig, argv: string[]): Promise<void> {
       name,
       role: stringFlag(flags, 'role'),
       engine: stringFlag(flags, 'engine') ?? 'codex',
+      model: stringFlag(flags, 'model'),
+      reasoningEffort: stringFlag(flags, 'reasoning-effort'),
+      approvalPolicy: stringFlag(flags, 'approval-policy'),
+      sandbox: stringFlag(flags, 'sandbox'),
+      timeoutMs: stringFlag(flags, 'timeout-ms') ? Number(stringFlag(flags, 'timeout-ms')) : undefined,
+      idleTimeoutMs: stringFlag(flags, 'idle-timeout-ms') ? Number(stringFlag(flags, 'idle-timeout-ms')) : undefined,
+      allowedTools: arrayFlag(flags, 'allowed-tools'),
       prompt: stringFlag(flags, 'prompt'),
+      actorRole: stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role'),
     }));
     return;
   }
   if (sub === 'stop') {
-    const [team, name] = rest;
+    const { positional, flags } = parseArgs(rest);
+    const [team, name] = positional;
     if (!team || !name) throw new Error('metabot teams agents stop: <team> <name> required');
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}/stop`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}/stop`, actorRolePayload(flags)));
     return;
   }
   if (sub === 'delete' || sub === 'remove') {
-    const [team, name] = rest;
+    const { positional, flags } = parseArgs(rest);
+    const [team, name] = positional;
     if (!team || !name) throw new Error(`metabot teams agents ${sub}: <team> <name> required`);
-    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}`));
+    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}`, actorRolePayload(flags)));
     return;
   }
   throw new Error('metabot teams agents: expected list|spawn|stop|delete');
@@ -594,10 +926,34 @@ async function runRuns(cfg: BridgeConfig, argv: string[]): Promise<void> {
     return;
   }
   if (sub === 'stop') {
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/runs/${encodeURIComponent(id)}/stop`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/runs/${encodeURIComponent(id)}/stop`, actorRolePayload(flags)));
     return;
   }
   throw new Error('metabot teams runs: expected list|create|update|output|stop');
+}
+
+async function runActivity(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const { positional, flags } = parseArgs(argv);
+  const team = positional[0];
+  if (!team) throw new Error('metabot teams activity: <team> required');
+  const params = new URLSearchParams();
+  for (const [flagName, queryName] of [
+    ['agent', 'agent'],
+    ['run-id', 'runId'],
+    ['run', 'runId'],
+    ['task-id', 'taskId'],
+    ['task', 'taskId'],
+    ['chat', 'chatId'],
+    ['chat-id', 'chatId'],
+    ['source', 'source'],
+    ['limit', 'limit'],
+  ] as Array<[string, string]>) {
+    const value = stringFlag(flags, flagName);
+    if (value) params.set(queryName, value);
+  }
+  const query = params.toString();
+  const body = await bridgeRequest(cfg, 'GET', `/api/agent-teams/${encodeURIComponent(team)}/activity${query ? `?${query}` : ''}`);
+  print(wantsSummary(flags) ? formatActivity(body) : body);
 }
 
 async function runWatch(cfg: BridgeConfig, argv: string[]): Promise<void> {

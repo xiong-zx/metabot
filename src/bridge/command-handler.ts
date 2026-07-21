@@ -10,6 +10,42 @@ import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
+import {
+  expireTimedOutServiceRestartRequests,
+  listServiceRestartRequests,
+  recordServiceRestartReadiness,
+} from './restart-coordinator.js';
+import { hasTeamCapability, type TeamActorRole } from '../agent-teams/team-store.js';
+
+export interface ServiceRestartRequest {
+  chatId: string;
+  userId: string;
+  reason?: string;
+  force?: boolean;
+}
+
+export interface ServiceRestartBlocker {
+  botName: string;
+  chatId: string;
+  messageId?: string;
+  lifecycleKey?: string;
+  source?: string;
+  startedAt?: number;
+  updatedAt?: number;
+  userPrompt?: string;
+}
+
+export interface ServiceRestartResult {
+  scheduled: boolean;
+  requestId?: string;
+  blockedBy?: ServiceRestartBlocker[];
+  forced?: boolean;
+  message?: string;
+}
+
+export interface StopTaskOptions {
+  preserveActiveTask?: boolean;
+}
 
 export class CommandHandler {
   private docSync: DocSync | null = null;
@@ -22,7 +58,7 @@ export class CommandHandler {
     private memoryClient: MemoryClient,
     private audit: AuditLogger,
     private getRunningTask: (chatId: string) => { startTime: number } | undefined,
-    private stopTask: (chatId: string) => void,
+    private stopTask: (chatId: string, options?: StopTaskOptions) => void,
     /**
      * Drain the chat's queued-message buffer, returning the number of
      * messages discarded. Called from /stop so the user's "stop" intent
@@ -34,7 +70,7 @@ export class CommandHandler {
     /**
      * Release the persistent Claude process associated with this chat
      * (no-op if the persistent-executor feature flag is off or no
-     * executor exists). Called on /reset so teammates and /goal state
+     * executor exists). Called on /reset so Agent Team agents and /goal state
      * tied to the old session are torn down with the conversation.
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,
@@ -53,6 +89,12 @@ export class CommandHandler {
      * Kick off a /bytheway side query. `continueBranch` backs /btwc.
      */
     private runBytheway: (msg: IncomingMessage, question: string, continueBranch: boolean) => Promise<void>,
+    /**
+     * Schedule a controlled bridge restart. The implementation must return
+     * after the restart has been scheduled, because the current process will be
+     * terminated shortly after the user-facing acknowledgement is sent.
+     */
+    private restartService?: (request: ServiceRestartRequest) => Promise<void | ServiceRestartResult>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
@@ -75,6 +117,8 @@ export class CommandHandler {
         await this.sender.sendTextNotice(chatId, '📖 Help', [
           '**Bot Commands:**',
           '`/reset` - Clear session, start fresh',
+          '`/restart` or `/restart service` - Controlled MetaBot service restart',
+          '`/restart session` - Restart this chat/session without restarting service',
           '`/stop` - Abort current running task (and any in-flight /btw)',
           '`/status` - Show current session info',
           '`/model` - Show current engine/model; `/model list` - Available options',
@@ -147,6 +191,13 @@ export class CommandHandler {
         }
         await this.sender.sendTextNotice(chatId, '✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
         return true;
+
+      case '/restart':
+      case '/reboot': {
+        const args = text.slice(cmd.length).trim();
+        await this.handleRestartCommand(msg, args);
+        return true;
+      }
 
       case '/stop': {
         const task = this.getRunningTask(chatId);
@@ -277,6 +328,188 @@ export class CommandHandler {
         // Unrecognized /xxx commands — not handled here, pass through to Claude
         return false;
     }
+  }
+
+  private async handleRestartCommand(msg: IncomingMessage, args: string): Promise<void> {
+    const { chatId, userId } = msg;
+    const [targetRaw, ...reasonParts] = args.split(/\s+/).filter(Boolean);
+    const target = (targetRaw || 'service').toLowerCase();
+
+    if (target === 'help' || target === '-h' || target === '--help') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'Restart',
+        [
+          'Usage:',
+          '- `/restart` or `/restart service [reason]` - restart the MetaBot bridge service',
+          '- `/restart service --force [reason]` - restart even when other active turns are recorded',
+          '- `/restart session` - clear this chat session and release its engine process',
+          '- `/restart status` - show whether service restart is available',
+          '- `/restart ready <requestId> [note]` - mark this bot/chat ready for a coordinated restart',
+          '',
+          'Blocked restart requests have a bounded ready timeout. A timeout does not force restart; retry after blockers finish or use `--force` explicitly.',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (target === 'session' || target === 'chat' || target === 'conversation' || target === 'engine') {
+      await this.handle({ ...msg, text: '/reset' });
+      return;
+    }
+
+    if (target === 'status') {
+      expireTimedOutServiceRestartRequests();
+      const recentRequests = listServiceRestartRequests()
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 5);
+      await this.sender.sendTextNotice(
+        chatId,
+        'Restart Status',
+        [
+          this.restartService
+            ? 'Controlled service restart is available. Use `/restart service`.'
+            : 'Controlled service restart is not available in this runtime.',
+          '',
+          ...formatRestartRequests(recentRequests),
+        ].filter(Boolean).join('\n'),
+        this.restartService ? 'green' : 'orange',
+      );
+      return;
+    }
+
+    if (target === 'ready' || target === 'ack' || target === 'prepared') {
+      const [requestId, ...noteParts] = reasonParts;
+      if (!requestId) {
+        await this.sender.sendTextNotice(
+          chatId,
+          'Restart Ready',
+          'Usage: `/restart ready <requestId> [checkpoint note]`',
+          'orange',
+        );
+        return;
+      }
+      const updated = recordServiceRestartReadiness({
+        requestId,
+        botName: this.config.name,
+        chatId,
+        userId,
+        status: 'ready',
+        note: noteParts.join(' ').trim() || undefined,
+      });
+      if (!updated) {
+        await this.sender.sendTextNotice(
+          chatId,
+          'Restart Request Not Found',
+          `No restart request found for \`${requestId}\`. Use \`/restart status\` to inspect recent requests.`,
+          'red',
+        );
+        return;
+      }
+      await this.sender.sendTextNotice(
+        chatId,
+        'Restart Ready Recorded',
+        [
+          `Recorded readiness for \`${requestId}\`.`,
+          formatReadinessProgress(updated),
+        ].join('\n'),
+        'green',
+      );
+      return;
+    }
+
+    if (target !== 'service' && target !== 'metabot' && target !== 'bridge') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'Invalid Restart Target',
+        'Use `/restart service`, `/restart session`, or `/restart status`.',
+        'red',
+      );
+      return;
+    }
+
+    if (!this.restartService) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'Restart Unavailable',
+        'This bot runtime does not expose controlled service restart.',
+        'red',
+      );
+      return;
+    }
+
+    const actorRole = actorRoleField(msg.actorRole) ?? 'user';
+    if (!hasTeamCapability(actorRole, 'restart_service')) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'Restart Not Allowed',
+        `actorRole ${actorRole} is not allowed to restart the MetaBot service. Ask a PM, user, or admin to run \`/restart service\`.`,
+        'red',
+      );
+      return;
+    }
+
+    const force = reasonParts.includes('--force') || reasonParts.includes('force');
+    const reason = reasonParts
+      .filter((part) => part !== '--force' && part !== 'force')
+      .join(' ')
+      .trim() || undefined;
+    const restartResult = await this.restartService({ chatId, userId, reason, force });
+    if (restartResult && restartResult.scheduled === false) {
+      const blockers = restartResult.blockedBy || [];
+      await this.sender.sendTextNotice(
+        chatId,
+        'MetaBot Restart Blocked',
+        [
+          restartResult.message || 'Service restart was blocked because other bot/agent turns are still active.',
+          restartResult.requestId ? `Request ID: \`${restartResult.requestId}\`` : '',
+          blockers.length > 0 ? '' : undefined,
+          ...formatRestartBlockers(blockers),
+          '',
+          'Ask those chats/agents to checkpoint or finish, then retry `/restart service`.',
+          'Use `/restart service --force <reason>` only for an explicit emergency override.',
+        ].filter((line): line is string => line !== undefined).join('\n'),
+        'red',
+      );
+      return;
+    }
+
+    const task = this.getRunningTask(chatId);
+    const cleared = this.clearQueue(chatId);
+    if (task) {
+      this.audit.log({
+        event: 'task_stopped',
+        botName: this.config.name,
+        chatId,
+        userId,
+        durationMs: Date.now() - task.startTime,
+        meta: { reason: 'restart-service', clearedQueue: cleared, preserveActiveTask: true },
+      });
+      this.stopTask(chatId, { preserveActiveTask: true });
+    } else if (cleared > 0) {
+      this.audit.log({
+        event: 'queue_cleared',
+        botName: this.config.name,
+        chatId,
+        userId,
+        meta: { reason: 'restart-service', clearedQueue: cleared },
+      });
+    }
+
+    await this.sender.sendTextNotice(
+      chatId,
+      restartResult?.forced ? 'MetaBot Restart Forced' : 'MetaBot Restart Scheduled',
+      [
+        restartResult?.forced
+          ? 'Controlled service restart has been force-scheduled despite recorded active work.'
+          : 'Controlled service restart has been scheduled.',
+        restartResult?.requestId ? `Request ID: \`${restartResult.requestId}\`` : '',
+        'The bridge will reconnect automatically and send a deterministic completion notice.',
+        'Any recorded in-flight bot turns will be queued for continuation after reconnect; the restart command itself will not be repeated.',
+        cleared > 0 ? `Discarded ${cleared} queued message${cleared === 1 ? '' : 's'} before restarting.` : '',
+      ].filter(Boolean).join('\n'),
+      restartResult?.forced ? 'red' : 'orange',
+    );
   }
 
   private resolveWorkdirPath(inputPath: string): string {
@@ -810,8 +1043,83 @@ export class CommandHandler {
   }
 }
 
+function formatRestartBlockers(blockers: ServiceRestartBlocker[]): string[] {
+  if (blockers.length === 0) return ['No blocker details were available.'];
+  const rows = blockers.slice(0, 8).map((blocker, index) => {
+    const age = blocker.startedAt ? `, age=${formatDuration(Date.now() - blocker.startedAt)}` : '';
+    const source = blocker.source ? `, source=${blocker.source}` : '';
+    const prompt = blocker.userPrompt ? `, prompt="${truncateOneLine(blocker.userPrompt, 80)}"` : '';
+    return `${index + 1}. bot=\`${blocker.botName}\`, chat=\`${blocker.chatId}\`${source}${age}${prompt}`;
+  });
+  if (blockers.length > rows.length) rows.push(`...and ${blockers.length - rows.length} more active turn(s).`);
+  return rows;
+}
+
+function formatRestartRequests(requests: ReturnType<typeof listServiceRestartRequests>): string[] {
+  if (requests.length === 0) return ['Recent restart requests: none.'];
+  return [
+    'Recent restart requests:',
+    ...requests.map((request, index) => {
+      const age = formatDuration(Date.now() - request.createdAt);
+      const blocker = request.blockers[0];
+      const blockerSummary = blocker
+        ? `, blockers=${request.blockers.length}, first=${blocker.botName}/${blocker.chatId}`
+        : '';
+      const reason = request.reason ? `, reason="${truncateOneLine(request.reason, 60)}"` : '';
+      return `${index + 1}. \`${request.requestId}\` ${request.status}${request.force ? ' force' : ''}, age=${age}, ${formatReadinessProgress(request)}${blockerSummary}${reason}`;
+    }),
+  ];
+}
+
+function formatReadinessProgress(request: ReturnType<typeof listServiceRestartRequests>[number]): string {
+  const now = Date.now();
+  const blockerKeys = new Set(request.blockers.map((blocker) => `${blocker.botName}\0${blocker.chatId}`));
+  const relevantReadiness = (request.readiness || []).filter((ack) => blockerKeys.size === 0 || blockerKeys.has(`${ack.botName}\0${ack.chatId}`));
+  const readyCount = relevantReadiness.filter((ack) => ack.status === 'ready').length;
+  const blockedCount = relevantReadiness.filter((ack) => ack.status === 'blocked').length;
+  const total = request.blockers.length || relevantReadiness.length;
+  const suffixes: string[] = [];
+  if (blockedCount > 0) suffixes.push(`blocker-acks=${blockedCount}`);
+  if (request.status === 'timed_out') {
+    suffixes.push(request.timedOutAt ? `timed_out=${formatDuration(now - request.timedOutAt)} ago` : 'timed_out');
+  } else if (request.status === 'blocked' && typeof request.deadlineAt === 'number') {
+    suffixes.push(request.deadlineAt > now
+      ? `timeout_in=${formatDuration(request.deadlineAt - now)}`
+      : `timeout_due=${formatDuration(now - request.deadlineAt)} ago`);
+  }
+  return `ready=${readyCount}/${total}${suffixes.length > 0 ? `, ${suffixes.join(', ')}` : ''}`;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m${seconds ? ` ${seconds}s` : ''}`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return `${hours}h${remainderMinutes ? ` ${remainderMinutes}m` : ''}`;
+}
+
+function truncateOneLine(value: string, maxLength: number): string {
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= maxLength) return oneLine;
+  return `${oneLine.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function isEngineName(value: string): value is EngineName {
   return value === 'claude' || value === 'kimi' || value === 'codex';
+}
+
+function actorRoleField(value: unknown): TeamActorRole | undefined {
+  return value === 'admin'
+    || value === 'user'
+    || value === 'pm'
+    || value === 'manager'
+    || value === 'agent'
+    || value === 'worker'
+    ? value
+    : undefined;
 }
 
 function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | undefined {

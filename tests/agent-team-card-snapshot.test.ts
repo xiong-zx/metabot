@@ -21,13 +21,13 @@ describe('buildAgentTeamCardSnapshot', () => {
     });
 
     expect(snapshot.teamState?.name).toBe('demo');
-    expect(snapshot.teamState?.teammates).toEqual([
+    expect(snapshot.teamState?.agents).toEqual([
       { name: 'lead', status: 'idle' },
       { name: 'reviewer', status: 'working' },
     ]);
     expect(snapshot.teamState?.tasks).toEqual([
-      { taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' },
-      { taskId: '2', subject: 'Review output', status: 'in_progress', teammate: 'reviewer' },
+      { taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' },
+      { taskId: '2', subject: 'Review output', status: 'in_progress', agent: 'reviewer' },
     ]);
     expect(snapshot.backgroundEvents?.[0]).toMatchObject({
       taskId: 'run-abc123',
@@ -57,7 +57,7 @@ describe('buildAgentTeamCardSnapshot', () => {
     });
 
     expect(snapshot.teamState?.tasks).toEqual([
-      { taskId: '1', subject: 'Open implementation', status: 'in_progress', teammate: 'lead' },
+      { taskId: '1', subject: 'Open implementation', status: 'in_progress', agent: 'lead' },
     ]);
     expect(snapshot.backgroundEvents).toEqual([
       { taskId: 'run-failed-open', description: 'lead: Open implementation', status: 'failed', lastEvent: 'needs retry' },

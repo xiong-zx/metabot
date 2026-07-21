@@ -50,45 +50,48 @@ describe('buildCardV2', () => {
     expect(goal.content).toContain('Ship the persistent executor PR');
   });
 
-  it('renders 🧑‍🤝‍🧑 Team panel with teammates and tasks (regression)', () => {
+  it('renders a compact working count and per-working-agent activity (AT-006)', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'investigate',
       responseText: '',
       toolCalls:    [],
       teamState: {
-        name: 'feishu-ux-review',
-        teammates: [
+        name: 'feishu-ux-review@chat:oc_abcdef',
+        agents: [
           { name: 'ux-researcher',  status: 'working', lastSubject: 'auditing card UX' },
           { name: 'arch-reviewer',  status: 'idle' },
+          { name: 'scribe',         status: 'idle' },
         ],
         tasks: [
-          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', teammate: 'ux-researcher' },
-          { taskId: 't2', subject: 'Arch review', status: 'completed',  teammate: 'arch-reviewer' },
+          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', agent: 'ux-researcher' },
+          { taskId: 't2', subject: 'Arch review', status: 'completed',  agent: 'arch-reviewer' },
         ],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content) && /Teammates/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
     );
     expect(team).toBeDefined();
-    // Team name
+    // Compact working count instead of one line per agent.
+    expect(team.content).toContain('1/3 working');
+    // Team id is shortened — no chat-scoped suffix in the header.
     expect(team.content).toContain('feishu-ux-review');
-    // Teammates with both statuses
+    expect(team.content).not.toContain('oc_abcdef');
+    // Working agent + what it is doing.
     expect(team.content).toContain('ux-researcher');
-    expect(team.content).toContain('arch-reviewer');
-    expect(team.content).toContain('⏳');                  // working icon
-    expect(team.content).toContain('💤');                  // idle icon
-    expect(team.content).toContain('auditing card UX');     // lastSubject
-    // Tasks summary line
+    expect(team.content).toContain('auditing card UX');
+    // Idle agents are collapsed away entirely.
+    expect(team.content).not.toContain('arch-reviewer');
+    expect(team.content).not.toContain('scribe');
+    // Task counts stay, completed task subjects do not.
     expect(team.content).toContain('1 in progress');
     expect(team.content).toContain('1 done');
-    expect(team.content).toContain('UX audit');
-    expect(team.content).toContain('Arch review');
+    expect(team.content).not.toContain('Arch review');
   });
 
-  it('renders pending Agent Team tasks', () => {
+  it('collapses an all-idle team to a single compact line', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'x',
@@ -96,8 +99,30 @@ describe('buildCardV2', () => {
       toolCalls:    [],
       teamState: {
         name: 'demo',
-        teammates: [{ name: 'lead', status: 'idle' }],
-        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
+        agents: [{ name: 'lead', status: 'idle' }, { name: 'reviewer', status: 'idle' }],
+        tasks: [],
+      },
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const team = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
+    );
+    expect(team).toBeDefined();
+    expect(team.content.split('\n')).toHaveLength(1);
+    expect(team.content).toContain('idle (2 agents)');
+    expect(team.content).not.toContain('lead');
+  });
+
+  it('summarizes pending Agent Team tasks when nobody is working', () => {
+    const state: CardState = {
+      status:       'running',
+      userPrompt:   'x',
+      responseText: '',
+      toolCalls:    [],
+      teamState: {
+        name: 'demo',
+        agents: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' }],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
@@ -109,19 +134,40 @@ describe('buildCardV2', () => {
     expect(team?.content).toContain('Plan work');
   });
 
-  it('omits Team panel when teamState has no teammates and no tasks', () => {
+  it('omits Team panel when teamState has no agents and no tasks', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'x',
       responseText: '',
       toolCalls:    [],
-      teamState:    { teammates: [], tasks: [] },
+      teamState:    { agents: [], tasks: [] },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
     );
     expect(team).toBeUndefined();
+  });
+
+  it('renders legacy teammate card state for persisted compatibility', () => {
+    const state = {
+      status:       'running',
+      userPrompt:   'x',
+      responseText: '',
+      toolCalls:    [],
+      teamState: {
+        name: 'legacy',
+        teammates: [{ name: 'reviewer', status: 'working', lastSubject: 'reviewing legacy card' }],
+        tasks: [{ taskId: '1', subject: 'Review legacy card', status: 'pending', teammate: 'reviewer' }],
+      },
+    } as CardState;
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const team = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
+    );
+    expect(team?.content).toContain('1/1 working');
+    expect(team?.content).toContain('reviewer');
+    expect(team?.content).toContain('reviewing legacy card');
   });
 
   // Cards from flushSpontaneous (between-turn agent activity) get the
@@ -257,6 +303,40 @@ describe('buildCardV2', () => {
     // we accidentally re-shipped buttons.
     const cardStr = JSON.stringify(json);
     expect(cardStr).not.toContain('answer_question');
+  });
+
+  it('renders non-closed lifecycle state and key', () => {
+    const state: CardState = {
+      status:         'running',
+      userPrompt:     'restart recovery',
+      responseText:   '',
+      toolCalls:      [],
+      lifecycleStage: 'recovering',
+      lifecycleKey:   'teaminst:abc:manager:run-123',
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const lifecycle = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle.content).toContain('Recovering');
+    expect(lifecycle.content).toContain('teaminst:abc:manager:run-123');
+  });
+
+  it('hides closed lifecycle state', () => {
+    const state: CardState = {
+      status:         'complete',
+      userPrompt:     'done',
+      responseText:   'Done.',
+      toolCalls:      [],
+      lifecycleStage: 'closed',
+      lifecycleKey:   'chat:done',
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const lifecycle = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
+    );
+    expect(lifecycle).toBeUndefined();
   });
 
   it('shows stats footer with cost/duration/model on complete', () => {

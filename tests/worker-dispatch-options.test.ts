@@ -58,6 +58,7 @@ describe('WorkerManager dispatch execution options', () => {
       workingDirectory: workdir,
       model: 'gpt-5.4',
       engine: 'codex',
+      lifecycleKey: expect.stringMatching(/^worker:/),
       approvalPolicy: 'on-request',
       sandbox: 'workspace-write',
       timeoutMs: 12_345,
@@ -65,6 +66,58 @@ describe('WorkerManager dispatch execution options', () => {
     });
   });
 
+  it('rejects unsupported explicit output contracts before starting a worker', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    expect(() => manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment',
+      model: 'gpt-5.4',
+      outputContract: {
+        name: 'not_a_real_contract',
+        requiredArtifact: true,
+      } as any,
+    } as any)).toThrow(/Invalid outputContract\.name/);
+
+    expect(executeApiTask).not.toHaveBeenCalled();
+    expect(manager.listWorkers('pm-chat')).toEqual([]);
+  });
+
+  it('prepends worker rules context when a provider is configured', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+    manager.setRulesContextProvider((input) => [
+      '<rules-context-pack purpose="worker-dispatch">',
+      `Worker workdir: ${input.workingDirectory}`,
+      '</rules-context-pack>',
+    ].join('\n'));
+
+    manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => expect(executeApiTask).toHaveBeenCalled());
+    expect(executeApiTask.mock.calls[0][0].prompt).toBe([
+      '<rules-context-pack purpose="worker-dispatch">',
+      `Worker workdir: ${workdir}`,
+      '</rules-context-pack>',
+      '',
+      'run experiment',
+    ].join('\n'));
+  });
   it('raises too-short timeouts for durable research workers', async () => {
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done' }));
@@ -92,6 +145,52 @@ describe('WorkerManager dispatch execution options', () => {
     });
   });
 
+  it('reuses a running or recent completed worker when dedupeKey matches', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    let finishWorker: ((value: { success: boolean; responseText: string }) => void) | undefined;
+    const executeApiTask = vi.fn(() => new Promise<{ success: boolean; responseText: string }>((resolve) => {
+      finishWorker = resolve;
+    }));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const first = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment',
+      model: 'gpt-5.4',
+      dedupeKey: 'restart-resume:worker-a',
+    });
+    const second = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment again',
+      model: 'gpt-5.4',
+      dedupeKey: 'restart-resume:worker-a',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(executeApiTask).toHaveBeenCalledTimes(1);
+
+    finishWorker?.({ success: true, responseText: 'done' });
+    await vi.waitFor(() => expect(manager.getWorker(first.id)?.status).toBe('completed'));
+    const callsAfterCompletionNotification = executeApiTask.mock.calls.length;
+
+    const third = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'run experiment after completion',
+      model: 'gpt-5.4',
+      dedupeKey: 'restart-resume:worker-a',
+    });
+
+    expect(third.id).toBe(first.id);
+    expect(executeApiTask).toHaveBeenCalledTimes(callsAfterCompletionNotification);
+  });
   it('recovers a failed worker when a completed authoritative artifact exists', async () => {
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     writeFileSync(join(workdir, 'results.json'), JSON.stringify({
@@ -175,5 +274,105 @@ describe('WorkerManager dispatch execution options', () => {
     expect(finalRecord.artifactStatus).toBe('valid_complete');
     expect(finalRecord.artifactPath).toBe(artifactPath);
     expect(finalRecord.terminalError).toContain('2 minutes');
+  });
+
+  it('marks a completed research worker missing results.json as contract violated', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed without durable output.' }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: summarize findings',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.outputContract).toMatchObject({ name: 'generic_results_v1', requiredArtifact: true });
+    expect(finalRecord.artifactStatus).toBe('missing');
+    expect(finalRecord.contractStatus).toBe('violated');
+    expect(finalRecord.recoveryStatus).toBe('none');
+  });
+
+  it('accepts a valid generic results.json artifact and stores full detail refs', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(resultsPath, JSON.stringify({
+      task: 'Summarize benchmark deltas',
+      metrics: { accuracy: 0.91, latency_ms: 12 },
+      notes: 'Model B improved accuracy without violating the latency budget.',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed with durable output.'.repeat(40) }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.artifactStatus).toBe('valid_complete');
+    expect(finalRecord.contractStatus).toBe('satisfied');
+    expect(finalRecord.artifactPath).toBe(resultsPath);
+    expect(finalRecord.finalPayloadRef).toBe(`file://${resultsPath}`);
+    expect(finalRecord.finalTranscriptRef).toBe(`worker-chat:${finalRecord.workerChatId}`);
+    expect(finalRecord.detailRoute).toBe(`/api/workers/${finalRecord.id}`);
+  });
+
+  it('marks an invalid generic results.json artifact as contract violated', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(resultsPath, JSON.stringify({
+      task: 'Summarize benchmark deltas',
+      metrics: ['not-an-object'],
+      notes: '',
+    }));
+    const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => (
+      chatId.startsWith('worker-')
+        ? { success: true, responseText: 'Completed with malformed output.' }
+        : { success: true, responseText: 'notified' }
+    ));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.getWorker(record.id)?.status).toBe('completed');
+    });
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord.artifactStatus).toBe('invalid');
+    expect(finalRecord.contractStatus).toBe('violated');
+    expect(finalRecord.finalPayloadRef).toBe(`file://${resultsPath}`);
   });
 });

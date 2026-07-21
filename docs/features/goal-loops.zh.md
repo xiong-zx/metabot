@@ -52,5 +52,5 @@ MetaBot 的贡献是让这套机制能跨飞书消息工作：
 
 ## 相关
 
-- [Agent 团队](agent-teams.md) — 把目标和并行队友组合使用
+- [Agent 团队](agent-teams.md) — 把目标和并行 Agent 组合使用
 - [聊天命令](../usage/chat-commands.md) — 完整命令参考

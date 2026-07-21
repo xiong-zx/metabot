@@ -15,7 +15,7 @@
  *   The executor self-restarts on transient SDK/PTY stream errors (capped, see
  *   PersistentClaudeExecutor.maybeRestart). When that budget is exhausted it
  *   ends in 'closed' having emitted 'crashed' first. Rather than discard the
- *   pool slot immediately — which would lose all Agent-Team teammates and any
+ *   pool slot immediately — which would lose all Agent Team agents and any
  *   in-progress work, and route the next acquire to a vanilla fresh executor —
  *   the registry KEEPS the crashed entry parked in the pool (its last sessionId
  *   captured for resume) and respawns it on the next acquire / between-turn
@@ -26,7 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
-import type { ClaudeEffort } from '../../config.js';
+import type { ClaudeEffort, ClaudePermissionMode } from '../../config.js';
 import type { TeamEvent, ApiContext } from './executor.js';
 import {
   PersistentClaudeExecutor,
@@ -56,6 +56,8 @@ export interface RegistryOptions {
   defaultModel?: string;
   /** Default reasoning effort for new executors. */
   defaultEffort?: ClaudeEffort;
+  /** Default Claude Code permission mode for new executors. */
+  defaultPermissionMode?: ClaudePermissionMode;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
@@ -108,7 +110,7 @@ interface PoolEntry {
    * True once the executor has emitted 'crashed' and its in-process restart
    * budget is exhausted (terminal 'closed' after a crash). A crashed entry is
    * KEPT in the pool (not deleted) so the next acquire can respawn it with the
-   * last sessionId, preserving teammates / in-progress work.
+   * last sessionId, preserving Agent Team agents / in-progress work.
    */
   crashed: boolean;
   /**
@@ -194,7 +196,7 @@ export class ExecutorRegistry extends EventEmitter {
         await this.release(chatId, 'model-change');
       } else if (existing.crashed && existing.model === effectiveModel) {
         // Crashed slot — respawn in place (resuming the captured session) so
-        // teammates / in-progress work survive. Honors backoff + respawn cap;
+        // Agent Team agents / in-progress work survive. Honors backoff + respawn cap;
         // returns the live executor on success, or undefined once the budget
         // is exhausted (slot removed) — fall through to fresh create then.
         const respawned = await this.respawnCrashed(chatId, existing, opts);
@@ -267,6 +269,7 @@ export class ExecutorRegistry extends EventEmitter {
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
       effort: this.opts.defaultEffort,
+      permissionMode: this.opts.defaultPermissionMode,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,
@@ -343,7 +346,7 @@ export class ExecutorRegistry extends EventEmitter {
 
   /**
    * Respawn a parked crashed entry in place, resuming its captured sessionId so
-   * teammates / in-progress work survive. Returns the live executor on success,
+   * Agent Team agents / in-progress work survive. Returns the live executor on success,
    * or undefined when the respawn budget is exhausted / backoff not yet elapsed
    * with no budget left — in which case the slot is removed and the caller
    * falls back to a fresh create.
@@ -422,7 +425,7 @@ export class ExecutorRegistry extends EventEmitter {
 
   /**
    * Force-release the executor for chatId (graceful shutdown). Used by
-   * /reset to discard any teammates / background tasks tied to the old
+   * /reset to discard any Agent Team agents / background tasks tied to the old
    * session before starting fresh.
    *
    * Emits 'executor-removed' eagerly (before the underlying shutdown

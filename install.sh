@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MetaBot Installer
 # Usage:
-#   git clone https://github.com/xvirobotics/metabot.git ~/metabot
+#   git clone https://github.com/xiong-zx/metabot.git ~/metabot
 #   cd ~/metabot && bash install.sh
 #   # Optional: METABOT_HOME=/opt/metabot bash install.sh
 set -euo pipefail
@@ -69,7 +69,7 @@ done
 # ============================================================================
 # METABOT_HOME is resolved later (Phase 0.5) — priority: --dir > env var > prompt > default.
 DEFAULT_METABOT_HOME="$HOME/metabot"
-METABOT_REPO="${METABOT_REPO:-https://github.com/xvirobotics/metabot.git}"
+METABOT_REPO="${METABOT_REPO:-https://github.com/xiong-zx/metabot.git}"
 
 # ============================================================================
 # Colors and formatting
@@ -320,6 +320,70 @@ if [[ "$MISSING" -eq 1 ]]; then
   exit 1
 fi
 
+ensure_native_build_deps() {
+  local missing=()
+  command -v python3 &>/dev/null || missing+=("python3")
+  command -v make &>/dev/null || missing+=("make")
+  command -v g++ &>/dev/null || missing+=("g++")
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    success "Native build tools found (python3, make, g++)"
+    return 0
+  fi
+
+  warn "Native npm build tools missing: ${missing[*]}"
+  if [[ "$OS" == "Linux" ]]; then
+    if ! prompt_yn "Install native build tools automatically?"; then
+      error "Native build tools are required for npm packages such as node-pty and better-sqlite3."
+      exit 1
+    fi
+    if command -v apt-get &>/dev/null; then
+      sudo -n apt-get update 2>/dev/null || sudo apt-get update
+      sudo -n apt-get install -y python3 make g++ 2>/dev/null || sudo apt-get install -y python3 make g++
+    elif command -v dnf &>/dev/null; then
+      sudo -n dnf install -y python3 make gcc-c++ 2>/dev/null || sudo dnf install -y python3 make gcc-c++
+    elif command -v yum &>/dev/null; then
+      sudo -n yum install -y python3 make gcc-c++ 2>/dev/null || sudo yum install -y python3 make gcc-c++
+    else
+      error "No supported package manager found. Install python3, make, and g++ manually, then re-run."
+      exit 1
+    fi
+  elif [[ "$OS" == "Darwin" ]]; then
+    if xcode-select -p &>/dev/null; then
+      success "Xcode Command Line Tools found"
+    else
+      error "Install Xcode Command Line Tools first: xcode-select --install"
+      exit 1
+    fi
+  fi
+
+  command -v python3 &>/dev/null && command -v make &>/dev/null && command -v g++ &>/dev/null \
+    || { error "Native build tools are still missing after install attempt."; exit 1; }
+  success "Native build tools ready"
+}
+
+ensure_native_build_deps
+
+configure_npm_native_headers() {
+  if [[ -n "${npm_config_nodedir:-}" ]]; then
+    info "Using existing npm_config_nodedir=${npm_config_nodedir}"
+    return 0
+  fi
+  if [[ "$OS" != "Linux" || ! -f /usr/include/node/node.h ]]; then
+    return 0
+  fi
+  local node_path
+  node_path="$(node -p 'process.execPath' 2>/dev/null || true)"
+  case "$node_path" in
+    /usr/bin/node|/bin/node)
+      export npm_config_nodedir=/usr
+      info "Using system Node headers for native npm builds: npm_config_nodedir=/usr"
+      ;;
+  esac
+}
+
+configure_npm_native_headers
+
 # ============================================================================
 # Phase 2: Clone or update repo
 # ============================================================================
@@ -452,6 +516,46 @@ codex_config_set_feature_default() {
   mv "$tmp" "$config"
 }
 
+codex_config_set_worker_manager_mcp() {
+  local config="$1"
+  local metabot_home="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v home="$metabot_home" '
+    function toml_quote(s) {
+      gsub(/\\/, "\\\\", s)
+      gsub(/"/, "\\\"", s)
+      return s
+    }
+    function print_worker_manager_block() {
+      cmd = "set -a; [ -f \"$METABOT_HOME/.env\" ] && . \"$METABOT_HOME/.env\"; export METABOT_API_URL=${METABOT_API_URL:-http://localhost:${API_PORT:-9100}}; exec node \"$METABOT_HOME/dist/mcp/worker-manager-mcp.js\""
+      print "[mcp_servers.worker-manager]"
+      print "command = \"bash\""
+      print "args = [\"-lc\", \"" toml_quote(cmd) "\"]"
+      print "env = { METABOT_HOME = \"" toml_quote(home) "\" }"
+    }
+    /^[[:space:]]*\[mcp_servers\.worker-manager\][[:space:]]*$/ {
+      if (!inserted) {
+        print_worker_manager_block()
+        inserted=1
+      }
+      skip=1
+      next
+    }
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+      skip=0
+    }
+    !skip { print }
+    END {
+      if (!inserted) {
+        print ""
+        print_worker_manager_block()
+      }
+    }
+  ' "$config" > "$tmp"
+  mv "$tmp" "$config"
+}
+
 ensure_codex_agent_defaults() {
   local codex_home="${CODEX_HOME:-$HOME/.codex}"
   local config="$codex_home/config.toml"
@@ -463,8 +567,9 @@ ensure_codex_agent_defaults() {
   codex_config_set_feature_default "$config" "memories" "true"
   codex_config_set_feature_default "$config" "guardian_approval" "true"
   codex_config_set_feature_default "$config" "prevent_idle_sleep" "true"
+  codex_config_set_worker_manager_mcp "$config" "$METABOT_HOME"
 
-  success "Codex agent defaults ensured in $config (multi_agent, memories, guardian_approval, prevent_idle_sleep)"
+  success "Codex agent defaults ensured in $config (features + worker-manager MCP)"
 }
 
 if ! command -v pm2 &>/dev/null; then

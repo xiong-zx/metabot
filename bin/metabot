@@ -411,11 +411,19 @@ fields = {
     "METABOT_BOT_NAME": "botName",
     "METABOT_CHAT_ID": "chatId",
     "METABOT_RESTART_REASON": "reason",
+    "METABOT_RESTART_SOURCE": "source",
+    "METABOT_RESTART_REQUEST_ID": "requestId",
 }
 for env_name, json_name in fields.items():
     value = os.environ.get(env_name, "").strip()
     if value:
         data[json_name] = value
+
+resume = os.environ.get("METABOT_RESTART_RESUME", "").strip().lower()
+if resume in ("0", "false", "no", "off"):
+    data["resume"] = False
+elif resume in ("1", "true", "yes", "on"):
+    data["resume"] = True
 
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False)
@@ -423,9 +431,110 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 PY
 }
 
+_wait_bridge_health() {
+  local timeout="${1:-60}"
+  _load_bridge_api_config
+  local url="${METABOT_URL%/}/api/health"
+  local i
+  for ((i=0; i<timeout; i++)); do
+    if command -v curl >/dev/null 2>&1 && curl -fsS --connect-timeout 1 --max-time 2 -H "$METABOT_AUTH" "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
 cmd_stop()    { pm2 stop metabot; }
-cmd_restart() { _write_restart_breadcrumb; pm2 restart metabot; }
+cmd_restart() {
+  local wait=false
+  local json=false
+  local wait_timeout=60
+  local reason=""
+  local bot_name=""
+  local chat_id=""
+  local source=""
+  local request_id=""
+  local resume=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --wait) wait=true; shift ;;
+      --json) json=true; shift ;;
+      --timeout)
+        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--timeout requires seconds"; return 2; fi
+        wait_timeout="$2"; shift 2
+        ;;
+      --reason)
+        if [[ $# -lt 2 ]]; then warn "--reason requires text"; return 2; fi
+        reason="$2"; shift 2
+        ;;
+      --bot|--bot-name)
+        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "$1 requires a bot name"; return 2; fi
+        bot_name="$2"; shift 2
+        ;;
+      --chat|--chat-id)
+        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "$1 requires a chat id"; return 2; fi
+        chat_id="$2"; shift 2
+        ;;
+      --source)
+        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--source requires a value"; return 2; fi
+        source="$2"; shift 2
+        ;;
+      --request-id)
+        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--request-id requires a value"; return 2; fi
+        request_id="$2"; shift 2
+        ;;
+      --resume) resume="1"; shift ;;
+      --no-resume) resume="0"; shift ;;
+      --help|-h)
+        echo "Usage: metabot restart [--wait] [--json] [--timeout SEC] [--reason TEXT] [--bot NAME] [--chat ID] [--source SOURCE] [--resume|--no-resume]"
+        return 0
+        ;;
+      *)
+        warn "Unknown restart option: $1"
+        return 2
+        ;;
+    esac
+  done
+
+  if ! [[ "$wait_timeout" =~ ^[0-9]+$ ]] || [[ "$wait_timeout" -lt 1 ]]; then
+    warn "--timeout must be a positive integer"
+    return 2
+  fi
+
+  [[ -n "$bot_name" ]] && export METABOT_BOT_NAME="$bot_name"
+  [[ -n "$chat_id" ]] && export METABOT_CHAT_ID="$chat_id"
+  [[ -n "$reason" ]] && export METABOT_RESTART_REASON="$reason"
+  [[ -n "$source" ]] && export METABOT_RESTART_SOURCE="$source"
+  [[ -n "$request_id" ]] && export METABOT_RESTART_REQUEST_ID="$request_id"
+  [[ -n "$resume" ]] && export METABOT_RESTART_RESUME="$resume"
+
+  _write_restart_breadcrumb
+  local restart_ok=true
+  if ! pm2 restart metabot; then
+    restart_ok=false
+    if pm2 start "$METABOT_HOME/ecosystem.config.cjs"; then
+      restart_ok=true
+    fi
+  fi
+  pm2 save --force 2>/dev/null || true
+
+  local health_ok=true
+  if [[ "$wait" == true ]]; then
+    _wait_bridge_health "$wait_timeout" || health_ok=false
+  fi
+
+  if [[ "$json" == true ]]; then
+    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s}\n' \
+      "$([[ "$restart_ok" == true ]] && echo true || echo false)" \
+      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
+      "$wait" \
+      "$wait_timeout"
+  fi
+
+  [[ "$restart_ok" == true && "$health_ok" == true ]]
+}
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
@@ -478,6 +587,7 @@ file_env = load_env(home / ".env")
 
 def env(name, default=None):
     return os.environ.get(name) or file_env.get(name) or default
+
 
 def run(cmd, timeout=4):
     try:
@@ -591,6 +701,7 @@ check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["
       "Check VPN/network and METABOT_CORE_URL.",
       False,
       {"url": core_url, "status": core_health["status"], "tokenPresent": core_token_present, "response": core_health["json"] or core_health["bodyPreview"]})
+
 
 bots_data = []
 bots_path = home / "bots.json"
@@ -827,22 +938,63 @@ cmd_bridge_api() {
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
       ;;
     talk|t)
-      local bot="$1" chat="$2"; shift 2 2>/dev/null || true
+      local async=false send_cards=true wait_ms="${METABOT_TALK_WAIT_MS:-25000}" wait_ms_set=false
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --async)
+            async=true
+            if [[ "$wait_ms_set" != true ]]; then wait_ms=""; fi
+            shift ;;
+          --sync)
+            async=false; wait_ms=""; wait_ms_set=true; shift ;;
+          --no-cards)
+            send_cards=false; shift ;;
+          --wait-ms)
+            wait_ms="${2:-}"; wait_ms_set=true; shift 2 ;;
+          --)
+            shift; break ;;
+          -*)
+            echo "Unknown metabot talk option: $1" >&2
+            echo "Usage: metabot talk [--async|--sync] [--no-cards] [--wait-ms N] [peer/]<botName> <chatId> <prompt>" >&2
+            exit 1 ;;
+          *)
+            break ;;
+        esac
+      done
+      local bot="${1:-}" chat="${2:-}"
+      if [[ $# -ge 2 ]]; then shift 2; fi
       local prompt="$*"
       if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${prompt:-}" ]]; then
-        echo "Usage: metabot talk [peer/]<botName> <chatId> <prompt>"
+        echo "Usage: metabot talk [--async|--sync] [--no-cards] [--wait-ms N] [peer/]<botName> <chatId> <prompt>"
         echo "  Examples:"
         echo "    metabot talk mybot chat123 'fix the bug'"
+        echo "    metabot talk --sync mybot chat123 'wait until complete'"
+        echo "    metabot talk --async --no-cards mybot private-chat 'run privately'"
+        echo "    metabot talk --wait-ms 25000 mybot chat123 'return fast or give me a task id'"
         echo "    metabot talk alice/backend-bot chat123 'deploy to staging'"
         exit 1
       fi
       python3 -c "
 import json, sys
-print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': True}))
-" "$bot" "$chat" "$prompt" | \
+payload = {'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': sys.argv[4] == 'true'}
+if sys.argv[5] == 'true':
+    payload['async'] = True
+if sys.argv[6]:
+    payload['waitMs'] = int(sys.argv[6])
+print(json.dumps(payload))
+" "$bot" "$chat" "$prompt" "$send_cards" "$async" "$wait_ms" | \
       curl -s -X POST "$METABOT_URL/api/talk" \
         -H "$METABOT_AUTH" -H "Content-Type: application/json" \
         -d @-
+      ;;
+    talk-status|ts)
+      local task_id="${1:-}"
+      if [[ -z "$task_id" ]]; then
+        echo "Usage: metabot talk-status <taskId>"
+        exit 1
+      fi
+      curl -s --connect-timeout 10 --max-time 30 \
+        -H "$METABOT_AUTH" "$METABOT_URL/api/talk/$task_id" | _json
       ;;
     schedule|sched|sc)
       local subcmd="${1:-list}"; shift 2>/dev/null || true
@@ -1088,18 +1240,32 @@ argv = sys.argv[3:]
 def usage():
     print("""metabot teams - MetaBot Agent Teams
   metabot teams list
-  metabot teams create <team> [--description text]
-  metabot teams delete <team>
+  metabot teams create <team> [--description text] [--actor-role admin|user|pm]
+  metabot teams delete <team> [--actor-role admin|user|pm]
   metabot teams status <team> [--summary|--plain]
-  metabot teams bind <team> <chatId> [--display]
-  metabot teams start|stop <team>
+  metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
+  metabot teams start|stop <team> [--actor-role admin|user|pm]
+  metabot teams activity <team> [--agent name] [--run-id id] [--task-id id] [--chat chatId] [--source name] [--limit n] [--summary|--plain]
   metabot teams dispatch <team> <agent> <subject> [--description text] [--message text] [--from name] [--plain]
   metabot teams next <team> <agent> [--read] [--summary|--plain]
   metabot teams watch <team> [--interval sec] [--count n] [--summary|--plain]
+  metabot teams templates list [name]
+  metabot teams templates export <name> [--version n]
+  metabot teams templates diff <name> --from n [--to n]
+  metabot teams templates import <json> [--source name] [--actor-role admin|user|pm]
+  metabot teams proposals list [--status pending|approved|rejected]
+  metabot teams proposals create [template|ruleset] <json> [--summary text] [--by name] [--role admin|user|pm|manager|agent]
+  metabot teams proposals approve <id> [--by name] [--actor-role admin|user|pm] [--reason text]
+  metabot teams proposals reject <id> [--by name] [--actor-role admin|user|pm] [--reason text]
+  metabot teams instances list [--template name]
+  metabot teams instances resolve <template> [--chat chatId|--project projectId|--global] [--pm-bot name] [--actor-role admin|user|pm]
+  metabot teams rules list [name]
+  metabot teams rules set <name> --scope scope --rule text [--actor-role admin|user|pm]
+  metabot teams rules context --ref name[@version] [--rule text]
   metabot teams agents list <team>
-  metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--prompt p]
-  metabot teams agents stop <team> <name>
-  metabot teams agents delete <team> <name>
+  metabot teams agents spawn <team> <name> [--role r] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model m] [--reasoning-effort e] [--approval-policy p] [--sandbox s] [--timeout-ms n] [--idle-timeout-ms n] [--allowed-tools a,b] [--prompt p]
+  metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
+  metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
   metabot teams send <team> <to> <message> [--from name] [--summary text]
   metabot teams inbox <team> <name> [--unread] [--read] [--summary|--plain]
   metabot teams tasks list <team> [--summary|--plain]
@@ -1113,7 +1279,8 @@ def usage():
   metabot teams runs list <team> [--summary|--plain]
   metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
   metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
-  metabot teams runs output|stop <team> <runId>""")
+  metabot teams runs output <team> <runId>
+  metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]""")
 
 def parse(args):
     pos, flags, i = [], {}, 0
@@ -1138,6 +1305,9 @@ def parse(args):
             pos.append(a)
             i += 1
     return pos, flags
+
+def actor_role(flags):
+    return flags.get("actor-role") or flags.get("as-role") or flags.get("role")
 
 def req_data(method, path, body=None):
     if isinstance(body, dict):
@@ -1193,6 +1363,23 @@ def parse_number_list(value):
             nums.append(num)
     return nums or None
 
+def array_flag(flags, name):
+    value = flags.get(name)
+    if not isinstance(value, str):
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+def parse_rule_ref(value):
+    name, _, version_raw = value.partition("@")
+    ref = {"name": name}
+    try:
+        version = int(version_raw) if version_raw else None
+    except Exception:
+        version = None
+    if version and version > 0:
+        ref["version"] = version
+    return ref
+
 def default_agent_name():
     import os
     return os.environ.get("METABOT_TEAM_AGENT") or os.environ.get("METABOT_AGENT_NAME")
@@ -1246,6 +1433,24 @@ def format_runs(body):
     lines.extend(f"- {run_line(run)}" for run in runs[:12])
     if len(runs) > 12:
         lines.append(f"... {len(runs) - 12} more")
+    return "\n".join(lines)
+
+def activity_line(item):
+    agent = f" @{item.get('agentName')}" if item.get("agentName") else ""
+    run = f" run={item.get('runId')}" if item.get("runId") else ""
+    tasks = ""
+    if item.get("taskIds"):
+        tasks = " tasks=#" + ",#".join(str(x) for x in item.get("taskIds"))
+    stage = f"/{item.get('lifecycleStage')}" if item.get("lifecycleStage") else ""
+    preview = f" - {compact(item.get('responsePreview'), 100)}" if item.get("responsePreview") else ""
+    return f"{item.get('lifecycleKey')} {item.get('status')}{stage}{agent}{run}{tasks}{preview}"
+
+def format_activity(body):
+    activity = body.get("activity", []) if isinstance(body, dict) else []
+    lines = [f"Activity: {len(activity)} records"]
+    lines.extend(f"- {activity_line(item)}" for item in activity[:20])
+    if len(activity) > 20:
+        lines.append(f"... {len(activity) - 20} more")
     return "\n".join(lines)
 
 def format_inbox(body):
@@ -1305,10 +1510,11 @@ if cmd == "list":
 elif cmd == "create":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams create <team>")
-    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description")})
+    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description"), "actorRole": actor_role(flags)})
 elif cmd == "delete":
-    if not rest: raise SystemExit("Usage: metabot teams delete <team>")
-    req("DELETE", f"/api/agent-teams/{enc(rest[0])}")
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit("Usage: metabot teams delete <team>")
+    req("DELETE", f"/api/agent-teams/{enc(pos[0])}", {"actorRole": actor_role(flags)})
 elif cmd == "status":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams status <team>")
@@ -1327,10 +1533,33 @@ elif cmd == "bind":
     req("PATCH", f"/api/agent-teams/{enc(pos[0])}", {
         "chatIds": chat_ids,
         "displayChatIds": display_chat_ids,
+        "actorRole": actor_role(flags),
     })
 elif cmd in ("start", "stop"):
-    if not rest: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
-    req("POST", f"/api/agent-teams/{enc(rest[0])}/{cmd}", {})
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
+    req("POST", f"/api/agent-teams/{enc(pos[0])}/{cmd}", {"actorRole": actor_role(flags)})
+elif cmd == "activity":
+    pos, flags = parse(rest)
+    if not pos:
+        raise SystemExit("Usage: metabot teams activity <team>")
+    params = {}
+    for flag_name, query_name in (
+        ("agent", "agent"),
+        ("run-id", "runId"),
+        ("run", "runId"),
+        ("task-id", "taskId"),
+        ("task", "taskId"),
+        ("chat", "chatId"),
+        ("chat-id", "chatId"),
+        ("source", "source"),
+        ("limit", "limit"),
+    ):
+        if flags.get(flag_name):
+            params[query_name] = str(flags.get(flag_name))
+    query = ("?" + urllib.parse.urlencode(params)) if params else ""
+    body = req_data("GET", f"/api/agent-teams/{enc(pos[0])}/activity{query}")
+    emit(format_activity(body) if wants_summary(flags) else body)
 elif cmd == "dispatch":
     pos, flags = parse(rest)
     if len(pos) < 3: raise SystemExit("Usage: metabot teams dispatch <team> <agent> <subject>")
@@ -1391,6 +1620,118 @@ elif cmd == "watch":
         emit(format_status(status) if wants_summary(flags) else status)
         if i < count - 1:
             time.sleep(interval)
+elif cmd == "templates":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        name = args[0] if args else None
+        req("GET", "/api/agent-teams/templates" + (f"/{enc(name)}" if name else ""))
+    elif sub == "export":
+        pos, flags = parse(args)
+        name = pos[0] if pos else None
+        if not name: raise SystemExit("Usage: metabot teams templates export <name> [--version n]")
+        version = flags.get("version")
+        req("GET", f"/api/agent-teams/templates/{enc(name)}/export" + (f"?version={enc(version)}" if version else ""))
+    elif sub == "diff":
+        pos, flags = parse(args)
+        name = pos[0] if pos else None
+        from_version = flags.get("from")
+        if not name or not from_version: raise SystemExit("Usage: metabot teams templates diff <name> --from n [--to n]")
+        query = f"?from={enc(from_version)}"
+        if flags.get("to"):
+            query += f"&to={enc(flags.get('to'))}"
+        req("GET", f"/api/agent-teams/templates/{enc(name)}/diff{query}")
+    elif sub == "import":
+        pos, flags = parse(args)
+        raw = " ".join(pos)
+        if not raw: raise SystemExit("Usage: metabot teams templates import <json> [--source name]")
+        req("POST", "/api/agent-teams/templates", {
+            "template": json.loads(raw),
+            "source": flags.get("source") or "cli",
+            "actorRole": actor_role(flags),
+        })
+    else:
+        raise SystemExit("Usage: metabot teams templates list|export|diff|import ...")
+elif cmd == "proposals":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        pos, flags = parse(args)
+        status = flags.get("status")
+        req("GET", "/api/agent-teams/proposals" + (f"?status={enc(status)}" if status else ""))
+    elif sub == "create":
+        pos, flags = parse(args)
+        explicit_kind = pos[0] if pos and pos[0] in ("template", "ruleset") else None
+        if explicit_kind:
+            pos = pos[1:]
+        raw = " ".join(pos)
+        if not raw:
+            raise SystemExit("Usage: metabot teams proposals create [template|ruleset] <json>")
+        parsed = json.loads(raw)
+        body = {"kind": explicit_kind, "body": parsed} if explicit_kind else parsed
+        if flags.get("summary"):
+            body["summary"] = flags.get("summary")
+        if flags.get("by"):
+            body["requestedBy"] = flags.get("by")
+        if flags.get("role"):
+            body["requestedByRole"] = flags.get("role")
+        req("POST", "/api/agent-teams/proposals", body)
+    elif sub in ("approve", "reject"):
+        pos, flags = parse(args)
+        if not pos:
+            raise SystemExit(f"Usage: metabot teams proposals {sub} <id>")
+        req("POST", f"/api/agent-teams/proposals/{enc(pos[0])}/{sub}", {
+            "actorRole": actor_role(flags),
+            "decidedBy": flags.get("by"),
+            "reason": flags.get("reason"),
+        })
+    else:
+        raise SystemExit("Usage: metabot teams proposals list|create|approve|reject ...")
+elif cmd == "instances":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        pos, flags = parse(args)
+        template = flags.get("template")
+        req("GET", "/api/agent-teams/instances" + (f"?template={enc(template)}" if template else ""))
+    elif sub == "resolve":
+        pos, flags = parse(args)
+        if not pos: raise SystemExit("Usage: metabot teams instances resolve <template> [--chat id|--project id|--global]")
+        scope_type = "global" if flags.get("global") else ("project" if flags.get("project") else "chat")
+        req("POST", "/api/agent-teams/instances/resolve", {
+            "templateName": pos[0],
+            "scopeType": scope_type,
+            "chatId": flags.get("chat"),
+            "projectId": flags.get("project"),
+            "pmBot": flags.get("pm-bot"),
+            "createIfMissing": True,
+            "allowGlobal": bool(flags.get("global")),
+            "actorRole": actor_role(flags),
+        })
+    else:
+        raise SystemExit("Usage: metabot teams instances list|resolve ...")
+elif cmd == "rules":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        name = args[0] if args else None
+        req("GET", "/api/agent-teams/rules" + (f"/{enc(name)}" if name else ""))
+    elif sub == "set":
+        pos, flags = parse(args)
+        rules = [{"text": rule} for rule in array_flag(flags, "rule")]
+        if not pos or not flags.get("scope") or not rules:
+            raise SystemExit("Usage: metabot teams rules set <name> --scope scope --rule text")
+        req("POST", "/api/agent-teams/rules", {
+            "name": pos[0],
+            "scope": flags.get("scope"),
+            "rules": rules,
+            "source": "cli",
+            "actorRole": actor_role(flags),
+        })
+    elif sub == "context":
+        pos, flags = parse(args)
+        req("POST", "/api/agent-teams/rules/context", {
+            "refs": [parse_rule_ref(ref) for ref in array_flag(flags, "ref")],
+            "inlineRules": [{"text": rule} for rule in array_flag(flags, "rule")],
+        })
+    else:
+        raise SystemExit("Usage: metabot teams rules list|set|context ...")
 elif cmd == "agents":
     sub, args = (rest[0] if rest else ""), rest[1:]
     if sub == "list":
@@ -1400,14 +1741,27 @@ elif cmd == "agents":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams agents spawn <team> <name>")
         req("POST", f"/api/agent-teams/{enc(pos[0])}/agents", {
-            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine") or "codex", "prompt": flags.get("prompt")
+            "name": pos[1],
+            "role": flags.get("role"),
+            "engine": flags.get("engine") or "codex",
+            "model": flags.get("model"),
+            "reasoningEffort": flags.get("reasoning-effort"),
+            "approvalPolicy": flags.get("approval-policy"),
+            "sandbox": flags.get("sandbox"),
+            "timeoutMs": int(flags["timeout-ms"]) if str(flags.get("timeout-ms") or "").isdigit() else None,
+            "idleTimeoutMs": int(flags["idle-timeout-ms"]) if str(flags.get("idle-timeout-ms") or "").isdigit() else None,
+            "allowedTools": array_flag(flags, "allowed-tools"),
+            "prompt": flags.get("prompt"),
+            "actorRole": flags.get("actor-role") or flags.get("as-role"),
         })
     elif sub == "stop":
-        if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
-        req("POST", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}/stop", {})
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
+        req("POST", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
     elif sub in ("delete", "remove"):
-        if len(args) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
-        req("DELETE", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}")
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
+        req("DELETE", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}", {"actorRole": actor_role(flags)})
     else:
         raise SystemExit("Usage: metabot teams agents list|spawn|stop|delete ...")
 elif cmd == "send":
@@ -1513,7 +1867,8 @@ elif cmd == "runs":
         if sub == "output":
             req("GET", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/output")
         else:
-            req("POST", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/stop", {})
+            pos, flags = parse(args)
+            req("POST", f"/api/agent-teams/{enc(pos[0])}/runs/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
     else:
         raise SystemExit("Usage: metabot teams runs list|create|update|output|stop ...")
 else:
@@ -1542,7 +1897,8 @@ print_help() {
   echo "  Bridge daemon API (localhost:9100):"
   echo "    metabot bots                       List all bots (local + peer)"
   echo "    metabot bot <name>                 Get bot details"
-  echo "    metabot talk <bot> <chatId> <msg>  Talk to a bot (bridge /api/talk)"
+  echo "    metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <msg>  Talk to a bot (defaults to bounded wait, then task status)"
+  echo "    metabot talk-status <taskId>       Check an async talk task with local auth"
   echo "    metabot schedule …                 Task scheduling (list/add/cron/pause/resume/cancel)"
   echo "    metabot teams …                    MetaBot Agent Teams (agents/tasks/messages/runs)"
   echo "    metabot peers                      List peers and their status"
@@ -1559,11 +1915,11 @@ case "${1:-}" in
   update|up)    shift; cmd_update "$@" ;;
   start)        cmd_start ;;
   stop)         cmd_stop ;;
-  restart|rs)   cmd_restart ;;
+  restart|rs)   shift; cmd_restart "$@" ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;
-  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
+  bots|b|bot|talk|t|talk-status|ts|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
   *)            cmd_delegate "$@" ;;

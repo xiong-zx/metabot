@@ -34,8 +34,8 @@
  * enqueued user message = one turn (or a tool_result injection). The PTY
  * session consumes that iterable and types prompts into the TUI as keystrokes.
  *
- * This file is types/interfaces ONLY — no runtime logic — so every teammate
- * can build against a stable shape in parallel.
+ * This file is types/interfaces ONLY — no runtime logic — so every Agent Team
+ * contributor can build against a stable shape in parallel.
  */
 
 import type { SDKMessage } from '../executor.js';
@@ -70,8 +70,8 @@ export type PtyPromptSource = AsyncIterable<PtyUserMessage>;
  * Options accepted by {@link ptyQuery}. This is intentionally a SUBSET of the
  * Agent SDK's query options — only the fields the PTY backend can honor. The
  * caller (persistent-executor.ts) passes its full `queryOptions` object; extra
- * fields are ignored. We list the ones that matter so teammates know what to
- * wire through to the spawned `claude` process.
+ * fields are ignored. We list the ones that matter so Agent Team agents know
+ * what to wire through to the spawned `claude` process.
  */
 export interface PtyQueryOptions {
   /** Working directory for the claude process. Drives the jsonl path. */
@@ -204,7 +204,7 @@ export type PtyQueryFn = (args: {
  *   - Self-generate a session id (uuid) so the jsonl path is predictable, OR
  *     adopt `resume`.
  *   - spawn `claude` (NO -p) with --session-id/--resume, --settings,
- *     --dangerously-skip-permissions, --append-system-prompt.
+ *     a suitable permission mode, and --append-system-prompt.
  *   - Wait for TUI readiness (the `❯` input box) before accepting input.
  *   - typePrompt(): feed a prompt as keystrokes + submit (Enter), with the
  *     double-Enter safeguard proven in the POC.

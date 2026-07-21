@@ -139,6 +139,29 @@ describe('TaskScheduler one-time tasks — creation', () => {
     expect(scheduler.taskCount()).toBe(2);
     scheduler.destroy();
   });
+
+  it('reuses an active task when dedupeKey matches', () => {
+    const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const first = scheduler.scheduleTask({
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'p1',
+      delaySeconds: 60,
+      dedupeKey: 'restart-resume:b:c:m1',
+    });
+    const second = scheduler.scheduleTask({
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'p2',
+      delaySeconds: 120,
+      dedupeKey: 'restart-resume:b:c:m1',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(second.prompt).toBe('p1');
+    expect(scheduler.listTasks()).toHaveLength(1);
+    scheduler.destroy();
+  });
 });
 
 // =====================================================================
@@ -286,6 +309,32 @@ describe('TaskScheduler one-time tasks — persistence', () => {
     expect(tasks[0].id).toBe('fresh-task-1');
     s.destroy();
   });
+
+  it('retries a one-shot task that was executing when the bridge restarted', () => {
+    const executingTask = {
+      id: 'executing-task-1',
+      botName: 'b',
+      chatId: 'c',
+      prompt: 'resume me',
+      executeAt: Date.now() - 1_000,
+      sendCards: true,
+      status: 'executing',
+      createdAt: Date.now() - 5_000,
+      retryCount: 0,
+    };
+    fs.mkdirSync(PERSIST_DIR, { recursive: true });
+    fs.writeFileSync(PERSIST_FILE, JSON.stringify({ tasks: [executingTask], recurringTasks: [] }));
+
+    const s = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const tasks = s.listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: 'executing-task-1',
+      status: 'pending',
+      retryCount: 1,
+    });
+    s.destroy();
+  });
 });
 
 // =====================================================================
@@ -312,6 +361,7 @@ describe('TaskScheduler one-time tasks — execution', () => {
         prompt: 'Do work',
         chatId: 'chat1',
         userId: 'scheduler',
+        lifecycleKey: expect.stringMatching(/^schedule:/),
       }),
     );
     scheduler.destroy();
@@ -350,7 +400,74 @@ describe('TaskScheduler one-time tasks — execution', () => {
 // =====================================================================
 
 describe('TaskScheduler one-time tasks — retry when chat busy', () => {
-  it('marks task failed and sends notification after max retries with busy chat', async () => {
+  it('executes the task once the chat frees up instead of failing (busy-then-free)', async () => {
+    let busy = true;
+    const mockBridge = {
+      isBusy: vi.fn(() => busy),
+      executeApiTask: vi.fn().mockResolvedValue({ success: true }),
+    };
+    const mockSender = { sendTextNotice: vi.fn().mockResolvedValue(undefined) };
+    const registry = {
+      get: vi.fn().mockReturnValue({ bridge: mockBridge, sender: mockSender, config: {} }),
+      list: vi.fn().mockReturnValue([]),
+    } as unknown as BotRegistry;
+
+    const scheduler = new TaskScheduler(registry, createMockLogger());
+    scheduler.scheduleTask({
+      botName: 'b',
+      chatId: 'busy-then-free',
+      prompt: 'worker checkup',
+      label: 'checkup',
+      delaySeconds: 0,
+    });
+
+    // Busy well past the old 5 × 30s budget — must still be waiting, not failed.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(mockBridge.executeApiTask).not.toHaveBeenCalled();
+    expect(mockSender.sendTextNotice).not.toHaveBeenCalled();
+
+    busy = false;
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(mockBridge.executeApiTask).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'busy-then-free', prompt: 'worker checkup' }),
+    );
+
+    scheduler.destroy();
+  });
+
+  it('does not fail a busy recurring checkup child, and skips the red notice', async () => {
+    const mockBridge = {
+      isBusy: vi.fn().mockReturnValue(true),
+      executeApiTask: vi.fn(),
+    };
+    const mockSender = { sendTextNotice: vi.fn().mockResolvedValue(undefined) };
+    const registry = {
+      get: vi.fn().mockReturnValue({ bridge: mockBridge, sender: mockSender, config: {} }),
+      list: vi.fn().mockReturnValue([]),
+    } as unknown as BotRegistry;
+
+    const scheduler = new TaskScheduler(registry, createMockLogger());
+    const recurring = scheduler.scheduleRecurring({
+      botName: 'b',
+      chatId: 'always-busy',
+      prompt: 'inspect workers',
+      cronExpr: '*/5 * * * *',
+      label: 'worker checkup',
+    });
+
+    // Occurrence fires while busy: it must keep retrying, not fail immediately.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(mockSender.sendTextNotice).not.toHaveBeenCalled();
+    expect(scheduler.getRecurringTask(recurring.id)?.status).toBe('active');
+
+    // Even after the whole busy window expires, no red notice per occurrence.
+    await vi.advanceTimersByTimeAsync(40 * 60_000);
+    expect(mockSender.sendTextNotice).not.toHaveBeenCalled();
+
+    scheduler.destroy();
+  });
+
+  it('marks task failed and sends notification after the busy window expires', async () => {
     const mockBridge = {
       isBusy: vi.fn().mockReturnValue(true), // always busy
       executeApiTask: vi.fn(),
@@ -376,8 +493,8 @@ describe('TaskScheduler one-time tasks — retry when chat busy', () => {
       delaySeconds: 0,
     });
 
-    // Initial fire + 5 retries (MAX_RETRIES = 5), each 30s apart
-    await vi.advanceTimersByTimeAsync(5 * 30_100 + 200);
+    // Busy for the whole 30-minute wait window (exponential backoff, 5m cap).
+    await vi.advanceTimersByTimeAsync(45 * 60_000);
 
     expect(mockSender.sendTextNotice).toHaveBeenCalledWith(
       'always-busy',
@@ -410,11 +527,10 @@ describe('TaskScheduler one-time tasks — retry when chat busy', () => {
       delaySeconds: 0,
     });
 
-    // After 3 retries
-    await vi.advanceTimersByTimeAsync(3 * 30_100 + 200);
+    // Exponential backoff: retries land at +30s, +90s, +210s.
+    await vi.advanceTimersByTimeAsync(210_000 + 200);
 
-    // The task should still exist (not yet at max retries = 5)
-    // registry.get should have been called 4 times (initial + 3 retries)
+    // Still pending inside the busy window; initial fire + 3 retries.
     expect(registry.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(4);
 
     scheduler.destroy();

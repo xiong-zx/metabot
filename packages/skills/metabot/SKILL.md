@@ -217,14 +217,14 @@ metabot inbox clear   [--chat <id>] [--all-chats]
 ## `metabot teams` — local Agent Teams
 
 Agent Teams live in the local bridge (`/api/agent-teams/*`) and are optimized
-for Codex-first delegation. New CLI-spawned teammates default to `codex`; pass
+for Codex-first delegation. New CLI-spawned agents default to `codex`; pass
 `--engine claude|kimi` only for explicit exceptions.
 
 Lead path:
 
 ```bash
-metabot teams create <team> --description "..."
-metabot teams agents spawn <team> <agent> --role "runtime" --prompt "Own runtime work."
+metabot teams create <team> --description "..." --actor-role pm
+metabot teams agents spawn <team> <agent> --role "runtime" --actor-role pm --prompt "Own runtime work."
 metabot teams dispatch <team> <agent> "Fix update package" --description "Self-contained scope." --plain
 metabot teams status <team> --summary
 metabot teams runs list <team>
@@ -238,7 +238,7 @@ same reviewer/verifier. The supervisor starts one run per ready task, up to
 `METABOT_AGENT_TEAM_MAX_PARALLEL_PER_AGENT` concurrent runs per agent
 (default: `4`), using isolated run-scoped chats for parallel same-agent work.
 
-Teammate path:
+Agent path:
 
 ```bash
 metabot teams next <team> <agent> --read
@@ -249,7 +249,7 @@ metabot teams tasks block <team> <taskId> "blocked reason" --blocked-by <id,id>
 metabot teams send <team> lead "Completed task <taskId>: ..."
 ```
 
-For repeated local teammate use, set `METABOT_TEAM_AGENT=<agent>` and omit the
+For repeated local agent use, set `METABOT_TEAM_AGENT=<agent>` and omit the
 owner argument in `tasks claim`.
 
 Add `--summary` or `--plain` to `status`, `next`, `inbox`, `tasks list`,
@@ -316,7 +316,7 @@ bridge `.env`). These commands act on the bot process running on this host:
 ```bash
 metabot bots                              # list all bots (local + peer)
 metabot bot <name>                        # get bot details
-metabot talk [peer/]<bot> <chatId> <msg>  # talk to a bot via the bridge /api/talk
+metabot talk [--async|--sync] [peer/]<bot> <chatId> <msg>  # talk to a bot via bridge /api/talk
 metabot teams ...                          # local Agent Teams
 metabot schedule list|add|cron|pause|resume|cancel …   # task scheduler
 metabot peers                             # list peers and status
@@ -356,7 +356,7 @@ the unified form:
 | `mm <cmd>` | `metabot memory <cmd>` |
 | `mh <cmd>` | `metabot skills <cmd>` |
 | `mb skills <cmd>` (was → `bot-skills`) | `metabot skills <cmd>` (central Skill Hub) |
-| `mb talk <bot> <chatId> "<msg>"` | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`) |
+| `mb talk <bot> <chatId> "<msg>"` | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`, bounded wait by default; use `--sync` to block) |
 | `mb bots / schedule / voice / stats / peers / metrics / health` | `metabot <same subcommand>` |
 | (n/a) | `metabot agents talk <peer>[/<bot>] <chatId> "<msg>"` (central-registry P2P variant) |
 | (n/a) | `metabot agents list / register / heartbeat / visible / hide` (new in the agent-bus batch) |

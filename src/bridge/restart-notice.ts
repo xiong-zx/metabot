@@ -26,6 +26,10 @@ export interface RestartBreadcrumb {
   botName?: string;
   chatId?: string;
   reason?: string;
+  source?: string;
+  requestId?: string;
+  /** Whether restart recovery should schedule an agent continuation turn. */
+  resume?: boolean;
 }
 
 let restartBreadcrumb: RestartBreadcrumb | undefined;
@@ -35,6 +39,24 @@ const remindedChats = new Set<string>();
 function breadcrumbPath(): string {
   const dir = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
   return path.join(dir, BREADCRUMB_FILENAME);
+}
+
+export function writeRestartBreadcrumb(input: Omit<RestartBreadcrumb, 'restartedAt'> & { restartedAt?: number }): string {
+  const file = breadcrumbPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const data: RestartBreadcrumb = {
+    restartedAt: input.restartedAt ?? Math.floor(Date.now() / 1000),
+    ...(input.botName ? { botName: input.botName } : {}),
+    ...(input.chatId ? { chatId: input.chatId } : {}),
+    ...(input.reason ? { reason: input.reason } : {}),
+    ...(input.source ? { source: input.source } : {}),
+    ...(input.requestId ? { requestId: input.requestId } : {}),
+    ...(input.resume !== undefined ? { resume: input.resume } : {}),
+  };
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  fs.renameSync(tmp, file);
+  return file;
 }
 
 /**
@@ -53,6 +75,9 @@ export function loadRestartBreadcrumb(): void {
         ...(typeof parsed.botName === 'string' && parsed.botName ? { botName: parsed.botName } : {}),
         ...(typeof parsed.chatId === 'string' && parsed.chatId ? { chatId: parsed.chatId } : {}),
         ...(typeof parsed.reason === 'string' && parsed.reason ? { reason: parsed.reason } : {}),
+        ...(typeof parsed.source === 'string' && parsed.source ? { source: parsed.source } : {}),
+        ...(typeof parsed.requestId === 'string' && parsed.requestId ? { requestId: parsed.requestId } : {}),
+        ...(typeof parsed.resume === 'boolean' ? { resume: parsed.resume } : {}),
       };
       restartedAtMs = parsed.restartedAt * 1000; // breadcrumb stores epoch seconds
     }
@@ -70,6 +95,7 @@ export function loadRestartBreadcrumb(): void {
 /** True if we should inject the restart reminder for this chat's next turn. */
 export function shouldRemindRestart(chatId: string): boolean {
   if (!isFreshRestart()) return false;
+  if (restartBreadcrumb?.resume === false) return false;
   return !remindedChats.has(chatId);
 }
 
@@ -91,4 +117,8 @@ export function isFreshRestart(): boolean {
 export function getRestartBreadcrumb(): RestartBreadcrumb | undefined {
   if (!isFreshRestart()) return undefined;
   return restartBreadcrumb;
+}
+
+export function shouldResumeAfterRestart(): boolean {
+  return isFreshRestart() && restartBreadcrumb?.resume !== false;
 }

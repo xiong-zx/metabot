@@ -1,7 +1,7 @@
 # `metabot-team` — MetaBot Agent Team skill bundle
 
 This directory ships the canonical Agent Team skill for `metabot teams`.
-It is optimized for Codex-first delegation, teammate task claiming, concise
+It is optimized for Codex-first delegation, agent task claiming, concise
 handoffs, run inspection, and lead reporting.
 
 ## Install

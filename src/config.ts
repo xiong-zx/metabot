@@ -2,7 +2,17 @@ import * as dotenv from 'dotenv';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import type {
+  AgentTeamConfig,
+  AgentTeamQuotas,
+  TeamAgentApprovalPolicy,
+  TeamAgentKind,
+  TeamAgentPromotionStatus,
+  TeamAgentReasoningEffort,
+  TeamAgentSandbox,
+  TeamInstanceScope,
+  TeamRuleSetRef,
+} from './agent-teams/team-store.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -38,11 +48,24 @@ loadEnvFiles();
 export type EngineName = 'claude' | 'kimi' | 'codex';
 export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
 
 const CLAUDE_EFFORT_VALUES: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const CLAUDE_PERMISSION_MODE_VALUES: ReadonlySet<string> = new Set([
+  'default',
+  'acceptEdits',
+  'bypassPermissions',
+  'plan',
+  'dontAsk',
+  'auto',
+]);
 
 function parseClaudeEffort(value: string | undefined): ClaudeEffort | undefined {
   return value && CLAUDE_EFFORT_VALUES.has(value) ? (value as ClaudeEffort) : undefined;
+}
+
+function parseClaudePermissionMode(value: string | undefined): ClaudePermissionMode | undefined {
+  return value && CLAUDE_PERMISSION_MODE_VALUES.has(value) ? (value as ClaudePermissionMode) : undefined;
 }
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
@@ -83,7 +106,7 @@ export interface BotConfigBase {
   engine?: EngineName;
   /**
    * Research-PM mode. When true, the bot receives the PM workflow contract
-   * and the bridge re-arms the 40-minute worker check-in reminder after turns.
+   * and the bridge re-arms the 1-hour worker check-in reminder after turns.
    */
   pmPrompt?: boolean;
   claude: {
@@ -93,6 +116,8 @@ export interface BotConfigBase {
     model: string | undefined;
     /** Reasoning effort for the Claude Agent SDK's `effort` query option. */
     effort: ClaudeEffort | undefined;
+    /** Claude Code permission mode for tool execution. Defaults to root-aware MetaBot behavior. */
+    permissionMode?: ClaudePermissionMode;
     /** Explicit Anthropic API key. When set, child Claude Code processes use this
      *  key instead of ~/.claude/.credentials.json. Supports cc-switch compatibility:
      *  leave unset to let Claude Code resolve auth dynamically. */
@@ -130,7 +155,7 @@ export interface BotConfigBase {
    * ExecutorRegistry) instead of spawning a fresh process per turn.
    *
    * Benefits:
-   *   - Agent Teams teammates survive between user messages
+   *   - Agent Team agents survive between user messages
    *   - /goal multi-turn auto-drive works (Stop hook fires the next turn)
    *   - /background tasks and agentProgressSummaries actually persist
    *
@@ -236,7 +261,7 @@ export interface AppConfig {
   /** Resident MetaBot Agent Teams reconciled into the bridge runtime. */
   agentTeams: AgentTeamConfig[];
   /**
-   * Bot used by the Agent Team supervisor when executing teammate runs.
+   * Bot used by the Agent Team supervisor when executing agent runs.
    * Set this to a non-privileged PM/internal worker bot so teams do not
    * accidentally run under the first registered bot (often manager).
    */
@@ -338,6 +363,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   maxBudgetUsd?: number;
   model?: string;
   effort?: ClaudeEffort;
+  permissionMode?: ClaudePermissionMode;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -345,7 +371,9 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   groupNoMention?: boolean;
 }
 
-function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
+function feishuBotFromJson(entry: FeishuBotJsonEntry, pathPrefix = 'feishuBots[]'): BotConfig {
+  const feishuAppId = requireNonPlaceholderCredential(entry.feishuAppId, `${pathPrefix}.feishuAppId`);
+  const feishuAppSecret = requireNonPlaceholderCredential(entry.feishuAppSecret, `${pathPrefix}.feishuAppSecret`);
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -364,8 +392,8 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     feishu: {
-      appId: entry.feishuAppId,
-      appSecret: entry.feishuAppSecret,
+      appId: feishuAppId,
+      appSecret: feishuAppSecret,
     },
     claude: buildClaudeConfig(entry),
   };
@@ -392,12 +420,14 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   maxBudgetUsd?: number;
   model?: string;
   effort?: ClaudeEffort;
+  permissionMode?: ClaudePermissionMode;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }
 
-function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
+function telegramBotFromJson(entry: TelegramBotJsonEntry, pathPrefix = 'telegramBots[]'): TelegramBotConfig {
+  const telegramBotToken = requireNonPlaceholderCredential(entry.telegramBotToken, `${pathPrefix}.telegramBotToken`);
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -415,7 +445,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     telegram: {
-      botToken: entry.telegramBotToken,
+      botToken: telegramBotToken,
     },
     claude: buildClaudeConfig(entry),
   };
@@ -441,6 +471,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   maxBudgetUsd?: number;
   model?: string;
   effort?: ClaudeEffort;
+  permissionMode?: ClaudePermissionMode;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }
@@ -482,12 +513,16 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   maxBudgetUsd?: number;
   model?: string;
   effort?: ClaudeEffort;
+  permissionMode?: ClaudePermissionMode;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }
 
-function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
+function wechatBotFromJson(entry: WechatBotJsonEntry, pathPrefix = 'wechatBots[]'): WechatBotConfig {
+  const wechatBotToken = entry.wechatBotToken
+    ? requireNonPlaceholderCredential(entry.wechatBotToken, `${pathPrefix}.wechatBotToken`)
+    : undefined;
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -500,7 +535,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(codex ? { codex } : {}),
     wechat: {
       ilinkBaseUrl: entry.ilinkBaseUrl,
-      botToken: entry.wechatBotToken,
+      botToken: wechatBotToken,
     },
     claude: buildClaudeConfig(entry),
   };
@@ -514,6 +549,7 @@ function buildClaudeConfig(entry: {
   maxBudgetUsd?: number;
   model?: string;
   effort?: ClaudeEffort;
+  permissionMode?: ClaudePermissionMode;
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
@@ -527,6 +563,7 @@ function buildClaudeConfig(entry: {
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-fable-5',
     effort: entry.effort ?? parseClaudeEffort(process.env.CLAUDE_EFFORT),
+    permissionMode: entry.permissionMode ?? parseClaudePermissionMode(process.env.CLAUDE_PERMISSION_MODE),
     apiKey: entry.apiKey || undefined,
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -558,6 +595,108 @@ function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
   return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
 }
 
+function requireNonPlaceholderCredential(value: unknown, pathName: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${pathName} is required. Replace the example value in bots.json before enabling this bot.`);
+  }
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  const knownPlaceholders = new Set([
+    'cli_xxx',
+    'cli_yyy',
+    'cli_zzz',
+    'cli_codex',
+    'cli_manager',
+    'cli_research_pm',
+    'cli_research-pm',
+    'secret',
+    'secret1',
+    'secret2',
+    'secret3',
+    'secret4',
+    'secret-manager',
+    'secret-research-pm',
+    '123456:abc-def...',
+  ]);
+  if (knownPlaceholders.has(lower) || trimmed.includes('...')) {
+    throw new Error(`${pathName} still contains an example placeholder (${trimmed}). Replace it in bots.json or remove that bot entry.`);
+  }
+  return trimmed;
+}
+
+function isTeamAgentReasoningEffort(value: unknown): value is TeamAgentReasoningEffort {
+  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max';
+}
+
+function isAgentApprovalPolicy(value: unknown): value is TeamAgentApprovalPolicy {
+  return value === 'untrusted' || value === 'on-failure' || value === 'on-request' || value === 'never';
+}
+
+function isAgentSandbox(value: unknown): value is TeamAgentSandbox {
+  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access';
+}
+
+function isTeamInstanceScope(value: unknown): value is TeamInstanceScope {
+  return value === 'chat' || value === 'project' || value === 'global' || value === 'legacy';
+}
+
+function isTeamAgentKind(value: unknown): value is TeamAgentKind {
+  return value === 'template' || value === 'custom' || value === 'temporary';
+}
+
+function isTeamAgentPromotionStatus(value: unknown): value is TeamAgentPromotionStatus {
+  return value === 'none' || value === 'proposed' || value === 'approved' || value === 'rejected';
+}
+
+function normalizePositiveMs(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value);
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value);
+}
+
+function normalizeQuotas(value: unknown): Partial<AgentTeamQuotas> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const quotas: Partial<AgentTeamQuotas> = {};
+  for (const key of [
+    'maxAgents',
+    'maxTemporaryAgents',
+    'maxParallelRunsPerAgent',
+    'maxTeamsPerScope',
+    'maxQueuedTasks',
+    'maxActiveRuns',
+  ] as const) {
+    const normalized = normalizePositiveInt(raw[key]);
+    if (normalized !== undefined) quotas[key] = normalized;
+  }
+  return Object.keys(quotas).length > 0 ? quotas : undefined;
+}
+
+function parseRuleSetRef(value: unknown): TeamRuleSetRef | string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
+  const version = normalizePositiveInt(raw.version);
+  return {
+    name: raw.name.trim(),
+    ...(version !== undefined ? { version } : {}),
+  };
+}
+
+function normalizeRuleSetRefs(value: unknown): Array<TeamRuleSetRef | string> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs = value.map(parseRuleSetRef).filter((ref): ref is TeamRuleSetRef | string => ref !== undefined);
+  return refs.length > 0 ? refs : undefined;
+}
+
 // --- Single-bot env var mode ---
 
 function feishuBotFromEnv(): BotConfig {
@@ -577,6 +716,7 @@ function feishuBotFromEnv(): BotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
       effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
+      permissionMode: parseClaudePermissionMode(process.env.CLAUDE_PERMISSION_MODE),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -601,6 +741,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
       effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
+      permissionMode: parseClaudePermissionMode(process.env.CLAUDE_PERMISSION_MODE),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -625,6 +766,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-fable-5',
       effort: parseClaudeEffort(process.env.CLAUDE_EFFORT),
+      permissionMode: parseClaudePermissionMode(process.env.CLAUDE_PERMISSION_MODE),
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
@@ -678,21 +820,21 @@ export function loadAppConfig(): AppConfig {
       if (parsed.length === 0) {
         throw new Error(`BOTS_CONFIG file must contain a non-empty array or object: ${resolved}`);
       }
-      feishuBots = (parsed as FeishuBotJsonEntry[]).map(feishuBotFromJson);
+      feishuBots = (parsed as FeishuBotJsonEntry[]).map((entry, index) => feishuBotFromJson(entry, `[${index}]`));
     } else if (parsed && typeof parsed === 'object') {
       // New format: { feishuBots: [...], telegramBots: [...], webBots: [...] }
       const cfg = parsed as BotsJsonNewFormat;
       if (cfg.feishuBots) {
-        feishuBots = cfg.feishuBots.map(feishuBotFromJson);
+        feishuBots = cfg.feishuBots.map((entry, index) => feishuBotFromJson(entry, `feishuBots[${index}]`));
       }
       if (cfg.telegramBots) {
-        telegramBots = cfg.telegramBots.map(telegramBotFromJson);
+        telegramBots = cfg.telegramBots.map((entry, index) => telegramBotFromJson(entry, `telegramBots[${index}]`));
       }
       if (cfg.webBots) {
         webBots = cfg.webBots.map(webBotFromJson);
       }
       if (cfg.wechatBots) {
-        wechatBots = cfg.wechatBots.map(wechatBotFromJson);
+        wechatBots = cfg.wechatBots.map((entry, index) => wechatBotFromJson(entry, `wechatBots[${index}]`));
       }
       if (cfg.agentTeams) {
         agentTeams = cfg.agentTeams.map(normalizeAgentTeamConfig);
@@ -797,12 +939,24 @@ export function loadAppConfig(): AppConfig {
 }
 
 function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
+  const quotas = normalizeQuotas(team.quotas);
+  const ruleSetRefs = normalizeRuleSetRefs(team.ruleSetRefs);
   return {
     name: team.name,
     ...(team.description ? { description: team.description } : {}),
     ...(team.status === 'active' || team.status === 'stopped' ? { status: team.status } : {}),
     ...(Array.isArray(team.chatIds) ? { chatIds: team.chatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
     ...(Array.isArray(team.displayChatIds) ? { displayChatIds: team.displayChatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
+    ...(typeof team.managedByConfig === 'boolean' ? { managedByConfig: team.managedByConfig } : {}),
+    ...(typeof team.templateName === 'string' && team.templateName.trim() ? { templateName: team.templateName.trim() } : {}),
+    ...(normalizePositiveInt(team.templateVersion) ? { templateVersion: normalizePositiveInt(team.templateVersion) } : {}),
+    ...(typeof team.templateDigest === 'string' && team.templateDigest.trim() ? { templateDigest: team.templateDigest.trim() } : {}),
+    ...(isTeamInstanceScope(team.scopeType) ? { scopeType: team.scopeType } : {}),
+    ...(typeof team.scopeKey === 'string' && team.scopeKey.trim() ? { scopeKey: team.scopeKey.trim() } : {}),
+    ...(typeof team.instanceId === 'string' && team.instanceId.trim() ? { instanceId: team.instanceId.trim() } : {}),
+    ...(typeof team.pmBot === 'string' && team.pmBot.trim() ? { pmBot: team.pmBot.trim() } : {}),
+    ...(quotas ? { quotas } : {}),
+    ...(ruleSetRefs ? { ruleSetRefs } : {}),
     ...(Array.isArray(team.agents) ? {
       agents: team.agents
         .filter((agent) => agent && typeof agent.name === 'string' && !!agent.name.trim())
@@ -810,9 +964,21 @@ function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
           name: agent.name.trim(),
           ...(agent.role ? { role: agent.role } : {}),
           ...(agent.engine === 'claude' || agent.engine === 'codex' || agent.engine === 'kimi' ? { engine: agent.engine } : {}),
+          ...(typeof agent.model === 'string' && agent.model.trim() ? { model: agent.model.trim() } : {}),
+          ...(isTeamAgentReasoningEffort(agent.reasoningEffort) ? { reasoningEffort: agent.reasoningEffort } : {}),
+          ...(isAgentApprovalPolicy(agent.approvalPolicy) ? { approvalPolicy: agent.approvalPolicy } : {}),
+          ...(isAgentSandbox(agent.sandbox) ? { sandbox: agent.sandbox } : {}),
+          ...(normalizePositiveMs(agent.timeoutMs) ? { timeoutMs: normalizePositiveMs(agent.timeoutMs) } : {}),
+          ...(normalizePositiveMs(agent.idleTimeoutMs) ? { idleTimeoutMs: normalizePositiveMs(agent.idleTimeoutMs) } : {}),
+          ...(Array.isArray(agent.allowedTools) ? { allowedTools: agent.allowedTools.filter((v): v is string => typeof v === 'string' && !!v.trim()).map((v) => v.trim()) } : {}),
           ...(agent.prompt ? { prompt: agent.prompt } : {}),
           ...(agent.sessionId ? { sessionId: agent.sessionId } : {}),
           ...(agent.status === 'idle' || agent.status === 'working' || agent.status === 'stopped' ? { status: agent.status } : {}),
+          ...(isTeamAgentKind(agent.kind) ? { kind: agent.kind } : {}),
+          ...(typeof agent.createdBy === 'string' && agent.createdBy.trim() ? { createdBy: agent.createdBy.trim() } : {}),
+          ...(normalizePositiveMs(agent.ttlMs) ? { ttlMs: normalizePositiveMs(agent.ttlMs) } : {}),
+          ...(normalizePositiveMs(agent.expiresAt) ? { expiresAt: normalizePositiveMs(agent.expiresAt) } : {}),
+          ...(isTeamAgentPromotionStatus(agent.promotionStatus) ? { promotionStatus: agent.promotionStatus } : {}),
         })),
     } : {}),
     ...(Array.isArray(team.tasks) ? {

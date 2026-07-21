@@ -27,6 +27,10 @@ export const TASK_TIMEOUT_MS = parseTimeoutMs('METABOT_TASK_TIMEOUT_MS', 24 * 60
 export const IDLE_TIMEOUT_MS = parseTimeoutMs('METABOT_IDLE_TIMEOUT_MS', 60 * 60 * 1000);
 export const QUESTION_TIMEOUT_MS = parseTimeoutMs('METABOT_QUESTION_TIMEOUT_MS', 5 * 60 * 1000);
 export const SPONTANEOUS_COALESCE_MS = 30 * 1000;
+/** Retry delay when a spontaneous batch cannot flush because a user turn is in flight. */
+export const SPONTANEOUS_DEFER_MS = 10 * 1000;
+/** Max requeues before a spontaneous batch is dropped (~10 min of a busy chat). */
+export const MAX_SPONTANEOUS_DEFERRALS = 60;
 export const SPONTANEOUS_SNIPPET_MAX_CHARS = 4000;
 export const SPONTANEOUS_BODY_MAX_CHARS = 12000;
 export const FINAL_CARD_RETRIES = 3;

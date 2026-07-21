@@ -3,7 +3,11 @@
  * plus edge cases: unknown slash commands, empty input, unicode, very long input.
  */
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CommandHandler } from '../src/bridge/command-handler.js';
+import { getServiceRestartRequest, recordServiceRestartRequest } from '../src/bridge/restart-coordinator.js';
 import type { IncomingMessage } from '../src/types.js';
 
 interface RecordedNotice {
@@ -20,6 +24,8 @@ interface BuildOpts {
   hasRunningTask?: boolean;
   memoryError?: boolean;
   docSyncConfigured?: boolean;
+  restartService?: any;
+  clearQueueCount?: number;
 }
 
 function buildHandler(opts: BuildOpts = {}) {
@@ -27,6 +33,9 @@ function buildHandler(opts: BuildOpts = {}) {
   let sessionEngine: string | undefined = opts.engine;
   let sessionModel: string | undefined = opts.sessionModel;
   let reasoningEffort: string | undefined;
+  let resetCount = 0;
+  let stopCount = 0;
+  let lastStopOptions: any;
 
   const sender = {
     sendCard: async () => undefined,
@@ -49,7 +58,7 @@ function buildHandler(opts: BuildOpts = {}) {
       workingDirectory: '/workspace',
       sessionId: opts.sessionId,
     }),
-    resetSession: () => {},
+    resetSession: () => { resetCount++; },
     setSessionEngine: (_chatId: string, engine: string | undefined) => {
       sessionEngine = engine;
     },
@@ -94,12 +103,13 @@ function buildHandler(opts: BuildOpts = {}) {
     memoryClient,
     { log: () => {} } as any,
     () => (opts.hasRunningTask ? { startTime: Date.now() - 500 } : undefined),
-    () => {},
-    () => 0,
+    (_chatId, options) => { stopCount++; lastStopOptions = options; },
+    () => opts.clearQueueCount ?? 0,
     async () => {},
     () => [],
     async () => {},
     async () => {},
+    opts.restartService,
   );
 
   if (opts.docSyncConfigured) {
@@ -116,10 +126,13 @@ function buildHandler(opts: BuildOpts = {}) {
     getSessionEngine: () => sessionEngine,
     getSessionModel: () => sessionModel,
     getReasoningEffort: () => reasoningEffort,
+    getResetCount: () => resetCount,
+    getStopCount: () => stopCount,
+    getLastStopOptions: () => lastStopOptions,
   };
 }
 
-function msg(text: string): IncomingMessage {
+function msg(text: string, overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: 'm1',
     chatId: 'c1',
@@ -128,6 +141,7 @@ function msg(text: string): IncomingMessage {
     text,
     timestamp: Date.now(),
     isBotMentioned: true,
+    ...overrides,
   } as IncomingMessage;
 }
 
@@ -172,6 +186,212 @@ describe('CommandHandler /status', () => {
     const { handler, notices } = buildHandler({});
     await handler.handle(msg('/status'));
     expect(notices[0].content).toContain('gpt-5.5');
+  });
+});
+
+describe('CommandHandler /restart', () => {
+  it('schedules controlled service restart', async () => {
+    const calls: any[] = [];
+    const { handler, notices } = buildHandler({
+      restartService: async (request: any) => { calls.push(request); },
+    });
+
+    const handled = await handler.handle(msg('/restart service config update'));
+
+    expect(handled).toBe(true);
+    expect(calls).toEqual([expect.objectContaining({
+      chatId: 'c1',
+      userId: 'u1',
+      reason: 'config update',
+    })]);
+    expect(notices.at(-1)?.title).toContain('Restart Scheduled');
+    expect(notices.at(-1)?.content).toContain('Any recorded in-flight bot turns');
+  });
+
+  it('resets the current chat on /restart session', async () => {
+    const { handler, notices, getResetCount } = buildHandler({});
+
+    await handler.handle(msg('/restart session'));
+
+    expect(getResetCount()).toBe(1);
+    expect(notices.at(-1)?.title).toContain('Session Reset');
+  });
+
+  it('aborts a running task and clears queued messages after service restart is scheduled', async () => {
+    const calls: any[] = [];
+    const { handler, notices, getStopCount, getLastStopOptions } = buildHandler({
+      hasRunningTask: true,
+      clearQueueCount: 2,
+      restartService: async (request: any) => { calls.push(request); },
+    });
+
+    await handler.handle(msg('/restart'));
+
+    expect(getStopCount()).toBe(1);
+    expect(getLastStopOptions()).toEqual({ preserveActiveTask: true });
+    expect(calls).toHaveLength(1);
+    expect(notices.at(-1)?.content).toContain('Discarded 2 queued messages');
+  });
+
+  it('does not stop the running task when service restart preflight blocks', async () => {
+    const { handler, notices, getStopCount } = buildHandler({
+      hasRunningTask: true,
+      clearQueueCount: 2,
+      restartService: async () => ({
+        scheduled: false,
+        requestId: 'restart-blocked-2',
+        message: 'Service restart was not scheduled because other bot/agent turns are still active.',
+        blockedBy: [{ botName: 'pm-codex', chatId: 'oc_busy' }],
+      }),
+    });
+
+    await handler.handle(msg('/restart service deploy tested fixes'));
+
+    expect(getStopCount()).toBe(0);
+    expect(notices.at(-1)?.title).toContain('Restart Blocked');
+    expect(notices.at(-1)?.content).not.toContain('Discarded 2 queued messages');
+  });
+
+  it('rejects service restart from manager or lower actor roles', async () => {
+    const calls: any[] = [];
+    const { handler, notices } = buildHandler({
+      restartService: async (request: any) => { calls.push(request); },
+    });
+
+    await handler.handle(msg('/restart service', { actorRole: 'manager' }));
+
+    expect(calls).toEqual([]);
+    expect(notices.at(-1)?.title).toContain('Restart Not Allowed');
+    expect(notices.at(-1)?.content).toContain('actorRole manager');
+  });
+
+  it('shows blocked restart participants when service restart preflight rejects', async () => {
+    const calls: any[] = [];
+    const { handler, notices } = buildHandler({
+      restartService: async (request: any) => {
+        calls.push(request);
+        return {
+          scheduled: false,
+          requestId: 'restart-blocked-1',
+          message: 'Service restart was not scheduled because other bot/agent turns are still active.',
+          blockedBy: [{
+            botName: 'pm-codex',
+            chatId: 'oc_busy',
+            source: 'chat',
+            startedAt: Date.now() - 90_000,
+            userPrompt: 'finish tester loop',
+          }],
+        };
+      },
+    });
+
+    await handler.handle(msg('/restart service deploy tested fixes'));
+
+    expect(calls).toEqual([expect.objectContaining({
+      chatId: 'c1',
+      userId: 'u1',
+      reason: 'deploy tested fixes',
+      force: false,
+    })]);
+    expect(notices.at(-1)?.title).toContain('Restart Blocked');
+    expect(notices.at(-1)?.content).toContain('restart-blocked-1');
+    expect(notices.at(-1)?.content).toContain('pm-codex');
+    expect(notices.at(-1)?.content).toContain('oc_busy');
+    expect(notices.at(-1)?.content).toContain('--force');
+  });
+
+  it('passes force restart flag and strips it from the reason', async () => {
+    const calls: any[] = [];
+    const { handler, notices } = buildHandler({
+      restartService: async (request: any) => {
+        calls.push(request);
+        return { scheduled: true, requestId: 'restart-1', forced: true };
+      },
+    });
+
+    await handler.handle(msg('/restart service --force deploy tested fixes'));
+
+    expect(calls).toEqual([expect.objectContaining({
+      reason: 'deploy tested fixes',
+      force: true,
+    })]);
+    expect(notices.at(-1)?.title).toContain('Restart Forced');
+    expect(notices.at(-1)?.content).toContain('restart-1');
+  });
+
+  it('shows recent restart requests on /restart status', async () => {
+    const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-status-'));
+    process.env.SESSION_STORE_DIR = dir;
+    try {
+      recordServiceRestartRequest({
+        requestId: 'restart-status-1',
+        requesterBotName: 'test-bot',
+        request: { chatId: 'c1', userId: 'u1', reason: 'deploy fixes' },
+        status: 'blocked',
+        blockers: [{ botName: 'pm-codex', chatId: 'oc_busy', source: 'chat' }],
+        now: Date.now() - 30_000,
+      });
+      recordServiceRestartRequest({
+        requestId: 'restart-status-timeout',
+        requesterBotName: 'test-bot',
+        request: { chatId: 'c1', userId: 'u1' },
+        status: 'blocked',
+        blockers: [{ botName: 'pm-claude', chatId: 'oc_busy_2', source: 'chat' }],
+        timeoutMs: 1_000,
+        now: Date.now() - 60_000,
+      });
+      const { handler, notices } = buildHandler({
+        restartService: async () => ({ scheduled: true }),
+      });
+
+      await handler.handle(msg('/restart status'));
+
+      expect(notices.at(-1)?.title).toContain('Restart Status');
+      expect(notices.at(-1)?.content).toContain('restart-status-1');
+      expect(notices.at(-1)?.content).toContain('blocked');
+      expect(notices.at(-1)?.content).toContain('pm-codex/oc_busy');
+      expect(notices.at(-1)?.content).toContain('restart-status-timeout');
+      expect(notices.at(-1)?.content).toContain('timed_out');
+      expect(getServiceRestartRequest('restart-status-timeout')?.status).toBe('timed_out');
+    } finally {
+      if (originalSessionStoreDir === undefined) delete process.env.SESSION_STORE_DIR;
+      else process.env.SESSION_STORE_DIR = originalSessionStoreDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records restart readiness acknowledgements from /restart ready', async () => {
+    const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-ready-'));
+    process.env.SESSION_STORE_DIR = dir;
+    try {
+      recordServiceRestartRequest({
+        requestId: 'restart-ready-1',
+        requesterBotName: 'admin',
+        request: { chatId: 'oc_requester', userId: 'admin-user', reason: 'deploy fixes' },
+        status: 'blocked',
+        blockers: [{ botName: 'test-bot', chatId: 'c1', source: 'chat' }],
+        now: Date.now() - 30_000,
+      });
+      const { handler, notices } = buildHandler({});
+
+      await handler.handle(msg('/restart ready restart-ready-1 checkpoint saved'));
+
+      expect(notices.at(-1)?.title).toContain('Restart Ready Recorded');
+      expect(notices.at(-1)?.content).toContain('ready=1/1');
+      expect(getServiceRestartRequest('restart-ready-1')?.readiness).toEqual([expect.objectContaining({
+        botName: 'test-bot',
+        chatId: 'c1',
+        userId: 'u1',
+        note: 'checkpoint saved',
+        status: 'ready',
+      })]);
+    } finally {
+      if (originalSessionStoreDir === undefined) delete process.env.SESSION_STORE_DIR;
+      else process.env.SESSION_STORE_DIR = originalSessionStoreDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
