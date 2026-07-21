@@ -17,6 +17,7 @@ import { classifyBurstSource } from '../src/engines/claude/persistent-executor.j
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
 import { AgentTeamStore } from '../src/agent-teams/team-store.js';
+import { MAX_SPONTANEOUS_DEFERRALS } from '../src/bridge/bridge-constants.js';
 import { recordActiveTask } from '../src/bridge/restart-recovery.js';
 import {
   getServiceRestartRequest,
@@ -929,6 +930,62 @@ describe('MessageBridge chatId cleanup (memory leak guard)', () => {
     clearTimeout(bufTimer);
     clearTimeout(qTimer);
     void clearedTimers;
+  });
+});
+
+describe('MessageBridge spontaneous flush when the chat is busy', () => {
+  it('requeues the batch instead of dropping it, then delivers once the turn ends', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.runningTasks.set('chat-busy', {});
+    bridge.spontaneousBuffers.set('chat-busy', {
+      teamState: { agents: [], tasks: [] },
+      snippets: ['Agent Team finished run r1'],
+      timer: setTimeout(() => {}, 60_000),
+    });
+
+    await bridge.flushSpontaneous('chat-busy');
+
+    // Batch survives; nothing sent while the foreground turn holds the chat.
+    expect(bridge.spontaneousBuffers.get('chat-busy')?.snippets).toEqual(['Agent Team finished run r1']);
+    expect(bridge.spontaneousBuffers.get('chat-busy')?.deferrals).toBe(1);
+    expect(sender.sent).toHaveLength(0);
+
+    // Turn ends; the requeued timer fires and the activity lands.
+    bridge.runningTasks.delete('chat-busy');
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0].chatId).toBe('chat-busy');
+    expect(sender.sent[0].state.status).toBe('agent_activity');
+    expect(sender.sent[0].state.responseText).toContain('Agent Team finished run r1');
+    expect(bridge.spontaneousBuffers.has('chat-busy')).toBe(false);
+
+    bridge.destroy();
+    vi.useRealTimers();
+  });
+
+  it('drops the batch once it exceeds the deferral limit', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.runningTasks.set('chat-busy', {});
+    bridge.spontaneousBuffers.set('chat-busy', {
+      teamState: { agents: [], tasks: [] },
+      snippets: ['stuck'],
+      timer: setTimeout(() => {}, 60_000),
+      deferrals: MAX_SPONTANEOUS_DEFERRALS,
+    });
+
+    await bridge.flushSpontaneous('chat-busy');
+
+    expect(bridge.spontaneousBuffers.has('chat-busy')).toBe(false);
+    expect(sender.sent).toHaveLength(0);
+
+    bridge.runningTasks.delete('chat-busy');
+    bridge.destroy();
   });
 });
 

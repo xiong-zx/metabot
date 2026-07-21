@@ -8,7 +8,8 @@ export type {
   BackgroundEvent,
   BackgroundTaskStatus,
 } from '../types.js';
-import type { CardState, TeamMember, TeamState, TeamTask } from '../types.js';
+import type { CardState } from '../types.js';
+import { buildTeamPanelMarkdown } from './team-panel.js';
 import {
   STATUS_CONFIG,
   BG_ICON,
@@ -42,48 +43,12 @@ export function buildCard(state: CardState): string {
     elements.push({ tag: 'hr' });
   }
 
-  // Agent Teams panel — agents + shared task list. Driven by Claude
-  // Code's TaskCreated / TaskCompleted / TeammateIdle hooks; rendered here
-  // so the user sees the team state without having to switch panes.
-  const teamAgents = state.teamState ? agentsForTeamState(state.teamState) : [];
-  if (state.teamState && (teamAgents.length > 0 || state.teamState.tasks.length > 0)) {
-    const ts = state.teamState;
-    const lines: string[] = [];
-    const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
-    lines.push(header);
-    if (teamAgents.length > 0) {
-      lines.push('');
-      lines.push('**Agents:**');
-      for (const m of teamAgents) {
-        const icon = m.status === 'working' ? '⏳' : '💤';
-        const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
-        lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
-      }
-    }
-    if (ts.tasks.length > 0) {
-      // Show in-progress first, then most recent completions
-      const pending = ts.tasks.filter(t => t.status === 'pending');
-      const inProgress = ts.tasks.filter(t => t.status === 'in_progress');
-      const completed = ts.tasks.filter(t => t.status === 'completed').slice(-5);
-      lines.push('');
-      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter(t => t.status === 'completed').length} done`);
-      for (const t of pending) {
-        const ownerName = agentForTeamTask(t);
-        const owner = ownerName ? ` → \`${ownerName}\`` : '';
-        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
-      }
-      for (const t of inProgress) {
-        const ownerName = agentForTeamTask(t);
-        const owner = ownerName ? ` → \`${ownerName}\`` : '';
-        lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
-      }
-      for (const t of completed) {
-        const ownerName = agentForTeamTask(t);
-        const owner = ownerName ? ` (\`${ownerName}\`)` : '';
-        lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
-      }
-    }
-    elements.push({ tag: 'markdown', content: lines.join('\n') });
+  // Agent Teams panel — compact status only. Driven by Claude Code's
+  // TaskCreated / TaskCompleted / TeammateIdle hooks; see team-panel.ts for
+  // why this collapses to one line when nothing is working.
+  const teamPanel = buildTeamPanelMarkdown(state.teamState);
+  if (teamPanel) {
+    elements.push({ tag: 'markdown', content: teamPanel });
     elements.push({ tag: 'hr' });
   }
 
@@ -225,13 +190,6 @@ export function buildCard(state: CardState): string {
   return JSON.stringify(card);
 }
 
-function agentsForTeamState(teamState: TeamState): TeamMember[] {
-  return teamState.agents ?? teamState.teammates ?? [];
-}
-
-function agentForTeamTask(task: TeamTask): string | undefined {
-  return task.agent ?? task.teammate;
-}
 
 export function buildHelpCard(): string {
   const card = {

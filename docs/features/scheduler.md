@@ -12,6 +12,12 @@ The scheduler lets you automate agent tasks:
 - **Persistent** — Survives restarts
 - **Auto-retry** — Reschedules if the bot is busy
 
+### Busy-chat behavior
+
+A scheduled task is background work, so a busy chat delays it rather than failing it. When the chat is busy at the due time the task retries with exponential backoff (30s, doubling, capped at 5 minutes) for up to 30 minutes of total waiting, then runs as soon as the chat frees up. This matters for periodic worker-checkup jobs, which routinely come due while the PM chat is mid-turn.
+
+If the chat stays busy for the whole window, a one-time task is marked failed and the user gets a notice. A recurring occurrence is dropped silently instead — the next occurrence is already scheduled, and a red card every period would be pure noise.
+
 ## Usage
 
 Send natural language scheduling requests in chat:
