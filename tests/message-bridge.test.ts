@@ -655,6 +655,39 @@ describe('MessageBridge runtime rules context', () => {
 });
 
 describe('MessageBridge card lifecycle', () => {
+  it('invalidates retired Claude session mappings without resetting chat configuration', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const clearClaudeSessionId = vi.fn(() => true);
+    bridge.setSessionRegistry({ clearClaudeSessionId } as any);
+    const manager = bridge.getSessionManager();
+    manager.setSessionId('chat-retired', 'sess-unsafe', 'claude');
+    manager.setSessionModel('chat-retired', 'claude-fable-5', 'claude');
+
+    try {
+      const retired = bridge.updateSessionMappingFromStream(
+        'chat-retired',
+        'claude',
+        {
+          type: 'result',
+          session_id: 'sess-unsafe',
+          modelTelemetry: {
+            sessionDisposition: 'retired',
+            sessionRetireReason: 'turn_start_timeout',
+          },
+        },
+        { getSessionId: () => 'sess-unsafe' },
+      );
+
+      expect(retired).toBe(true);
+      expect(manager.getSession('chat-retired').sessionId).toBeUndefined();
+      expect(manager.getSession('chat-retired').model).toBe('claude-fable-5');
+      expect(clearClaudeSessionId).toHaveBeenCalledWith('chat-retired', 'test-bot');
+    } finally {
+      bridge.destroy();
+    }
+  });
+
   it('persists cardless API lifecycle records by lifecycleKey', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-message-bridge-lifecycle-'));
     const originalSessionStoreDir = process.env.SESSION_STORE_DIR;

@@ -94,6 +94,10 @@ export interface ModelTelemetry {
   fallbackOriginalModel?: string;
   fallbackModel?: string;
   fallbackReason?: string;
+  /** Whether the observed CLI session may be resumed for a later user turn. */
+  sessionDisposition?: 'active' | 'retired';
+  /** Machine-readable reason for retiring a session from resume mappings. */
+  sessionRetireReason?: 'turn_start_timeout';
 }
 
 export interface CardState {

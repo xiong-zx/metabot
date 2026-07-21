@@ -749,6 +749,8 @@ export const ptyQuery = (args: {
         } catch (err) {
           logger.warn({ err }, 'ptyQuery: failed to interrupt after turn-start timeout');
         }
+        turnModelTelemetry.sessionDisposition = 'retired';
+        turnModelTelemetry.sessionRetireReason = 'turn_start_timeout';
         finishTurnWithError(
           `Claude Code did not start a model turn within ${Math.round(TURN_START_TIMEOUT_MS / 1000)}s after prompt submission. MetaBot interrupted the PTY, closed this turn, and retired the ambiguous PTY session instead of leaving the Feishu card in thinking or reusing unconsumed input. Please retry the message; MetaBot will resume the conversation in a new PTY.`,
           undefined,

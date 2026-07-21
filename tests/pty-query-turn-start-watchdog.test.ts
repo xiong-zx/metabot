@@ -110,6 +110,10 @@ describe('ptyQuery turn-start watchdog', () => {
       type: 'result',
       subtype: 'error',
       is_error: true,
+      modelTelemetry: {
+        sessionDisposition: 'retired',
+        sessionRetireReason: 'turn_start_timeout',
+      },
     });
     expect(String((result.value as any).result)).toContain('did not start a model turn');
     expect(fakeSession.interrupt).toHaveBeenCalled();

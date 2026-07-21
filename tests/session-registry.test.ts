@@ -73,4 +73,36 @@ describe('SessionRegistry', () => {
       registry.close();
     }
   });
+
+  it('clears only the selected bot resume pointer while retaining history', () => {
+    const registry = new SessionRegistry(createLogger());
+    try {
+      const adminId = registry.createOrUpdate({
+        botName: 'admin',
+        chatId: 'oc_same_chat',
+        claudeSessionId: 'admin-unsafe',
+        workingDirectory: '/root',
+        prompt: 'admin prompt',
+        responseText: 'timeout',
+      });
+      registry.createOrUpdate({
+        botName: 'memory',
+        chatId: 'oc_same_chat',
+        claudeSessionId: 'memory-safe',
+        workingDirectory: '/root/metabot',
+        prompt: 'memory prompt',
+        responseText: 'memory response',
+      });
+
+      expect(registry.clearClaudeSessionId('oc_same_chat', 'admin')).toBe(true);
+      expect(registry.findByChatId('oc_same_chat', 'admin')?.claudeSessionId).toBeUndefined();
+      expect(registry.findByChatId('oc_same_chat', 'memory')?.claudeSessionId).toBe('memory-safe');
+      expect(registry.getMessages(adminId).map((message) => message.text)).toEqual([
+        'admin prompt',
+        'timeout',
+      ]);
+    } finally {
+      registry.close();
+    }
+  });
 });
