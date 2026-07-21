@@ -4,9 +4,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
   AgentTeamConfig,
+  AgentTeamQuotas,
   TeamAgentApprovalPolicy,
+  TeamAgentKind,
+  TeamAgentPromotionStatus,
   TeamAgentReasoningEffort,
   TeamAgentSandbox,
+  TeamInstanceScope,
+  TeamRuleSetRef,
 } from './agent-teams/team-store.js';
 
 function loadEnvFiles(): void {
@@ -101,7 +106,7 @@ export interface BotConfigBase {
   engine?: EngineName;
   /**
    * Research-PM mode. When true, the bot receives the PM workflow contract
-   * and the bridge re-arms the 40-minute worker check-in reminder after turns.
+   * and the bridge re-arms the 1-hour worker check-in reminder after turns.
    */
   pmPrompt?: boolean;
   claude: {
@@ -631,9 +636,65 @@ function isAgentSandbox(value: unknown): value is TeamAgentSandbox {
   return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access';
 }
 
+function isTeamInstanceScope(value: unknown): value is TeamInstanceScope {
+  return value === 'chat' || value === 'project' || value === 'global' || value === 'legacy';
+}
+
+function isTeamAgentKind(value: unknown): value is TeamAgentKind {
+  return value === 'template' || value === 'custom' || value === 'temporary';
+}
+
+function isTeamAgentPromotionStatus(value: unknown): value is TeamAgentPromotionStatus {
+  return value === 'none' || value === 'proposed' || value === 'approved' || value === 'rejected';
+}
+
 function normalizePositiveMs(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
   return Math.floor(value);
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value);
+}
+
+function normalizeQuotas(value: unknown): Partial<AgentTeamQuotas> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const quotas: Partial<AgentTeamQuotas> = {};
+  for (const key of [
+    'maxAgents',
+    'maxTemporaryAgents',
+    'maxParallelRunsPerAgent',
+    'maxTeamsPerScope',
+    'maxQueuedTasks',
+    'maxActiveRuns',
+  ] as const) {
+    const normalized = normalizePositiveInt(raw[key]);
+    if (normalized !== undefined) quotas[key] = normalized;
+  }
+  return Object.keys(quotas).length > 0 ? quotas : undefined;
+}
+
+function parseRuleSetRef(value: unknown): TeamRuleSetRef | string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
+  const version = normalizePositiveInt(raw.version);
+  return {
+    name: raw.name.trim(),
+    ...(version !== undefined ? { version } : {}),
+  };
+}
+
+function normalizeRuleSetRefs(value: unknown): Array<TeamRuleSetRef | string> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs = value.map(parseRuleSetRef).filter((ref): ref is TeamRuleSetRef | string => ref !== undefined);
+  return refs.length > 0 ? refs : undefined;
 }
 
 // --- Single-bot env var mode ---
@@ -878,12 +939,24 @@ export function loadAppConfig(): AppConfig {
 }
 
 function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
+  const quotas = normalizeQuotas(team.quotas);
+  const ruleSetRefs = normalizeRuleSetRefs(team.ruleSetRefs);
   return {
     name: team.name,
     ...(team.description ? { description: team.description } : {}),
     ...(team.status === 'active' || team.status === 'stopped' ? { status: team.status } : {}),
     ...(Array.isArray(team.chatIds) ? { chatIds: team.chatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
     ...(Array.isArray(team.displayChatIds) ? { displayChatIds: team.displayChatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
+    ...(typeof team.managedByConfig === 'boolean' ? { managedByConfig: team.managedByConfig } : {}),
+    ...(typeof team.templateName === 'string' && team.templateName.trim() ? { templateName: team.templateName.trim() } : {}),
+    ...(normalizePositiveInt(team.templateVersion) ? { templateVersion: normalizePositiveInt(team.templateVersion) } : {}),
+    ...(typeof team.templateDigest === 'string' && team.templateDigest.trim() ? { templateDigest: team.templateDigest.trim() } : {}),
+    ...(isTeamInstanceScope(team.scopeType) ? { scopeType: team.scopeType } : {}),
+    ...(typeof team.scopeKey === 'string' && team.scopeKey.trim() ? { scopeKey: team.scopeKey.trim() } : {}),
+    ...(typeof team.instanceId === 'string' && team.instanceId.trim() ? { instanceId: team.instanceId.trim() } : {}),
+    ...(typeof team.pmBot === 'string' && team.pmBot.trim() ? { pmBot: team.pmBot.trim() } : {}),
+    ...(quotas ? { quotas } : {}),
+    ...(ruleSetRefs ? { ruleSetRefs } : {}),
     ...(Array.isArray(team.agents) ? {
       agents: team.agents
         .filter((agent) => agent && typeof agent.name === 'string' && !!agent.name.trim())
@@ -901,6 +974,11 @@ function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
           ...(agent.prompt ? { prompt: agent.prompt } : {}),
           ...(agent.sessionId ? { sessionId: agent.sessionId } : {}),
           ...(agent.status === 'idle' || agent.status === 'working' || agent.status === 'stopped' ? { status: agent.status } : {}),
+          ...(isTeamAgentKind(agent.kind) ? { kind: agent.kind } : {}),
+          ...(typeof agent.createdBy === 'string' && agent.createdBy.trim() ? { createdBy: agent.createdBy.trim() } : {}),
+          ...(normalizePositiveMs(agent.ttlMs) ? { ttlMs: normalizePositiveMs(agent.ttlMs) } : {}),
+          ...(normalizePositiveMs(agent.expiresAt) ? { expiresAt: normalizePositiveMs(agent.expiresAt) } : {}),
+          ...(isTeamAgentPromotionStatus(agent.promotionStatus) ? { promotionStatus: agent.promotionStatus } : {}),
         })),
     } : {}),
     ...(Array.isArray(team.tasks) ? {

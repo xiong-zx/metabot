@@ -22,6 +22,8 @@ export interface ScheduledTask {
   createdAt: number;
   retryCount: number;
   parentRecurringId?: string;  // set if spawned by a recurring task
+  /** Optional idempotency key. Pending/executing one-time tasks with the same key are reused. */
+  dedupeKey?: string;
 }
 
 export interface ScheduleInput {
@@ -31,6 +33,7 @@ export interface ScheduleInput {
   delaySeconds: number;
   sendCards?: boolean;
   label?: string;
+  dedupeKey?: string;
 }
 
 export interface ScheduleUpdateInput {
@@ -122,6 +125,17 @@ export class TaskScheduler {
 
   scheduleTask(input: ScheduleInput): ScheduledTask {
     const now = Date.now();
+    const dedupeKey = normalizeDedupeKey(input.dedupeKey);
+    if (dedupeKey) {
+      const existing = this.findActiveTaskByDedupeKey(dedupeKey);
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey, botName: existing.botName, chatId: existing.chatId, label: existing.label },
+          'Scheduled task reused by dedupe key',
+        );
+        return existing;
+      }
+    }
     const task: ScheduledTask = {
       id: crypto.randomUUID(),
       botName: input.botName,
@@ -133,6 +147,7 @@ export class TaskScheduler {
       status: 'pending',
       createdAt: now,
       retryCount: 0,
+      ...(dedupeKey ? { dedupeKey } : {}),
     };
 
     this.tasks.set(task.id, task);
@@ -398,6 +413,7 @@ export class TaskScheduler {
         chatId: task.chatId,
         userId: 'scheduler',
         sendCards: task.sendCards,
+        lifecycleKey: `schedule:${task.id}`,
         onUpdate: (state: CardState, _bridgeMessageId: string, final: boolean) => {
           // Stream updates to any WebSocket client subscribed to this chatId
           if (this.wsHandle) {
@@ -533,10 +549,17 @@ export class TaskScheduler {
         recurringList = (parsed as PersistedData).recurringTasks || [];
       }
 
-      // Restore one-time tasks
+      // Restore one-time tasks. If the previous process died while a one-shot
+      // task was executing, retry it as pending; otherwise it is silently lost.
       for (const task of taskList) {
-        // Skip completed/cancelled/failed tasks
-        if (task.status !== 'pending') continue;
+        if (task.status === 'executing' && !task.parentRecurringId) {
+          task.status = 'pending';
+          task.retryCount = Math.max(task.retryCount ?? 0, 1);
+          task.executeAt = Math.max(task.executeAt, now);
+        }
+        // Skip completed/cancelled/failed tasks, and recurring child tasks
+        // whose parent will decide how to recover its schedule below.
+        if (task.status !== 'pending' || task.parentRecurringId) continue;
 
         // Skip tasks that are more than 24h overdue (stale)
         if (task.executeAt < now - STALE_THRESHOLD_MS) {
@@ -560,6 +583,10 @@ export class TaskScheduler {
             const child = taskList.find((t) => t.id === recurring.currentChildId);
             if (child && (child.status === 'pending' || child.status === 'executing')) {
               child.status = 'failed';
+              this.tasks.delete(child.id);
+              const timer = this.timers.get(child.id);
+              if (timer) clearTimeout(timer);
+              this.timers.delete(child.id);
             }
             recurring.currentChildId = undefined;
           }
@@ -582,4 +609,21 @@ export class TaskScheduler {
       this.logger.error({ err }, 'Failed to load scheduled tasks from disk');
     }
   }
+
+  private findActiveTaskByDedupeKey(dedupeKey: string): ScheduledTask | undefined {
+    for (const task of this.tasks.values()) {
+      if (
+        task.dedupeKey === dedupeKey
+        && (task.status === 'pending' || task.status === 'executing')
+      ) {
+        return task;
+      }
+    }
+    return undefined;
+  }
+}
+
+function normalizeDedupeKey(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }

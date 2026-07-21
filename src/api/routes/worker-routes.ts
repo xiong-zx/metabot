@@ -1,5 +1,5 @@
 import type * as http from 'node:http';
-import { jsonResponse, parseJsonBody } from './helpers.js';
+import { jsonResponse, parseJsonBody, readBody, type JsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
 import type {
   CodexApprovalPolicy,
@@ -7,6 +7,7 @@ import type {
   WorkerReasoningEffort,
 } from '../../workers/worker-manager.js';
 import type { EngineName } from '../../config.js';
+import { hasTeamCapability, type TeamActorRole, type TeamCapabilityAction } from '../../agent-teams/team-store.js';
 
 /**
  * PM/Worker + remind endpoints (consumed by the worker-manager MCP server):
@@ -43,6 +44,7 @@ export async function handleWorkerRoutes(
 
     if (method === 'POST' && url === '/api/workers') {
       const body = await parseJsonBody(req);
+      if (!requireActorCapability(res, body, 'worker_dispatch')) return true;
       const botName = body.botName as string;
       const pmChatId = body.pmChatId as string;
       const workingDirectory = body.workingDirectory as string;
@@ -65,6 +67,7 @@ export async function handleWorkerRoutes(
           sandbox: body.sandbox as CodexSandbox | undefined,
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
           idleTimeoutMs: typeof body.idleTimeoutMs === 'number' ? body.idleTimeoutMs : undefined,
+          dedupeKey: typeof body.dedupeKey === 'string' ? body.dedupeKey : undefined,
         });
         jsonResponse(res, 202, record);
       } catch (err: any) {
@@ -89,6 +92,8 @@ export async function handleWorkerRoutes(
       }
 
       if (method === 'POST' && action === 'abort') {
+        const body = await parseOptionalJsonBody(req);
+        if (!requireActorCapability(res, body, 'worker_dispatch')) return true;
         const ok = workerManager.abortWorker(id);
         if (!ok) {
           jsonResponse(res, 404, { error: `Worker not found or not running: ${id}` });
@@ -99,7 +104,8 @@ export async function handleWorkerRoutes(
       }
 
       if (method === 'POST' && action === 'redirect') {
-        const body = await parseJsonBody(req);
+        const body = await parseOptionalJsonBody(req);
+        if (!requireActorCapability(res, body, 'worker_dispatch')) return true;
         const newPrompt = body.newPrompt as string;
         if (!newPrompt) {
           jsonResponse(res, 400, { error: 'Missing required field: newPrompt' });
@@ -166,4 +172,36 @@ export async function handleWorkerRoutes(
   }
 
   return false;
+}
+
+function requireActorCapability(
+  res: http.ServerResponse,
+  body: JsonBody,
+  action: TeamCapabilityAction,
+): boolean {
+  const role = actorRoleField(body.actorRole ?? body.role) ?? 'agent';
+  if (hasTeamCapability(role, action)) return true;
+  jsonResponse(res, 403, { error: `actorRole ${role} is not allowed to ${action}` });
+  return false;
+}
+
+async function parseOptionalJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw) as JsonBody;
+  } catch {
+    throw Object.assign(new Error('Invalid JSON in request body'), { statusCode: 400 });
+  }
+}
+
+function actorRoleField(value: unknown): TeamActorRole | undefined {
+  return value === 'admin'
+    || value === 'user'
+    || value === 'pm'
+    || value === 'manager'
+    || value === 'agent'
+    || value === 'worker'
+    ? value
+    : undefined;
 }

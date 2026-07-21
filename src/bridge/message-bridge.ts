@@ -1,8 +1,11 @@
+import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { BotConfigBase, ClaudeEffort, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import type { BackgroundEvent, IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
+import type { BackgroundEvent, IncomingMessage, CardLifecycleStage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type {
@@ -24,14 +27,33 @@ import { listClaudeSessions, type SessionSummary } from '../engines/claude/sessi
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
-import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
-import { clearActiveTask, recordActiveTask } from './restart-recovery.js';
+import { shouldRemindRestart, markReminded, restartSecondsAgo, writeRestartBreadcrumb } from './restart-notice.js';
+import { clearActiveTask, listActiveTaskRecords, recordActiveTask } from './restart-recovery.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
-import { CommandHandler } from './command-handler.js';
+import {
+  CommandHandler,
+  type ServiceRestartBlocker,
+  type ServiceRestartRequest,
+  type ServiceRestartResult,
+  type StopTaskOptions,
+} from './command-handler.js';
 import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
+import {
+  getCardLifecycleRecord,
+  recordCardLifecycle as persistCardLifecycle,
+} from './card-lifecycle-store.js';
+import {
+  collectServiceRestartBlockers,
+  findReusableServiceRestartRequest,
+  markServiceRestartRequestTimedOut,
+  recordServiceRestartRequest,
+  resolveRestartReadyTimeoutMs,
+  summarizeServiceRestartReadiness,
+  type RestartCoordinationRecord,
+} from './restart-coordinator.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { WorkerManager } from '../workers/worker-manager.js';
@@ -56,16 +78,33 @@ import { sendCompletionNotice } from './notification-policy.js';
 import { normalizePromptForEngine } from './prompt-normalizer.js';
 import { SlashPickerController } from './slash-picker-controller.js';
 import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
-import type { AgentTeamStore } from '../agent-teams/team-store.js';
+import type { AgentTeamStore, RulesContextPack, RuntimeRulesPurpose, TeamRule } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
-const AUTO_REMIND_DELAY_SECONDS = 2400; // 40 minutes
+type RestartSpawn = typeof spawn;
+let restartSpawn: RestartSpawn = spawn;
+
+export function setServiceRestartSpawnForTest(spawner?: RestartSpawn): void {
+  restartSpawn = spawner || spawn;
+}
+
+export interface AgentActivityCardMetadata {
+  teamName?: string;
+  instanceId?: string;
+  agentName?: string;
+  runId?: string;
+  taskIds?: number[];
+  finalDeliveryStatus?: 'card' | 'fallback' | 'failed';
+  finalDeliveryMessageId?: string;
+}
+
+const AUTO_REMIND_DELAY_SECONDS = 3600; // 1 hour
 const AUTO_REMIND_PROMPT = [
-  '⏰ 40分钟定时提醒。请检查当前任务状态并决策下一步：',
+  '⏰ 1小时定时提醒。请检查当前任务状态并决策下一步：',
   '',
   '1. 用 worker_list 查看所有 worker 状态',
   '2. 对于 running 的 worker：去 workdir 查看日志和进度文件，评估是否正常推进',
@@ -111,6 +150,23 @@ export function resolvePersistentExecutorEnvDefault(envVal: string | undefined):
   return true;
 }
 
+function truncateOneLine(value: string, maxLength: number): string {
+  const oneLine = value.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= maxLength) return oneLine;
+  return `${oneLine.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatBriefDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m${seconds ? ` ${seconds}s` : ''}`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return `${hours}h${remainderMinutes ? ` ${remainderMinutes}m` : ''}`;
+}
+
 interface RunningTask {
   abortController: AbortController;
   startTime: number;
@@ -142,6 +198,8 @@ export interface ApiTaskOptions {
   chatId: string;
   userId?: string;
   sendCards?: boolean;
+  /** Optional stable key used to correlate card lifecycle updates across retries/recovery. */
+  lifecycleKey?: string;
   /** Override maxTurns for this task (e.g. 1 for voice mode). */
   maxTurns?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
@@ -181,6 +239,14 @@ export interface ApiTaskResult {
   costUsd?: number;
   durationMs?: number;
   error?: string;
+  errorCode?: string;
+  retryAfterMs?: number;
+  busy?: {
+    chatId: string;
+    startedAt: string;
+    durationMs: number;
+    hasVisibleCard: boolean;
+  };
 }
 
 /** Remembered /bytheway side branch for a chat (engine-tagged session id). */
@@ -339,7 +405,7 @@ export class MessageBridge {
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
       (chatId) => this.runningTasks.get(chatId) ?? this.bythewayTasks.get(chatId),
-      (chatId) => this.stopTask(chatId),
+      (chatId, options) => this.stopTask(chatId, options),
       (chatId) => this.clearChatQueue(chatId),
       (chatId, reason) => {
         if (reason === 'reset-command') this.btwBranches.delete(chatId);
@@ -348,6 +414,7 @@ export class MessageBridge {
       (chatId) => this.listSessionsForChat(chatId),
       (chatId, sessionId) => this.applyResume(chatId, sessionId),
       (msg, question, continueBranch) => this.runBytheway(msg, question, continueBranch),
+      (request) => this.scheduleControlledServiceRestart(request),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -412,6 +479,38 @@ export class MessageBridge {
   /** Emit an activity event if a listener is registered. */
   private emitActivity(event: ActivityEventData): void {
     try { this.onActivityEvent?.(event); } catch { /* ignore */ }
+  }
+
+  private recordCardLifecycle(
+    chatId: string,
+    messageId: string | undefined,
+    state: CardState,
+    source: string,
+    metadata?: AgentActivityCardMetadata,
+  ): void {
+    if (!state.lifecycleKey) return;
+    try {
+      persistCardLifecycle({
+        lifecycleKey: state.lifecycleKey,
+        botName: this.config.name,
+        chatId,
+        messageId,
+        source,
+        teamName: metadata?.teamName,
+        instanceId: metadata?.instanceId,
+        agentName: metadata?.agentName,
+        runId: metadata?.runId,
+        taskIds: metadata?.taskIds,
+        status: state.status,
+        lifecycleStage: state.lifecycleStage,
+        userPrompt: state.userPrompt,
+        responseText: state.responseText || state.errorMessage,
+        finalDeliveryStatus: metadata?.finalDeliveryStatus,
+        finalDeliveryMessageId: metadata?.finalDeliveryMessageId,
+      });
+    } catch (err) {
+      this.logger.warn({ err, chatId, messageId, lifecycleKey: state.lifecycleKey }, 'MessageBridge: failed to persist card lifecycle');
+    }
   }
 
   /**
@@ -515,6 +614,13 @@ export class MessageBridge {
     if (chatId.startsWith('worker-')) return;
     if (!(this.autoRemindEnabled.get(chatId) ?? true)) return;
     this.cancelPendingRemind(chatId);
+    // Auto-remind is tied to active worker work, not on by default. Only keep
+    // the loop alive while a dispatched worker is still running for this PM
+    // chat. With no running worker there is nothing to come back and check,
+    // so don't schedule a reminder.
+    const hasRunningWorker = !!this.workerManager
+      && this.workerManager.listWorkers(chatId).some((w) => w.status === 'running');
+    if (!hasRunningWorker) return;
     try {
       const task = this.scheduler.scheduleTask({
         botName: this.config.name,
@@ -551,20 +657,207 @@ export class MessageBridge {
     if (!enabled) this.cancelPendingRemind(chatId);
   }
 
+  private async scheduleControlledServiceRestart(request: ServiceRestartRequest): Promise<ServiceRestartResult> {
+    const now = Date.now();
+    const blockers = collectServiceRestartBlockers({
+      request,
+      requesterBotName: this.config.name,
+      activeTasks: listActiveTaskRecords(),
+      now,
+    });
+    const reusable = !request.force
+      ? findReusableServiceRestartRequest({ requesterBotName: this.config.name, request, now })
+      : undefined;
+    const requestId = reusable?.requestId || `restart-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    const readiness = reusable ? summarizeServiceRestartReadiness(reusable, blockers, now) : undefined;
+    const blockersReady = readiness?.allReady === true;
+
+    if (blockers.length > 0 && !request.force && !blockersReady) {
+      const timeoutMs = resolveRestartReadyTimeoutMs();
+      const record = recordServiceRestartRequest({
+        requestId,
+        requesterBotName: this.config.name,
+        request,
+        status: 'blocked',
+        blockers,
+        timeoutMs,
+        now,
+      });
+      const nextReadiness = summarizeServiceRestartReadiness(record, blockers, now);
+      if (nextReadiness.timedOut) {
+        const timedOutRecord = markServiceRestartRequestTimedOut({ requestId, now }) || record;
+        this.logger.warn(
+          {
+            chatId: request.chatId,
+            userId: request.userId,
+            requestId,
+            blockers: blockers.length,
+            deadlineAt: timedOutRecord.deadlineAt,
+          },
+          'Controlled service restart request timed out while blockers were still active',
+        );
+        return {
+          scheduled: false,
+          requestId,
+          blockedBy: blockers,
+          message: [
+            'Service restart was not scheduled because restart coordination timed out while other bot/agent turns are still active.',
+            `Readiness: ready=${nextReadiness.ready}/${nextReadiness.total}.`,
+            timedOutRecord.deadlineAt ? `Ready timeout expired ${formatBriefDuration(now - timedOutRecord.deadlineAt)} ago.` : '',
+            'Retry after the blockers finish, or use `/restart service --force <reason>` for an explicit emergency override.',
+          ].filter(Boolean).join(' '),
+        };
+      }
+      const notified = await this.notifyServiceRestartBlockers(record, nextReadiness.pendingBlockers);
+      this.logger.warn(
+        { chatId: request.chatId, userId: request.userId, requestId, blockers: blockers.length, notified },
+        'Controlled service restart blocked by active turns',
+      );
+      return {
+        scheduled: false,
+        requestId,
+        blockedBy: blockers,
+        message: [
+          'Service restart was not scheduled because other bot/agent turns are still active.',
+          `Readiness: ready=${nextReadiness.ready}/${nextReadiness.total}.`,
+          nextReadiness.remainingMs !== undefined ? `Ready timeout in ${formatBriefDuration(nextReadiness.remainingMs)}.` : '',
+          notified > 0 ? `Sent restart-prepare notice to ${notified} blocker chat${notified === 1 ? '' : 's'}.` : '',
+        ].filter(Boolean).join(' '),
+      };
+    }
+
+    writeRestartBreadcrumb({
+      botName: this.config.name,
+      chatId: request.chatId,
+      reason: request.reason || 'chat-command',
+      source: 'chat-command',
+      requestId,
+      resume: true,
+    });
+
+    const cwd = process.env.METABOT_HOME || process.cwd();
+    const dataDir = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
+    const logFile = path.join(dataDir, 'restart-command.log');
+    const script = [
+      'sleep 0.8',
+      `cd ${shellQuote(cwd)}`,
+      `mkdir -p ${shellQuote(dataDir)}`,
+      `(pm2 restart metabot || pm2 start ecosystem.config.cjs) >> ${shellQuote(logFile)} 2>&1`,
+      `pm2 save --force >> ${shellQuote(logFile)} 2>&1 || true`,
+    ].join('; ');
+    const child = restartSpawn('/bin/sh', ['-lc', script], {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        METABOT_BOT_NAME: this.config.name,
+        METABOT_CHAT_ID: request.chatId,
+        METABOT_RESTART_REASON: request.reason || 'chat-command',
+        METABOT_RESTART_SOURCE: 'chat-command',
+        METABOT_RESTART_REQUEST_ID: requestId,
+        METABOT_RESTART_RESUME: '1',
+      },
+    });
+    child.unref();
+    recordServiceRestartRequest({
+      requestId,
+      requesterBotName: this.config.name,
+      request,
+      status: request.force === true && blockers.length > 0 ? 'forced' : 'scheduled',
+      blockers,
+    });
+    this.logger.info(
+      {
+        chatId: request.chatId,
+        requestId,
+        forced: request.force === true,
+        blockers: blockers.length,
+        readinessScheduled: blockersReady,
+      },
+      'Controlled service restart scheduled',
+    );
+    return {
+      scheduled: true,
+      requestId,
+      forced: request.force === true && blockers.length > 0,
+      blockedBy: blockers,
+    };
+  }
+
+  private async notifyServiceRestartBlockers(
+    record: RestartCoordinationRecord,
+    blockers: ServiceRestartBlocker[],
+  ): Promise<number> {
+    let sent = 0;
+    for (const blocker of blockers) {
+      if (!blocker.chatId || blocker.chatId === record.requesterChatId) continue;
+      try {
+        await this.sender.sendTextNotice(
+          blocker.chatId,
+          'MetaBot Restart Requested',
+          [
+            `${record.requesterBotName} requested a controlled MetaBot service restart.`,
+            `Request ID: \`${record.requestId}\``,
+            record.reason ? `Reason: ${record.reason}` : '',
+            '',
+            'This chat has an active bot/agent turn. Checkpoint the current work, then send:',
+            `\`/restart ready ${record.requestId} <checkpoint note>\``,
+            '',
+            `Active turn: bot=\`${blocker.botName}\`${blocker.source ? `, source=${blocker.source}` : ''}${blocker.userPrompt ? `, prompt="${truncateOneLine(blocker.userPrompt, 100)}"` : ''}`,
+          ].filter(Boolean).join('\n'),
+          'orange',
+        );
+        sent += 1;
+      } catch (err) {
+        this.logger.warn(
+          { err, requestId: record.requestId, blockerBotName: blocker.botName, blockerChatId: blocker.chatId },
+          'Failed to send restart-prepare notice to blocker chat',
+        );
+      }
+    }
+    return sent;
+  }
+
   /** Inject MetaBot Agent Teams store so cards can show team and run state. */
   setAgentTeamStore(store: AgentTeamStore): void {
     this.agentTeamStore = store;
   }
 
   /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
-  async sendAgentActivityCard(chatId: string, body: string): Promise<void> {
+  async sendAgentActivityCard(
+    chatId: string,
+    body: string,
+    metadata?: AgentActivityCardMetadata,
+  ): Promise<void> {
     const card: CardState = this.enrichWithAgentTeams({
       status: 'agent_activity',
       userPrompt: '(agent activity)',
       responseText: body,
       toolCalls: [],
+      lifecycleStage: 'closed',
+      lifecycleKey: buildCardLifecycleKey('agent-activity', chatId, Date.now()),
     }, chatId);
-    await this.sender.sendCard(chatId, card);
+    const messageId = await this.sender.sendCard(chatId, card);
+    this.recordCardLifecycle(chatId, messageId, card, 'agent-activity', metadata);
+  }
+
+  private withRuntimeRulesContext(
+    prompt: string,
+    input: {
+      chatId: string;
+      purpose: RuntimeRulesPurpose;
+      inlineRules?: TeamRule[];
+    },
+  ): string {
+    if (!this.agentTeamStore) return prompt;
+    const pack = this.agentTeamStore.buildRuntimeRulesContextPack({
+      purpose: input.purpose,
+      botName: this.config.name,
+      chatId: input.chatId,
+      inlineRules: input.inlineRules,
+    });
+    const text = formatRuntimeRulesContextPack(pack, input.purpose);
+    return text ? `${text}\n\n${prompt}` : prompt;
   }
 
   /** Expose session manager for cross-platform session linking. */
@@ -609,7 +902,7 @@ export class MessageBridge {
     return cleared;
   }
 
-  private stopTask(chatId: string): void {
+  private stopTask(chatId: string, options: StopTaskOptions = {}): void {
     const btw = this.bythewayTasks.get(chatId);
     if (btw) {
       try { btw.executionHandle.finish(); } catch { /* ignore */ }
@@ -650,7 +943,9 @@ export class MessageBridge {
     if (this.runningTasks.get(chatId) === task) {
       this.runningTasks.delete(chatId);
       metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
-      clearActiveTask({ botName: this.config.name, chatId });
+      if (!options.preserveActiveTask) {
+        clearActiveTask({ botName: this.config.name, chatId });
+      }
     }
   }
 
@@ -1165,9 +1460,12 @@ export class MessageBridge {
       responseText,
       toolCalls: [],
       teamState: buf.teamState,
+      lifecycleStage: 'closed',
+      lifecycleKey: buildCardLifecycleKey('spontaneous', chatId, Date.now()),
     };
     try {
-      await this.sender.sendCard(chatId, card);
+      const messageId = await this.sender.sendCard(chatId, card);
+      this.recordCardLifecycle(chatId, messageId, card, 'spontaneous');
       this.logger.info({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: sent spontaneous card');
     } catch (err) {
       this.logger.warn({ err, chatId }, 'MessageBridge: failed to send spontaneous card');
@@ -1224,6 +1522,8 @@ export class MessageBridge {
     const abortController = new AbortController();
     const session = this.sessionManager.getSession(chatId);
     const activeGoal = session.activeGoal;
+    const turnId = (handle as unknown as { turnId?: string }).turnId ?? 'continuation';
+    const lifecycleKey = buildCardLifecycleKey('continuation', chatId, turnId);
 
     const initialState: CardState = {
       status: 'thinking',
@@ -1231,6 +1531,8 @@ export class MessageBridge {
       responseText: '',
       toolCalls: [],
       goalCondition: activeGoal,
+      lifecycleStage: 'received',
+      lifecycleKey,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -1241,11 +1543,12 @@ export class MessageBridge {
       try { handle.finish(); } catch { /* ignore */ }
       return;
     }
+    this.recordCardLifecycle(chatId, messageId, initialState, 'continuation');
 
     this.continuationTasks.set(chatId, {
       abortController,
       cardMessageId: messageId,
-      turnId: (handle as unknown as { turnId?: string }).turnId ?? 'continuation',
+      turnId,
     });
     this.logger.info({ chatId, messageId }, 'MessageBridge: continuation card opened');
 
@@ -1259,9 +1562,10 @@ export class MessageBridge {
     try {
       for await (const message of handle.stream) {
         if (abortController.signal.aborted) break;
-        const state = processor.processMessage(message);
+        const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
         if (activeGoal) state.goalCondition = activeGoal;
         lastState = state;
+        this.recordCardLifecycle(chatId, messageId, state, 'continuation');
 
         // AskUserQuestion during a continuation turn: route through the
         // same standalone-question-card path used between turns. The
@@ -1565,16 +1869,17 @@ export class MessageBridge {
   }
 
   private enrichWithAgentTeams(state: CardState, chatId?: string): CardState {
-    if (!this.agentTeamStore) return state;
+    const base = withCardLifecycle(state);
+    if (!this.agentTeamStore) return base;
     const team = chatId ? this.agentTeamStore.findTeamForChat(chatId) : undefined;
-    if (!team) return state;
+    if (!team) return base;
     const snapshot = this.agentTeamStore.status(team.name);
-    if (!snapshot) return state;
+    if (!snapshot) return base;
     const mapped = buildAgentTeamCardSnapshot(snapshot);
     return {
-      ...state,
-      teamState: hasTeamState(state.teamState) ? state.teamState : mapped.teamState,
-      backgroundEvents: mergeBackgroundEvents(state.backgroundEvents, mapped.backgroundEvents),
+      ...base,
+      teamState: hasTeamState(base.teamState) ? base.teamState : mapped.teamState,
+      backgroundEvents: mergeBackgroundEvents(base.backgroundEvents, mapped.backgroundEvents),
     };
   }
 
@@ -1663,6 +1968,12 @@ export class MessageBridge {
     // clear the session instead of being queued behind the old task.
     if (text.trim().toLowerCase() === 'reset') {
       await this.commandHandler.handle({ ...msg, text: '/reset' });
+      return;
+    }
+
+    const restartCommand = mapBareRestartMessage(text);
+    if (restartCommand) {
+      await this.commandHandler.handle({ ...msg, text: restartCommand });
       return;
     }
 
@@ -1936,6 +2247,7 @@ export class MessageBridge {
         responseText: '',
         toolCalls: [],
         pendingQuestion: displayQuestion,
+        lifecycleStage: 'blocked',
       });
       if (newQId) task.questionCardMessageId = newQId;
       return;
@@ -1946,6 +2258,7 @@ export class MessageBridge {
     await this.sender.updateCard(task.cardMessageId, {
       ...currentState,
       status: 'running',
+      lifecycleStage: 'executing',
       responseText: currentState.responseText
         ? currentState.responseText + `\n\n> **Reply:** ${answerSummary}\n\n_Continuing..._`
         : `> **Reply:** ${answerSummary}\n\n_Continuing..._`,
@@ -2091,6 +2404,7 @@ export class MessageBridge {
     const displayPrompt = hasMedia && mediaCount > 1
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
+    const lifecycleKey = buildCardLifecycleKey('chat', chatId, msg.messageId);
     const processor = new StreamProcessor(displayPrompt);
     // Capture mirrored goal once at task start. New /goal messages can't
     // arrive mid-task (handleMessage rejects them with "Task In Progress"),
@@ -2102,6 +2416,8 @@ export class MessageBridge {
       responseText: '',
       toolCalls: [],
       goalCondition: activeGoal,
+      lifecycleStage: 'received',
+      lifecycleKey,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -2110,11 +2426,13 @@ export class MessageBridge {
       this.logger.error('Failed to send initial card, aborting');
       return;
     }
+    this.recordCardLifecycle(chatId, messageId, initialState, 'chat');
     const taskStartedAt = Date.now();
     recordActiveTask({
       botName: this.config.name,
       chatId,
       messageId,
+      lifecycleKey,
       userPrompt: displayPrompt,
       startedAt: taskStartedAt,
       source: 'chat',
@@ -2141,6 +2459,7 @@ export class MessageBridge {
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
+              lifecycleKey,
             }, chatId));
           }
         });
@@ -2172,12 +2491,16 @@ export class MessageBridge {
       codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS;
       prompt = buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
     }
+    const runtimePrompt = this.withRuntimeRulesContext(prompt, {
+      chatId,
+      purpose: 'bot-turn',
+    });
 
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries
     // properly release the bound executor before reacquiring.
     const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
+      prompt: runtimePrompt,
       cwd,
       abortController,
       outputsDir,
@@ -2238,10 +2561,11 @@ export class MessageBridge {
         if (abortController.signal.aborted) break;
         resetIdleTimer();
 
-        const state = processor.processMessage(message);
+        const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
         if (activeGoal) state.goalCondition = activeGoal;
         if (runningTask.teamState) state.teamState = runningTask.teamState;
         lastState = state;
+        this.recordCardLifecycle(chatId, messageId, state, 'chat');
 
         // Update session ID if discovered
         const newSessionId = processor.getSessionId();
@@ -2312,6 +2636,8 @@ export class MessageBridge {
             responseText: '',
             toolCalls: [],
             pendingQuestion: displayQuestion,
+            lifecycleStage: 'blocked',
+            lifecycleKey: buildCardLifecycleKey('question', chatId, pending.toolUseId),
           };
           if (runningTask.questionCardMessageId && this.sender.updateQuestionCard) {
             await this.sender.updateQuestionCard(runningTask.questionCardMessageId, questionCardState);
@@ -2413,15 +2739,16 @@ export class MessageBridge {
       if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
         this.logger.info({ chatId }, 'Stale session detected, retrying with fresh session');
         this.sessionManager.resetSession(chatId);
-        lastState = { ...lastState, status: 'running', errorMessage: undefined };
+        lastState = { ...lastState, status: 'running', errorMessage: undefined, lifecycleStage: 'recovering' };
         await this.sender.updateCard(messageId, { ...lastState, responseText: '_Session expired, retrying..._' });
+        this.recordCardLifecycle(chatId, messageId, { ...lastState, responseText: '_Session expired, retrying..._' }, 'chat-retry');
 
         // Retry via the shared chokepoint so the persistent executor is
         // released-then-reacquired (its start() is bound to the now-stale
         // sessionId; without release, acquire would return the same broken
         // instance).
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+          prompt: runtimePrompt, cwd, abortController, outputsDir, apiContext, model: session.model,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2430,8 +2757,9 @@ export class MessageBridge {
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
           resetIdleTimer();
-          const state = processor.processMessage(message);
+          const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
           lastState = state;
+          this.recordCardLifecycle(chatId, messageId, state, 'chat-retry');
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
@@ -2444,11 +2772,12 @@ export class MessageBridge {
       if (lastState.status === 'error' && isContextOverflowError(lastState.errorMessage) && session.sessionId) {
         this.logger.info({ chatId }, 'Context overflow detected, retrying with fresh session');
         this.sessionManager.resetSession(chatId);
-        lastState = { ...lastState, status: 'running', errorMessage: undefined };
+        lastState = { ...lastState, status: 'running', errorMessage: undefined, lifecycleStage: 'recovering' };
         await this.sender.updateCard(messageId, { ...lastState, responseText: '_Context limit reached, starting fresh session..._' });
+        this.recordCardLifecycle(chatId, messageId, { ...lastState, responseText: '_Context limit reached, starting fresh session..._' }, 'chat-retry');
 
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+          prompt: runtimePrompt, cwd, abortController, outputsDir, apiContext, model: session.model,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2457,8 +2786,9 @@ export class MessageBridge {
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
           resetIdleTimer();
-          const state = processor.processMessage(message);
+          const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
           lastState = state;
+          this.recordCardLifecycle(chatId, messageId, state, 'chat-retry');
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
@@ -2525,11 +2855,12 @@ export class MessageBridge {
         this.logger.info({ chatId, isOverflow }, isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session');
         this.sessionManager.resetSession(chatId);
         const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
-        await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
+        await this.sender.updateCard(messageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg });
+        this.recordCardLifecycle(chatId, messageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg }, 'chat-retry');
 
         try {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+            prompt: runtimePrompt, cwd, abortController, outputsDir, apiContext, model: session.model,
             onTeamEvent, freshSession: true,
           });
           executionHandle.finish();
@@ -2538,8 +2869,9 @@ export class MessageBridge {
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
             resetIdleTimer();
-            const state = processor.processMessage(message);
+            const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
             lastState = state;
+            this.recordCardLifecycle(chatId, messageId, state, 'chat-retry');
             const newSid = processor.getSessionId();
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
@@ -2601,6 +2933,7 @@ export class MessageBridge {
         responseText: lastState.responseText,
         toolCalls: lastState.toolCalls,
         errorMessage: err.message || 'Unknown error',
+        lifecycleKey,
       };
       await rateLimiter.cancelAndWait();
       await this.sendFinalCard(messageId, errorState, chatId);
@@ -2685,12 +3018,15 @@ export class MessageBridge {
 
     const outputsDir = this.outputsManager.prepareDir(`${chatId}-btw-${Date.now()}`);
     const displayPrompt = (oneShotMode === 'continue' ? 'ByTheWay (continued): ' : 'ByTheWay: ') + question;
+    const lifecycleKey = buildCardLifecycleKey('bytheway', chatId, syntheticRecord?.id ?? Date.now());
     const processor = new StreamProcessor(displayPrompt);
     const initialState: CardState = {
       status: 'thinking',
       userPrompt: displayPrompt,
       responseText: '',
       toolCalls: [],
+      lifecycleStage: 'received',
+      lifecycleKey,
     };
 
     const messageId = await this.sender.sendCard(chatId, initialState);
@@ -2702,6 +3038,7 @@ export class MessageBridge {
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
       return;
     }
+    this.recordCardLifecycle(chatId, messageId, initialState, 'bytheway');
 
     const executionHandle = this.executorForEngine(chatId, engineName).startExecution({
       prompt: effectiveQuestion,
@@ -2760,8 +3097,9 @@ export class MessageBridge {
         if (abortController.signal.aborted) break;
         resetIdleTimer();
 
-        const state = processor.processMessage(message);
+        const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
         lastState = state;
+        this.recordCardLifecycle(chatId, messageId, state, 'bytheway');
 
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
           const q = state.pendingQuestion;
@@ -2846,6 +3184,7 @@ export class MessageBridge {
         responseText: lastState.responseText,
         toolCalls: lastState.toolCalls,
         errorMessage: err.message || 'Unknown error',
+        lifecycleKey,
       };
       await rateLimiter.cancelAndWait();
       await this.sendFinalCard(messageId, errorState, chatId);
@@ -2860,9 +3199,23 @@ export class MessageBridge {
 
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
+    let cardsEnabled = sendCards;
 
     if (this.runningTasks.has(chatId)) {
-      return { success: false, responseText: '', error: 'Chat is busy with another task' };
+      const task = this.runningTasks.get(chatId)!;
+      return {
+        success: false,
+        responseText: '',
+        error: 'Chat is busy with another task',
+        errorCode: 'chat_busy',
+        retryAfterMs: 5000,
+        busy: {
+          chatId,
+          startedAt: new Date(task.startTime).toISOString(),
+          durationMs: Date.now() - task.startTime,
+          hasVisibleCard: task.cardMessageId.length > 0,
+        },
+      };
     }
 
     const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
@@ -2872,6 +3225,7 @@ export class MessageBridge {
     const outputsDir = this.outputsManager.prepareDir(chatId);
 
     const displayPrompt = prompt;
+    const lifecycleKey = options.lifecycleKey ?? buildCardLifecycleKey('api', chatId, Date.now());
     const processor = new StreamProcessor(displayPrompt);
     const rateLimiter = new RateLimiter(1500);
     const activeGoal = session.activeGoal;
@@ -2882,16 +3236,24 @@ export class MessageBridge {
       responseText: '',
       toolCalls: [],
       goalCondition: activeGoal,
+      lifecycleStage: 'received',
+      lifecycleKey,
     };
 
     let messageId: string | undefined;
-    if (sendCards) {
-      messageId = await this.sender.sendCard(chatId, initialState);
+    if (cardsEnabled) {
+      try {
+        messageId = await this.sender.sendCard(chatId, initialState);
+      } catch (err) {
+        cardsEnabled = false;
+        this.logger.warn({ err, chatId, userId }, 'API task initial card send failed; continuing without cards');
+      }
       if (messageId) {
         recordActiveTask({
           botName: this.config.name,
           chatId,
           messageId,
+          lifecycleKey,
           userPrompt: displayPrompt,
           startedAt: Date.now(),
           source: 'api',
@@ -2900,7 +3262,8 @@ export class MessageBridge {
     }
 
     // Generate a messageId for onUpdate even if sendCards is false
-    const effectiveMessageId = messageId || `api-${chatId}-${Date.now()}`;
+    const effectiveMessageId = messageId || lifecycleKey;
+    this.recordCardLifecycle(chatId, effectiveMessageId, initialState, 'api');
     options.onUpdate?.(initialState, effectiveMessageId, false);
 
     const apiContext = { botName: this.config.name, chatId, groupMembers: options.groupMembers, groupId: options.groupId };
@@ -2913,18 +3276,24 @@ export class MessageBridge {
     const onTeamEvent = (event: TeamEvent) => {
       if (!runningTask) return;
       const changed = this.applyTeamEvent(runningTask, event);
-      if (changed && sendCards && messageId && !abortController.signal.aborted) {
+      if (changed && cardsEnabled && messageId && !abortController.signal.aborted) {
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
             this.sender.updateCard(messageId!, this.enrichWithAgentTeams({
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
+              lifecycleKey,
             }, chatId));
           }
         });
       }
     };
+
+    const apiRuntimePrompt = this.withRuntimeRulesContext(prompt, {
+      chatId,
+      purpose: 'bot-turn',
+    });
 
     // Persistent vs legacy executor — see executeQuery for the same pattern.
     // API task path also honors the feature flag, but only for Claude engine
@@ -2934,7 +3303,7 @@ export class MessageBridge {
     // them per-turn — runOneTurn falls back to legacy spawn automatically
     // when those are set.
     const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
+      prompt: apiRuntimePrompt,
       cwd,
       abortController,
       outputsDir,
@@ -2996,6 +3365,8 @@ export class MessageBridge {
       responseText: '',
       toolCalls: [],
       goalCondition: activeGoal,
+      lifecycleStage: 'received',
+      lifecycleKey,
     };
 
     try {
@@ -3003,10 +3374,11 @@ export class MessageBridge {
         if (abortController.signal.aborted) break;
         resetIdleTimer();
 
-        const state = processor.processMessage(message);
+        const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
         if (activeGoal) state.goalCondition = activeGoal;
         if (runningTask.teamState) state.teamState = runningTask.teamState;
         lastState = state;
+        this.recordCardLifecycle(chatId, effectiveMessageId, state, 'api');
 
         const newSessionId = processor.getSessionId();
         if (newSessionId && (newSessionId !== session.sessionId || session.sessionIdEngine !== engineName)) {
@@ -3040,7 +3412,7 @@ export class MessageBridge {
         const sdkTools = processor.drainSdkHandledTools();
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: detected SDK-handled tool');
-          if (tool.name === 'ExitPlanMode' && sendCards) {
+          if (tool.name === 'ExitPlanMode' && cardsEnabled) {
             if (this.exitPlanCardsShown.delete(chatId)) {
               this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
             } else {
@@ -3053,7 +3425,7 @@ export class MessageBridge {
           break;
         }
 
-        if (sendCards && messageId) {
+        if (cardsEnabled && messageId) {
           rateLimiter.schedule(() => {
             this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId));
           });
@@ -3085,12 +3457,13 @@ export class MessageBridge {
         this.logger.info({ chatId, isOverflow }, isOverflow ? 'API task: context overflow, retrying with fresh session' : 'API task: stale session detected, retrying with fresh session');
         this.sessionManager.resetSession(chatId);
         const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
-        if (sendCards && messageId) {
-          await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
+        if (cardsEnabled && messageId) {
+          await this.sender.updateCard(messageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg });
         }
+        this.recordCardLifecycle(chatId, effectiveMessageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg }, 'api-retry');
 
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext,
+          prompt: apiRuntimePrompt, cwd, abortController, outputsDir, apiContext,
           model: options.model ?? session.model,
           reasoningEffort: options.reasoningEffort,
           approvalPolicy: options.approvalPolicy,
@@ -3103,12 +3476,13 @@ export class MessageBridge {
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
           resetIdleTimer();
-          const state = processor.processMessage(message);
+          const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
           lastState = state;
+          this.recordCardLifecycle(chatId, effectiveMessageId, state, 'api-retry');
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
-          if (sendCards && messageId) {
+          if (cardsEnabled && messageId) {
             rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
           }
           options.onUpdate?.(state, effectiveMessageId, false);
@@ -3116,12 +3490,14 @@ export class MessageBridge {
         await rateLimiter.cancelAndWait();
       }
 
-      if (sendCards && messageId) {
+      if (cardsEnabled && messageId) {
         await this.sendFinalCard(messageId, lastState, chatId);
       }
-      options.onUpdate?.(lastState, effectiveMessageId, true);
+      const finalState = withCardLifecycle(lastState);
+      this.recordCardLifecycle(chatId, effectiveMessageId, finalState, 'api');
+      options.onUpdate?.(finalState, effectiveMessageId, true);
 
-      await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+      await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, finalState);
 
       // Notify web clients about output files before cleanup
       if (options.onOutputFiles) {
@@ -3135,27 +3511,27 @@ export class MessageBridge {
         durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
       });
       this.emitActivity({
-        type: lastState.status === 'complete' ? 'task_completed' : 'task_failed',
+        type: finalState.status === 'complete' ? 'task_completed' : 'task_failed',
         botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200),
-        responsePreview: lastState.responseText?.slice(0, 200),
-        costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
+        responsePreview: finalState.responseText?.slice(0, 200),
+        costUsd: finalState.costUsd, durationMs, errorMessage: finalState.errorMessage,
         timestamp: Date.now(),
       });
-      this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
+      this.costTracker.record({ botName: this.config.name, userId, success: finalState.status === 'complete', costUsd: finalState.costUsd, durationMs });
       metrics.incCounter('metabot_api_tasks_total');
       metrics.observeHistogram('metabot_task_duration_seconds', durationMs / 1000);
-      if (lastState.costUsd) metrics.observeHistogram('metabot_task_cost_usd', lastState.costUsd);
+      if (finalState.costUsd) metrics.observeHistogram('metabot_task_cost_usd', finalState.costUsd);
 
       // Record in cross-platform session registry
-      this.recordSession(chatId, prompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
+      this.recordSession(chatId, prompt, finalState.responseText, processor.getSessionId(), finalState.costUsd, durationMs);
 
       return {
-        success: lastState.status === 'complete',
-        responseText: lastState.responseText,
+        success: finalState.status === 'complete',
+        responseText: finalState.responseText,
         sessionId: processor.getSessionId(),
-        costUsd: lastState.costUsd,
+        costUsd: finalState.costUsd,
         durationMs,
-        error: lastState.errorMessage,
+        error: finalState.errorMessage,
       };
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'API task execution error');
@@ -3167,13 +3543,14 @@ export class MessageBridge {
         this.logger.info({ chatId, isOverflow }, isOverflow ? 'API task: context overflow in catch, retrying with fresh session' : 'API task: stale session in catch, retrying with fresh session');
         this.sessionManager.resetSession(chatId);
         const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
-        if (sendCards && messageId) {
-          await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
-        }
+          if (cardsEnabled && messageId) {
+            await this.sender.updateCard(messageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg });
+          }
+          this.recordCardLifecycle(chatId, effectiveMessageId, { ...lastState, status: 'running', lifecycleStage: 'recovering', responseText: retryMsg }, 'api-retry');
 
         try {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext,
+            prompt: apiRuntimePrompt, cwd, abortController, outputsDir, apiContext,
             model: options.model ?? session.model,
             reasoningEffort: options.reasoningEffort,
             approvalPolicy: options.approvalPolicy,
@@ -3186,24 +3563,27 @@ export class MessageBridge {
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
             resetIdleTimer();
-            const state = processor.processMessage(message);
+            const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
             lastState = state;
+            this.recordCardLifecycle(chatId, effectiveMessageId, state, 'api-retry');
             const newSid = processor.getSessionId();
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
-            if (sendCards && messageId) {
+            if (cardsEnabled && messageId) {
               rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
             }
             options.onUpdate?.(state, effectiveMessageId, false);
           }
           await rateLimiter.cancelAndWait();
 
-          if (sendCards && messageId) {
+          if (cardsEnabled && messageId) {
             await this.sendFinalCard(messageId, lastState, chatId);
           }
-          options.onUpdate?.(lastState, effectiveMessageId, true);
+          const finalState = withCardLifecycle(lastState);
+          this.recordCardLifecycle(chatId, effectiveMessageId, finalState, 'api');
+          options.onUpdate?.(finalState, effectiveMessageId, true);
 
-          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, finalState);
 
           if (options.onOutputFiles) {
             const outputFiles = this.outputsManager.scanOutputs(outputsDir);
@@ -3211,12 +3591,12 @@ export class MessageBridge {
           }
 
           return {
-            success: lastState.status === 'complete',
-            responseText: lastState.responseText,
+            success: finalState.status === 'complete',
+            responseText: finalState.responseText,
             sessionId: processor.getSessionId(),
-            costUsd: lastState.costUsd,
+            costUsd: finalState.costUsd,
             durationMs: Date.now() - startTime,
-            error: lastState.errorMessage,
+            error: finalState.errorMessage,
           };
         } catch (retryErr: any) {
           this.logger.error({ err: retryErr, chatId }, 'API task retry after stale session also failed');
@@ -3224,13 +3604,14 @@ export class MessageBridge {
         }
       }
 
-      if (sendCards && messageId) {
+      if (cardsEnabled && messageId) {
         const errorState: CardState = {
           status: 'error',
           userPrompt: displayPrompt,
           responseText: lastState.responseText,
           toolCalls: lastState.toolCalls,
           errorMessage: err.message || 'Unknown error',
+          lifecycleKey,
         };
         await rateLimiter.cancelAndWait();
         await this.sendFinalCard(messageId, errorState, chatId);
@@ -3242,8 +3623,10 @@ export class MessageBridge {
         responseText: lastState.responseText,
         toolCalls: lastState.toolCalls,
         errorMessage: err.message || 'Unknown error',
+        lifecycleKey,
       };
-      options.onUpdate?.(catchErrorState, effectiveMessageId, true);
+      this.recordCardLifecycle(chatId, effectiveMessageId, withCardLifecycle(catchErrorState), 'api');
+      options.onUpdate?.(withCardLifecycle(catchErrorState), effectiveMessageId, true);
 
       this.emitActivity({
         type: 'task_failed', botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200),
@@ -3274,15 +3657,31 @@ export class MessageBridge {
    * sends a plain text fallback so the user at least sees the result.
    */
   private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<void> {
-    await sendFinalCardWithRetry({
+    const enrichedState = this.enrichWithAgentTeams(state, chatId);
+    const existingLifecycle = enrichedState.lifecycleKey ? getCardLifecycleRecord(enrichedState.lifecycleKey) : undefined;
+    if (existingLifecycle?.finalDeliveredAt && existingLifecycle.finalDeliveryStatus !== 'failed') {
+      this.logger.info(
+        { chatId, messageId, lifecycleKey: enrichedState.lifecycleKey, finalDeliveryStatus: existingLifecycle.finalDeliveryStatus },
+        'Skipping duplicate final card delivery for lifecycle key',
+      );
+      return;
+    }
+
+    const deliveryStatus = await sendFinalCardWithRetry({
       sender: this.sender,
       config: this.config,
       logger: this.logger,
       sessionManager: this.sessionManager,
       messageId,
-      state: this.enrichWithAgentTeams(state, chatId),
+      state: enrichedState,
       chatId,
     });
+    if (chatId) {
+      this.recordCardLifecycle(chatId, messageId, enrichedState, 'final', {
+        finalDeliveryStatus: deliveryStatus,
+        finalDeliveryMessageId: messageId,
+      });
+    }
   }
 
   /**
@@ -3397,8 +3796,90 @@ export class MessageBridge {
   }
 }
 
+function formatRuntimeRulesContextPack(pack: RulesContextPack, purpose: RuntimeRulesPurpose): string {
+  if (!pack.text.trim()) return '';
+  const provenance = pack.provenance.length
+    ? `\n\nProvenance: ${pack.provenance.map((item) => `${item.scope}:${item.name}@v${item.version}`).join(', ')}`
+    : '';
+  return [
+    `<rules-context-pack purpose="${purpose}">`,
+    pack.text,
+    provenance,
+    '</rules-context-pack>',
+  ].join('\n');
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function mapBareRestartMessage(text: string): string | undefined {
+  const normalized = text
+    .trim()
+    .toLowerCase()
+    .replace(/[。.!！]+$/g, '')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return undefined;
+
+  const serviceAliases = new Set([
+    'restart',
+    'reboot',
+    'restart service',
+    'restart metabot',
+    'restart bridge',
+    '重启',
+    '重启服务',
+    '重启 metabot',
+    '重启metabot',
+    '重启 bridge',
+    '重启bridge',
+    '重启机器人',
+  ]);
+  if (serviceAliases.has(normalized)) return '/restart service';
+
+  const sessionAliases = new Set([
+    'restart session',
+    'restart chat',
+    'restart conversation',
+    '重启会话',
+    '重启当前会话',
+    '重启聊天',
+    '重启当前聊天',
+  ]);
+  if (sessionAliases.has(normalized)) return '/restart session';
+
+  return undefined;
+}
+
 function hasTeamState(teamState: TeamState | undefined): boolean {
   return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
+}
+
+function withCardLifecycle(state: CardState, stage?: CardLifecycleStage, lifecycleKey?: string): CardState {
+  const lifecycleStage = stage ?? (hasTerminalCardStatus(state) ? inferCardLifecycleStage(state) : state.lifecycleStage ?? inferCardLifecycleStage(state));
+  return {
+    ...state,
+    lifecycleStage,
+    lifecycleKey: lifecycleKey ?? state.lifecycleKey,
+  };
+}
+
+function hasTerminalCardStatus(state: CardState): boolean {
+  return state.status === 'complete' || state.status === 'error' || state.status === 'waiting_for_input' || state.status === 'agent_activity';
+}
+
+function inferCardLifecycleStage(state: CardState): CardLifecycleStage {
+  if (state.pendingQuestion || state.status === 'waiting_for_input') return 'blocked';
+  if (state.status === 'error') return 'blocked';
+  if (state.status === 'complete' || state.status === 'agent_activity') return 'closed';
+  if (state.status === 'running' || state.status === 'thinking') return 'executing';
+  return 'executing';
+}
+
+function buildCardLifecycleKey(kind: string, chatId: string, id?: string | number): string {
+  const safeKind = kind.replace(/[^A-Za-z0-9_-]/g, '_') || 'card';
+  const suffix = id === undefined || id === null || id === '' ? Date.now().toString() : String(id);
+  return `${safeKind}:${chatId || 'unknown-chat'}:${suffix}`;
 }
 
 function mergeBackgroundEvents(

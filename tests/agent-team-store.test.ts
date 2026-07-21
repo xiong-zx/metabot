@@ -199,4 +199,624 @@ describe('AgentTeamStore', () => {
 
     store.close();
   });
+
+  it('bootstraps versioned templates from config and pins legacy resident teams', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.reconcileTeams([{
+      name: 'research',
+      description: 'Research template',
+      agents: [{ name: 'planner', engine: 'codex', prompt: 'Plan v1' }],
+    }]);
+
+    expect(store.listTemplates('research')).toHaveLength(1);
+    expect(store.getTemplateVersion('research')).toMatchObject({ name: 'research', version: 1 });
+    expect(store.getTeam('research')).toMatchObject({
+      templateName: 'research',
+      templateVersion: 1,
+      scopeType: 'legacy',
+      instanceId: 'legacy:research',
+      managedByConfig: true,
+    });
+
+    store.reconcileTeams([{
+      name: 'research',
+      description: 'Research template',
+      agents: [{ name: 'planner', engine: 'codex', prompt: 'Plan v2' }],
+    }]);
+
+    expect(store.listTemplates('research').map((template) => template.version)).toEqual([2, 1]);
+    expect(store.getTeam('research')).toMatchObject({ templateName: 'research', templateVersion: 2 });
+    store.close();
+  });
+
+  it('creates chat-scoped instances pinned to a template version', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      description: 'Research team',
+      agents: [{ name: 'planner', engine: 'codex', prompt: 'Plan v1' }],
+    }, 'test');
+
+    const projectA = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+      pmBot: 'pm-codex',
+    })!;
+
+    expect(projectA.name).toContain('research@chat:');
+    expect(projectA).toMatchObject({
+      templateName: 'research',
+      templateVersion: 1,
+      scopeType: 'chat',
+      scopeKey: 'oc_project_a',
+      pmBot: 'pm-codex',
+      displayChatIds: ['oc_project_a'],
+      managedByConfig: false,
+    });
+    expect(store.getAgent(projectA.name, 'planner')).toMatchObject({ kind: 'template', prompt: 'Plan v1' });
+
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      description: 'Research team',
+      agents: [{ name: 'planner', engine: 'codex', prompt: 'Plan v2' }],
+    }, 'test');
+
+    const resolvedAgain = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+    })!;
+    expect(resolvedAgain.name).toBe(projectA.name);
+    expect(resolvedAgain.templateVersion).toBe(1);
+    expect(store.getAgent(projectA.name, 'planner')).toMatchObject({ prompt: 'Plan v1' });
+
+    const projectB = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_b',
+    })!;
+    expect(projectB.templateVersion).toBe(2);
+    expect(store.getAgent(projectB.name, 'planner')).toMatchObject({ prompt: 'Plan v2' });
+    store.close();
+  });
+
+  it('resolves instance ids and keeps chat-scoped runtime work isolated', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.createTeam('legacy-research', 'Legacy display team', { displayChatIds: ['oc_project_a'] });
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      agents: [{ name: 'planner', engine: 'codex' }],
+    }, 'test');
+
+    const projectA = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+    })!;
+    const projectB = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_b',
+    })!;
+
+    expect(projectA.instanceId).toBeTruthy();
+    expect(store.getTeamByInstanceId(projectA.instanceId!)).toMatchObject({ name: projectA.name });
+    expect(store.resolveTeamName(projectA.instanceId!)).toBe(projectA.name);
+    expect(store.resolveTeamIdentifier(projectA.instanceId!)).toMatchObject({ name: projectA.name });
+    expect(store.findTeamForChat('oc_project_a')).toMatchObject({ name: projectA.name });
+    expect(store.getAgent(projectA.name, 'planner')).toMatchObject({ instanceId: projectA.instanceId });
+
+    const taskA = store.createTask(projectA.name, { subject: 'Project A task', owner: 'planner' });
+    store.createTask(projectB.name, { subject: 'Project B task', owner: 'planner' });
+    const messageA = store.sendMessage(projectA.name, { toName: 'planner', body: 'A only' });
+    store.sendMessage(projectB.name, { toName: 'planner', body: 'B only' });
+    const runA = store.createRun(projectA.name, { agentName: 'planner', output: 'A run' });
+    store.createRun(projectB.name, { agentName: 'planner', output: 'B run' });
+
+    expect(taskA).toMatchObject({ instanceId: projectA.instanceId });
+    expect(messageA).toMatchObject({ instanceId: projectA.instanceId });
+    expect(runA).toMatchObject({ instanceId: projectA.instanceId });
+    expect(store.listTasks(projectA.name).map((task) => task.subject)).toEqual(['Project A task']);
+    expect(store.listTasks(projectB.name).map((task) => task.subject)).toEqual(['Project B task']);
+    expect(store.listMessages(projectA.name, 'planner').map((message) => message.body)).toEqual(['A only']);
+    expect(store.listMessages(projectB.name, 'planner').map((message) => message.body)).toEqual(['B only']);
+    expect(store.listRuns(projectA.name).map((run) => run.output)).toEqual(['A run']);
+    expect(store.listRuns(projectB.name).map((run) => run.output)).toEqual(['B run']);
+    store.close();
+  });
+
+  it('backfills child rows when a legacy team becomes pinned to an instance id', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.createTeam('legacy', 'Legacy team');
+    store.createAgent('legacy', { name: 'planner', actorRole: 'pm' });
+    store.createTask('legacy', { subject: 'Legacy task', owner: 'planner' });
+    store.sendMessage('legacy', { toName: 'planner', body: 'Legacy message' });
+    const run = store.createRun('legacy', { agentName: 'planner' });
+
+    expect(store.getAgent('legacy', 'planner')?.instanceId).toBeUndefined();
+    store.upsertTeam({
+      name: 'legacy',
+      instanceId: 'legacy:legacy',
+      scopeType: 'legacy',
+      managedByConfig: true,
+    });
+
+    expect(store.getAgent('legacy', 'planner')).toMatchObject({ instanceId: 'legacy:legacy' });
+    expect(store.getTask('legacy', 1)).toMatchObject({ instanceId: 'legacy:legacy' });
+    expect(store.listMessages('legacy', 'planner')[0]).toMatchObject({ instanceId: 'legacy:legacy' });
+    expect(store.getRun('legacy', run.id)).toMatchObject({ instanceId: 'legacy:legacy' });
+    store.close();
+  });
+
+  it('pins RuleSet references when creating a scoped instance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertRuleSet({
+      name: 'research-rules',
+      scope: 'team-template',
+      rules: [{ text: 'Use workflow v1.' }],
+      source: 'test',
+    });
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      ruleSetRefs: ['research-rules'],
+      agents: [{ name: 'planner', engine: 'codex' }],
+    }, 'test');
+
+    const instance = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+    })!;
+    expect(instance.ruleSetRefs).toEqual([{ name: 'research-rules', version: 1 }]);
+
+    store.upsertRuleSet({
+      name: 'research-rules',
+      scope: 'team-template',
+      rules: [{ text: 'Use workflow v2.' }],
+      source: 'test',
+    });
+    const resolvedAgain = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+    })!;
+    expect(resolvedAgain.ruleSetRefs).toEqual([{ name: 'research-rules', version: 1 }]);
+
+    const newInstance = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_b',
+    })!;
+    expect(newInstance.ruleSetRefs).toEqual([{ name: 'research-rules', version: 2 }]);
+    store.close();
+  });
+
+  it('pins additional project RuleSet refs passed during instance resolution', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertRuleSet({
+      name: 'research-rules',
+      scope: 'team-template',
+      rules: [{ text: 'Use workflow v1.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'project-alpha',
+      scope: 'project',
+      rules: [{ text: 'Use dataset alpha.' }],
+      source: 'test',
+    });
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      ruleSetRefs: ['research-rules'],
+      agents: [{ name: 'planner', engine: 'codex' }],
+    }, 'test');
+
+    const instance = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+      ruleSetRefs: ['project-alpha'],
+    })!;
+    expect(instance.ruleSetRefs).toEqual([
+      { name: 'project-alpha', version: 1 },
+      { name: 'research-rules', version: 1 },
+    ]);
+
+    store.upsertRuleSet({
+      name: 'project-alpha',
+      scope: 'project',
+      rules: [{ text: 'Use dataset alpha v2.' }],
+      source: 'test',
+    });
+    const resolvedAgain = store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+      ruleSetRefs: ['project-alpha@2'],
+    })!;
+    expect(resolvedAgain.ruleSetRefs).toEqual([
+      { name: 'project-alpha', version: 1 },
+      { name: 'research-rules', version: 1 },
+    ]);
+    store.close();
+  });
+
+  it('pins unversioned RuleSet refs during team config updates', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertRuleSet({
+      name: 'project-alpha',
+      scope: 'project',
+      rules: [{ text: 'Use dataset alpha v1.' }],
+      source: 'test',
+    });
+    store.createTeam('runtime', 'Runtime team');
+
+    const updated = store.updateTeamConfig('runtime', {
+      ruleSetRefs: ['project-alpha'],
+    })!;
+    expect(updated.ruleSetRefs).toEqual([{ name: 'project-alpha', version: 1 }]);
+
+    store.upsertRuleSet({
+      name: 'project-alpha',
+      scope: 'project',
+      rules: [{ text: 'Use dataset alpha v2.' }],
+      source: 'test',
+    });
+    expect(store.getTeam('runtime')?.ruleSetRefs).toEqual([{ name: 'project-alpha', version: 1 }]);
+    store.close();
+  });
+
+  it('rejects scoped instances when declared RuleSet refs are missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertTemplateFromConfig({
+      name: 'research',
+      ruleSetRefs: ['missing-rules'],
+      agents: [{ name: 'planner', engine: 'codex' }],
+    }, 'test');
+
+    expect(() => store.resolveTeamInstance({
+      templateName: 'research',
+      chatId: 'oc_project_a',
+    })).toThrow(/RuleSet not found/);
+    store.close();
+  });
+
+  it('exports templates, diffs versions, and stops expired temporary agents', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    const v1 = store.upsertTemplateFromConfig({
+      name: 'research',
+      description: 'v1',
+      agents: [{ name: 'planner', prompt: 'Plan v1' }],
+      ruleSetRefs: [{ name: 'dev-global', version: 1 }],
+    }, 'test');
+    const v2 = store.upsertTemplateFromConfig({
+      name: 'research',
+      description: 'v2',
+      agents: [
+        { name: 'planner', prompt: 'Plan v2' },
+        { name: 'reviewer', prompt: 'Review' },
+      ],
+      ruleSetRefs: [{ name: 'dev-global', version: 2 }],
+    }, 'test');
+
+    expect(store.exportTemplate('research', v1.version)).toMatchObject({
+      name: 'research',
+      version: 1,
+      body: { ruleSetRefs: [{ name: 'dev-global', version: 1 }] },
+    });
+    expect(store.diffTemplateVersions('research', v1.version, v2.version)).toMatchObject({
+      name: 'research',
+      changed: true,
+      summary: {
+        addedAgents: ['reviewer'],
+        changedAgents: ['planner'],
+        ruleSetRefsChanged: true,
+        descriptionChanged: true,
+      },
+    });
+
+    store.createTeam('runtime', 'Runtime team');
+    store.createAgent('runtime', {
+      name: 'temp',
+      kind: 'temporary',
+      actorRole: 'pm',
+      ttlMs: 1,
+    });
+    const expired = store.stopExpiredTemporaryAgents(Date.now() + 10);
+    expect(expired.map((agent) => agent.name)).toEqual(['temp']);
+    expect(store.getAgent('runtime', 'temp')).toMatchObject({ status: 'stopped' });
+    store.close();
+  });
+
+  it('enforces agent creation permissions and quotas', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+    store.createTeam('quota', 'Quota team', { quotas: { maxAgents: 2, maxTemporaryAgents: 1 } });
+
+    store.createAgent('quota', { name: 'planner', actorRole: 'pm' });
+    expect(() => store.createAgent('quota', { name: 'manager-created', actorRole: 'manager' }))
+      .toThrow(/not allowed/);
+    store.createAgent('quota', { name: 'temp-1', kind: 'temporary', actorRole: 'pm' });
+    expect(() => store.createAgent('quota', { name: 'temp-2', kind: 'temporary', actorRole: 'pm' }))
+      .toThrow(/quota exceeded/i);
+    store.close();
+  });
+
+  it('enforces scoped team, queue, and active run quotas', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertTemplateFromConfig({ name: 'research-a', agents: [{ name: 'planner' }] }, 'test');
+    store.upsertTemplateFromConfig({ name: 'research-b', agents: [{ name: 'planner' }] }, 'test');
+    store.upsertTemplateFromConfig({ name: 'research-c', agents: [{ name: 'planner' }] }, 'test');
+    store.resolveTeamInstance({ templateName: 'research-a', chatId: 'oc_project', quotas: { maxTeamsPerScope: 2 } });
+    store.resolveTeamInstance({ templateName: 'research-b', chatId: 'oc_project', quotas: { maxTeamsPerScope: 2 } });
+    expect(() => store.resolveTeamInstance({ templateName: 'research-c', chatId: 'oc_project', quotas: { maxTeamsPerScope: 2 } }))
+      .toThrow(/scope quota exceeded/i);
+
+    store.createTeam('queue-limited', 'Queue limited', { quotas: { maxQueuedTasks: 2, maxActiveRuns: 1 } });
+    store.createTask('queue-limited', { subject: 'first' });
+    const second = store.createTask('queue-limited', { subject: 'second' });
+    expect(() => store.createTask('queue-limited', { subject: 'third' }))
+      .toThrow(/queue quota exceeded/i);
+    store.updateTask('queue-limited', second.id, { status: 'completed' });
+    expect(store.createTask('queue-limited', { subject: 'third' })).toMatchObject({ subject: 'third' });
+    expect(() => store.updateTask('queue-limited', second.id, { status: 'pending' }))
+      .toThrow(/queue quota exceeded/i);
+
+    const running = store.createRun('queue-limited', { agentName: 'planner' });
+    expect(() => store.createRun('queue-limited', { agentName: 'reviewer' }))
+      .toThrow(/active run quota exceeded/i);
+    expect(store.createRun('queue-limited', { agentName: 'archiver', status: 'completed' })).toMatchObject({ status: 'completed' });
+    store.updateRun('queue-limited', running.id, { status: 'completed' });
+    expect(store.createRun('queue-limited', { agentName: 'reviewer' })).toMatchObject({ status: 'running' });
+    const completedArchiver = store.listRuns('queue-limited').find((run) => run.agentName === 'archiver')!;
+    expect(() => store.updateRun('queue-limited', completedArchiver.id, { status: 'running' }))
+      .toThrow(/active run quota exceeded/i);
+
+    store.createTeam('parallel-limited', 'Parallel limited', { quotas: { maxActiveRuns: 3, maxParallelRunsPerAgent: 1 } });
+    store.createRun('parallel-limited', { agentName: 'planner' });
+    expect(() => store.createRun('parallel-limited', { agentName: 'planner' }))
+      .toThrow(/per-agent run quota exceeded/i);
+    expect(store.createRun('parallel-limited', { agentName: 'reviewer' })).toMatchObject({ status: 'running' });
+    const completedPlanner = store.createRun('parallel-limited', { agentName: 'planner', status: 'completed' });
+    expect(() => store.updateRun('parallel-limited', completedPlanner.id, { status: 'running' }))
+      .toThrow(/per-agent run quota exceeded/i);
+    store.close();
+  });
+
+  it('requires PM/user/admin approval before applying template or RuleSet proposals', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    const ruleProposal = store.createPromotionProposal({
+      kind: 'ruleset',
+      requestedBy: 'research-manager',
+      requestedByRole: 'manager',
+      summary: 'Share code-change rule',
+      body: {
+        name: 'dev-global',
+        scope: 'global',
+        rules: [{ text: 'Update docs and MetaMemory after code changes.', overridable: false }],
+      },
+    });
+    expect(ruleProposal).toMatchObject({
+      kind: 'ruleset',
+      targetName: 'dev-global',
+      status: 'pending',
+      requestedByRole: 'manager',
+    });
+    expect(store.getRuleSet('dev-global')).toBeUndefined();
+    expect(() => store.decidePromotionProposal(ruleProposal.id, {
+      decision: 'approved',
+      actorRole: 'manager',
+      decidedBy: 'research-manager',
+    })).toThrow(/not allowed/);
+
+    const approved = store.decidePromotionProposal(ruleProposal.id, {
+      decision: 'approved',
+      actorRole: 'pm',
+      decidedBy: 'pm-codex',
+      reason: 'Rule is global and stable.',
+    });
+    expect(approved).toMatchObject({
+      status: 'approved',
+      appliedVersion: 1,
+      decidedBy: 'pm-codex',
+    });
+    expect(store.getRuleSet('dev-global')).toMatchObject({
+      version: 1,
+      source: `proposal:${ruleProposal.id}`,
+      rules: [{ text: 'Update docs and MetaMemory after code changes.', overridable: false }],
+    });
+
+    const templateProposal = store.createPromotionProposal({
+      kind: 'template',
+      requestedBy: 'reviewer',
+      requestedByRole: 'agent',
+      body: {
+        name: 'research',
+        agents: [{ name: 'planner', prompt: 'Plan carefully.' }],
+      },
+    });
+    const rejected = store.decidePromotionProposal(templateProposal.id, {
+      decision: 'rejected',
+      actorRole: 'user',
+      decidedBy: 'human',
+      reason: 'Needs more review.',
+    });
+    expect(rejected).toMatchObject({ status: 'rejected', decidedBy: 'human' });
+    expect(store.getTemplateVersion('research')).toBeUndefined();
+    expect(store.listPromotionProposals('pending')).toEqual([]);
+    expect(store.listPromotionProposals('approved').map((proposal) => proposal.id)).toEqual([ruleProposal.id]);
+    expect(() => store.createPromotionProposal({
+      kind: 'ruleset',
+      requestedBy: 'worker',
+      requestedByRole: 'worker',
+      body: {
+        name: 'worker-proposed',
+        scope: 'worker',
+        rules: [{ text: 'Untrusted worker proposal.' }],
+      },
+    })).toThrow(/not allowed to create promotion proposals/);
+    store.close();
+  });
+
+  it('builds a rules context pack with provenance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    const global = store.upsertRuleSet({
+      name: 'dev-global',
+      scope: 'global',
+      rules: [{ text: 'Update docs and MetaMemory after code changes.', overridable: false }],
+      source: 'test',
+    });
+    const project = store.upsertRuleSet({
+      name: 'project-a',
+      scope: 'project',
+      rules: [{ text: 'Use project dataset path /data/a.' }],
+      source: 'test',
+    });
+
+    const pack = store.buildRulesContextPack({
+      refs: [
+        { name: project.name, version: project.version },
+        { name: global.name, version: global.version },
+      ],
+      inlineRules: [{ text: 'Run the focused store tests.' }],
+    });
+
+    expect(pack.provenance.map((item) => item.scope)).toEqual(['global', 'project']);
+    expect(pack.text).toContain('Update docs and MetaMemory after code changes. [locked]');
+    expect(pack.text).toContain('Run the focused store tests.');
+    store.close();
+  });
+
+  it('builds runtime rules packs from global, bot, and chat instance refs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertRuleSet({
+      name: 'dev-global',
+      scope: 'global',
+      rules: [{ text: 'Global v1' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'dev-global',
+      scope: 'global',
+      rules: [{ text: 'Global v2' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'bot:pm-codex',
+      scope: 'bot',
+      rules: [{ text: 'PM Codex bot rule' }],
+      source: 'test',
+    });
+    const teamRules = store.upsertRuleSet({
+      name: 'research-team',
+      scope: 'team-instance',
+      rules: [{ text: 'Project team rule' }],
+      source: 'test',
+    });
+    store.createTeam('runtime', 'Runtime team', {
+      displayChatIds: ['oc_project'],
+      ruleSetRefs: [{ name: teamRules.name, version: teamRules.version }],
+    });
+
+    const pack = store.buildRuntimeRulesContextPack({
+      purpose: 'bot-turn',
+      botName: 'pm-codex',
+      chatId: 'oc_project',
+    });
+
+    expect(pack.text).toContain('Global v2');
+    expect(pack.text).not.toContain('Global v1');
+    expect(pack.text).toContain('PM Codex bot rule');
+    expect(pack.text).toContain('Project team rule');
+    expect(pack.text).toContain('Bot turn boundary');
+    expect(pack.provenance.map((item) => `${item.scope}:${item.name}@v${item.version}`)).toEqual([
+      'global:dev-global@v2',
+      'bot:bot:pm-codex@v1',
+      'team-instance:research-team@v1',
+    ]);
+    store.close();
+  });
+
+  it('selects first-class agent-role and worker RuleSets for runtime packs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+
+    store.upsertRuleSet({
+      name: 'manager',
+      scope: 'agent-role',
+      rules: [{ text: 'Manager must coordinate and request PM approval.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'role:reviewer',
+      scope: 'agent-role',
+      rules: [{ text: 'Reviewer must check tests and risks.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'worker',
+      scope: 'worker',
+      rules: [{ text: 'All workers must return structured output.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'worker:nightly',
+      scope: 'worker',
+      rules: [{ text: 'Nightly workers must summarize artifacts.' }],
+      source: 'test',
+    });
+    store.upsertRuleSet({
+      name: 'unrelated-worker',
+      scope: 'worker',
+      rules: [{ text: 'Should not be injected.' }],
+      source: 'test',
+    });
+
+    const managerPack = store.buildRuntimeRulesContextPack({
+      purpose: 'agent-run',
+      agentName: 'manager',
+      agentRole: 'team manager',
+    });
+    expect(managerPack.text).toContain('Manager must coordinate and request PM approval.');
+    expect(managerPack.text).not.toContain('Reviewer must check tests and risks.');
+    expect(managerPack.provenance.map((item) => `${item.scope}:${item.name}@v${item.version}`)).toContain('agent-role:manager@v1');
+
+    const reviewerPack = store.buildRuntimeRulesContextPack({
+      purpose: 'agent-run',
+      agentName: 'qa',
+      agentRole: 'reviewer',
+    });
+    expect(reviewerPack.text).toContain('Reviewer must check tests and risks.');
+
+    const workerPack = store.buildRuntimeRulesContextPack({
+      purpose: 'worker-dispatch',
+      botName: 'pm-codex',
+      workerLabel: 'nightly',
+    });
+    expect(workerPack.text).toContain('All workers must return structured output.');
+    expect(workerPack.text).toContain('Nightly workers must summarize artifacts.');
+    expect(workerPack.text).not.toContain('Should not be injected.');
+    expect(workerPack.provenance.map((item) => `${item.scope}:${item.name}@v${item.version}`)).toEqual([
+      'worker:worker@v1',
+      'worker:worker:nightly@v1',
+    ]);
+    store.close();
+  });
 });
