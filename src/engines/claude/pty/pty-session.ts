@@ -20,6 +20,7 @@ import { applyClaudeChildEnvPolicy } from '../executor.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
+  PtyPromptSubmission,
 } from './contract.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -267,7 +268,8 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
 
     while (Date.now() - start < TIMEOUT) {
-      if (PROMPT_MARKER_RE.test(this.ring)) {
+      const screen = this.screen();
+      if (classifyClaudeInputReadiness(screen).idle) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
         return;
@@ -277,11 +279,11 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
     throw new Error(
       `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯/⏵). ` +
-        `Last 500 chars: ${this.ring.slice(-500)}`,
+        `Current screen: ${this.screen().slice(-500)}`,
     );
   }
 
-  async typePrompt(text: string): Promise<void> {
+  async typePrompt(text: string): Promise<PtyPromptSubmission> {
     await this.ready(); // boot: wait for the TUI to first come up
     // Per-call readiness: ready() is memoized after boot, so on its own it would
     // let us type the INSTANT a turn is requested — even while claude is still
@@ -302,7 +304,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     if (!idle) {
       throw new Error(
         `pty-session: cannot type prompt — Claude TUI did not return to idle input. ` +
-          `Last 500 chars: ${this.snapshot().slice(-500)}`,
+          `Current screen: ${this.screen().slice(-500)}`,
       );
     }
     if (!this.term || this.disposed) {
@@ -311,24 +313,65 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
     this.log.info({ len: text.length }, 'pty-session: typing prompt');
 
+    const idleScreen = this.screen();
     // Type char-by-char into the PTY (interactive input).
     for (const ch of text) {
       this.term.write(ch);
     }
 
-    await sleep(800);
+    const echoObserved = await this.waitForScreenChange(idleScreen, 3_000);
+    if (!echoObserved) {
+      throw new Error('pty-session: prompt input was not echoed by the Claude TUI');
+    }
+
     this.term.write('\r');
-    await sleep(1500);
-    // Double-Enter safeguard: the TUI sometimes needs a second Enter to submit.
-    this.term.write('\r');
+    let acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
+    if (!acknowledgement) {
+      // The TUI occasionally accepts the text but leaves it in the input box
+      // until a second Enter. Retry only when the first submit had no observable
+      // effect, then require the same screen-based acknowledgement.
+      this.log.warn('pty-session: first Enter had no observable effect — retrying submit');
+      this.term.write('\r');
+      acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
+    }
+    if (!acknowledgement) {
+      throw new Error('pty-session: prompt submit was not acknowledged by the Claude TUI');
+    }
+    return { submittedAt: Date.now(), acknowledgement };
+  }
+
+  private async waitForScreenChange(before: string, timeoutMs: number): Promise<string | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = this.screen();
+      if (current && current !== before) return current;
+      await sleep(50);
+    }
+    return null;
+  }
+
+  private async waitForSubmissionAcknowledgement(
+    submittedScreen: string,
+    timeoutMs: number,
+  ): Promise<PtyPromptSubmission['acknowledgement'] | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = this.screen();
+      const readiness = classifyClaudeInputReadiness(current);
+      if (readiness.running) return 'running';
+      if (current && current !== submittedScreen && !readiness.idle) return 'accepted';
+      if (current && current !== submittedScreen && readiness.idle) return 'accepted';
+      await sleep(50);
+    }
+    return null;
   }
 
   /**
    * Wait until the TUI is at an IDLE input box, ready to accept a new prompt.
    *
-   * The snapshot is an append-log of PTY output (not a screen buffer), so we
-   * read only the most-recent slice — the latest redraw — and key off what
-   * claude actively rewrites there:
+   * Readiness is classified from the current cursor-resolved terminal screen.
+   * Historical append-log output must never satisfy this check: old prompt or
+   * running markers can remain in the ring after the live TUI has changed.
    *   - "esc to interrupt" in the live footer ⟶ the model is generating.
    *   - a menu footer ("enter to select", "ctrl-g to edit", "shift+tab to
    *     approve") or a `❯` pointing at a numbered option ⟶ a blocking menu is up
@@ -349,8 +392,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
-      const tail = this.snapshot().slice(-700);
-      const readiness = classifyClaudeInputReadiness(tail);
+      const readiness = classifyClaudeInputReadiness(this.screen());
       if (readiness.idle) {
         if (!idleSince) idleSince = Date.now();
         if (Date.now() - idleSince >= STABLE_MS) return true;

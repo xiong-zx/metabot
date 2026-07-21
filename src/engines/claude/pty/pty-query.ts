@@ -21,9 +21,9 @@
  *   1. scanner loop  — adapts jsonl records into `out`, tracking usage/session.
  *   2. prompt loop   — consumes the input prompt iterable, typing each user
  *                      message into the TUI (one turn per message).
- *   3. turn-complete — on each Stop-hook fire, after a short drain delay (so
- *                      the scanner flushes the turn's final lines), emit the
- *                      synthesized `result`.
+ *   3. turn-complete — on each Stop-hook fire, flush the scanner through the
+ *                      terminal assistant record, then emit the synthesized
+ *                      `result`.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -128,16 +128,8 @@ export function readLatestExitPlan(
   }
 }
 
-/**
- * Drain delay after a Stop-hook fires before synthesizing the `result`. The
- * scanner polls every ~120ms; this gives it room to read the turn's final
- * assistant line(s) so the `result` is ordered AFTER them. Matches the POC's
- * proven ~500ms settle. A synchronous `drainPending(true)` runs when this timer
- * fires (see onTurnComplete) to recover any still-unterminated final line, so
- * this value only needs to cover claude's byte-write latency, not the newline
- * flush — bumped from 450ms to give headroom under heavy host I/O load.
- */
-const RESULT_DRAIN_MS = 600;
+const RESULT_FLUSH_TIMEOUT_MS = 2_000;
+const RESULT_FLUSH_POLL_MS = 50;
 
 function envPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -195,6 +187,9 @@ export const ptyQuery = (args: {
   let turnInFlight = false;
   let currentTurnId = 0;
   let currentTurnStarted = false;
+  let currentTurnPrompt = '';
+  let currentTurnPromptSeen = false;
+  let terminalAssistantTurnId = 0;
   let terminalResultTurnId = 0;
   let errorClosingTurnId = 0;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
@@ -237,40 +232,14 @@ export const ptyQuery = (args: {
       startAtEnd: Boolean(options.resume),
     });
 
-    // Stop-hook → synthesize a terminal `result` after a short drain delay.
+    // Stop-hook → flush every already-read/new final JSONL record before the
+    // synthetic result. claimTerminalResult() arbitrates against watchdogs,
+    // while turnInFlight remains true until the ordering barrier completes.
     hookBridge.onTurnComplete(() => {
       if (disposed) return;
       const turnId = currentTurnId;
       if (!turnInFlight || errorClosingTurnId === turnId || !claimTerminalResult(turnId)) return;
-      // Mark the turn complete IMMEDIATELY (not in the drain timeout below) so
-      // the slash-command idle watchdog stands down and never double-emits.
-      turnInFlight = false;
-      currentTurnStarted = false;
-      const usage = { ...lastUsage };
-      // Reset for the next turn.
-      lastUsage = {};
-      setTimeout(() => {
-        if (disposed) return;
-        // Final flush BEFORE the terminal result. The Stop hook can fire before
-        // claude flushes the terminating newline of its last assistant line;
-        // the newline-only scanner would then emit that line AFTER `result`,
-        // stranding the real answer as a post-turn "spontaneous" card while the
-        // previous (intermediate) line becomes the "Complete" card. Draining the
-        // unterminated tail here re-orders the true final line ahead of `result`.
-        try {
-          const pending = scanner?.drainPending(true) ?? [];
-          for (const rec of pending) emitRecord(rec);
-        } catch (err) {
-          logger.warn({ err }, 'ptyQuery: final drain before result failed');
-        }
-        out.enqueue(
-          synthesizeResult({
-            sessionId,
-            model: usage.model,
-            usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
-          }),
-        );
-      }, RESULT_DRAIN_MS);
+      void finalizeTurnAfterStop(turnId);
     });
 
     // Scanner loop: adapt each raw record into the output channel.
@@ -292,8 +261,14 @@ export const ptyQuery = (args: {
   // ── Scanner loop ─────────────────────────────────────────────────────────
   /** Track usage/session off a raw record, adapt it, and enqueue to `out`. */
   function emitRecord(rec: RawJsonlRecord): void {
-    if (turnInFlight && (rec.type === 'assistant' || rec.type === 'system')) {
+    if (turnInFlight && rec.type === 'user' && rawUserText(rec) === currentTurnPrompt) {
+      currentTurnPromptSeen = true;
+    }
+    if (turnInFlight && currentTurnPromptSeen && (rec.type === 'assistant' || rec.type === 'system')) {
       currentTurnStarted = true;
+    }
+    if (turnInFlight && rec.type === 'assistant' && isTerminalAssistant(rec)) {
+      terminalAssistantTurnId = currentTurnId;
     }
     trackUsage(rec);
     if (!sessionId) {
@@ -307,6 +282,56 @@ export const ptyQuery = (args: {
     } else {
       out.enqueue(adapted);
     }
+  }
+
+  async function finalizeTurnAfterStop(turnId: number): Promise<void> {
+    const deadline = Date.now() + RESULT_FLUSH_TIMEOUT_MS;
+    try {
+      do {
+        const pending = scanner?.drainPending(true) ?? [];
+        for (const rec of pending) emitRecord(rec);
+        if (terminalAssistantTurnId >= turnId || disposed) break;
+        await sleep(RESULT_FLUSH_POLL_MS);
+      } while (Date.now() < deadline);
+    } catch (err) {
+      logger.warn({ err, turnId }, 'ptyQuery: final scanner barrier failed');
+    }
+    if (disposed || currentTurnId !== turnId) return;
+    if (terminalAssistantTurnId < turnId) {
+      logger.warn({ turnId }, 'ptyQuery: Stop hook completed without an observable terminal assistant record');
+    }
+    const usage = { ...lastUsage };
+    turnInFlight = false;
+    currentTurnStarted = false;
+    currentTurnPrompt = '';
+    currentTurnPromptSeen = false;
+    lastUsage = {};
+    out.enqueue(
+      synthesizeResult({
+        sessionId,
+        model: usage.model,
+        usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+      }),
+    );
+  }
+
+  function rawUserText(rec: RawJsonlRecord): string | null {
+    const content = (rec.message as Record<string, unknown> | undefined)?.content;
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return null;
+    const text = content
+      .filter((block): block is Record<string, unknown> => !!block && typeof block === 'object')
+      .filter((block) => block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text as string)
+      .join('\n');
+    return text || null;
+  }
+
+  function isTerminalAssistant(rec: RawJsonlRecord): boolean {
+    const msg = rec.message as Record<string, unknown> | undefined;
+    const stopReason = msg?.stop_reason;
+    return rec.parentToolUseID == null
+      && (stopReason === 'end_turn' || stopReason === 'stop_sequence');
   }
 
   async function runScanner(): Promise<void> {
@@ -509,6 +534,8 @@ export const ptyQuery = (args: {
         if (!session || disposed) break;
         turnInFlight = true; // a new turn starts the moment we submit the prompt
         currentTurnStarted = false;
+        currentTurnPrompt = text;
+        currentTurnPromptSeen = false;
         errorClosingTurnId = 0;
         const turnId = ++currentTurnId;
         try {
@@ -598,8 +625,8 @@ export const ptyQuery = (args: {
     let sawRunning = false;
     while (!disposed) {
       if (!turnInFlight) return; // Stop hook already completed this turn
-      const tail = (session?.snapshot() ?? '').slice(-2000).toLowerCase().replace(/\s+/g, '');
-      if (tail.includes(RUNNING_MARKER)) sawRunning = true;
+      const screen = (session?.screen() ?? '').toLowerCase().replace(/\s+/g, '');
+      if (screen.includes(RUNNING_MARKER)) sawRunning = true;
       const elapsed = Date.now() - start;
       if (sawRunning) return; // real model turn — let the Stop-hook path finish it
       if (elapsed > SLASH_GRACE_MS) {
@@ -634,8 +661,8 @@ export const ptyQuery = (args: {
     const start = Date.now();
     while (!disposed && turnInFlight && currentTurnId === turnId) {
       if (currentTurnStarted) return;
-      const tail = (session?.snapshot() ?? '').slice(-2000).toLowerCase().replace(/\s+/g, '');
-      if (tail.includes(RUNNING_MARKER)) {
+      const screen = (session?.screen() ?? '').toLowerCase().replace(/\s+/g, '');
+      if (screen.includes(RUNNING_MARKER)) {
         currentTurnStarted = true;
         return;
       }

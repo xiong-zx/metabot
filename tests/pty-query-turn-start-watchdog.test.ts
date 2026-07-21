@@ -12,13 +12,15 @@ const fakeSession = vi.hoisted(() => ({
   sessionId: 'sess-test',
 }));
 
+const scannerDrain = vi.hoisted(() => vi.fn((): Array<Record<string, unknown>> => []));
+
 vi.mock('../src/engines/claude/pty/pty-session.js', () => ({
   createPtyClaudeSession: vi.fn(() => fakeSession),
 }));
 
 vi.mock('../src/engines/claude/pty/jsonl-scanner.js', () => ({
   createJsonlScanner: vi.fn(() => ({
-    drainPending: vi.fn(() => []),
+    drainPending: scannerDrain,
     stop: vi.fn(),
     async *[Symbol.asyncIterator]() {
       // No assistant/system records: this simulates a prompt that never
@@ -73,6 +75,10 @@ describe('ptyQuery turn-start watchdog', () => {
     fakeSession.typePrompt.mockImplementation(async () => {});
     fakeSession.snapshot.mockReset();
     fakeSession.snapshot.mockImplementation(() => '❯ ');
+    fakeSession.screen.mockReset();
+    fakeSession.screen.mockImplementation(() => '');
+    scannerDrain.mockReset();
+    scannerDrain.mockImplementation(() => []);
   });
 
   afterEach(() => {
@@ -106,6 +112,65 @@ describe('ptyQuery turn-start watchdog', () => {
     expect(String((result.value as any).result)).toContain('did not start a model turn');
     expect(fakeSession.interrupt).toHaveBeenCalled();
 
+    await query.dispose?.();
+  });
+
+  it('does not accept a historical append-log running marker as turn-start proof', async () => {
+    fakeSession.snapshot.mockImplementation(() => 'old output\nEsc to interrupt\n❯ ');
+    fakeSession.screen.mockImplementation(() => '❯ ');
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+
+    const next = query[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(next).resolves.toMatchObject({
+      value: { type: 'result', subtype: 'error', is_error: true },
+    });
+    await query.dispose?.();
+  });
+
+  it('flushes a queued final assistant before the synthetic result', async () => {
+    const { hookBridge, fireTurnComplete } = createHookBridge();
+    scannerDrain.mockImplementationOnce(() => [
+      {
+        type: 'user',
+        sessionId: 'sess-test',
+        message: { content: 'hello' },
+      },
+      {
+        type: 'assistant',
+        sessionId: 'sess-test',
+        parentToolUseID: null,
+        message: {
+          model: 'claude-fable-5',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'final answer' }],
+        },
+      },
+    ]);
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fakeSession.typePrompt).toHaveBeenCalledWith('hello');
+    fireTurnComplete();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'user' } });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'final answer' }] },
+      },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'result' } });
     await query.dispose?.();
   });
 

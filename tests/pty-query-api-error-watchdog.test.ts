@@ -32,13 +32,15 @@ const fakeSession = vi.hoisted(() => ({
   sessionId: 'sess-test',
 }));
 
+const scannerDrain = vi.hoisted(() => vi.fn((): Array<Record<string, unknown>> => []));
+
 vi.mock('../src/engines/claude/pty/pty-session.js', () => ({
   createPtyClaudeSession: vi.fn(() => fakeSession),
 }));
 
 vi.mock('../src/engines/claude/pty/jsonl-scanner.js', () => ({
   createJsonlScanner: vi.fn(() => ({
-    drainPending: vi.fn(() => []),
+    drainPending: scannerDrain,
     stop: vi.fn(),
     async *[Symbol.asyncIterator]() {
       // Aborted mid-stream: claude never writes a terminating record.
@@ -115,6 +117,8 @@ describe('ptyQuery API-error watchdog', () => {
     fakeSession.typePrompt.mockImplementation(async () => {});
     fakeSession.interrupt.mockReset();
     fakeSession.interrupt.mockImplementation(async () => {});
+    scannerDrain.mockReset();
+    scannerDrain.mockImplementation(() => []);
   });
 
   afterEach(() => {
@@ -180,10 +184,23 @@ describe('ptyQuery API-error watchdog', () => {
     // lands long before the idle window elapses.
     await vi.advanceTimersByTimeAsync(1_000);
     setScreen(`The card wedged because of "${ABORT_LINE}"`, IDLE_FOOTER);
+    scannerDrain.mockImplementationOnce(() => [
+      { type: 'user', message: { content: 'hello' } },
+      {
+        type: 'assistant',
+        parentToolUseID: null,
+        message: {
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'completed normally' }],
+        },
+      },
+    ]);
     fireTurnComplete();
     await vi.advanceTimersByTimeAsync(1_000);
 
-    const result = await next;
+    await expect(next).resolves.toMatchObject({ value: { type: 'user' } });
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'assistant' } });
+    const result = await iterator.next();
     expect(result.done).toBe(false);
     expect(result.value).toMatchObject({ type: 'result', subtype: 'success', is_error: false });
 

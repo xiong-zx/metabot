@@ -215,8 +215,13 @@ export interface PtyClaudeSession {
   readonly sessionId: string;
   /** Resolves once the TUI input box is ready to accept typing. */
   ready(): Promise<void>;
-  /** Type a prompt string into the TUI and submit it. */
-  typePrompt(text: string): Promise<void>;
+  /**
+   * Type a prompt string into the TUI and submit it. Resolves only after the
+   * current terminal screen proves that the input was echoed and then left the
+   * input box (or entered the running state). This is a submit acknowledgement,
+   * not proof that the upstream model has produced a response.
+   */
+  typePrompt(text: string): Promise<PtyPromptSubmission>;
   /**
    * Write raw bytes to the PTY (no prompt-submit framing). Used by the
    * interactive-tool keystroke layer to drive native TUI menus.
@@ -236,6 +241,11 @@ export interface PtyClaudeSession {
   dispose(): Promise<void>;
   /** Path to the session jsonl file the scanner should tail. */
   readonly jsonlPath: string;
+}
+
+export interface PtyPromptSubmission {
+  submittedAt: number;
+  acknowledgement: 'running' | 'accepted';
 }
 
 export interface PtyClaudeSessionOptions {
@@ -280,9 +290,10 @@ export interface JsonlScanner extends AsyncIterable<RawJsonlRecord> {
   /** Stop tailing and end the async iteration. */
   stop(): void;
   /**
-   * Synchronously read any records appended since the last poll and return
-   * them, advancing the internal offset so the async iterator won't re-emit
-   * them. When `includePartial` is true, also emits a trailing record whose
+   * Synchronously return records already read by the iterator but not yet
+   * delivered, followed by any records appended since the last poll. This is
+   * the ordering barrier used before a synthetic terminal result. When
+   * `includePartial` is true, it also emits a trailing record whose
    * terminating newline hasn't landed yet (used at end-of-turn to recover
    * claude's final assistant line before synthesizing the `result`).
    */
