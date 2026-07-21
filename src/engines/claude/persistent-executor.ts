@@ -33,10 +33,10 @@ import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from '../../utils/logger.js';
-import type { ClaudeEffort } from '../../config.js';
+import type { ClaudeEffort, ClaudePermissionMode } from '../../config.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
-import { apply1MContextSettings, applyNoProxyPolicy, loadMcpServersWithApiContext } from './executor.js';
+import { apply1MContextSettings, applyClaudeChildEnvPolicy, loadMcpServersWithApiContext, resolveClaudePermissionOptions } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
 import { ptyQuery } from './pty/pty-query.js';
@@ -115,7 +115,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
-    applyNoProxyPolicy(env);
+    applyClaudeChildEnvPolicy(env);
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
       env,
@@ -150,6 +150,8 @@ export interface PersistentExecutorOptions {
   model?: string;
   /** Reasoning effort forwarded to the SDK. */
   effort?: ClaudeEffort;
+  /** Claude Code permission mode for tool execution. */
+  permissionMode?: ClaudePermissionMode;
   logger: Logger;
   /**
    * MetaBot bot/chat context. Stable for the lifetime of the executor
@@ -430,8 +432,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
     const isRoot = process.getuid?.() === 0;
     const runtimeEnv = apiContextEnv(this.options.apiContext);
     const queryOptions: Record<string, unknown> = {
-      permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
-      ...(isRoot ? {} : { allowDangerouslySkipPermissions: true }),
+      ...resolveClaudePermissionOptions(this.options.permissionMode, isRoot),
       cwd: this.options.cwd,
       includePartialMessages: true,
       settingSources: ['user', 'project'],

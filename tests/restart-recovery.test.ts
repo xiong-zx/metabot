@@ -73,7 +73,7 @@ describe('restart recovery', () => {
       delaySeconds: 2,
       sendCards: true,
       label: 'restart-resume-oc_1',
-      prompt: expect.stringContaining('Do not run metabot restart or metabot update again'),
+      prompt: expect.stringContaining('Do not run metabot restart or metabot update again merely to satisfy the previous interrupted request'),
     }));
     expect(recovery.listActiveTaskRecords()).toEqual([]);
   });

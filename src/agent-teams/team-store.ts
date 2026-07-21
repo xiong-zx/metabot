@@ -9,6 +9,9 @@ export type TeamStatus = 'active' | 'stopped';
 export type AgentStatus = 'idle' | 'working' | 'stopped';
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped';
+export type TeamAgentReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type TeamAgentApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
+export type TeamAgentSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 export interface AgentTeam {
   name: string;
@@ -26,6 +29,13 @@ export interface TeamAgent {
   name: string;
   role?: string;
   engine?: EngineName;
+  model?: string;
+  reasoningEffort?: TeamAgentReasoningEffort;
+  approvalPolicy?: TeamAgentApprovalPolicy;
+  sandbox?: TeamAgentSandbox;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  allowedTools?: string[];
   prompt?: string;
   status: AgentStatus;
   sessionId?: string;
@@ -79,6 +89,13 @@ export interface AgentTeamConfig {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
+    reasoningEffort?: TeamAgentReasoningEffort;
+    approvalPolicy?: TeamAgentApprovalPolicy;
+    sandbox?: TeamAgentSandbox;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    allowedTools?: string[];
     prompt?: string;
     sessionId?: string;
     status?: AgentStatus;
@@ -126,6 +143,13 @@ export class AgentTeamStore {
         name TEXT NOT NULL,
         role TEXT,
         engine TEXT,
+        model TEXT,
+        reasoning_effort TEXT,
+        approval_policy TEXT,
+        sandbox TEXT,
+        timeout_ms INTEGER,
+        idle_timeout_ms INTEGER,
+        allowed_tools TEXT,
         prompt TEXT,
         status TEXT NOT NULL,
         session_id TEXT,
@@ -180,6 +204,13 @@ export class AgentTeamStore {
     this.addColumnIfMissing('agent_teams', 'chat_ids', "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing('agent_teams', 'display_chat_ids', "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing('agent_teams', 'managed_by_config', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumnIfMissing('agent_team_agents', 'model', 'TEXT');
+    this.addColumnIfMissing('agent_team_agents', 'reasoning_effort', 'TEXT');
+    this.addColumnIfMissing('agent_team_agents', 'approval_policy', 'TEXT');
+    this.addColumnIfMissing('agent_team_agents', 'sandbox', 'TEXT');
+    this.addColumnIfMissing('agent_team_agents', 'timeout_ms', 'INTEGER');
+    this.addColumnIfMissing('agent_team_agents', 'idle_timeout_ms', 'INTEGER');
+    this.addColumnIfMissing('agent_team_agents', 'allowed_tools', 'TEXT');
   }
 
   createTeam(name: string, description?: string, options?: { chatIds?: string[]; displayChatIds?: string[]; status?: TeamStatus }): AgentTeam {
@@ -308,6 +339,13 @@ export class AgentTeamStore {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
+    reasoningEffort?: TeamAgentReasoningEffort;
+    approvalPolicy?: TeamAgentApprovalPolicy;
+    sandbox?: TeamAgentSandbox;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    allowedTools?: string[];
     prompt?: string;
     sessionId?: string;
   }): TeamAgent {
@@ -315,13 +353,21 @@ export class AgentTeamStore {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO agent_team_agents
-        (team_name, name, role, engine, prompt, status, session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?)
+        (team_name, name, role, engine, model, reasoning_effort, approval_policy, sandbox,
+         timeout_ms, idle_timeout_ms, allowed_tools, prompt, status, session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?)
     `).run(
       teamName,
       input.name,
       input.role ?? null,
       input.engine ?? null,
+      input.model ?? null,
+      input.reasoningEffort ?? null,
+      input.approvalPolicy ?? null,
+      input.sandbox ?? null,
+      input.timeoutMs ?? null,
+      input.idleTimeoutMs ?? null,
+      input.allowedTools ? JSON.stringify(normalizeStringArray(input.allowedTools)) : null,
       input.prompt ?? null,
       input.sessionId ?? null,
       now,
@@ -332,6 +378,13 @@ export class AgentTeamStore {
       name: input.name,
       ...(input.role ? { role: input.role } : {}),
       ...(input.engine ? { engine: input.engine } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+      ...(input.approvalPolicy ? { approvalPolicy: input.approvalPolicy } : {}),
+      ...(input.sandbox ? { sandbox: input.sandbox } : {}),
+      ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.idleTimeoutMs ? { idleTimeoutMs: input.idleTimeoutMs } : {}),
+      ...(input.allowedTools ? { allowedTools: normalizeStringArray(input.allowedTools) } : {}),
       ...(input.prompt ? { prompt: input.prompt } : {}),
       status: 'idle',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -344,6 +397,13 @@ export class AgentTeamStore {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
+    reasoningEffort?: TeamAgentReasoningEffort;
+    approvalPolicy?: TeamAgentApprovalPolicy;
+    sandbox?: TeamAgentSandbox;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    allowedTools?: string[];
     prompt?: string;
     sessionId?: string;
     status?: AgentStatus;
@@ -354,13 +414,21 @@ export class AgentTeamStore {
     if (!existing) {
       this.db.prepare(`
         INSERT INTO agent_team_agents
-          (team_name, name, role, engine, prompt, status, session_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (team_name, name, role, engine, model, reasoning_effort, approval_policy, sandbox,
+           timeout_ms, idle_timeout_ms, allowed_tools, prompt, status, session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         teamName,
         input.name,
         input.role ?? null,
         input.engine ?? null,
+        input.model ?? null,
+        input.reasoningEffort ?? null,
+        input.approvalPolicy ?? null,
+        input.sandbox ?? null,
+        input.timeoutMs ?? null,
+        input.idleTimeoutMs ?? null,
+        input.allowedTools ? JSON.stringify(normalizeStringArray(input.allowedTools)) : null,
         input.prompt ?? null,
         input.status ?? 'idle',
         input.sessionId ?? null,
@@ -370,11 +438,20 @@ export class AgentTeamStore {
     } else {
       this.db.prepare(`
         UPDATE agent_team_agents
-        SET role = ?, engine = ?, prompt = ?, status = ?, session_id = ?, updated_at = ?
+        SET role = ?, engine = ?, model = ?, reasoning_effort = ?, approval_policy = ?, sandbox = ?,
+            timeout_ms = ?, idle_timeout_ms = ?, allowed_tools = ?, prompt = ?, status = ?, session_id = ?,
+            updated_at = ?
         WHERE team_name = ? AND name = ?
       `).run(
         input.role ?? existing.role ?? null,
         input.engine ?? existing.engine ?? null,
+        input.model ?? existing.model ?? null,
+        input.reasoningEffort ?? existing.reasoningEffort ?? null,
+        input.approvalPolicy ?? existing.approvalPolicy ?? null,
+        input.sandbox ?? existing.sandbox ?? null,
+        input.timeoutMs ?? existing.timeoutMs ?? null,
+        input.idleTimeoutMs ?? existing.idleTimeoutMs ?? null,
+        input.allowedTools ? JSON.stringify(normalizeStringArray(input.allowedTools)) : JSON.stringify(existing.allowedTools ?? []),
         input.prompt ?? existing.prompt ?? null,
         input.status ?? (existing.status === 'stopped' ? 'idle' : existing.status),
         input.sessionId ?? existing.sessionId ?? null,
@@ -722,6 +799,13 @@ export class AgentTeamStore {
       name: row.name,
       ...(row.role ? { role: row.role } : {}),
       ...(row.engine ? { engine: row.engine } : {}),
+      ...(row.model ? { model: row.model } : {}),
+      ...(row.reasoning_effort ? { reasoningEffort: row.reasoning_effort } : {}),
+      ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
+      ...(row.sandbox ? { sandbox: row.sandbox } : {}),
+      ...(Number.isFinite(row.timeout_ms) ? { timeoutMs: row.timeout_ms } : {}),
+      ...(Number.isFinite(row.idle_timeout_ms) ? { idleTimeoutMs: row.idle_timeout_ms } : {}),
+      ...(parseJsonStringArray(row.allowed_tools).length > 0 ? { allowedTools: parseJsonStringArray(row.allowed_tools) } : {}),
       ...(row.prompt ? { prompt: row.prompt } : {}),
       status: row.status,
       ...(row.session_id ? { sessionId: row.session_id } : {}),

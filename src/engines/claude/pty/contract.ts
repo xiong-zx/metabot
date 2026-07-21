@@ -204,7 +204,7 @@ export type PtyQueryFn = (args: {
  *   - Self-generate a session id (uuid) so the jsonl path is predictable, OR
  *     adopt `resume`.
  *   - spawn `claude` (NO -p) with --session-id/--resume, --settings,
- *     --dangerously-skip-permissions, --append-system-prompt.
+ *     a suitable permission mode, and --append-system-prompt.
  *   - Wait for TUI readiness (the `❯` input box) before accepting input.
  *   - typePrompt(): feed a prompt as keystrokes + submit (Enter), with the
  *     double-Enter safeguard proven in the POC.

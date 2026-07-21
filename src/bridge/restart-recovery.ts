@@ -199,7 +199,8 @@ function buildContinuationPrompt(record: ActiveTaskRecord): string {
   return [
     '<system-reminder>',
     `MetaBot bridge was restarted successfully about ${secs} seconds ago. Your previous turn was interrupted by that planned restart.`,
-    'Do not run metabot restart or metabot update again for the previous request.',
+    'Do not run metabot restart or metabot update again merely to satisfy the previous interrupted request.',
+    'If the user sends a new explicit request to restart or update after recovery, treat it as a new request.',
     'First tell the user the service restart completed, then continue any remaining work from the interrupted turn.',
     'If the only remaining work was restarting the service, report completion and stop.',
     '',

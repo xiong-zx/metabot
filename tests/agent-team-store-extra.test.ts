@@ -192,6 +192,35 @@ describe('AgentTeamStore.upsertAgent', () => {
     expect(store.getAgent('team7', 'new-agent')).toMatchObject({ name: 'new-agent', engine: 'kimi', role: 'coder' });
     store.close();
   });
+
+  it('stores per-agent execution overrides', () => {
+    const store = makeStore();
+    store.createTeam('team8');
+    store.upsertAgent('team8', {
+      name: 'reviewer',
+      engine: 'codex',
+      model: 'gpt-5.5',
+      reasoningEffort: 'xhigh',
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      timeoutMs: 600_000,
+      idleTimeoutMs: 120_000,
+      allowedTools: ['Read', 'Grep'],
+    });
+
+    expect(store.getAgent('team8', 'reviewer')).toMatchObject({
+      name: 'reviewer',
+      engine: 'codex',
+      model: 'gpt-5.5',
+      reasoningEffort: 'xhigh',
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      timeoutMs: 600_000,
+      idleTimeoutMs: 120_000,
+      allowedTools: ['Read', 'Grep'],
+    });
+    store.close();
+  });
 });
 
 // =====================================================================

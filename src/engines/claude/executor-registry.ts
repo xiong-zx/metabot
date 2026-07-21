@@ -26,7 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
-import type { ClaudeEffort } from '../../config.js';
+import type { ClaudeEffort, ClaudePermissionMode } from '../../config.js';
 import type { TeamEvent, ApiContext } from './executor.js';
 import {
   PersistentClaudeExecutor,
@@ -56,6 +56,8 @@ export interface RegistryOptions {
   defaultModel?: string;
   /** Default reasoning effort for new executors. */
   defaultEffort?: ClaudeEffort;
+  /** Default Claude Code permission mode for new executors. */
+  defaultPermissionMode?: ClaudePermissionMode;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
@@ -267,6 +269,7 @@ export class ExecutorRegistry extends EventEmitter {
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
       effort: this.opts.defaultEffort,
+      permissionMode: this.opts.defaultPermissionMode,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,

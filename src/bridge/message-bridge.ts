@@ -702,6 +702,7 @@ export class MessageBridge {
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
         defaultEffort: this.config.claude.effort,
+        defaultPermissionMode: this.config.claude.permissionMode,
         backend: this.config.claude.backend,
         pmPrompt: this.config.pmPrompt,
       });
@@ -2155,8 +2156,9 @@ export class MessageBridge {
       prompt =
         `<system-reminder>\n` +
         `MetaBot bridge 已于约 ${secs} 秒前被重启过（很可能是上一轮你自己执行了 metabot restart/update —— 进程已重生、会话已恢复）。` +
-        `重启已经完成，请勿再次执行 metabot restart 或 metabot update。` +
-        `若用户说「继续」，请接着完成之前未完成的任务，而不是重启。\n` +
+        `重启已经完成；不要为了上一轮已中断的请求再次执行 metabot restart 或 metabot update。` +
+        `若用户只是说「继续」，请接着完成之前未完成的任务，而不是重启。` +
+        `若用户在恢复后的新消息中明确要求重启或更新，则按该新请求处理。\n` +
         `</system-reminder>\n\n` +
         prompt;
       markReminded(chatId);
