@@ -50,6 +50,8 @@ Before a long AutoResearchClaw run starts, the bot should send a preflight summa
 
 The required output contract is `autoresearchclaw.output.v2` with these top-level fields: `contract_version`, `project_id`, `run_id`, `status`, `summary`, `hypotheses`, `experiments`, `findings`, `negative_results`, `decisions`, `artifacts`, `open_questions`, `memory_event_candidates`, `recommended_followups`, and `tool_trace`.
 
+Deployment compatibility: canonical run `status` values are `completed`, `partial`, and `failed`; the legacy singular `complete` is invalid for `autoresearchclaw.output.v2`. A well-formed `failed` artifact is a contract-satisfied partial artifact for inspection, but it cannot recover a failed WorkerManager record. Only completed artifacts can recover failed workers and receive full delivery.
+
 Every nested evidence item must also satisfy the schema, not just the top-level keys: hypotheses, findings, negative results, decisions, open questions, metrics, and pivots need a non-empty `summary`; artifacts need `id`, `uri`, and `summary`; tool trace entries need `tool` and `summary`. Each `memory_event_candidates[]` item requires only `type` and `summary`; optional canonical fields are `body`, `outcome`, `confidence`, `evidence_event_ids`, `subject`, `status`, and `metadata`. Candidate `subject.file_paths`, `subject.artifact_ids`, `subject.source_uris`, and `evidence_event_ids` must be arrays of non-empty strings. Local candidate file evidence, including `file://` URIs, must stay inside the project root; external HTTP(S) URIs are allowed. Candidates must not set `supersedes`, use controlled event types, or include unknown fields. AutoResearchClaw workers should write the artifact themselves and must not dispatch nested workers or background tasks.
 
 Canonical candidate shape:
@@ -58,7 +60,7 @@ Canonical candidate shape:
 {
   "type": "finding",
   "summary": "Context pack preserved the negative result evidence chain.",
-  "body": "Optional detail for reviewers.",
+  "body": "Keep this as candidate memory until review confirms it generalizes beyond the current run.",
   "outcome": "worked",
   "confidence": 0.82,
   "evidence_event_ids": ["mem_evt_context_pack_created"],
@@ -73,6 +75,8 @@ Canonical candidate shape:
 ```
 
 Memory Core accepts only three historical candidate aliases at validation/ingest time: `candidate_type` maps to `type`, `evidence_ids` maps to `evidence_event_ids`, and `evidence_paths` maps into `subject.file_paths` or `subject.source_uris`. The normalized memory event preserves those deprecated alias values in authoritative metadata for audit, strips worker-supplied forged deprecation metadata keys, and emits structured deprecation telemetry with project/run/candidate/alias names. New AutoResearchClaw artifacts must use the canonical fields above; unknown aliases remain invalid.
+
+Security note: if already-normalized candidate JSON crosses an untrusted serialization boundary and no raw legacy aliases remain, reserved alias provenance metadata is stripped instead of trusted. Revalidate the raw artifact for authoritative alias audit; canonical evidence fields are preserved separately and are not lost.
 
 The JSON artifact is the authoritative system output. Once a valid artifact appears under the project root, Memory Core may collect and ingest it even if the worker process has not exited yet. After Memory Core finalizes the artifact, it requests WorkerManager external completion / soft-stop so the worker lifecycle does not remain `running` after the run is already finalized.
 

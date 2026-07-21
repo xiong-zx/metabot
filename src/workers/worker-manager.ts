@@ -318,17 +318,67 @@ function appendSummary(existing: string | undefined, addition: string): string {
 }
 
 function readJsonFile(filePath: string): { value?: unknown; error?: WorkerArtifactError } {
+  let raw: string;
   try {
-    return { value: JSON.parse(fs.readFileSync(filePath, 'utf-8')) };
+    raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err) {
     return {
       error: {
         code: 'invalid_json_artifact',
-        message: err instanceof Error ? err.message : 'Artifact is not valid JSON',
+        message: err instanceof Error ? err.message : 'Artifact JSON could not be read',
         path: filePath,
       },
     };
   }
+
+  try {
+    return { value: JSON.parse(raw) };
+  } catch (err) {
+    return {
+      error: {
+        code: 'invalid_json_artifact',
+        message: safeJsonParseErrorMessage(err, raw),
+        path: filePath,
+      },
+    };
+  }
+}
+
+function safeJsonParseErrorMessage(err: unknown, raw: string): string {
+  const location = jsonParseErrorLocation(err, raw);
+  return location ? `Artifact is not valid JSON at ${location}` : 'Artifact is not valid JSON';
+}
+
+function jsonParseErrorLocation(err: unknown, raw: string): string | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const positionMatch = /\bposition\s+(\d+)\b/i.exec(err.message);
+  if (positionMatch) {
+    const position = Number(positionMatch[1]);
+    if (Number.isSafeInteger(position) && position >= 0) {
+      const { line, column } = lineColumnForOffset(raw, position);
+      return `position ${position} (line ${line}, column ${column})`;
+    }
+  }
+  const lineColumnMatch = /\bline\s+(\d+)\s+column\s+(\d+)\b/i.exec(err.message);
+  if (lineColumnMatch) {
+    return `line ${lineColumnMatch[1]}, column ${lineColumnMatch[2]}`;
+  }
+  return undefined;
+}
+
+function lineColumnForOffset(value: string, offset: number): { line: number; column: number } {
+  let line = 1;
+  let column = 1;
+  const end = Math.min(offset, value.length);
+  for (let index = 0; index < end; index += 1) {
+    if (value.charCodeAt(index) === 10) {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

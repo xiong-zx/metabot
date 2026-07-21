@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_EXAMPLE,
   AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION,
   autoResearchClawOutputToMemoryEvents,
   buildAutoResearchClawPrompt,
@@ -27,6 +29,13 @@ function baseOutput(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
+function docCandidateExample(filePath: string): unknown {
+  const markdown = readFileSync(filePath, 'utf8');
+  const match = /```json\n([\s\S]*?)\n```/.exec(markdown);
+  if (!match) throw new Error(`No JSON example found in ${filePath}`);
+  return JSON.parse(match[1]);
+}
+
 describe('AutoResearchClaw output contract', () => {
   it('prompts workers with a non-empty canonical memory event candidate example', () => {
     const prompt = buildAutoResearchClawPrompt({
@@ -52,6 +61,15 @@ describe('AutoResearchClaw output contract', () => {
     expect(prompt).not.toContain('"candidate_type"');
     expect(prompt).not.toContain('"evidence_ids"');
     expect(prompt).not.toContain('"evidence_paths"');
+  });
+
+  it('keeps EN/ZH docs aligned with the canonical memory event candidate example', () => {
+    expect(docCandidateExample('docs/features/auto-research.md')).toEqual(
+      AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_EXAMPLE,
+    );
+    expect(docCandidateExample('docs/features/auto-research.zh.md')).toEqual(
+      AUTORESEARCHCLAW_MEMORY_EVENT_CANDIDATE_EXAMPLE,
+    );
   });
 
   it('normalizes known legacy candidate aliases and preserves evidence links for ingest audit', () => {

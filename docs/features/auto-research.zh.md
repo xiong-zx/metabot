@@ -70,6 +70,8 @@ worker 产出需要包含 hypotheses、experiments、findings、negative_results
 
 必需输出契约是 `autoresearchclaw.output.v2`，顶层字段包括：`contract_version`、`project_id`、`run_id`、`status`、`summary`、`hypotheses`、`experiments`、`findings`、`negative_results`、`decisions`、`artifacts`、`open_questions`、`memory_event_candidates`、`recommended_followups`、`tool_trace`。
 
+部署兼容性说明：canonical run `status` 只能是 `completed`、`partial` 或 `failed`；历史单数 `complete` 对 `autoresearchclaw.output.v2` 无效。结构合法的 `failed` artifact 是 contract-satisfied 的 partial artifact，可用于检查文件内容，但不能把 failed WorkerManager 记录恢复为 completed；只有 completed artifact 能恢复 failed worker 并获得 full delivery。
+
 嵌套字段也必须满足 schema，不能只满足顶层 key：hypotheses、findings、negative results、decisions、open questions、metrics、pivots 都需要非空 `summary`；artifacts 需要 `id`、`uri`、`summary`；tool trace 需要 `tool` 和 `summary`。每个 `memory_event_candidates[]` 项只要求受支持且非受控的 `type` 和非空 `summary`；可选 canonical 字段是 `body`、`outcome`、`confidence`、`evidence_event_ids`、`subject`、`status` 和 `metadata`。候选项里的 `subject.file_paths`、`subject.artifact_ids`、`subject.source_uris`、`evidence_event_ids` 必须是非空字符串数组。本地候选文件证据（包括 `file://` URI）必须留在 project root 内；外部 HTTP(S) URI 允许使用。候选项不能设置 `supersedes`，不能使用受控事件类型，也不能包含未知字段。AutoResearchClaw worker 应该自己写出 artifact，不能再派发嵌套 worker 或后台任务。
 
 候选记忆的 canonical 形状如下：
@@ -78,7 +80,7 @@ worker 产出需要包含 hypotheses、experiments、findings、negative_results
 {
   "type": "finding",
   "summary": "Context pack preserved the negative result evidence chain.",
-  "body": "Optional detail for reviewers.",
+  "body": "Keep this as candidate memory until review confirms it generalizes beyond the current run.",
   "outcome": "worked",
   "confidence": 0.82,
   "evidence_event_ids": ["mem_evt_context_pack_created"],
@@ -93,6 +95,8 @@ worker 产出需要包含 hypotheses、experiments、findings、negative_results
 ```
 
 Memory Core 只在 validation / ingest 边界接受三个历史候选别名：`candidate_type` 映射到 `type`，`evidence_ids` 映射到 `evidence_event_ids`，`evidence_paths` 映射到 `subject.file_paths` 或 `subject.source_uris`。规范化后的 memory event 会把这些 deprecated alias 原始值保存在权威 metadata 里，便于审计；worker 自己伪造的 deprecation metadata key 会被移除，同时系统会发出包含 project / run / candidate / alias 名称的结构化 deprecation telemetry。新的 AutoResearchClaw artifact 必须使用上面的 canonical 字段；未知 alias 仍然无效。
+
+安全说明：如果已经 normalized 的候选 JSON 穿过不可信序列化边界，而且没有保留 raw legacy aliases，系统会移除 reserved alias provenance metadata，而不是信任它。需要权威 alias audit 时应重新校验 raw artifact；canonical evidence 字段会单独保留，不会丢失。
 
 JSON artifact 是系统级权威输出。只要项目 root 内出现了合法 artifact，Memory Core 就可以先收割并 ingest；即使 worker 进程还没自然退出，也不应丢弃已经通过 contract 校验的 artifact。Memory Core 完成 artifact finalization 后，会请求 WorkerManager 做 external completion / soft-stop，避免 run 已经 finalized 但 worker 仍长期显示 `running`。
 

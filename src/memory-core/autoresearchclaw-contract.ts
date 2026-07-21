@@ -1033,6 +1033,9 @@ function stripReservedLegacyAliasMetadata(
   metadata: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (metadata === undefined) return undefined;
+  // After an untrusted JSON serialization boundary, reserved alias provenance cannot be distinguished
+  // from forgery. Strip it unless raw legacy aliases are present; raw artifact revalidation remains
+  // authoritative for alias audit, and canonical evidence fields are preserved separately.
   const sanitized = Object.fromEntries(
     Object.entries(metadata).filter(([key]) => !AUTORESEARCHCLAW_RESERVED_LEGACY_ALIAS_METADATA_KEYS.has(key)),
   );

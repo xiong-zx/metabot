@@ -515,6 +515,51 @@ describe('WorkerManager dispatch execution options', () => {
     }
   });
 
+  it('sanitizes malformed AutoResearchClaw JSON errors without leaking artifact fragments', async () => {
+    const { backfillWorkerRecords } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, '{"api_key":"sk-SECRET-abcdef123456","x":}');
+
+    const result = backfillWorkerRecords([
+      {
+        id: 'worker-malformed-json-secret',
+        botName: 'research-pm',
+        pmChatId: 'pm-chat',
+        workerChatId: 'worker-chat',
+        workingDirectory: workdir,
+        prompt: '# AutoResearchClaw Run',
+        model: 'gpt-5.4',
+        engine: 'codex',
+        outputContract: { name: 'autoresearchclaw_output_v2', requiredArtifact: true },
+        status: 'completed',
+        startTime: Date.now() - 1000,
+        endTime: Date.now(),
+      } as any,
+    ]);
+
+    const record = result.updatedRecords[0]!;
+    expect(record).toMatchObject({
+      status: 'completed',
+      artifactStatus: 'invalid',
+      contractStatus: 'violated',
+      recoveryStatus: 'none',
+      deliveryStatus: 'file_only',
+      artifactPath,
+      artifactError: {
+        code: 'invalid_json_artifact',
+        path: artifactPath,
+      },
+    });
+    expect(record.artifactError!.message).toMatch(/^Artifact is not valid JSON/);
+    const surfacedError = JSON.stringify(record.artifactError);
+    expect(surfacedError).not.toContain('sk-');
+    expect(surfacedError).not.toContain('SECRET');
+    expect(surfacedError).not.toContain('abcdef123456');
+    expect(surfacedError).not.toContain('api_key');
+  });
+
   it('accepts valid AutoResearchClaw legacy aliases and emits structured deprecation detail', async () => {
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
