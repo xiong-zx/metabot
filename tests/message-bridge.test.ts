@@ -17,6 +17,7 @@ import { classifyBurstSource } from '../src/engines/claude/persistent-executor.j
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
 import { AgentTeamStore } from '../src/agent-teams/team-store.js';
+import { MAX_SPONTANEOUS_DEFERRALS } from '../src/bridge/bridge-constants.js';
 import { recordActiveTask } from '../src/bridge/restart-recovery.js';
 import {
   getServiceRestartRequest,
@@ -907,7 +908,7 @@ describe('MessageBridge chatId cleanup (memory leak guard)', () => {
     bridge.messageQueues.set('chat-1', []);
     const clearedTimers: Array<ReturnType<typeof setTimeout>> = [];
     const bufTimer = setTimeout(() => {}, 60_000);
-    bridge.spontaneousBuffers.set('chat-1', { teamState: { teammates: [], tasks: [] }, snippets: [], timer: bufTimer });
+    bridge.spontaneousBuffers.set('chat-1', { teamState: { agents: [], tasks: [] }, snippets: [], timer: bufTimer });
     const qTimer = setTimeout(() => {}, 60_000);
     bridge.pendingBetweenTurnQuestions.set('chat-1', {
       toolUseId: 't', questions: [], cardMessageId: 'm', currentQuestionIndex: 0,
@@ -929,6 +930,62 @@ describe('MessageBridge chatId cleanup (memory leak guard)', () => {
     clearTimeout(bufTimer);
     clearTimeout(qTimer);
     void clearedTimers;
+  });
+});
+
+describe('MessageBridge spontaneous flush when the chat is busy', () => {
+  it('requeues the batch instead of dropping it, then delivers once the turn ends', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.runningTasks.set('chat-busy', {});
+    bridge.spontaneousBuffers.set('chat-busy', {
+      teamState: { agents: [], tasks: [] },
+      snippets: ['Agent Team finished run r1'],
+      timer: setTimeout(() => {}, 60_000),
+    });
+
+    await bridge.flushSpontaneous('chat-busy');
+
+    // Batch survives; nothing sent while the foreground turn holds the chat.
+    expect(bridge.spontaneousBuffers.get('chat-busy')?.snippets).toEqual(['Agent Team finished run r1']);
+    expect(bridge.spontaneousBuffers.get('chat-busy')?.deferrals).toBe(1);
+    expect(sender.sent).toHaveLength(0);
+
+    // Turn ends; the requeued timer fires and the activity lands.
+    bridge.runningTasks.delete('chat-busy');
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0].chatId).toBe('chat-busy');
+    expect(sender.sent[0].state.status).toBe('agent_activity');
+    expect(sender.sent[0].state.responseText).toContain('Agent Team finished run r1');
+    expect(bridge.spontaneousBuffers.has('chat-busy')).toBe(false);
+
+    bridge.destroy();
+    vi.useRealTimers();
+  });
+
+  it('drops the batch once it exceeds the deferral limit', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.runningTasks.set('chat-busy', {});
+    bridge.spontaneousBuffers.set('chat-busy', {
+      teamState: { agents: [], tasks: [] },
+      snippets: ['stuck'],
+      timer: setTimeout(() => {}, 60_000),
+      deferrals: MAX_SPONTANEOUS_DEFERRALS,
+    });
+
+    await bridge.flushSpontaneous('chat-busy');
+
+    expect(bridge.spontaneousBuffers.has('chat-busy')).toBe(false);
+    expect(sender.sent).toHaveLength(0);
+
+    bridge.runningTasks.delete('chat-busy');
+    bridge.destroy();
   });
 });
 
@@ -1047,7 +1104,7 @@ describe('formatSpontaneousCardBody', () => {
   // The card body renders ALL snippets (chronological), separated by a
   // horizontal rule. Earlier behavior was "show only the latest + a
   // (N coalesced) footer" — that turned out to drop most of the useful
-  // content (the "经常显示不全" bug) because teammate pings, /loop
+  // content (the "经常显示不全" bug) because Agent Team pings, /loop
   // iterations, and cron tasks each emit their own snippet and the user
   // needs to see all of them. Total length is capped at
   // SPONTANEOUS_BODY_MAX_CHARS; overflow drops the oldest snippets and
@@ -1107,7 +1164,7 @@ describe('formatSpontaneousCardBody', () => {
 /**
  * Burst-source classifier — distinguishes SDK-initiated continuation turns
  * (the agent waking up to summarise a `run_in_background` Bash return) from
- * everything else that arrives between user turns (teammate pings, /goal
+ * everything else that arrives between user turns (Agent Team pings, /goal
  * Stop-hook user messages, system status events).
  *
  * The classification matters for UX:
@@ -1140,10 +1197,10 @@ describe('classifyBurstSource', () => {
     expect(classifyBurstSource(msg)).toBe('spontaneous');
   });
 
-  it('returns spontaneous for a user message with peer origin (teammate SendMessage)', () => {
+  it('returns spontaneous for a user message with peer origin (Agent Team SendMessage)', () => {
     const msg = {
       type: 'user',
-      message: { role: 'user', content: 'hi from teammate' },
+      message: { role: 'user', content: 'hi from agent' },
       origin: { kind: 'peer', from: 'researcher' },
     };
     expect(classifyBurstSource(msg)).toBe('spontaneous');
@@ -1161,10 +1218,10 @@ describe('classifyBurstSource', () => {
     expect(classifyBurstSource(msg)).toBe('spontaneous');
   });
 
-  it('returns spontaneous for assistant text (e.g. teammate burst opening with assistant)', () => {
+  it('returns spontaneous for assistant text (e.g. Agent Team burst opening with assistant)', () => {
     // origin is on USER messages, not assistant. An assistant-led burst is
     // either a continuation already in progress (handled by activeTurn) or
-    // a teammate ping (spontaneous).
+    // an Agent Team ping (spontaneous).
     const msg = {
       type: 'assistant',
       message: { content: [{ type: 'text', text: 'doing the thing' }] },

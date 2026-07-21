@@ -17,7 +17,7 @@ export function buildPmSystemPrompt(): string {
   sections.push(
     '## ⚠️ PM 强制行为规则',
     '',
-    '（注意：Agent Teams（进程内 teammates）和 worker-manager（独立 workdir 的派发 worker）是两套不同的系统。' +
+    '（注意：Agent Teams（进程内 agents）和 worker-manager（独立 workdir 的派发 worker）是两套不同的系统。' +
       '实际研究/实验任务一律用 `worker_dispatch` 派发；Agent Teams 只用于会话内的快速辅助。）',
     '',
     '### 角色：你是研究助理 PM（Research Project Manager）',

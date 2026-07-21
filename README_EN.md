@@ -218,7 +218,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | Component | Description |
 |-----------|-------------|
 | **Triple Engine Kernel** | Each bot independently chooses Claude Code / Kimi Code / Codex CLI — full tool stack (Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP) in autonomous mode |
-| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; internal agents and background tasks survive between turns |
+| **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; Agent Team agents and background tasks survive between turns |
 | **Agent Teams** | A PM/lead bot spawns specialist internal agents in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
 | **MetaMemory** | Shared knowledge store served by metabot-core (self-hosted locally, default `http://localhost:9200`) with full-text search; MetaBot reads/writes via `/api/memory/*` and can sync to Feishu Wiki |
@@ -438,9 +438,13 @@ Global fields:
 | `METABOT_CORE_URL` | `http://localhost:9200` | metabot-core service URL (MetaMemory + Skill Hub + Agents + T5T) — self-host locally or point at your own remote host |
 | `METABOT_CORE_TOKEN` | reads `~/.metabot-core/token` | Bearer token for metabot-core |
 | `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API write calls may create/update; comma-separated |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's top-level MetaMemory namespace, for example `/cargo1`; appended to Memory API writable roots when set |
 | `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | Mark `/api/talk?async=true` tasks as `task_expired` when they exceed this runtime without completing |
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
+| `WIKI_AUTO_SYNC` | true | Poll MetaMemory changes and trigger sync automatically |
+| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | MetaMemory snapshot polling interval |
+| `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Auto-sync debounce delay |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Directory holding the wiki-sync mapping SQLite |
 | `VOLCENGINE_TTS_APPID` | — | Doubao voice (TTS + STT) |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao voice key |

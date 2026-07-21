@@ -26,6 +26,31 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
+const PROMPT_MARKER_RE = /[❯⏵]/u;
+
+export interface ClaudeInputReadiness {
+  hasInputBox: boolean;
+  running: boolean;
+  menuUp: boolean;
+  idle: boolean;
+}
+
+export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness {
+  const sq = tail.toLowerCase().replace(/\s+/g, '');
+  const running = sq.includes('esctointerrupt');
+  const menuUp =
+    sq.includes('entertoselect') ||
+    sq.includes('ctrl-gtoedit') ||
+    sq.includes('shift+tabtoapprove') ||
+    /[❯⏵]\d\./u.test(sq); // pointer on a numbered menu option
+  const hasInputBox = PROMPT_MARKER_RE.test(tail);
+  return {
+    hasInputBox,
+    running,
+    menuUp,
+    idle: hasInputBox && !running && !menuUp,
+  };
+}
 
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
@@ -128,6 +153,13 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     args.push('--settings', opts.settingsPath);
+    // MCP servers (worker-manager: worker_dispatch / remind_me / ...). NOT
+    // --strict-mcp-config: that would suppress every other MCP source, taking
+    // the user's claude.ai connectors down with it. We want ours ON TOP of
+    // whatever else the CLI resolves.
+    if (opts.mcpConfigPath) {
+      args.push('--mcp-config', opts.mcpConfigPath);
+    }
     if (process.getuid?.() === 0) {
       args.push('--permission-mode', 'auto');
     } else {
@@ -151,16 +183,38 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
         if (v !== undefined) env[k] = v;
       }
     }
-    // A PTY session is INTERACTIVE by definition. The parent (metabot) runs
-    // under the Agent SDK, so its env carries CLAUDE_CODE_ENTRYPOINT=sdk-cli /
-    // CLAUDECODE. We MUST strip those so the spawned `claude` uses the
-    // interactive entrypoint marker — that marker is what selects the Claude
-    // Code SUBSCRIPTION billing pool (vs the Agent-SDK credit pool) post
-    // June-2026. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are deliberately
-    // KEPT so traffic still routes through TeamClaude for Max-account load
-    // balancing — the entrypoint marker passes through that transparent proxy.
-    for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
-      delete env[k];
+    // A PTY session is INTERACTIVE by definition, and the parent metabot
+    // process may itself be running INSIDE a Claude Code session (e.g. the
+    // bridge was launched from a `claude` shell, or under the Agent SDK).
+    // In that case process.env carries a whole family of CLAUDE_* markers:
+    // CLAUDE_CODE_ENTRYPOINT, CLAUDECODE, CLAUDE_CODE_SESSION_ID,
+    // CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_BRIDGE_SESSION_ID,
+    // CLAUDE_AGENTS_SELECT, CLAUDE_JOB_DIR, CLAUDE_CODE_EXECPATH, ... If those
+    // leak into the child, claude treats itself as a NESTED/child session and
+    // does NOT persist its transcript jsonl to
+    // ~/.claude/projects/<escaped-cwd>/<id>.jsonl — so our scanner (which
+    // tails exactly that path) finds nothing and the turn completes with an
+    // EMPTY body. Strip every CLAUDE-prefixed var except the handful of feature
+    // toggles we intentionally pass through (mirrors createSpawnFn in the SDK
+    // backend). Dropping CLAUDE_CODE_ENTRYPOINT also lets the child adopt the
+    // interactive entrypoint marker that selects the Claude Code SUBSCRIPTION
+    // billing pool (vs the Agent-SDK credit pool) post June-2026.
+    // ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are NOT CLAUDE-prefixed and are
+    // deliberately KEPT so traffic still routes through TeamClaude for
+    // Max-account load balancing — the entrypoint marker passes through that
+    // transparent proxy.
+    const CLAUDE_ENV_PASSTHROUGH = new Set([
+      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+      'CLAUDE_CODE_DISABLE_AGENT_VIEW',
+      'CLAUDE_CODE_SIMPLE',
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
+      'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+    ]);
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('CLAUDE') && !CLAUDE_ENV_PASSTHROUGH.has(k)) {
+        delete env[k];
+      }
     }
     applyClaudeChildEnvPolicy(env);
 
@@ -213,7 +267,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
 
     while (Date.now() - start < TIMEOUT) {
-      if (/❯/.test(this.ring)) {
+      if (PROMPT_MARKER_RE.test(this.ring)) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
         return;
@@ -222,7 +276,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     throw new Error(
-      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯). ` +
+      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯/⏵). ` +
         `Last 500 chars: ${this.ring.slice(-500)}`,
     );
   }
@@ -235,9 +289,22 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // (ExitPlanMode cancel) claude is briefly settling the interrupt and is NOT
     // at a clean input box; keystrokes typed then are dropped and the prompt is
     // never submitted. Wait for the TUI to actually return to an idle input box
-    // before typing (best-effort: proceeds after a timeout so a session never
-    // wedges on a missed heuristic).
-    await this.waitForIdleInput();
+    // before typing. If the idle heuristic cannot confirm a clean prompt, do
+    // not type into a potentially running/menu state: that produces zero-stream
+    // turns where Feishu stays in "thinking" forever. Try one interrupt-based
+    // recovery, then fail the turn explicitly so the caller can close the card.
+    let idle = await this.waitForIdleInput();
+    if (!idle) {
+      this.log.warn('pty-session: idle-input wait timed out — interrupting before retry');
+      await this.interrupt();
+      idle = await this.waitForIdleInput({ timeoutMs: 5_000, stableMs: 500 });
+    }
+    if (!idle) {
+      throw new Error(
+        `pty-session: cannot type prompt — Claude TUI did not return to idle input. ` +
+          `Last 500 chars: ${this.snapshot().slice(-500)}`,
+      );
+    }
     if (!this.term || this.disposed) {
       throw new Error('pty-session: cannot type — session disposed');
     }
@@ -268,34 +335,32 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
    *     (driven separately; never type a prompt into it).
    *   - otherwise, with the `❯` input box present ⟶ idle and ready.
    * We require the idle state to hold across a couple polls so a single
-   * mid-redraw frame doesn't trip us, and cap the wait so a missed heuristic
-   * degrades to today's behaviour (type anyway) rather than wedging the turn.
+   * mid-redraw frame doesn't trip us. Callers decide how to recover if the
+   * timeout expires; this function must not type into an unconfirmed state.
    */
-  private async waitForIdleInput(): Promise<void> {
-    const TIMEOUT = 15_000;
-    const POLL = 200;
-    const STABLE_MS = 700;
+  private async waitForIdleInput(opts: {
+    timeoutMs?: number;
+    pollMs?: number;
+    stableMs?: number;
+  } = {}): Promise<boolean> {
+    const TIMEOUT = opts.timeoutMs ?? 15_000;
+    const POLL = opts.pollMs ?? 200;
+    const STABLE_MS = opts.stableMs ?? 700;
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
       const tail = this.snapshot().slice(-700);
-      const sq = tail.toLowerCase().replace(/\s+/g, '');
-      const running = sq.includes('esctointerrupt');
-      const menuUp =
-        sq.includes('entertoselect') ||
-        sq.includes('ctrl-gtoedit') ||
-        sq.includes('shift+tabtoapprove') ||
-        /❯\d\./.test(sq); // pointer on a numbered menu option
-      const hasInputBox = tail.includes('❯');
-      if (hasInputBox && !running && !menuUp) {
+      const readiness = classifyClaudeInputReadiness(tail);
+      if (readiness.idle) {
         if (!idleSince) idleSince = Date.now();
-        if (Date.now() - idleSince >= STABLE_MS) return;
+        if (Date.now() - idleSince >= STABLE_MS) return true;
       } else {
         idleSince = 0;
       }
       await sleep(POLL);
     }
-    this.log.warn('pty-session: idle-input wait timed out — typing anyway');
+    this.log.warn({ timeoutMs: TIMEOUT }, 'pty-session: idle-input wait timed out');
+    return false;
   }
 
   async interrupt(): Promise<void> {

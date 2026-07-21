@@ -140,10 +140,11 @@ export class MemoryClient {
     return this.unwrapSingle<FolderTreeNode>(raw, 'folders');
   }
 
-  async listDocuments(folderId?: string, limit = 50): Promise<DocumentSummary[]> {
+  async listDocuments(folderId?: string, limit = 50, offset?: number): Promise<DocumentSummary[]> {
     const params = new URLSearchParams();
     if (folderId) params.set('folder_id', folderId);
     params.set('limit', String(limit));
+    if (offset !== undefined) params.set('offset', String(offset));
     const raw = await this.request<unknown>(`/api/memory/documents?${params}`);
     return this.unwrapArray<DocumentSummary>(raw, 'documents');
   }

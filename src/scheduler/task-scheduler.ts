@@ -21,6 +21,8 @@ export interface ScheduledTask {
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
+  /** When the chat was first observed busy for this occurrence (busy-wait window start). */
+  firstBusyAt?: number;
   parentRecurringId?: string;  // set if spawned by a recurring task
   /** Optional idempotency key. Pending/executing one-time tasks with the same key are reused. */
   dedupeKey?: string;
@@ -88,8 +90,11 @@ interface PersistedData {
 
 // --- Constants ---
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 30_000; // 30 seconds
+const RETRY_DELAY_MS = 30_000; // 30 seconds — first busy backoff step
+/** Cap on the exponential busy backoff between retries. */
+const BUSY_MAX_RETRY_DELAY_MS = 5 * 60_000;
+/** Total time a scheduled task waits out a busy chat before giving up. */
+const BUSY_MAX_WAIT_MS = 30 * 60_000;
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
 // Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
@@ -371,21 +376,32 @@ export class TaskScheduler {
       return;
     }
 
-    // If chat is busy, retry
+    // Chat is busy. A scheduled task is background/system-origin work: the
+    // user being mid-turn says nothing about whether the task should run, so
+    // we wait the turn out with exponential backoff rather than burning a
+    // fixed 5 × 30s budget. Periodic worker checkups routinely hit a PM chat
+    // that stays busy for many minutes; they used to be marked failed there.
     if (bot.bridge.isBusy(task.chatId)) {
-      if (task.retryCount < MAX_RETRIES) {
+      task.firstBusyAt ??= Date.now();
+      const waitedMs = Date.now() - task.firstBusyAt;
+      if (waitedMs < BUSY_MAX_WAIT_MS) {
         task.retryCount++;
-        this.logger.info({ taskId: id, retryCount: task.retryCount }, 'Chat busy, retrying scheduled task');
-        const timer = setTimeout(() => this.fireTask(id), RETRY_DELAY_MS);
+        const delay = Math.min(RETRY_DELAY_MS * 2 ** (task.retryCount - 1), BUSY_MAX_RETRY_DELAY_MS);
+        this.logger.info({ taskId: id, retryCount: task.retryCount, delay, waitedMs }, 'Chat busy, retrying scheduled task');
+        const timer = setTimeout(() => this.fireTask(id), delay);
+        timer.unref?.();
         this.timers.set(id, timer);
         this.saveToDisk();
         return;
       }
 
-      // Max retries exceeded — notify user and mark failed
-      this.logger.warn({ taskId: id }, 'Scheduled task failed after max retries (chat busy)');
+      // Busy for the whole window. A recurring occurrence just yields to the
+      // next one — notifying every period would be pure noise — while a
+      // one-time task still tells the user it never ran.
+      this.logger.warn({ taskId: id, waitedMs }, 'Scheduled task gave up waiting for a busy chat');
       task.status = 'failed';
       this.saveToDisk();
+      if (task.parentRecurringId) return;
       try {
         await bot.sender.sendTextNotice(
           task.chatId,
@@ -398,6 +414,7 @@ export class TaskScheduler {
       }
       return;
     }
+    task.firstBusyAt = undefined;
 
     // Execute the task
     task.status = 'executing';

@@ -70,7 +70,7 @@ export class CommandHandler {
     /**
      * Release the persistent Claude process associated with this chat
      * (no-op if the persistent-executor feature flag is off or no
-     * executor exists). Called on /reset so teammates and /goal state
+     * executor exists). Called on /reset so Agent Team agents and /goal state
      * tied to the old session are torn down with the conversation.
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,

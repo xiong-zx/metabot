@@ -62,3 +62,13 @@ export async function parseJsonBody(req: http.IncomingMessage): Promise<JsonBody
     throw Object.assign(new Error('Invalid JSON in request body'), { statusCode: 400 });
   }
 }
+
+export async function parseOptionalJsonBody(req: http.IncomingMessage): Promise<JsonBody> {
+  const raw = await readBody(req);
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw) as JsonBody;
+  } catch {
+    throw Object.assign(new Error('Invalid JSON in request body'), { statusCode: 400 });
+  }
+}

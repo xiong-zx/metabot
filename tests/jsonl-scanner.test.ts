@@ -64,4 +64,44 @@ describe('createJsonlScanner', () => {
     });
     scanner.stop();
   });
+
+  it('drainPending(true) recovers a complete-but-unterminated final record once', async () => {
+    const scanner = createJsonlScanner({ jsonlPath: file, logger, pollMs: 5 });
+
+    // A final assistant line written WITHOUT its terminating newline — mimics
+    // the end-of-turn race where the Stop hook fires before claude flushes \n.
+    fs.writeFileSync(file, JSON.stringify({ type: 'assistant', id: 'final-answer' }));
+
+    // Without includePartial the unterminated line stays buffered.
+    expect(scanner.drainPending(false)).toEqual([]);
+
+    // With includePartial the final record is recovered.
+    expect(scanner.drainPending(true)).toEqual([{ type: 'assistant', id: 'final-answer' }]);
+
+    // When the terminating newline finally lands, it is NOT re-emitted.
+    fs.appendFileSync(file, '\n');
+    expect(scanner.drainPending(true)).toEqual([]);
+
+    // A genuinely new record after it still comes through normally.
+    fs.appendFileSync(file, line({ type: 'assistant', id: 'next-turn' }));
+    expect(scanner.drainPending(false)).toEqual([{ type: 'assistant', id: 'next-turn' }]);
+
+    scanner.stop();
+  });
+
+  it('drainPending(true) leaves an incomplete (non-JSON) partial buffered', async () => {
+    const scanner = createJsonlScanner({ jsonlPath: file, logger, pollMs: 5 });
+
+    // Half-written record (invalid JSON) must not be emitted or consumed.
+    fs.writeFileSync(file, '{"type":"assistant","id":"half');
+    expect(scanner.drainPending(true)).toEqual([]);
+
+    // Once the rest + newline lands, the completed record is emitted once.
+    fs.appendFileSync(file, '-written"}\n');
+    expect(scanner.drainPending(false)).toEqual([
+      { type: 'assistant', id: 'half-written' },
+    ]);
+
+    scanner.stop();
+  });
 });

@@ -101,13 +101,13 @@ If tests were not run or failed, state that clearly in the final report.
 
 Current implementation status:
 
-- Implemented: versioned template store bootstrapped from `bots.json`, template digests, chat/project/global instance resolver, pinned legacy/runtime team metadata, physical `instance_id` columns on Agent/Task/Message/Run rows with backfill and sync, instance-scoped Agent supervisor chat/session IDs for runtime teams, restart recovery cleanup for internal `worker-`, `team:`, and `teaminst:` active-task records, pinned RuleSet refs on runtime instances, explicit RuleSet pinning during `instances resolve`, team config updates for pinned RuleSet refs / quotas / `pmBot`, versioned RuleSet store, RuleSet export/diff/import control surface, promotion proposals with PM/user/admin approval, first-class `agent-role` / `worker` RuleSet selection, Rules Context Pack generation, Rules Context Pack injection for Bot turns, Agent Team runs, and Worker dispatch prompts, PM/admin/user-only agent creation gate, quota enforcement for Agents, temporary Agents, scoped team count, queue backlog, and active runs, temporary Agent TTL recycling, and `instanceId` lookup for existing team routes.
+- Implemented: versioned template store bootstrapped from `bots.json`, template digests, chat/project/global instance resolver, pinned legacy/runtime team metadata, physical `instance_id` columns on Agent/Task/Message/Run rows with backfill and sync, instance-scoped Agent supervisor chat/session IDs for runtime teams, restart recovery cleanup for internal `worker-`, `team:`, and `teaminst:` active-task records, pinned RuleSet refs on runtime instances, explicit RuleSet pinning during `instances resolve`, team config updates for pinned RuleSet refs / quotas / `pmBot`, versioned RuleSet store, RuleSet export/diff/import control surface, promotion proposals with PM/user/admin approval, first-class `agent-role` / `worker` RuleSet selection, Rules Context Pack generation, Rules Context Pack injection for Bot turns, Agent Team runs, and Worker dispatch prompts, PM/admin/user-only gates for team lifecycle, Agent creation/stop/delete, run stop, worker dispatch, service restart, and template/rule promotion, quota enforcement for Agents, temporary Agents, scoped team count, queue backlog, and active runs, temporary Agent TTL recycling, and `instanceId` lookup for existing team routes.
 - Implemented CLI/API surface: `metabot teams templates ...`, `metabot teams proposals ...`, `metabot teams instances ...`, and `metabot teams rules ...` including `rules export/diff/import`. Existing `<team>` command positions now accept either a team name or an `instanceId`; prefer `instanceId` for scoped chat/project instances.
 - Implemented minimum activity-card lifecycle: `CardState.lifecycleStage` / `lifecycleKey`, Feishu v1/v2 card rendering for non-closed stages, MessageBridge normalization for `received`, `executing`, `recovering`, `blocked`, and `closed`, stable lifecycle-key generation/propagation for normal chat turns, continuation cards, bytheway cards, spontaneous and direct Agent activity cards, scheduled tasks, workers, Agent Team runs, and API tasks, plus a lightweight `SESSION_STORE_DIR/card-lifecycle.json` store keyed by `lifecycleKey`. Agent Team activity cards now persist `teamName`, `instanceId`, `agentName`, `runId`, and `taskIds` metadata when available, and `GET /api/agent-teams/<team>/activity` plus `metabot teams activity <team>` expose filtered history.
 - Implemented restart dedupe increment: restart recovery queues continuation tasks with a stable chat-scoped `dedupeKey` (`botName + chatId`), and `TaskScheduler` reuses a pending/executing task with the same key instead of scheduling duplicates; Worker dispatch accepts an explicit `dedupeKey` and reuses a running or recent completed worker for the same `pmChatId + dedupeKey`; final card delivery writes `finalDeliveredAt` / `finalDeliveryStatus` markers on the lifecycle record to avoid duplicate final delivery for the same lifecycleKey.
 - Implemented restart recovery hardening: when the bridge starts without a fresh controlled-restart breadcrumb but still finds a non-expired active chat/API task record, it marks the interrupted card as `recovering` and queues a recovery continuation instead of showing `Task interrupted by service restart`.
 - Implemented restart preflight guard, checkpoint handshake, and bounded ready timeout: ordinary `/restart service` checks recorded active bot/agent turns and blocks the service restart when other work is still active; blocked/scheduled/forced/timed_out restart requests are recorded in `SESSION_STORE_DIR/restart-requests.json`; blocker chats receive a restart-prepare notice with the same `requestId`, can reply `/restart ready <requestId> [checkpoint note]`, and the requester can retry `/restart service` to reuse the request and schedule once all current blockers are ready. A blocked request has a default 10 minute ready timeout (`METABOT_RESTART_READY_TIMEOUT_MS`); timeout only marks the request `timed_out` and never force-restarts the service. `/restart service --force <reason>` is the explicit override path. Scheduled same-chat restarts preserve the active-task record so restart recovery can queue continuation instead of losing the interrupted turn.
-- Implemented config/authority hardening: `loadAppConfig()` preserves supported Agent Team template fields from `bots.json` (`quotas`, `ruleSetRefs`, `pmBot`, scoped instance metadata, and temporary-Agent lifecycle metadata), and the HTTP/CLI surfaces no longer treat missing `actorRole` as PM authority for Agent creation, promotion approval, direct template/rule import, instance resolve, or team config updates. Worker dispatch/abort/redirect API and MCP calls also require explicit PM/user/admin `actorRole` / `actor_role`; controlled service restart rejects manager/agent/worker actor roles.
+- Implemented config/authority hardening: `loadAppConfig()` preserves supported Agent Team template fields from `bots.json` (`quotas`, `ruleSetRefs`, `pmBot`, scoped instance metadata, and temporary-Agent lifecycle metadata), and the HTTP/CLI surfaces no longer treat missing `actorRole` as PM authority for team lifecycle, Agent creation/stop/delete, run stop, promotion approval, direct template/rule import, instance resolve, or team config updates. Worker dispatch/abort/redirect API and MCP calls also require explicit PM/user/admin `actorRole` / `actor_role`; controlled service restart rejects manager/agent/worker actor roles.
 - Implemented Web UI activity history: the Team tab fetches Agent Team instances and renders Agent Team lifecycle activity through `GET /api/agent-teams/<team>/activity`; selecting a sub-agent filters by `agentName`, while the existing bot task activity remains visible separately.
 - Implemented UI lease/checkpoint increment: `card-lifecycle.json` records now include `leaseOwner`, `leaseExpiresAt`, `checkpointNote`, `checkpointBy`, `checkpointAt`, and `restartRequestId`; non-closed cards refresh the lease automatically and closed cards release it. `/restart ready <requestId> [checkpoint note]` writes the blocker checkpoint back to the matching lifecycle record.
 - Implemented post-restart readiness reports: after controlled restart recovery, requester and blocker chats receive requestId, status, readiness progress, timed-out state, queued continuations, and affected chats; `reportedAt` dedupes the report.
@@ -168,15 +168,15 @@ Phase 5: Activity cards and recovery
 Use `metabot teams` for all coordination:
 
 ```bash
-metabot teams create metabot-dev --description "MetaBot implementation team"
+metabot teams create metabot-dev --description "MetaBot implementation team" --actor-role pm
 metabot teams agents spawn metabot-dev cli-engineer --role implementation --actor-role pm --engine codex --prompt "Own CLI UX, tests, and docs."
 metabot teams tasks create metabot-dev "Add runs CLI" --description "Expose runs create/update in bash and TS CLIs." --owner cli-engineer
 metabot teams send metabot-dev cli-engineer "Start task 4." --from lead --summary "assign task 4"
 ```
 
-For scoped runtime teams, first run `metabot teams instances resolve <template> --chat <chatId> --rule-ref <name[@version]>` or inspect `metabot teams instances list`. The returned `instanceId` can be used anywhere the command reference shows `<team>`, for example `metabot teams tasks list ati_...`.
+For scoped runtime teams, first run `metabot teams instances resolve <template> --chat <chatId> --rule-ref <name[@version]> --actor-role pm` or inspect `metabot teams instances list`. The returned `instanceId` can be used anywhere the command reference shows `<team>`, for example `metabot teams tasks list ati_...`.
 
-If a project needs new pinned conventions after creation, use `metabot teams config <instanceId> --rule-ref <name[@version]> --pm-bot <name>` and, when needed, explicit quota flags such as `--max-temporary-agents 5`. This updates the current runtime instance without silently following `latest`.
+If a project needs new pinned conventions after creation, use `metabot teams config <instanceId> --rule-ref <name[@version]> --pm-bot <name> --actor-role pm` and, when needed, explicit quota flags such as `--max-temporary-agents 5`. This updates the current runtime instance without silently following `latest`.
 
 Agents normally start each turn by reading their mailbox and task:
 
@@ -202,7 +202,7 @@ metabot teams runs list metabot-dev
 metabot teams runs create metabot-dev --agent cli-engineer --task-id 4 --status running --output "Starting smoke test"
 metabot teams runs update metabot-dev <runId> --status completed --output "Smoke passed"
 metabot teams runs output metabot-dev <runId>
-metabot teams runs stop metabot-dev <runId>
+metabot teams runs stop metabot-dev <runId> --actor-role pm
 ```
 
 Valid run statuses are `running`, `completed`, `failed`, and `stopped`. `metabot teams runs stop` now routes through the supervisor when available: it marks the run `stopped`, asks the bridge to stop the agent chat task, requeues any assigned in-progress tasks to `pending` with a stop note, and suppresses late executor output so a delayed success cannot overwrite the stopped run.
@@ -218,7 +218,8 @@ Failed-run handling:
 
 The bridge builds a team snapshot from the Agent Teams store:
 
-- The **Team** panel shows active agents, their working or idle state, and visible tasks.
+- The **Team** panel is deliberately compact. When agents are working it shows a `⏳ 2/4 working` count plus one short activity line for each working agent (up to two, then `+N more working`); idle agents are not listed. When nothing is working the whole panel collapses to a single `💤 idle (4 agents)` line plus, if there is open work, a task count and up to two open task subjects.
+- Long team ids are shortened for display: `research-codex@chat:oc_abc…` renders as `research-codex`.
 - The **Background activity** panel shows runs with status and the latest output or error.
 - Task statuses shown on cards are `pending`, `in_progress`, and `completed`; deleted tasks are hidden.
 
@@ -235,7 +236,8 @@ Operational details:
 - Disable the loop with `METABOT_AGENT_TEAM_SUPERVISOR=0`.
 - Tune the polling interval with `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS`.
 - Set `agentTeamExecutionBot` in `bots.json` or `METABOT_AGENT_TEAM_EXECUTION_BOT` to pin which bridge bot executes agent runs. Use a non-privileged PM/internal worker bot such as `research-pm`; do not rely on registration order when `manager` is first.
-- Without an explicit execution bot, the supervisor falls back to `metabot`, then `research-pm`, then the first non-`manager` bot, then the first registered bot.
+- A team instance that has a `pmBot` (chat/project-scoped runtime instances created by a PM) executes through that bot when it is registered, ahead of the global `agentTeamExecutionBot`. This keeps a `pm-claude`-owned instance on `pm-claude` without changing global config. Agent activity cards for the team use the same bot.
+- Without a usable `pmBot` or an explicit execution bot, the supervisor falls back to `metabot`, then `research-pm`, then the first non-`manager` bot, then the first registered bot.
 - Assigned pending tasks are moved to `in_progress` when the supervisor starts the run.
 - The supervisor sets the configured session engine for the agent chat, but it does not yet validate per-engine capabilities before dispatching work. Keep resident teams on engines known to work in the local bridge until runtime capability checks or per-engine adapters are added.
 
@@ -292,16 +294,16 @@ Rollout caveat for existing databases: the `managed_by_config` column defaults t
 
 ```bash
 metabot teams list
-metabot teams create <team> [--description <text>]
-metabot teams delete <team>
+metabot teams create <team> [--description <text>] [--actor-role admin|user|pm]
+metabot teams delete <team> [--actor-role admin|user|pm]
 metabot teams status <team>
-metabot teams start <team>
-metabot teams stop <team>
+metabot teams start <team> [--actor-role admin|user|pm]
+metabot teams stop <team> [--actor-role admin|user|pm]
 
 metabot teams agents list <team>
 metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--prompt <text>]
-metabot teams agents stop <team> <name>
-metabot teams agents delete <team> <name>
+metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
+metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
 
 metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
 metabot teams inbox <team> <name> [--unread] [--read]
@@ -315,7 +317,7 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId>
+metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]
 ```
 
 ## Current Limits

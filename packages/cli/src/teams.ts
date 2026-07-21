@@ -97,13 +97,13 @@ function usage(): string {
 
 Subcommands:
   list
-  create <team> [--description <text>]
+  create <team> [--description <text>] [--actor-role admin|user|pm]
   config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
-  delete <team>
+  delete <team> [--actor-role admin|user|pm]
   status <team> [--summary|--plain]
-  bind <team> <chatId> [--display]
-  start <team>
-  stop <team>
+  bind <team> <chatId> [--display] [--actor-role admin|user|pm]
+  start <team> [--actor-role admin|user|pm]
+  stop <team> [--actor-role admin|user|pm]
   activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
   dispatch <team> <agent> <subject> [--description <text>] [--message <text>] [--from <name>] [--summary|--plain]
   next <team> <agent> [--read] [--summary|--plain]
@@ -127,8 +127,8 @@ Subcommands:
 
   agents list <team>
   agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
-  agents stop <team> <name>
-  agents delete <team> <name>
+  agents stop <team> <name> [--actor-role admin|user|pm]
+  agents delete <team> <name> [--actor-role admin|user|pm]
 
   send <team> <to> <message> [--from <name>] [--summary <text>]
   inbox <team> <name> [--unread] [--read] [--summary|--plain]
@@ -146,7 +146,7 @@ Subcommands:
   runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
   runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
   runs output <team> <runId>
-  runs stop <team> <runId>
+  runs stop <team> <runId> [--actor-role admin|user|pm]
 
 Note: <team> accepts either a team name or an Agent Team instanceId. Prefer instanceId for chat/project-scoped runtime teams.
 `;
@@ -172,6 +172,7 @@ export async function run(argv: string[]): Promise<void> {
     print(await bridgeRequest(cfg, 'POST', '/api/agent-teams', {
       name,
       description: typeof flags.description === 'string' ? flags.description : undefined,
+      ...actorRolePayload(flags),
     }));
     return;
   }
@@ -180,9 +181,10 @@ export async function run(argv: string[]): Promise<void> {
     return;
   }
   if (cmd === 'delete') {
-    const team = rest[0];
+    const { positional, flags } = parseArgs(rest);
+    const team = positional[0];
     if (!team) throw new Error('metabot teams delete: <team> required');
-    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}`));
+    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}`, actorRolePayload(flags)));
     return;
   }
   if (cmd === 'status') {
@@ -208,13 +210,15 @@ export async function run(argv: string[]): Promise<void> {
     print(await bridgeRequest(cfg, 'PATCH', `/api/agent-teams/${encodeURIComponent(team)}`, {
       chatIds: key === 'chatIds' ? unique([...existingChatIds, chatId]) : existingChatIds,
       displayChatIds: key === 'displayChatIds' ? unique([...existingDisplayChatIds, chatId]) : existingDisplayChatIds,
+      ...actorRolePayload(flags),
     }));
     return;
   }
   if (cmd === 'start' || cmd === 'stop') {
-    const team = rest[0];
+    const { positional, flags } = parseArgs(rest);
+    const team = positional[0];
     if (!team) throw new Error(`metabot teams ${cmd}: <team> required`);
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/${cmd}`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/${cmd}`, actorRolePayload(flags)));
     return;
   }
   if (cmd === 'dispatch') {
@@ -286,6 +290,11 @@ function boolFlag(flags: Record<string, string | true>, name: string): boolean {
 
 function wantsSummary(flags: Record<string, string | true>): boolean {
   return boolFlag(flags, 'summary') || boolFlag(flags, 'plain');
+}
+
+function actorRolePayload(flags: Record<string, string | true>): { actorRole?: string } {
+  const actorRole = stringFlag(flags, 'actor-role') ?? stringFlag(flags, 'as-role');
+  return actorRole ? { actorRole } : {};
 }
 
 function parseNumberList(value: string | undefined): number[] | undefined {
@@ -693,15 +702,17 @@ async function runAgents(cfg: BridgeConfig, argv: string[]): Promise<void> {
     return;
   }
   if (sub === 'stop') {
-    const [team, name] = rest;
+    const { positional, flags } = parseArgs(rest);
+    const [team, name] = positional;
     if (!team || !name) throw new Error('metabot teams agents stop: <team> <name> required');
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}/stop`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}/stop`, actorRolePayload(flags)));
     return;
   }
   if (sub === 'delete' || sub === 'remove') {
-    const [team, name] = rest;
+    const { positional, flags } = parseArgs(rest);
+    const [team, name] = positional;
     if (!team || !name) throw new Error(`metabot teams agents ${sub}: <team> <name> required`);
-    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}`));
+    print(await bridgeRequest(cfg, 'DELETE', `/api/agent-teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(name)}`, actorRolePayload(flags)));
     return;
   }
   throw new Error('metabot teams agents: expected list|spawn|stop|delete');
@@ -915,7 +926,7 @@ async function runRuns(cfg: BridgeConfig, argv: string[]): Promise<void> {
     return;
   }
   if (sub === 'stop') {
-    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/runs/${encodeURIComponent(id)}/stop`));
+    print(await bridgeRequest(cfg, 'POST', `/api/agent-teams/${encodeURIComponent(team)}/runs/${encodeURIComponent(id)}/stop`, actorRolePayload(flags)));
     return;
   }
   throw new Error('metabot teams runs: expected list|create|update|output|stop');

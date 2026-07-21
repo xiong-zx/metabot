@@ -605,6 +605,20 @@ def run(cmd, timeout=4):
     except Exception as e:
         return {"ok": False, "code": None, "stdout": "", "stderr": str(e)}
 
+def read_text(path):
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except Exception:
+        return None
+
+def proc_status_value(key):
+    status = read_text("/proc/self/status") or ""
+    prefix = f"{key}:"
+    for raw in status.splitlines():
+        if raw.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return None
+
 def http_json(url, token=None, timeout=4):
     req = urllib.request.Request(url)
     if token:
@@ -861,6 +875,67 @@ check("codex_agent_features", codex_agent_features_ok,
           "memoryDbExists": codex_data["memoryDbExists"],
           "mcpServerCount": codex_data["mcpServerCount"],
       })
+
+bwrap_path = shutil.which("bwrap")
+bwrap_version = run([bwrap_path, "--version"], timeout=3) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+unshare_path = shutil.which("unshare")
+unshare_user = run([unshare_path, "-Ur", "true"], timeout=3) if unshare_path else {"ok": False, "stdout": "", "stderr": "unshare not found"}
+bwrap_smoke = run([
+    bwrap_path,
+    "--unshare-user",
+    "--uid", "0",
+    "--gid", "0",
+    "--ro-bind", "/", "/",
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    "/bin/sh", "-lc", "true",
+], timeout=5) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+cap_eff = proc_status_value("CapEff")
+try:
+    has_cap_sys_admin = bool(int(cap_eff or "0", 16) & (1 << 21))
+except Exception:
+    has_cap_sys_admin = None
+# bwrap file permissions: mode octal string, setuid bit, and Linux capabilities via getcap
+bwrap_filemode = None
+bwrap_setuid = None
+if bwrap_path:
+    try:
+        st = os.stat(bwrap_path)
+        bwrap_filemode = oct(st.st_mode)
+        bwrap_setuid = bool(st.st_mode & 0o4000)
+    except Exception:
+        pass
+getcap_path = shutil.which("getcap")
+bwrap_capabilities = None
+if bwrap_path and getcap_path:
+    _gc = run([getcap_path, bwrap_path], timeout=3)
+    bwrap_capabilities = (_gc["stdout"] or _gc["stderr"] or "").strip() or None
+codex_sandbox_data = {
+    "bwrap": bwrap_path,
+    "bwrapVersion": bwrap_version["stdout"] or bwrap_version["stderr"],
+    "bwrapSmokeOk": bwrap_smoke["ok"],
+    "bwrapSmokeStderr": bwrap_smoke["stderr"][:500],
+    "bwrapFileMode": bwrap_filemode,
+    "bwrapSetuid": bwrap_setuid,
+    "bwrapCapabilities": bwrap_capabilities,
+    "unshare": unshare_path,
+    "unshareUserOk": unshare_user["ok"],
+    "unshareUserStderr": unshare_user["stderr"][:500],
+    "kernelUnprivilegedUsernsClone": read_text("/proc/sys/kernel/unprivileged_userns_clone"),
+    "userMaxUserNamespaces": read_text("/proc/sys/user/max_user_namespaces"),
+    "seccomp": proc_status_value("Seccomp"),
+    "apparmor": read_text("/proc/self/attr/current"),
+    "cgroup": read_text("/proc/1/cgroup"),
+    "capEff": cap_eff,
+    "hasCapSysAdmin": has_cap_sys_admin,
+}
+check("codex_sandbox_namespaces", bwrap_smoke["ok"],
+      "ok" if bwrap_smoke["ok"] else ("bwrap_missing" if not bwrap_path else "bwrap_namespace_unavailable"),
+      "Codex read-only/workspace-write sandbox namespaces are available." if bwrap_smoke["ok"] else "Codex read-only/workspace-write sandbox namespaces are not available on this host/container.",
+      "Use Codex danger-full-access/bypass for this runtime, or run the container/host with user namespaces allowed by seccomp/AppArmor and kernel policy, then re-run metabot doctor --json.",
+      False,
+      codex_sandbox_data)
 
 team_base = None
 for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
@@ -1266,11 +1341,11 @@ argv = sys.argv[3:]
 def usage():
     print("""metabot teams - MetaBot Agent Teams
   metabot teams list
-  metabot teams create <team> [--description text]
-  metabot teams delete <team>
+  metabot teams create <team> [--description text] [--actor-role admin|user|pm]
+  metabot teams delete <team> [--actor-role admin|user|pm]
   metabot teams status <team> [--summary|--plain]
-  metabot teams bind <team> <chatId> [--display]
-  metabot teams start|stop <team>
+  metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
+  metabot teams start|stop <team> [--actor-role admin|user|pm]
   metabot teams activity <team> [--agent name] [--run-id id] [--task-id id] [--chat chatId] [--source name] [--limit n] [--summary|--plain]
   metabot teams dispatch <team> <agent> <subject> [--description text] [--message text] [--from name] [--plain]
   metabot teams next <team> <agent> [--read] [--summary|--plain]
@@ -1290,8 +1365,8 @@ def usage():
   metabot teams rules context --ref name[@version] [--rule text]
   metabot teams agents list <team>
   metabot teams agents spawn <team> <name> [--role r] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model m] [--reasoning-effort e] [--approval-policy p] [--sandbox s] [--timeout-ms n] [--idle-timeout-ms n] [--allowed-tools a,b] [--prompt p]
-  metabot teams agents stop <team> <name>
-  metabot teams agents delete <team> <name>
+  metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
+  metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
   metabot teams send <team> <to> <message> [--from name] [--summary text]
   metabot teams inbox <team> <name> [--unread] [--read] [--summary|--plain]
   metabot teams tasks list <team> [--summary|--plain]
@@ -1305,7 +1380,8 @@ def usage():
   metabot teams runs list <team> [--summary|--plain]
   metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
   metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
-  metabot teams runs output|stop <team> <runId>""")
+  metabot teams runs output <team> <runId>
+  metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]""")
 
 def parse(args):
     pos, flags, i = [], {}, 0
@@ -1535,10 +1611,11 @@ if cmd == "list":
 elif cmd == "create":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams create <team>")
-    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description")})
+    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description"), "actorRole": actor_role(flags)})
 elif cmd == "delete":
-    if not rest: raise SystemExit("Usage: metabot teams delete <team>")
-    req("DELETE", f"/api/agent-teams/{enc(rest[0])}")
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit("Usage: metabot teams delete <team>")
+    req("DELETE", f"/api/agent-teams/{enc(pos[0])}", {"actorRole": actor_role(flags)})
 elif cmd == "status":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams status <team>")
@@ -1557,10 +1634,12 @@ elif cmd == "bind":
     req("PATCH", f"/api/agent-teams/{enc(pos[0])}", {
         "chatIds": chat_ids,
         "displayChatIds": display_chat_ids,
+        "actorRole": actor_role(flags),
     })
 elif cmd in ("start", "stop"):
-    if not rest: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
-    req("POST", f"/api/agent-teams/{enc(rest[0])}/{cmd}", {})
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
+    req("POST", f"/api/agent-teams/{enc(pos[0])}/{cmd}", {"actorRole": actor_role(flags)})
 elif cmd == "activity":
     pos, flags = parse(rest)
     if not pos:
@@ -1777,11 +1856,13 @@ elif cmd == "agents":
             "actorRole": flags.get("actor-role") or flags.get("as-role"),
         })
     elif sub == "stop":
-        if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
-        req("POST", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}/stop", {})
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
+        req("POST", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
     elif sub in ("delete", "remove"):
-        if len(args) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
-        req("DELETE", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}")
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
+        req("DELETE", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}", {"actorRole": actor_role(flags)})
     else:
         raise SystemExit("Usage: metabot teams agents list|spawn|stop|delete ...")
 elif cmd == "send":
@@ -1887,7 +1968,8 @@ elif cmd == "runs":
         if sub == "output":
             req("GET", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/output")
         else:
-            req("POST", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/stop", {})
+            pos, flags = parse(args)
+            req("POST", f"/api/agent-teams/{enc(pos[0])}/runs/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
     else:
         raise SystemExit("Usage: metabot teams runs list|create|update|output|stop ...")
 else:

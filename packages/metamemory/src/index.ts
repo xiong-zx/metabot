@@ -9,6 +9,7 @@ import {
   cmdCreate,
   cmdUpdate,
   cmdMkdir,
+  cmdMoveFolder,
   cmdDelete,
   cmdShare,
   cmdHealth,
@@ -63,6 +64,11 @@ export async function main(argv: string[]): Promise<void> {
       case 'mkdir':
       case 'md':
         await cmdMkdir(cfg, args);
+        break;
+      case 'move-folder':
+      case 'mv-folder':
+      case 'mvdir':
+        await cmdMoveFolder(cfg, args);
         break;
       case 'delete':
       case 'rm':

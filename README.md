@@ -285,8 +285,8 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 | 组件 | 一句话说明 |
 |------|-----------|
 | **三引擎内核** | 每个 Bot 独立选 Claude Code / Kimi Code / Codex CLI — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行 |
-| **常驻会话与目标循环** | 每个会话一个常驻引擎会话 — `/goal` 让 Bot 在多轮之间持续自驱直到目标达成；Agent Team 成员和后台任务跨轮存活 |
-| **Agent Team（内部 Agents）** | 主导 Bot 并行派遣专家 Agent，路由任务、汇总结果 —— 全部可在一个飞书会话中完成 |
+| **常驻会话与目标循环** | 每个会话一个常驻引擎会话 — `/goal` 让 Bot 在多轮之间持续自驱直到目标达成；Agent Team agents 和后台任务跨轮存活 |
+| **Agent Team（内部 Agents）** | PM/主导 Bot 并行派遣多个专家 Agent，路由任务、汇总结果 —— 全部可在一个飞书会话中完成 |
 | **AutoResearchClaw** | 通过 `research-pm` 从飞书启动单项目 research loop，自动生成 context pack、派发 worker、收集结构化科研结果 |
 | **Research Memory Core** | 项目本地 append-only 科研记忆核心，沉淀 facts、decisions、negative results、open questions，并为 worker 生成低 token context pack |
 | **CC 原生调度** | 直接用 Claude Code 内置的 `CronCreate` / `/loop` —— 即开即用，会话内最简单 |
@@ -509,9 +509,13 @@ MetaBot 支持 4 种方式与你的 Bot 和执行单元交互：
 | `METABOT_CORE_PUBLIC_URL` | 读 `METABOT_CORE_URL` | metabot-core 对外可访问地址；用于分发安装脚本和 core→bridge 回调，反向代理场景建议显式设置 |
 | `METABOT_CORE_TOKEN` | 读 `~/.metabot-core/token` | metabot-core Bearer Token（在 `<METABOT_CORE_URL>/cli` 自助生成） |
 | `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许写入的顶层路径，逗号分隔 |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | 本服务器的 MetaMemory 顶层命名空间，例如 `/cargo1`；设置后会加入 Memory API 可写根 |
 | `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | `/api/talk?async=true` 任务超过该时长仍未完成时标记为 `task_expired` |
 | `WIKI_SYNC_ENABLED` | true | 启用 MetaMemory→飞书知识库同步 |
 | `WIKI_SPACE_NAME` | MetaMemory | 飞书知识库空间名称 |
+| `WIKI_AUTO_SYNC` | true | 轮询 MetaMemory 变更并自动触发同步 |
+| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | MetaMemory 快照轮询间隔 |
+| `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | 自动同步防抖时间 |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Wiki 同步映射 SQLite 存放目录 |
 | `VOLCENGINE_TTS_APPID` | — | 豆包语音（TTS + STT） |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包语音密钥 |
