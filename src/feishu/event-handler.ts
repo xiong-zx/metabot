@@ -27,6 +27,7 @@ const memberCountCache = new Map<string, { count: number; ts: number }>();
 // Cache for recent media messages in group chats (file/image sent without @mention).
 // When a user later @mentions the bot, cached media is attached automatically.
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MESSAGE_DEDUPE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 interface CachedMedia {
   messageId: string;
   imageKey?: string;
@@ -34,28 +35,53 @@ interface CachedMedia {
   fileName?: string;
   ts: number;
 }
-const pendingMediaCache = new Map<string, CachedMedia[]>(); // key: chatId:userId
+type PendingMediaCache = Map<string, CachedMedia[]>;
 
 function cacheMediaKey(chatId: string, userId: string): string {
   return `${chatId}:${userId}`;
 }
 
-function getCachedMedia(chatId: string, userId: string): CachedMedia[] {
+function consumeCachedMedia(
+  cache: PendingMediaCache,
+  chatId: string,
+  userId: string,
+  replyToMessageId?: string,
+): CachedMedia[] {
   const key = cacheMediaKey(chatId, userId);
-  const items = pendingMediaCache.get(key);
+  const items = cache.get(key);
   if (!items) return [];
   const now = Date.now();
   const valid = items.filter(m => now - m.ts < MEDIA_CACHE_TTL_MS);
   if (valid.length === 0) {
-    pendingMediaCache.delete(key);
+    cache.delete(key);
     return [];
   }
-  pendingMediaCache.set(key, valid);
+
+  if (replyToMessageId) {
+    const selected = valid.filter(m => m.messageId === replyToMessageId);
+    if (selected.length === 0) {
+      cache.set(key, valid);
+      return [];
+    }
+    const remaining = valid.filter(m => m.messageId !== replyToMessageId);
+    if (remaining.length > 0) cache.set(key, remaining);
+    else cache.delete(key);
+    return selected;
+  }
+
+  cache.delete(key);
   return valid;
 }
 
-function clearCachedMedia(chatId: string, userId: string): void {
-  pendingMediaCache.delete(cacheMediaKey(chatId, userId));
+function isDuplicateMessage(cache: Map<string, number>, messageId: string): boolean {
+  const now = Date.now();
+  for (const [id, ts] of cache) {
+    if (now - ts >= MESSAGE_DEDUPE_TTL_MS) cache.delete(id);
+  }
+  const prior = cache.get(messageId);
+  if (prior !== undefined && now - prior < MESSAGE_DEDUPE_TTL_MS) return true;
+  cache.set(messageId, now);
+  return false;
 }
 
 async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promise<boolean> {
@@ -82,6 +108,10 @@ export function createEventDispatcher(
   onAnyEvent?: () => void,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
+  // Each Feishu app gets an independent dispatcher. Keep routing state local so
+  // one bot cannot consume another bot's pending attachment or dedupe entry.
+  const pendingMediaCache: PendingMediaCache = new Map();
+  const recentMessageIds = new Map<string, number>();
 
   // Register the card action trigger handler (fired when a user clicks a button
   // on an interactive card). The lark SDK types omit this event so we cast.
@@ -136,15 +166,33 @@ export function createEventDispatcher(
           return;
         }
 
+        const chatId = message.chat_id;
+        const chatType = message.chat_type;
+        const messageId = message.message_id;
+        const replyToMessageId = message.parent_id || undefined;
+        if (!messageId) {
+          logger.warn({ chatId, chatType }, 'Message missing message_id');
+          return;
+        }
+        if (isDuplicateMessage(recentMessageIds, messageId)) {
+          logger.info({ messageId, chatId }, 'Ignoring duplicate message event');
+          return;
+        }
+
+        // include_bot permissions can deliver messages authored by another app.
+        // Feishu chat is a user-facing ingress; bot-to-bot work belongs on the
+        // agent bus and must not silently consume model context here.
+        const senderType = sender?.sender_type;
+        if (senderType !== 'user') {
+          logger.info({ messageId, chatId, senderType }, 'Ignoring non-user message event');
+          return;
+        }
+
         const userId = sender?.sender_id?.open_id;
         if (!userId) {
           logger.warn('Message missing sender open_id');
           return;
         }
-
-        const chatId = message.chat_id;
-        const chatType = message.chat_type;
-        const messageId = message.message_id;
 
         // In group chats, only respond when the bot is @mentioned
         // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
@@ -152,7 +200,7 @@ export function createEventDispatcher(
         if (chatType === 'group') {
           const botMentioned = botOpenId
             ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
-            : mentions && mentions.length > 0;
+            : false;
           if (!botMentioned) {
             // groupNoMention mode: respond to all messages without @mention
             if (config.groupNoMention) {
@@ -272,7 +320,12 @@ export function createEventDispatcher(
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
         if (chatType === 'group') {
-          const cached = getCachedMedia(chatId, userId);
+          const cached = consumeCachedMedia(
+            pendingMediaCache,
+            chatId,
+            userId,
+            replyToMessageId,
+          );
           if (cached.length > 0) {
             const cachedMedia = cached.map(m => ({
               messageId: m.messageId,
@@ -281,8 +334,14 @@ export function createEventDispatcher(
               fileName: m.fileName,
             }));
             extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
-            clearCachedMedia(chatId, userId);
-            logger.info({ chatId, userId, mediaCount: cached.length }, 'Attached cached media to @mention message');
+            logger.info({
+              chatId,
+              userId,
+              replyToMessageId,
+              mediaCount: cached.length,
+            }, 'Attached cached media to @mention message');
+          } else if (replyToMessageId) {
+            logger.debug({ chatId, userId, replyToMessageId }, 'No cached media matched replied message');
           }
         }
 

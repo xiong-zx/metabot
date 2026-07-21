@@ -58,6 +58,14 @@ Step-by-step procedure to configure a Feishu bot for MetaBot.
 8. Click **Confirm**
 9. When prompted for suggested scopes, click **"Add Scopes"**
 
+### Group Mentions And File Messages
+
+- `im:message.group_msg` delivers every user-message event from a group containing the bot. It enables the “send a file, then reply to that file and @mention the bot” workflow, but it does not decide which events should enter model context.
+- With the default `groupNoMention=false`, MetaBot drops ordinary group text that does not mention the current bot, so it never reaches the model. Unmentioned files and images are cached for five minutes; when the user replies to a file and mentions the bot, only the replied file is attached.
+- `groupNoMention=true` processes every delivered group user message and should only be used when a chat has one explicitly designated bot.
+- `im:message.group_at_msg.include_bot:readonly` allows other bots to mention the current bot. MetaBot ignores bot senders by default; use the Agent Bus for bot-to-bot coordination instead of a Feishu message loop.
+- Feishu can redeliver the same event. MetaBot deduplicates by `message_id` to avoid starting the same model turn twice.
+
 ## Step 6: Publish the App
 
 1. Click **"Create Version"** in the top banner (or go to Version Management & Release)
