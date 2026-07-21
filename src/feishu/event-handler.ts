@@ -1,7 +1,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import { MessageSender } from './message-sender.js';
+import { MessageSender, type FeishuMessageSnapshot } from './message-sender.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -27,6 +27,9 @@ const memberCountCache = new Map<string, { count: number; ts: number }>();
 // Cache for recent media messages in group chats (file/image sent without @mention).
 // When a user later @mentions the bot, cached media is attached automatically.
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MESSAGE_DEDUPE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_PENDING_MEDIA_PER_USER = 10;
+const MAX_REFERENCED_TEXT_CHARS = 16_000;
 interface CachedMedia {
   messageId: string;
   imageKey?: string;
@@ -34,28 +37,160 @@ interface CachedMedia {
   fileName?: string;
   ts: number;
 }
-const pendingMediaCache = new Map<string, CachedMedia[]>(); // key: chatId:userId
+type PendingMediaCache = Map<string, CachedMedia[]>;
 
 function cacheMediaKey(chatId: string, userId: string): string {
   return `${chatId}:${userId}`;
 }
 
-function getCachedMedia(chatId: string, userId: string): CachedMedia[] {
+function consumeCachedMedia(
+  cache: PendingMediaCache,
+  chatId: string,
+  userId: string,
+  replyToMessageId: string,
+): CachedMedia[] {
   const key = cacheMediaKey(chatId, userId);
-  const items = pendingMediaCache.get(key);
+  const items = cache.get(key);
   if (!items) return [];
   const now = Date.now();
   const valid = items.filter(m => now - m.ts < MEDIA_CACHE_TTL_MS);
   if (valid.length === 0) {
-    pendingMediaCache.delete(key);
+    cache.delete(key);
     return [];
   }
-  pendingMediaCache.set(key, valid);
-  return valid;
+
+  const selected = valid.filter(m => m.messageId === replyToMessageId);
+  if (selected.length === 0) {
+    cache.set(key, valid);
+    return [];
+  }
+  const remaining = valid.filter(m => m.messageId !== replyToMessageId);
+  if (remaining.length > 0) cache.set(key, remaining);
+  else cache.delete(key);
+  return selected;
 }
 
-function clearCachedMedia(chatId: string, userId: string): void {
-  pendingMediaCache.delete(cacheMediaKey(chatId, userId));
+function cachePendingMedia(
+  cache: PendingMediaCache,
+  chatId: string,
+  userId: string,
+  media: Omit<CachedMedia, 'ts'>,
+): void {
+  const key = cacheMediaKey(chatId, userId);
+  const now = Date.now();
+  const valid = (cache.get(key) ?? []).filter(item => now - item.ts < MEDIA_CACHE_TTL_MS);
+  valid.push({ ...media, ts: now });
+  cache.set(key, valid.slice(-MAX_PENDING_MEDIA_PER_USER));
+}
+
+function isDuplicateMessage(cache: Map<string, number>, messageId: string): boolean {
+  const now = Date.now();
+  for (const [id, ts] of cache) {
+    if (now - ts >= MESSAGE_DEDUPE_TTL_MS) cache.delete(id);
+  }
+  const prior = cache.get(messageId);
+  if (prior !== undefined && now - prior < MESSAGE_DEDUPE_TTL_MS) return true;
+  cache.set(messageId, now);
+  return false;
+}
+
+function cleanMessageText(text: string): string {
+  return text
+    .replace(/@_\w+\s*/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim();
+}
+
+function truncateReferencedText(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_REFERENCED_TEXT_CHARS) return { text, truncated: false };
+  return {
+    text: `${text.slice(0, MAX_REFERENCED_TEXT_CHARS)}\n[Referenced message truncated]`,
+    truncated: true,
+  };
+}
+
+function parseReferencedMessage(
+  snapshot: FeishuMessageSnapshot,
+  logger: Logger,
+): {
+  replyContext?: IncomingMessage['replyContext'];
+  media: CachedMedia[];
+} {
+  const messageType = snapshot.messageType;
+  const content = snapshot.content;
+  if (!messageType || !content) return { media: [] };
+
+  try {
+    const parsed = JSON.parse(content);
+    let text = '';
+    let media: CachedMedia[] = [];
+    if (messageType === 'text') {
+      text = cleanMessageText(parsed.text || '');
+    } else if (messageType === 'post') {
+      text = cleanMessageText(extractTextFromPost(parsed));
+      media = extractImagesFromPost(parsed).map(imageKey => ({
+        messageId: snapshot.messageId,
+        imageKey,
+        ts: Date.now(),
+      }));
+    } else if (messageType === 'image' && parsed.image_key) {
+      media = [{ messageId: snapshot.messageId, imageKey: parsed.image_key, ts: Date.now() }];
+    } else if (messageType === 'file' && parsed.file_key && parsed.file_name) {
+      media = [{
+        messageId: snapshot.messageId,
+        fileKey: parsed.file_key,
+        fileName: parsed.file_name,
+        ts: Date.now(),
+      }];
+    } else {
+      logger.debug({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
+      return { media: [] };
+    }
+
+    const bounded = truncateReferencedText(text);
+    return {
+      replyContext: {
+        messageId: snapshot.messageId,
+        messageType,
+        text: bounded.text || undefined,
+        truncated: bounded.truncated || undefined,
+      },
+      media,
+    };
+  } catch (err) {
+    logger.warn({ err, messageId: snapshot.messageId, messageType }, 'Failed to parse referenced message');
+    return { media: [] };
+  }
+}
+
+async function resolveReferencedMessage(
+  cache: PendingMediaCache,
+  messageSender: MessageSender | undefined,
+  chatId: string,
+  userId: string,
+  messageId: string,
+  logger: Logger,
+): Promise<{
+  replyContext?: IncomingMessage['replyContext'];
+  media: CachedMedia[];
+}> {
+  const cachedMedia = consumeCachedMedia(cache, chatId, userId, messageId);
+  if (!messageSender || typeof messageSender.getMessage !== 'function') {
+    return { media: cachedMedia };
+  }
+
+  const snapshot = await messageSender.getMessage(messageId);
+  if (!snapshot) return { media: cachedMedia };
+  if (snapshot.chatId && snapshot.chatId !== chatId) {
+    logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
+    return { media: [] };
+  }
+
+  const parsed = parseReferencedMessage(snapshot, logger);
+  return {
+    replyContext: parsed.replyContext,
+    media: parsed.media.length > 0 ? parsed.media : cachedMedia,
+  };
 }
 
 async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promise<boolean> {
@@ -82,6 +217,10 @@ export function createEventDispatcher(
   onAnyEvent?: () => void,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
+  // Each Feishu app gets an independent dispatcher. Keep routing state local so
+  // one bot cannot consume another bot's pending attachment or dedupe entry.
+  const pendingMediaCache: PendingMediaCache = new Map();
+  const recentMessageIds = new Map<string, number>();
 
   // Register the card action trigger handler (fired when a user clicks a button
   // on an interactive card). The lark SDK types omit this event so we cast.
@@ -136,15 +275,33 @@ export function createEventDispatcher(
           return;
         }
 
+        const chatId = message.chat_id;
+        const chatType = message.chat_type;
+        const messageId = message.message_id;
+        const replyToMessageId = message.parent_id || undefined;
+        if (!messageId) {
+          logger.warn({ chatId, chatType }, 'Message missing message_id');
+          return;
+        }
+        if (isDuplicateMessage(recentMessageIds, messageId)) {
+          logger.info({ messageId, chatId }, 'Ignoring duplicate message event');
+          return;
+        }
+
+        // include_bot permissions can deliver messages authored by another app.
+        // Feishu chat is a user-facing ingress; bot-to-bot work belongs on the
+        // agent bus and must not silently consume model context here.
+        const senderType = sender?.sender_type;
+        if (senderType !== 'user') {
+          logger.info({ messageId, chatId, senderType }, 'Ignoring non-user message event');
+          return;
+        }
+
         const userId = sender?.sender_id?.open_id;
         if (!userId) {
           logger.warn('Message missing sender open_id');
           return;
         }
-
-        const chatId = message.chat_id;
-        const chatType = message.chat_type;
-        const messageId = message.message_id;
 
         // In group chats, only respond when the bot is @mentioned
         // Exceptions: 2-member groups are treated like DMs; groupNoMention mode skips @mention check
@@ -152,7 +309,7 @@ export function createEventDispatcher(
         if (chatType === 'group') {
           const botMentioned = botOpenId
             ? mentions?.some((m: any) => m.id?.open_id === botOpenId)
-            : mentions && mentions.length > 0;
+            : false;
           if (!botMentioned) {
             // groupNoMention mode: respond to all messages without @mention
             if (config.groupNoMention) {
@@ -163,10 +320,7 @@ export function createEventDispatcher(
               // Cache media messages for later retrieval when user @mentions bot
               const media = parseMediaMessage(message, msgType, logger);
               if (media) {
-                const key = cacheMediaKey(chatId, userId);
-                const items = pendingMediaCache.get(key) || [];
-                items.push({ ...media, messageId, ts: Date.now() });
-                pendingMediaCache.set(key, items);
+                cachePendingMedia(pendingMediaCache, chatId, userId, { ...media, messageId });
                 logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for later @mention');
               }
               return;
@@ -243,15 +397,15 @@ export function createEventDispatcher(
 
         // Common text cleanup for text and post messages
         if (msgType === 'text' || msgType === 'post') {
-          // Strip @mention tags (format: @_user_xxx or similar)
-          text = text.replace(/@_\w+\s*/g, '').trim();
+          text = cleanMessageText(text);
 
-          // Strip Feishu auto-generated markdown links: [text](url) → text
-          text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
-          if (!text && !imageKey) {
+          if (!text && !imageKey && !replyToMessageId) {
             logger.debug('Empty message after stripping mentions');
             return;
+          }
+
+          if (!text && replyToMessageId) {
+            text = '请处理我回复的消息';
           }
 
           // If text is empty but we have an image (e.g. @bot + image in group chat), set default prompt
@@ -262,7 +416,29 @@ export function createEventDispatcher(
           logger.info({ userId, chatId, chatType, text: text.slice(0, 100), imageKey }, 'Received message');
         }
 
-        // Collect extra media: post images (2nd+) and cached group media
+        let replyContext: IncomingMessage['replyContext'];
+        let referencedMedia: CachedMedia[] = [];
+        if (chatType === 'group' && replyToMessageId) {
+          const resolved = await resolveReferencedMessage(
+            pendingMediaCache,
+            messageSender,
+            chatId,
+            userId,
+            replyToMessageId,
+            logger,
+          );
+          replyContext = resolved.replyContext;
+          referencedMedia = resolved.media;
+          logger.info({
+            chatId,
+            userId,
+            replyToMessageId,
+            messageType: replyContext?.messageType,
+            mediaCount: referencedMedia.length,
+          }, 'Resolved replied message context');
+        }
+
+        // Collect extra media: post images (2nd+) and explicitly referenced media
         let extraMedia: IncomingMessage['extraMedia'];
         if (postExtraImages.length > 0) {
           extraMedia = postExtraImages.map(key => ({
@@ -271,22 +447,34 @@ export function createEventDispatcher(
           }));
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
-        if (chatType === 'group') {
-          const cached = getCachedMedia(chatId, userId);
-          if (cached.length > 0) {
-            const cachedMedia = cached.map(m => ({
-              messageId: m.messageId,
-              imageKey: m.imageKey,
-              fileKey: m.fileKey,
-              fileName: m.fileName,
-            }));
-            extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
-            clearCachedMedia(chatId, userId);
-            logger.info({ chatId, userId, mediaCount: cached.length }, 'Attached cached media to @mention message');
-          }
+        if (referencedMedia.length > 0) {
+          const cachedMedia = referencedMedia.map(m => ({
+            messageId: m.messageId,
+            imageKey: m.imageKey,
+            fileKey: m.fileKey,
+            fileName: m.fileName,
+          }));
+          extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
+          logger.info({
+            chatId,
+            userId,
+            replyToMessageId,
+            mediaCount: referencedMedia.length,
+          }, 'Attached referenced media to @mention message');
         }
 
-        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia });
+        onMessage({
+          messageId,
+          chatId,
+          chatType,
+          userId,
+          text,
+          imageKey,
+          fileKey,
+          fileName,
+          replyContext,
+          extraMedia,
+        });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }

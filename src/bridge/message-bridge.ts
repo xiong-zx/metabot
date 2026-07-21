@@ -88,6 +88,24 @@ export { isContextOverflowError, isStaleSessionError } from './error-classifiers
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
+export function buildPromptWithReplyContext(
+  currentText: string,
+  replyContext?: IncomingMessage['replyContext'],
+): string {
+  if (!replyContext) return currentText;
+  const quotedText = replyContext.text
+    || `[Referenced ${replyContext.messageType} attachment; see the attached file paths below.]`;
+  return [
+    `<replied_message message_id="${replyContext.messageId}" type="${replyContext.messageType}">`,
+    quotedText,
+    '</replied_message>',
+    '',
+    '<current_user_message>',
+    currentText,
+    '</current_user_message>',
+  ].join('\n');
+}
+
 type RestartSpawn = typeof spawn;
 let restartSpawn: RestartSpawn = spawn;
 
@@ -2434,7 +2452,8 @@ export class MessageBridge {
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
     const activeEngine = session.engine ?? resolveEngineName(this.config);
-    const enginePromptText = normalizePromptForEngine(text, activeEngine);
+    const normalizedCurrentText = normalizePromptForEngine(text, activeEngine);
+    const enginePromptText = buildPromptWithReplyContext(normalizedCurrentText, msg.replyContext);
 
     // Prepare downloads directory (bot-isolated)
     const downloadsDir = this.config.claude.downloadsDir;

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MessageBridge,
+  buildPromptWithReplyContext,
   isStaleSessionError,
   normalizePromptForEngine,
   extractSpontaneousSnippet,
@@ -150,6 +151,31 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('hello /metaskill', 'codex')).toBe('hello /metaskill');
     expect(normalizePromptForEngine('/bad/path', 'codex')).toBe('/bad/path');
+  });
+});
+
+describe('buildPromptWithReplyContext', () => {
+  it('keeps the current instruction separate from the replied text', () => {
+    expect(buildPromptWithReplyContext('分析这个结论', {
+      messageId: 'om-parent',
+      messageType: 'text',
+      text: '这是未 @ 机器人的原消息',
+    })).toBe([
+      '<replied_message message_id="om-parent" type="text">',
+      '这是未 @ 机器人的原消息',
+      '</replied_message>',
+      '',
+      '<current_user_message>',
+      '分析这个结论',
+      '</current_user_message>',
+    ].join('\n'));
+  });
+
+  it('marks a referenced attachment when it has no text body', () => {
+    expect(buildPromptWithReplyContext('读取文件', {
+      messageId: 'om-file',
+      messageType: 'file',
+    })).toContain('[Referenced file attachment; see the attached file paths below.]');
   });
 });
 
