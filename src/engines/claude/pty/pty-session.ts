@@ -226,7 +226,10 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // Spawn with the SAME absolute cwd used to derive jsonlPath, so claude's
     // own jsonl-dir derivation matches ours regardless of metabot's process cwd.
     const spawnCwd = path.resolve(opts.cwd);
-    this.log.info({ sessionId: this.sessionId, args, cwd: spawnCwd }, 'pty-session: spawning claude');
+    this.log.info(
+      { sessionId: this.sessionId, executable: claudePath, args, cwd: spawnCwd },
+      'pty-session: spawning claude',
+    );
 
     this.term = pty.spawn(claudePath, args, {
       name: 'xterm-256color',

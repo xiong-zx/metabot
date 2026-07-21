@@ -1,4 +1,4 @@
-import { execSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,19 +10,7 @@ import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
-
-const isWindows = process.platform === 'win32';
-
-/** Resolve the Claude Code binary path at module load time. */
-function resolveClaudePath(): string {
-  if (process.env.CLAUDE_EXECUTABLE_PATH) return process.env.CLAUDE_EXECUTABLE_PATH;
-  try {
-    const cmd = isWindows ? 'where claude' : 'which claude';
-    return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
-  } catch {
-    return isWindows ? 'claude' : '/usr/local/bin/claude';
-  }
-}
+import { resolveClaudePath } from './resolve-executable.js';
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
 
