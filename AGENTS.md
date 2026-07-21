@@ -35,7 +35,7 @@
 - **禁止**直接往 `main` 提交；**禁止** rebase / force-push 任何共享分支（`dev`、已推送的 `feat/*`）。
 - 要跑 live 验证 → 把 feature 分支合进 `dev`；要评审 / 进 `main` → 从 feature 分支开 PR。
 - feature 分支从 `main` 拉；若新工作依赖别的 feature（如 memory-core 依赖 agent-team），就 stack 在那条 feature 上，别硬拆成独立分支。
-- 非平凡 merge 后不能只看 conflict 文件；必须分别对两个 parents 做 semantic loss sweep，至少比对 test-name inventory 和 exported/declaration symbol inventory。可先用 `git diff --name-only <parent> HEAD -- 'tests/**/*.test.ts' 'src/**/*.ts' 'packages/**/*.ts'` 取文件，再用 `rg -n "^\\s*(it|test)\\("` 与 `rg -n "^\\s*export\\s+(function|class|const|type|interface|enum)|^\\s*(function|class|const|type|interface|enum)\\s+"` 生成 parent/merge 清单后 `comm -23`；任何丢失都要补回或在 commit 说明中解释。
+- 非平凡 merge 后不能只看 conflict 文件；必须分别对两个 parents 做 semantic loss sweep，至少比对 test-name inventory 和 exported/declaration symbol inventory。可先用 `git diff --name-only <parent> HEAD -- tests src packages | rg '^(tests|src|packages)/.*\\.ts$'` 取文件，再用 `rg -n "^\\s*(it|test)\\("` 与 `rg -n "^\\s*export\\s+(function|class|const|type|interface|enum)|^\\s*(function|class|const|type|interface|enum)\\s+"` 生成 parent/merge 清单后 `comm -23`；任何丢失都要补回或在 commit 说明中解释。
 
 ## 结果输出
 
