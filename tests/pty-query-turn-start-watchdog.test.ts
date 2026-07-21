@@ -77,6 +77,8 @@ describe('ptyQuery turn-start watchdog', () => {
     fakeSession.snapshot.mockImplementation(() => '❯ ');
     fakeSession.screen.mockReset();
     fakeSession.screen.mockImplementation(() => '');
+    fakeSession.dispose.mockReset();
+    fakeSession.dispose.mockImplementation(async () => {});
     scannerDrain.mockReset();
     scannerDrain.mockImplementation(() => []);
   });
@@ -111,8 +113,9 @@ describe('ptyQuery turn-start watchdog', () => {
     });
     expect(String((result.value as any).result)).toContain('did not start a model turn');
     expect(fakeSession.interrupt).toHaveBeenCalled();
+    expect(fakeSession.dispose).toHaveBeenCalled();
 
-    await query.dispose?.();
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
   it('does not accept a historical append-log running marker as turn-start proof', async () => {
@@ -130,7 +133,7 @@ describe('ptyQuery turn-start watchdog', () => {
     await expect(next).resolves.toMatchObject({
       value: { type: 'result', subtype: 'error', is_error: true },
     });
-    await query.dispose?.();
+    await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
   });
 
   it('flushes a queued final assistant before the synthetic result', async () => {
@@ -234,16 +237,7 @@ describe('ptyQuery turn-start watchdog', () => {
     });
 
     fireTurnComplete();
-    const second = iterator.next();
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    let settled = false;
-    second.then(() => { settled = true; });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
-    await query.dispose?.();
-    await expect(second).resolves.toMatchObject({ done: true });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
   it('keeps the watchdog error authoritative when Stop fires during interrupt', async () => {
@@ -274,15 +268,51 @@ describe('ptyQuery turn-start watchdog', () => {
     });
     expect(String((result.value as any).result)).toContain('did not start a model turn');
 
-    const second = iterator.next();
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it('does not type a later prompt into a PTY retired after ambiguous submission', async () => {
+    let releaseSecond!: () => void;
+    const secondReady = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    async function* twoPrompts(): AsyncIterable<PtyUserMessage> {
+      yield {
+        type: 'user',
+        message: { role: 'user', content: 'first prompt' },
+        parent_tool_use_id: null,
+        session_id: 'input-session',
+      };
+      await secondReady;
+      yield {
+        type: 'user',
+        message: { role: 'user', content: 'second prompt' },
+        parent_tool_use_id: null,
+        session_id: 'input-session',
+      };
+    }
+
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: twoPrompts(),
+      options: {
+        cwd: '/tmp',
+        logger,
+        hookBridge: hookBridge as any,
+      },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+
     await vi.advanceTimersByTimeAsync(1_000);
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: 'result', subtype: 'error', is_error: true },
+    });
 
-    let settled = false;
-    second.then(() => { settled = true; });
-    await Promise.resolve();
-    expect(settled).toBe(false);
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(1);
 
-    await query.dispose?.();
-    await expect(second).resolves.toMatchObject({ done: true });
+    expect(fakeSession.typePrompt).toHaveBeenCalledTimes(1);
+    expect(fakeSession.typePrompt).toHaveBeenCalledWith('first prompt');
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 });

@@ -750,11 +750,22 @@ export const ptyQuery = (args: {
           logger.warn({ err }, 'ptyQuery: failed to interrupt after turn-start timeout');
         }
         finishTurnWithError(
-          `Claude Code did not start a model turn within ${Math.round(TURN_START_TIMEOUT_MS / 1000)}s after prompt submission. MetaBot interrupted the PTY and closed this turn instead of leaving the Feishu card in thinking. Please retry the message; if it repeats, reset the Claude session.`,
+          `Claude Code did not start a model turn within ${Math.round(TURN_START_TIMEOUT_MS / 1000)}s after prompt submission. MetaBot interrupted the PTY, closed this turn, and retired the ambiguous PTY session instead of leaving the Feishu card in thinking or reusing unconsumed input. Please retry the message; MetaBot will resume the conversation in a new PTY.`,
           undefined,
           turnId,
         );
         if (errorClosingTurnId === turnId) errorClosingTurnId = 0;
+        // Submission was acknowledged by the TUI, but no unique model-turn
+        // evidence ever appeared. The prompt may still be buffered in the
+        // terminal (for example behind a model-fallback consent transition).
+        // Reusing this PTY can concatenate that stale text with the next user
+        // message and attribute one assistant response to two tasks. Finish the
+        // stream immediately after the queued error result, then tear down the
+        // process. AsyncQueue drains queued items before observing `finished`,
+        // so the caller still receives the terminal error and the registry sees
+        // a clean close before it can reuse the executor for a later turn.
+        out.finish();
+        await dispose();
         return;
       }
       await sleep(500);
