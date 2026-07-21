@@ -14,7 +14,7 @@ export function buildAgentTeamCardSnapshot(snapshot: AgentTeamStatusSnapshot): P
   const taskById = new Map(snapshot.tasks.map((task) => [task.id, task]));
   const teamState: TeamState = {
     name: snapshot.team.name,
-    teammates: snapshot.agents.map((agent) => ({
+    agents: snapshot.agents.map((agent) => ({
       name: agent.name,
       status: agent.status === 'working' ? 'working' : 'idle',
       ...(agent.status === 'stopped' ? { lastSubject: 'stopped' } : {}),
@@ -25,7 +25,7 @@ export function buildAgentTeamCardSnapshot(snapshot: AgentTeamStatusSnapshot): P
         taskId: String(task.id),
         subject: task.subject,
         status: task.status,
-        ...(task.owner ? { teammate: task.owner } : {}),
+        ...(task.owner ? { agent: task.owner } : {}),
       })),
   };
 

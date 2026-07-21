@@ -101,13 +101,13 @@ Bots、Agents 和 Workers 需要共享 rules，但 rules 不能只散落在 prom
 
 当前实现状态：
 
-- 已实现：从 `bots.json` bootstrap 的 versioned template store、template digest、chat/project/global instance resolver、legacy/runtime team metadata pinning、Agent/Task/Message/Run rows 的物理 `instance_id` 列和 backfill/sync、runtime team 的 instance-scoped Agent supervisor chat/session ID、重启恢复时清理内部 `worker-`、`team:`、`teaminst:` active-task 记录、runtime instance 的 RuleSet refs pinning、`instances resolve` 时显式追加并 pin RuleSet refs、team config 对 pinned RuleSet refs / quotas / `pmBot` 的显式更新、versioned RuleSet store、RuleSet export/diff/import 控制面、promotion proposal 及 PM/user/admin 审批、first-class `agent-role` / `worker` RuleSet 选择、Rules Context Pack 生成、Bot turn、Agent Team run、Worker dispatch prompt 的 Rules Context Pack 注入、只允许 PM/admin/user 直接创建 Agent 的权限门禁、Agent、temporary Agent、scoped team count、queue backlog、active runs 的 quota enforcement、temporary Agent TTL 回收，以及现有 team 路由的 `instanceId` 查找。
+- 已实现：从 `bots.json` bootstrap 的 versioned template store、template digest、chat/project/global instance resolver、legacy/runtime team metadata pinning、Agent/Task/Message/Run rows 的物理 `instance_id` 列和 backfill/sync、runtime team 的 instance-scoped Agent supervisor chat/session ID、重启恢复时清理内部 `worker-`、`team:`、`teaminst:` active-task 记录、runtime instance 的 RuleSet refs pinning、`instances resolve` 时显式追加并 pin RuleSet refs、team config 对 pinned RuleSet refs / quotas / `pmBot` 的显式更新、versioned RuleSet store、RuleSet export/diff/import 控制面、promotion proposal 及 PM/user/admin 审批、first-class `agent-role` / `worker` RuleSet 选择、Rules Context Pack 生成、Bot turn、Agent Team run、Worker dispatch prompt 的 Rules Context Pack 注入、只允许 PM/admin/user 执行 team 生命周期、Agent 创建/停止/删除、run stop、worker dispatch、服务重启和 template/rule promotion 的权限门禁、Agent、temporary Agent、scoped team count、queue backlog、active runs 的 quota enforcement、temporary Agent TTL 回收，以及现有 team 路由的 `instanceId` 查找。
 - 已实现 CLI/API：`metabot teams templates ...`、`metabot teams proposals ...`、`metabot teams instances ...`、`metabot teams rules ...`，其中 `rules export/diff/import` 已补齐。现有 `<team>` 命令位置可以传 team name，也可以传 `instanceId`；chat/project scoped instance 建议优先传 `instanceId`。
 - 已实现最小 activity-card lifecycle：`CardState.lifecycleStage` / `lifecycleKey`、飞书 v1/v2 卡片对非 closed 阶段的渲染、MessageBridge 对 `received`、`executing`、`recovering`、`blocked`、`closed` 的归一化，普通聊天、continuation、bytheway、spontaneous activity、direct Agent activity card、scheduled task、worker、Agent Team run 和 API task 主要路径上的稳定 lifecycle key 生成/透传，以及按 `lifecycleKey` 落盘的轻量 `SESSION_STORE_DIR/card-lifecycle.json` store。Agent Team activity card 在可用时会持久化 `teamName`、`instanceId`、`agentName`、`runId`、`taskIds` metadata，并可通过 `GET /api/agent-teams/<team>/activity` 与 `metabot teams activity <team>` 查询过滤后的历史。
 - 已实现重启去重增量：restart recovery 给 continuation scheduled task 写稳定的 chat-scoped `dedupeKey`（`botName + chatId`），`TaskScheduler` 遇到相同 key 的 pending/executing task 会复用，不再重复排队；Worker dispatch 支持显式 `dedupeKey`，同一 `pmChatId + dedupeKey` 会复用 running 或近期 completed worker；final card delivery 会在 lifecycle record 上写 `finalDeliveredAt` / `finalDeliveryStatus` marker，避免同一 lifecycleKey 重复投递 final。
 - 已实现重启恢复加固：bridge 启动时即使没有 fresh controlled-restart breadcrumb，只要还存在未过期的 active chat/API task record，也会把被打断卡片标为 `recovering` 并排 recovery continuation，而不是显示 `Task interrupted by service restart`。
 - 已实现重启前 preflight guard、checkpoint handshake 和 bounded ready timeout：普通 `/restart service` 会检查记录中的活跃 bot/agent turn；如果还有其他工作在运行，会阻止服务重启。blocked/scheduled/forced/timed_out restart request 会记录到 `SESSION_STORE_DIR/restart-requests.json`；被阻塞的聊天会收到带同一个 `requestId` 的 restart-prepare 通知，可以回复 `/restart ready <requestId> [checkpoint note]`；发起方再次执行 `/restart service` 时会复用该 request，等当前 blockers 都 ready 后再安排重启。blocked request 默认有 10 分钟 ready timeout（可用 `METABOT_RESTART_READY_TIMEOUT_MS` 配置）；timeout 只会把 request 标成 `timed_out`，不会自动强制重启。`/restart service --force <reason>` 是显式覆盖路径。同聊天 scheduled restart 会保留 active-task record，让 restart recovery 可以排 continuation，而不是丢掉被中断的 turn。
-- 已实现 config/authority 加固：`loadAppConfig()` 会保留 `bots.json` 中已受支持的 Agent Team template 字段（`quotas`、`ruleSetRefs`、`pmBot`、scoped instance metadata、temporary Agent lifecycle metadata），HTTP/CLI surface 在创建 Agent、批准 promotion、直接 import template/rules、resolve instance、更新 team config 时也不再把缺失的 `actorRole` 当作 PM 权限。Worker dispatch/abort/redirect API 和 MCP 也要求显式 PM/user/admin `actorRole` / `actor_role`；受控服务重启会拒绝 manager/agent/worker actor role。
+- 已实现 config/authority 加固：`loadAppConfig()` 会保留 `bots.json` 中已受支持的 Agent Team template 字段（`quotas`、`ruleSetRefs`、`pmBot`、scoped instance metadata、temporary Agent lifecycle metadata），HTTP/CLI surface 在 team 生命周期、创建/停止/删除 Agent、停止 run、批准 promotion、直接 import template/rules、resolve instance、更新 team config 时也不再把缺失的 `actorRole` 当作 PM 权限。Worker dispatch/abort/redirect API 和 MCP 也要求显式 PM/user/admin `actorRole` / `actor_role`；受控服务重启会拒绝 manager/agent/worker actor role。
 - 已实现 Web UI activity history：Team tab 会拉取 Agent Team 实例列表，并通过 `GET /api/agent-teams/<team>/activity` 展示 Agent Team lifecycle activity；选择具体 sub-agent 时按 `agentName` 过滤，同时保留原 bot task activity。
 - 已实现 UI lease/checkpoint 增量：`card-lifecycle.json` 记录现在包含 `leaseOwner`、`leaseExpiresAt`、`checkpointNote`、`checkpointBy`、`checkpointAt`、`restartRequestId`；非终态 card 自动刷新 lease，closed card 自动释放 lease。`/restart ready <requestId> [checkpoint note]` 会把 blocker 的 checkpoint 写回对应 lifecycle record。
 - 已实现 post-restart readiness report：受控重启后 recovery 会向 requester 和 blocker chats 汇报 requestId、状态、ready 进度、是否 timed out、queued continuations 和受影响 chats，并用 `reportedAt` 去重。
@@ -168,15 +168,15 @@ Phase 5：activity card 和恢复
 所有协调都使用 `metabot teams`：
 
 ```bash
-metabot teams create metabot-dev --description "MetaBot implementation team"
+metabot teams create metabot-dev --description "MetaBot implementation team" --actor-role pm
 metabot teams agents spawn metabot-dev cli-engineer --role implementation --actor-role pm --engine codex --prompt "Own CLI UX, tests, and docs."
 metabot teams tasks create metabot-dev "Add runs CLI" --description "Expose runs create/update in bash and TS CLIs." --owner cli-engineer
 metabot teams send metabot-dev cli-engineer "Start task 4." --from lead --summary "assign task 4"
 ```
 
-对于 scoped runtime team，先运行 `metabot teams instances resolve <template> --chat <chatId> --rule-ref <name[@version]>`，或查看 `metabot teams instances list`。返回的 `instanceId` 可以用在命令参考中所有 `<team>` 位置，例如 `metabot teams tasks list ati_...`。
+对于 scoped runtime team，先运行 `metabot teams instances resolve <template> --chat <chatId> --rule-ref <name[@version]> --actor-role pm`，或查看 `metabot teams instances list`。返回的 `instanceId` 可以用在命令参考中所有 `<team>` 位置，例如 `metabot teams tasks list ati_...`。
 
-如果项目创建后还要追加新的 pinned 约定，用 `metabot teams config <instanceId> --rule-ref <name[@version]> --pm-bot <name>`；需要时也可以一起传 `--max-temporary-agents 5` 这类 quota 参数。这样更新的是当前 runtime instance，不会偷偷跟随 `latest`。
+如果项目创建后还要追加新的 pinned 约定，用 `metabot teams config <instanceId> --rule-ref <name[@version]> --pm-bot <name> --actor-role pm`；需要时也可以一起传 `--max-temporary-agents 5` 这类 quota 参数。这样更新的是当前 runtime instance，不会偷偷跟随 `latest`。
 
 Agent 每一轮通常先读取邮箱和任务：
 
@@ -202,7 +202,7 @@ metabot teams runs list metabot-dev
 metabot teams runs create metabot-dev --agent cli-engineer --task-id 4 --status running --output "Starting smoke test"
 metabot teams runs update metabot-dev <runId> --status completed --output "Smoke passed"
 metabot teams runs output metabot-dev <runId>
-metabot teams runs stop metabot-dev <runId>
+metabot teams runs stop metabot-dev <runId> --actor-role pm
 ```
 
 合法 run 状态包括 `running`、`completed`、`failed` 和 `stopped`。`metabot teams runs stop` 现在会在可用时走 supervisor：把 run 标记为 `stopped`，请求 bridge 停止该 Agent chat task，把已分配且 in-progress 的任务重新排回 `pending` 并写入 stop 说明，同时抑制迟到的 executor output，避免延迟返回的成功结果覆盖 stopped run。
@@ -290,16 +290,16 @@ Reconcile 行为：
 
 ```bash
 metabot teams list
-metabot teams create <team> [--description <text>]
-metabot teams delete <team>
+metabot teams create <team> [--description <text>] [--actor-role admin|user|pm]
+metabot teams delete <team> [--actor-role admin|user|pm]
 metabot teams status <team>
-metabot teams start <team>
-metabot teams stop <team>
+metabot teams start <team> [--actor-role admin|user|pm]
+metabot teams stop <team> [--actor-role admin|user|pm]
 
 metabot teams agents list <team>
 metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--prompt <text>]
-metabot teams agents stop <team> <name>
-metabot teams agents delete <team> <name>
+metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
+metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
 
 metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
 metabot teams inbox <team> <name> [--unread] [--read]
@@ -313,7 +313,7 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId>
+metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]
 ```
 
 ## 当前限制

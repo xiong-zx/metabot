@@ -954,7 +954,7 @@ export class MessageBridge {
    *
    * Default: ON. Each chatId is backed by a long-lived Claude process
    * (managed by {@link ExecutorRegistry}) instead of spawning a fresh
-   * process per turn. This is required for Agent Teams teammates,
+   * process per turn. This is required for Agent Team agents,
    * `/goal` multi-turn auto-drive, and `/background` tasks to survive
    * across user messages — features that the user-facing card UI now
    * advertises, so turning the persistent executor off silently breaks
@@ -1002,7 +1002,7 @@ export class MessageBridge {
         pmPrompt: this.config.pmPrompt,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
-      // subscription so teammate / goal / background pings between turns
+      // subscription so Agent Team / goal / background pings between turns
       // surface as Feishu cards.
       this.persistentRegistry.on('executor-added', (chatId: string) => {
         this.attachSpontaneousHandler(chatId);
@@ -1063,7 +1063,7 @@ export class MessageBridge {
    * spontaneousSubscribed.
    *
    * Wires two channels for between-turn agent output:
-   *   - `spontaneous` — teammate / `/goal` / status pings; coalesced into the
+   *   - `spontaneous` — Agent Team / `/goal` / status pings; coalesced into the
    *     "Agent activity between turns" card every 30 s.
    *   - `continuation-turn` — SDK-initiated continuation turn (background
    *     task settled, agent now replying in main-line). Rendered as a fresh
@@ -1406,7 +1406,7 @@ export class MessageBridge {
     let buf = this.spontaneousBuffers.get(chatId);
     if (!buf) {
       buf = {
-        teamState: { teammates: [], tasks: [] },
+        teamState: { agents: [], tasks: [] },
         snippets: [],
         timer: setTimeout(() => {
           void this.flushSpontaneous(chatId);
@@ -1445,7 +1445,7 @@ export class MessageBridge {
     }
 
     // Nothing user-meaningful to surface — buffer might exist because a
-    // teammate ping landed but extractSpontaneousSnippet filtered all of
+    // Agent Team ping landed but extractSpontaneousSnippet filtered all of
     // its blocks (e.g. tool-only burst). Silently skip the card.
     if (buf.snippets.length === 0) {
       this.logger.debug({ chatId }, 'MessageBridge: drop spontaneous (no text snippets)');
@@ -1668,7 +1668,7 @@ export class MessageBridge {
 
   /**
    * Shut down all persistent executors. Called on bot shutdown so the
-   * underlying Claude processes (and any teammates) terminate cleanly.
+   * underlying Claude processes (and any Agent Team agents) terminate cleanly.
    */
   async shutdownPersistentExecutors(reason: string = 'bot-shutdown'): Promise<void> {
     if (this.persistentRegistry) {
@@ -1678,7 +1678,7 @@ export class MessageBridge {
 
   /**
    * Stage 3b — release a single chat's persistent executor (graceful
-   * shutdown + remove from pool). Used by /reset to discard any teammates
+   * shutdown + remove from pool). Used by /reset to discard any Agent Team agents
    * / background tasks tied to the old session before starting fresh.
    * No-op if persistent mode is off or chat has no executor.
    */
@@ -1729,7 +1729,7 @@ export class MessageBridge {
    * {@link getOrCreateRegistry} and went straight to the chat executor
    * even in persistent mode. The result: the persistent process kept running
    * with its stale resume-sessionId mapping while the user's new turn happened
-   * in a separate one-off subprocess. Teammates / /goal / /background that
+   * in a separate one-off subprocess. Agent Team agents / /goal / /background that
    * were the whole point of Stage 4 quietly disappeared mid-conversation.
    *
    * Per-turn options that the persistent executor cannot rebind (`maxTurns`,
@@ -1817,19 +1817,20 @@ export class MessageBridge {
    */
   private applyTeamEvent(task: RunningTask, event: TeamEvent): boolean {
     if (!task.teamState) {
-      task.teamState = { teammates: [], tasks: [] };
+      task.teamState = { agents: [], tasks: [] };
     }
     const state = task.teamState;
+    state.agents ??= state.teammates ?? [];
     const teamName = (event as { teamName?: string }).teamName;
     if (teamName && !state.name) state.name = teamName;
 
     const upsertMember = (name: string, status: TeamMember['status'], lastSubject?: string) => {
-      const existing = state.teammates.find(m => m.name === name);
+      const existing = state.agents.find(m => m.name === name);
       if (existing) {
         existing.status = status;
         if (lastSubject) existing.lastSubject = lastSubject;
       } else {
-        state.teammates.push({ name, status, lastSubject });
+        state.agents.push({ name, status, lastSubject });
       }
     };
 
@@ -1842,7 +1843,7 @@ export class MessageBridge {
           taskId,
           subject: patch.subject ?? '(untitled)',
           status: patch.status ?? 'in_progress',
-          teammate: patch.teammate,
+          agent: patch.agent ?? patch.teammate,
         });
       }
     };
@@ -1851,17 +1852,17 @@ export class MessageBridge {
       upsertTask(event.taskId, {
         subject: event.subject,
         status: 'in_progress',
-        teammate: event.teammate,
+        agent: event.teammate,
       });
       if (event.teammate) upsertMember(event.teammate, 'working', event.subject);
     } else if (event.kind === 'task_completed') {
       upsertTask(event.taskId, {
         subject: event.subject,
         status: 'completed',
-        teammate: event.teammate,
+        agent: event.teammate,
       });
-      // Don't flip teammate to idle here — the TeammateIdle hook is the
-      // authoritative signal; teammates may pick up the next task immediately.
+      // Don't flip the agent to idle here — the TeammateIdle hook is the
+      // authoritative Claude SDK signal; agents may pick up the next task immediately.
     } else if (event.kind === 'teammate_idle') {
       upsertMember(event.teammate, 'idle');
     }
@@ -3852,7 +3853,8 @@ function mapBareRestartMessage(text: string): string | undefined {
 }
 
 function hasTeamState(teamState: TeamState | undefined): boolean {
-  return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
+  const agents = teamState?.agents ?? teamState?.teammates ?? [];
+  return !!teamState && (agents.length > 0 || teamState.tasks.length > 0);
 }
 
 function withCardLifecycle(state: CardState, stage?: CardLifecycleStage, lifecycleKey?: string): CardState {

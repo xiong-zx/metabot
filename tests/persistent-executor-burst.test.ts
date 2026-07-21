@@ -14,7 +14,7 @@ import { PersistentClaudeExecutor, classifyBurstSource } from '../src/engines/cl
  *   - observe the events / activeTurn / spontaneousBuffer it produces
  *
  * History this guards against:
- *   - Before this fix, EVERY between-turn burst (continuation + teammate +
+ *   - Before this fix, EVERY between-turn burst (continuation + Agent Team +
  *     /goal) went through pushSpontaneous and ended up in the coalesced
  *     "Agent activity between turns" card. The continuation burst is in
  *     fact the main agent finishing its work, not ambient activity, so it
@@ -88,7 +88,7 @@ describe('PersistentClaudeExecutor consumeLoop: burst dispatch', () => {
     expect((exec as any).activeTurn).toBeNull();
   });
 
-  it('pushes to spontaneous when burst opens with a teammate / peer user message', async () => {
+  it('pushes to spontaneous when burst opens with an Agent Team / peer user message', async () => {
     const exec = makeExec();
     const peerMsg = {
       type: 'user',

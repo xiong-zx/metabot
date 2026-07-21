@@ -219,7 +219,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 |------|-----------|
 | **三引擎内核** | 每个 Bot 独立选 Claude Code / Kimi Code / Codex CLI — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行 |
 | **常驻会话与目标循环** | 每个会话一个常驻 Claude 进程 — `/goal` 让 Agent 在多轮之间持续自驱直到目标达成；团队成员和后台任务跨轮存活 |
-| **Agent 团队（运行时）** | 主导 Agent 并行派遣专家队友，互相路由任务、汇总结果 —— 全部在一个飞书会话中完成 |
+| **Agent 团队（运行时）** | 主导 Agent 并行派遣多个专家 Agent，互相路由任务、汇总结果 —— 全部在一个飞书会话中完成 |
 | **CC 原生调度** | 直接用 Claude Code 内置的 `CronCreate` / `/loop` —— 即开即用，会话内最简单 |
 | **MetaMemory** | 由 metabot-core 服务（本地自托管，默认 `http://localhost:9200`）提供的共享知识库，全文搜索；MetaBot 通过 `/api/memory/*` 读写，并可同步到飞书知识库 |
 | **IM Bridge** | 飞书、Telegram、微信（含手机端）对话任意 Agent，流式卡片 + 工具调用追踪 |
@@ -409,7 +409,7 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 |------|--------|------|
 | `workers.defaultModel` | `gpt-5.4` | `worker_dispatch` 默认模型 |
 | `workers.maxPerPm` | `8` | 每个 PM chat 最多同时运行的 worker 数 |
-| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 用来执行队友 run 的 bot，建议设为 `research-pm` 或内部 worker，避免落到 `manager` |
+| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 用来执行 Agent run 的 bot，建议设为 `research-pm` 或内部 worker，避免落到 `manager` |
 
 `agentTeams[].agents[]` 还支持成员级执行覆盖：
 

@@ -10,7 +10,7 @@ export type CardStatus =
   | 'waiting_for_input'
   /**
    * Card was emitted by `flushSpontaneous` at the end of a between-turn
-   * burst (background task return / teammate ping / `/goal` evaluator).
+   * burst (background task return / Agent Team ping / `/goal` evaluator).
    * Rendered in blue with an "Agent activity" title so users can tell
    * it apart from a normal user-prompted turn without reading body text.
    */
@@ -56,12 +56,12 @@ export interface BackgroundEvent {
  * Snapshot of an Agent Teams session, derived from Claude Code's
  * TaskCreated / TaskCompleted / TeammateIdle hooks. Rendered in the
  * Feishu card and Web UI as a "team panel" so the user can see
- * teammates and the shared task list at a glance.
+ * agents and the shared task list at a glance.
  */
 export interface TeamMember {
   name: string;
   status: 'working' | 'idle';
-  /** Most recent task subject this teammate touched (best-effort). */
+  /** Most recent task subject this agent touched (best-effort). */
   lastSubject?: string;
 }
 
@@ -69,13 +69,17 @@ export interface TeamTask {
   taskId: string;
   subject: string;
   status: 'pending' | 'in_progress' | 'completed';
+  agent?: string;
+  /** @deprecated Compatibility for persisted pre-terminology card state. */
   teammate?: string;
 }
 
 export interface TeamState {
   /** Team name as reported by the SDK hooks (first non-empty wins). */
   name?: string;
-  teammates: TeamMember[];
+  agents: TeamMember[];
+  /** @deprecated Compatibility for persisted pre-terminology card state. */
+  teammates?: TeamMember[];
   tasks: TeamTask[];
 }
 
@@ -104,7 +108,7 @@ export interface CardState {
   backgroundEvents?: BackgroundEvent[];
   /** Active /goal condition for this session, if any. Mirrored locally so the card can show "🎯 Goal" badge across turns. */
   goalCondition?: string;
-  /** Snapshot of the active Agent Team (teammates + tasks), if any. */
+  /** Snapshot of the active Agent Team (agents + tasks), if any. */
   teamState?: TeamState;
 }
 

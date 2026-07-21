@@ -22,7 +22,7 @@ agents unless you send it through the team mailbox.
 ## Lead Workflow
 
 ```bash
-metabot teams create <team> --description "..."
+metabot teams create <team> --description "..." --actor-role pm
 metabot teams agents spawn <team> <name> --role <agent-role> --actor-role pm --prompt "..."  # engine defaults to codex
 metabot teams dispatch <team> <name> "<subject>" --description "..." --plain
 metabot teams next <team> <name> --summary
@@ -34,13 +34,13 @@ Lead rules:
 - Keep the team task list current.
 - Prefer `metabot teams dispatch` over separate `tasks create` + `tasks update --owner` + `send`; it creates the task, assigns the owner, and wakes the agent in one command.
 - Use `agents spawn` without `--engine` for Codex agents. Pass `--engine claude|kimi` only when an Agent specifically needs another engine.
-- Only a PM, user, or admin may create Agents. Use `--actor-role pm|user|admin` only when you are actually acting with that authority; team managers and Agents must request creation from the PM instead.
+- Only a PM, user, or admin may create/stop/delete teams, bind/configure teams, create/stop/delete Agents, or stop runs. Use `--actor-role pm|user|admin` only when you are actually acting with that authority; team managers and Agents must request these actions from the PM instead.
 - Only a PM, user, or admin may dispatch, abort, or redirect Workers, or restart the MetaBot service. Worker MCP calls require explicit `actor_role`; managers and Agents must ask the PM instead of calling them directly.
 - If a controlled service restart is blocked on your chat, checkpoint current work and reply with `/restart ready <requestId> [checkpoint note]`; do not run the restart yourself.
 - A blocked restart request has a bounded ready timeout; if it expires, wait for a PM/user/admin to retry or explicitly force the restart.
 - Use `next` to inspect an Agent's unread messages and open assigned tasks before deciding whether to send more work.
 - Integrate completed work before reporting to the user.
-- Stop or delete the team when the work is done.
+- Stop or delete the team when the work is done, using explicit PM/user/admin authority.
 
 ## Agent Workflow
 
@@ -129,7 +129,7 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId>
+metabot teams runs stop <team> <runId> --actor-role pm
 ```
 
 Run statuses: `running`, `completed`, `failed`, `stopped`.
@@ -227,12 +227,12 @@ removing a team from config to stop that resident team.
 
 | Claude Agent Teams | MetaBot CLI |
 | --- | --- |
-| TeamCreate | `metabot teams create` |
-| TeamDelete | `metabot teams delete` |
+| TeamCreate | `metabot teams create --actor-role pm` |
+| TeamDelete | `metabot teams delete --actor-role pm` |
 | Agent | `metabot teams agents spawn` |
 | ListAgents | `metabot teams agents list` |
 | SendMessage | `metabot teams send` / `metabot teams inbox` |
 | TaskCreate/List/Get/Update | `metabot teams tasks ...` |
 | TaskDispatch | `metabot teams dispatch` |
 | TaskClaim/Done/Block | `metabot teams tasks claim/done/block` |
-| TaskOutput/TaskStop | `metabot teams runs output/stop` |
+| TaskOutput/TaskStop | `metabot teams runs output`; `metabot teams runs stop --actor-role pm` |

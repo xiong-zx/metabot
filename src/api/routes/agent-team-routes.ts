@@ -1,5 +1,5 @@
 import type * as http from 'node:http';
-import { jsonResponse, parseJsonBody } from './helpers.js';
+import { jsonResponse, parseJsonBody, parseOptionalJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
 import { hasTeamCapability } from '../../agent-teams/team-store.js';
 import { listCardLifecycleRecords } from '../../bridge/card-lifecycle-store.js';
@@ -44,6 +44,7 @@ export async function handleAgentTeamRoutes(
 
   if (method === 'POST' && parts.length === 2) {
     const body = await parseJsonBody(req);
+    if (!requireActorCapability(res, body, 'manage_team')) return true;
     const name = stringField(body.name);
     if (!name) {
       jsonResponse(res, 400, { error: 'Missing required field: name' });
@@ -284,12 +285,16 @@ export async function handleAgentTeamRoutes(
   }
 
   if (method === 'DELETE' && parts.length === 3) {
+    const body = await parseOptionalJsonBody(req);
+    if (!requireActorCapability(res, body, 'manage_team')) return true;
     const deleted = store.deleteTeam(teamName);
     jsonResponse(res, deleted ? 200 : 404, { deleted });
     return true;
   }
 
   if (method === 'POST' && parts.length === 4 && (resource === 'start' || resource === 'stop')) {
+    const body = await parseOptionalJsonBody(req);
+    if (!requireActorCapability(res, body, 'manage_team')) return true;
     const updated = store.setTeamStatus(teamName, resource === 'start' ? 'active' : 'stopped');
     jsonResponse(res, updated ? 200 : 404, updated ?? { error: 'Agent team not found' });
     return true;
@@ -332,17 +337,22 @@ export async function handleAgentTeamRoutes(
       return true;
     }
     if (method === 'POST' && parts.length === 6 && id && action === 'stop') {
+      const body = await parseOptionalJsonBody(req);
+      if (!requireActorCapability(res, body, 'manage_team')) return true;
       const agent = store.setAgentStatus(teamName, id, 'stopped');
       jsonResponse(res, agent ? 200 : 404, agent ?? { error: 'Agent not found' });
       return true;
     }
     if (method === 'DELETE' && parts.length === 5 && id) {
+      const body = await parseOptionalJsonBody(req);
+      if (!requireActorCapability(res, body, 'manage_team')) return true;
       const deleted = store.deleteAgent(teamName, id);
       jsonResponse(res, deleted ? 200 : 404, { deleted });
       return true;
     }
     if (method === 'PATCH' && parts.length === 5 && id) {
       const body = await parseJsonBody(req);
+      if (!requireActorCapability(res, body, 'manage_team')) return true;
       const status = agentStatusField(body.status);
       if (!status) {
         jsonResponse(res, 400, { error: 'Missing or invalid field: status' });
@@ -456,6 +466,8 @@ export async function handleAgentTeamRoutes(
       return true;
     }
     if (method === 'POST' && parts.length === 6 && id && action === 'stop') {
+      const body = await parseOptionalJsonBody(req);
+      if (!requireActorCapability(res, body, 'manage_team')) return true;
       const run = ctx.agentTeamSupervisor?.stopRun(teamName, id) ?? store.updateRun(teamName, id, { status: 'stopped' });
       jsonResponse(res, run ? 200 : 404, run ?? { error: 'Run not found' });
       return true;
