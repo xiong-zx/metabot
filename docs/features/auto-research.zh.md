@@ -70,7 +70,28 @@ worker 产出需要包含 hypotheses、experiments、findings、negative_results
 
 必需输出契约是 `autoresearchclaw.output.v2`，顶层字段包括：`contract_version`、`project_id`、`run_id`、`status`、`summary`、`hypotheses`、`experiments`、`findings`、`negative_results`、`decisions`、`artifacts`、`open_questions`、`memory_event_candidates`、`recommended_followups`、`tool_trace`。
 
-嵌套字段也必须满足 schema，不能只满足顶层 key：hypotheses、findings、negative results、decisions、open questions、metrics、pivots 都需要非空 `summary`；artifacts 需要 `id`、`uri`、`summary`；tool trace 需要 `tool` 和 `summary`；每个 `memory_event_candidates[]` 项都必须包含非空 `type` 和 `summary`。AutoResearchClaw worker 应该自己写出 artifact，不能再派发嵌套 worker 或后台任务。
+嵌套字段也必须满足 schema，不能只满足顶层 key：hypotheses、findings、negative results、decisions、open questions、metrics、pivots 都需要非空 `summary`；artifacts 需要 `id`、`uri`、`summary`；tool trace 需要 `tool` 和 `summary`；每个 `memory_event_candidates[]` 项都必须包含受支持且非受控的 `type` 和非空 `summary`。候选项里的 `subject.file_paths`、`subject.artifact_ids`、`subject.source_uris`、`evidence_event_ids` 必须是非空字符串数组。候选项不能设置 `supersedes`，不能使用受控事件类型，也不能包含未知字段。AutoResearchClaw worker 应该自己写出 artifact，不能再派发嵌套 worker 或后台任务。
+
+候选记忆的 canonical 形状如下：
+
+```json
+{
+  "type": "finding",
+  "summary": "Context pack preserved the negative result evidence chain.",
+  "body": "Optional detail for reviewers.",
+  "confidence": 0.82,
+  "evidence_event_ids": ["mem_evt_context_pack_created"],
+  "subject": {
+    "file_paths": ["results/context-pack-eval.json"],
+    "source_uris": ["https://example.test/paper"],
+    "artifact_ids": ["artifact-results"]
+  },
+  "status": "candidate",
+  "metadata": { "source": "autoresearchclaw" }
+}
+```
+
+Memory Core 只在 validation / ingest 边界接受三个历史候选别名：`candidate_type` 映射到 `type`，`evidence_ids` 映射到 `evidence_event_ids`，`evidence_paths` 映射到 `subject.file_paths` 或 `subject.source_uris`。规范化后的 memory event 会把这些 deprecated alias 原始值保存在 metadata 里，便于审计。新的 AutoResearchClaw artifact 必须使用上面的 canonical 字段；未知 alias 仍然无效。
 
 JSON artifact 是系统级权威输出。只要项目 root 内出现了合法 artifact，Memory Core 就可以先收割并 ingest；即使 worker 进程还没自然退出，也不应丢弃已经通过 contract 校验的 artifact。Memory Core 完成 artifact finalization 后，会请求 WorkerManager 做 external completion / soft-stop，避免 run 已经 finalized 但 worker 仍长期显示 `running`。
 

@@ -246,6 +246,60 @@ describe('ResearchLoopRunner', () => {
     ).toBe('candidate');
   });
 
+  it('normalizes legacy candidate aliases through artifact validation into review-required memory', async () => {
+    const worker: AutoResearchClawWorkerAdapter = {
+      async dispatch(): Promise<ResearchWorkerHandle> {
+        return { workerId: 'worker-legacy-alias', artifactUri: 'file://autoresearchclaw-output.json' };
+      },
+      async collectOutput() {
+        return output({
+          findings: [],
+          memory_event_candidates: [
+            {
+              candidate_type: 'finding',
+              summary: 'Legacy alias candidate remains review staged',
+              evidence_ids: ['mem_evt_prior'],
+              evidence_paths: ['notes/evidence.md', 'https://example.test/evidence'],
+            } as any,
+          ] as any,
+        });
+      },
+    };
+    const runner = new ResearchLoopRunner({
+      readEvents: () => ledger.readAll(),
+      appendEvent: (event) => ledger.append(event),
+      worker,
+    });
+
+    const result = await runner.run({
+      projectId: 'proj-alpha',
+      runId: 'run-alpha',
+      projectRoot: dir,
+      task: 'Run with legacy candidate aliases',
+      actor: { kind: 'agent', id: 'agent-pm' },
+      reviewRequired: true,
+    });
+    const event = ledger.readAll().find((item) => item.summary === 'Legacy alias candidate remains review staged');
+
+    expect(result.status).toBe('partial');
+    expect(event).toMatchObject({
+      type: 'finding',
+      status: 'candidate',
+      subject: {
+        file_paths: ['notes/evidence.md'],
+        source_uris: ['https://example.test/evidence'],
+      },
+    });
+    expect(event?.evidence_event_ids).toEqual(expect.arrayContaining(['mem_evt_prior']));
+    expect(event?.metadata).toMatchObject({
+      autoresearchclaw_deprecated_aliases: [
+        { alias: 'candidate_type', canonical: 'type' },
+        { alias: 'evidence_ids', canonical: 'evidence_event_ids' },
+        { alias: 'evidence_paths', canonical: 'subject.file_paths/source_uris' },
+      ],
+    });
+  });
+
   it('applies reviewer approvals and rejections through append-only replacement events', async () => {
     let approvedEventId = '';
     let rejectedEventId = '';

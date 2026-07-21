@@ -236,6 +236,60 @@ describe('WorkerManagerAutoResearchClawAdapter', () => {
     ).rejects.toThrow(/memory_event_candidates\[0\]\.type/);
   });
 
+  it('rejects malformed nested candidates before returning completed artifacts', async () => {
+    const { manager } = fakeWorkerManager('completed');
+    fs.writeFileSync(
+      path.join(dir, 'autoresearchclaw-output.json'),
+      JSON.stringify(
+        validOutput({
+          memory_event_candidates: [
+            {
+              type: 'not_a_memory_type',
+              summary: 'Candidate has an unsupported type',
+            },
+          ],
+        }),
+      ),
+    );
+    const adapter = new WorkerManagerAutoResearchClawAdapter({
+      workerManager: manager,
+      botName: 'admin',
+      pmChatId: 'oc_test',
+      pollIntervalMs: 1,
+    });
+
+    await expect(
+      adapter.collectOutput({
+        workerId: 'worker-alpha',
+        workerChatId: 'worker-worker-alpha',
+        artifactUri: `file://${path.join(dir, 'autoresearchclaw-output.json')}`,
+      }),
+    ).rejects.toThrow(/memory_event_candidates\[0\]\.type has unsupported value/);
+  });
+
+  it('checks project and run context from worker metadata when collecting artifacts', async () => {
+    const { manager } = fakeWorkerManager('completed');
+    fs.writeFileSync(
+      path.join(dir, 'autoresearchclaw-output.json'),
+      JSON.stringify(validOutput({ project_id: 'proj-other' })),
+    );
+    const adapter = new WorkerManagerAutoResearchClawAdapter({
+      workerManager: manager,
+      botName: 'admin',
+      pmChatId: 'oc_test',
+      pollIntervalMs: 1,
+    });
+
+    await expect(
+      adapter.collectOutput({
+        workerId: 'worker-alpha',
+        workerChatId: 'worker-worker-alpha',
+        artifactUri: `file://${path.join(dir, 'autoresearchclaw-output.json')}`,
+        metadata: { project_id: 'proj-alpha', run_id: 'run-alpha' },
+      }),
+    ).rejects.toThrow(/project_id mismatch/);
+  });
+
   it('fails collection when the worker fails or the artifact is missing', async () => {
     const failedAdapter = new WorkerManagerAutoResearchClawAdapter({
       workerManager: fakeWorkerManager('failed').manager,
@@ -285,6 +339,43 @@ describe('WorkerManagerAutoResearchClawAdapter', () => {
         artifactUri: `file://${artifactPath}`,
       }),
     ).resolves.toMatchObject({ contract_version: AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION });
+  });
+
+  it('validates delayed completed-worker artifacts before returning them', async () => {
+    const { manager } = fakeWorkerManager('completed');
+    const artifactPath = path.join(dir, 'delayed-invalid-output.json');
+    const adapter = new WorkerManagerAutoResearchClawAdapter({
+      workerManager: manager,
+      botName: 'admin',
+      pmChatId: 'oc_test',
+      pollIntervalMs: 1,
+      artifactGraceMs: 100,
+    });
+
+    setTimeout(() => {
+      fs.writeFileSync(
+        artifactPath,
+        JSON.stringify(
+          validOutput({
+            memory_event_candidates: [
+              {
+                type: 'finding',
+                summary: 'Candidate subject is malformed',
+                subject: { file_paths: [42] },
+              },
+            ],
+          }),
+        ),
+      );
+    }, 5);
+
+    await expect(
+      adapter.collectOutput({
+        workerId: 'worker-alpha',
+        workerChatId: 'worker-worker-alpha',
+        artifactUri: `file://${artifactPath}`,
+      }),
+    ).rejects.toThrow(/memory_event_candidates\[0\]\.subject\.file_paths\[0\]/);
   });
 
   it('rejects artifact paths that escape the project root', async () => {

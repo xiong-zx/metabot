@@ -9,7 +9,9 @@ import type {
   MemoryEventType,
   MemoryOutcome,
   MemoryScope,
+  MemorySubject,
 } from './types.js';
+import { MEMORY_EVENT_STATUSES, MEMORY_EVENT_TYPES } from './types.js';
 
 export const AUTORESEARCHCLAW_OUTPUT_CONTRACT_VERSION = 'autoresearchclaw.output.v2' as const;
 export const AUTORESEARCHCLAW_REVIEW_CONTRACT_VERSION = 'autoresearchclaw.review.v1' as const;
@@ -24,6 +26,29 @@ const DENIED_MEMORY_EVENT_CANDIDATE_TYPES = new Set<MemoryEventType>([
   'context_pack_created',
   'metamemory_summary_published',
   'metamemory_human_edit',
+]);
+
+const MEMORY_EVENT_CANDIDATE_FIELDS = new Set([
+  'type',
+  'summary',
+  'body',
+  'outcome',
+  'confidence',
+  'evidence_event_ids',
+  'subject',
+  'supersedes',
+  'status',
+  'metadata',
+]);
+
+const MEMORY_SUBJECT_FIELDS = new Set([
+  'file_paths',
+  'artifact_ids',
+  'source_uris',
+  'commit',
+  'command',
+  'dataset',
+  'paper_id',
 ]);
 
 export type AutoResearchClawRunStatus = 'completed' | 'partial' | 'failed';
@@ -208,10 +233,34 @@ export function buildAutoResearchClawPrompt(input: AutoResearchClawInput): strin
     '- Every hypothesis, finding, negative_result, decision, open_question, metric, and pivot item must include a non-empty summary string.',
     '- Every experiment item must include a non-empty summary string; status may be completed, partial, or failed.',
     '- Every artifact item must include id, uri, and summary. Artifact paths must stay inside the project root.',
-    '- Every memory_event_candidates item must include a non-empty type and summary. Use ordinary memory event types such as note, finding, decision, negative_result, open_question, or hypothesis; do not use approval_requested, approval_granted, approval_rejected, memory_promoted, memory_superseded, memory_redacted, context_pack_created, or any other controlled event type.',
+    '- Every memory_event_candidates item must be canonical JSON with fields: type, summary, body, outcome, confidence, evidence_event_ids, subject, status, and metadata. Do not write legacy alias fields.',
+    '- memory_event_candidates[].type must be a supported ordinary memory event type such as note, finding, decision, negative_result, open_question, or hypothesis; do not use approval_requested, approval_granted, approval_rejected, memory_promoted, memory_superseded, memory_redacted, context_pack_created, or any other controlled event type.',
+    '- memory_event_candidates[].summary must be a non-empty string. Optional evidence_event_ids, subject.file_paths, subject.artifact_ids, and subject.source_uris must be arrays of non-empty strings.',
     '- memory_event_candidates must not set supersedes. If there is no candidate memory, write an empty array.',
     '- Every recommended_followups item must include summary.',
     '- Every tool_trace item must include tool and summary.',
+    '',
+    'Canonical memory_event_candidates item example:',
+    JSON.stringify(
+      {
+        type: 'finding',
+        summary: 'Context pack preserved the negative result evidence chain.',
+        body: 'Keep this as candidate memory until review confirms it generalizes beyond the current run.',
+        confidence: 0.82,
+        evidence_event_ids: ['mem_evt_context_pack_created'],
+        subject: {
+          file_paths: ['results/context-pack-eval.json'],
+          source_uris: ['https://example.test/paper'],
+          artifact_ids: ['artifact-results'],
+        },
+        status: 'candidate',
+        metadata: {
+          source: 'autoresearchclaw',
+        },
+      },
+      null,
+      2,
+    ),
     '',
     'Minimal valid smoke output example:',
     JSON.stringify(
@@ -222,7 +271,9 @@ export function buildAutoResearchClawPrompt(input: AutoResearchClawInput): strin
         status: 'completed',
         summary: 'PASS: minimal contract artifact was produced.',
         hypotheses: [{ summary: 'Smoke run can produce a valid contract artifact.' }],
-        experiments: [{ summary: 'Validated minimal artifact generation without network access.', status: 'completed' }],
+        experiments: [
+          { summary: 'Validated minimal artifact generation without network access.', status: 'completed' },
+        ],
         findings: [{ summary: 'Required top-level and nested fields are present.' }],
         negative_results: [],
         decisions: [{ summary: 'Keep r6 smoke run local and minimal.', approval_required: false }],
@@ -703,45 +754,146 @@ function isExternalUri(uri: string): boolean {
 
 function normalizeMemoryEventCandidates(value: unknown, field: string): AutoResearchClawMemoryEventCandidate[] {
   return ensureArray(value, field).map((item, index) => {
-    const record = ensureRecord(item, `${field}[${index}]`);
-    const type = ensureNonEmptyString(record.type, `${field}[${index}].type`) as MemoryEventType;
+    const candidateField = `${field}[${index}]`;
+    const { record, legacyAliases } = normalizeLegacyMemoryEventCandidateAliases(
+      ensureRecord(item, candidateField),
+      candidateField,
+    );
+    ensureAllowedFields(record, MEMORY_EVENT_CANDIDATE_FIELDS, candidateField);
+    const type = ensureMemoryEventType(record.type, `${candidateField}.type`);
     if (DENIED_MEMORY_EVENT_CANDIDATE_TYPES.has(type)) {
       throw new MemoryCoreError(
         'autoresearchclaw_candidate_type_not_allowed',
-        `${field}[${index}].type cannot be a controlled memory event type`,
+        `${candidateField}.type cannot be a controlled memory event type`,
       );
     }
     if (record.supersedes !== undefined) {
       throw new MemoryCoreError(
         'autoresearchclaw_candidate_supersedes_not_allowed',
-        `${field}[${index}].supersedes cannot be set by AutoResearchClaw candidates`,
+        `${candidateField}.supersedes cannot be set by AutoResearchClaw candidates`,
       );
     }
+    const metadata = withLegacyAliasMetadata(
+      normalizeOptionalRecord(record.metadata, `${candidateField}.metadata`),
+      legacyAliases,
+    );
     return {
       type,
-      summary: ensureNonEmptyString(record.summary, `${field}[${index}].summary`),
-      body: optionalNonEmptyString(record.body, `${field}[${index}].body`),
-      outcome: record.outcome === undefined ? undefined : ensureOutcome(record.outcome, `${field}[${index}].outcome`),
+      summary: ensureNonEmptyString(record.summary, `${candidateField}.summary`),
+      body: optionalNonEmptyString(record.body, `${candidateField}.body`),
+      outcome: record.outcome === undefined ? undefined : ensureOutcome(record.outcome, `${candidateField}.outcome`),
       confidence:
         record.confidence === undefined
           ? undefined
-          : ensureConfidence(record.confidence, `${field}[${index}].confidence`),
+          : ensureConfidence(record.confidence, `${candidateField}.confidence`),
       evidence_event_ids: normalizeOptionalStringArray(
         record.evidence_event_ids,
-        `${field}[${index}].evidence_event_ids`,
+        `${candidateField}.evidence_event_ids`,
       ),
-      subject:
-        record.subject === undefined
-          ? undefined
-          : (ensureRecord(record.subject, `${field}[${index}].subject`) as AppendMemoryEventInput['subject']),
+      subject: record.subject === undefined ? undefined : normalizeSubject(record.subject, `${candidateField}.subject`),
       supersedes: undefined,
       status:
-        record.status === undefined
-          ? undefined
-          : (ensureNonEmptyString(record.status, `${field}[${index}].status`) as MemoryEventStatus),
-      metadata: normalizeOptionalRecord(record.metadata, `${field}[${index}].metadata`),
+        record.status === undefined ? undefined : ensureMemoryEventStatus(record.status, `${candidateField}.status`),
+      metadata,
     };
   });
+}
+
+function normalizeLegacyMemoryEventCandidateAliases(
+  original: Record<string, unknown>,
+  field: string,
+): {
+  record: Record<string, unknown>;
+  legacyAliases: Array<{ alias: string; canonical: string; value: unknown }>;
+} {
+  const record: Record<string, unknown> = { ...original };
+  const legacyAliases: Array<{ alias: string; canonical: string; value: unknown }> = [];
+
+  if (original.candidate_type !== undefined) {
+    const aliasType = ensureNonEmptyString(original.candidate_type, `${field}.candidate_type`);
+    if (original.type !== undefined) {
+      const canonicalType = ensureNonEmptyString(original.type, `${field}.type`);
+      if (canonicalType !== aliasType) {
+        throw new MemoryCoreError(
+          'autoresearchclaw_legacy_alias_conflict',
+          `${field}.candidate_type conflicts with canonical type`,
+        );
+      }
+    } else {
+      record.type = aliasType;
+    }
+    delete record.candidate_type;
+    legacyAliases.push({ alias: 'candidate_type', canonical: 'type', value: original.candidate_type });
+  }
+
+  if (original.evidence_ids !== undefined) {
+    const aliasEvidenceIds = normalizeOptionalStringArray(original.evidence_ids, `${field}.evidence_ids`) ?? [];
+    const canonicalEvidenceIds =
+      normalizeOptionalStringArray(original.evidence_event_ids, `${field}.evidence_event_ids`) ?? [];
+    record.evidence_event_ids = unique([...canonicalEvidenceIds, ...aliasEvidenceIds]);
+    delete record.evidence_ids;
+    legacyAliases.push({ alias: 'evidence_ids', canonical: 'evidence_event_ids', value: original.evidence_ids });
+  }
+
+  if (original.evidence_paths !== undefined) {
+    const evidencePaths = normalizeOptionalStringArray(original.evidence_paths, `${field}.evidence_paths`) ?? [];
+    const subject = normalizeSubject(record.subject ?? {}, `${field}.subject`);
+    const split = splitEvidencePaths(evidencePaths);
+    record.subject = {
+      ...subject,
+      file_paths: unique([...(subject.file_paths ?? []), ...split.filePaths]),
+      source_uris: unique([...(subject.source_uris ?? []), ...split.sourceUris]),
+    };
+    delete record.evidence_paths;
+    legacyAliases.push({
+      alias: 'evidence_paths',
+      canonical: 'subject.file_paths/source_uris',
+      value: original.evidence_paths,
+    });
+  }
+
+  return { record, legacyAliases };
+}
+
+function splitEvidencePaths(values: string[]): { filePaths: string[]; sourceUris: string[] } {
+  const filePaths: string[] = [];
+  const sourceUris: string[] = [];
+  for (const value of values) {
+    if (isExternalUri(value) || value.startsWith('file://')) {
+      sourceUris.push(value);
+    } else {
+      filePaths.push(value);
+    }
+  }
+  return { filePaths, sourceUris };
+}
+
+function withLegacyAliasMetadata(
+  metadata: Record<string, unknown> | undefined,
+  legacyAliases: Array<{ alias: string; canonical: string; value: unknown }>,
+): Record<string, unknown> | undefined {
+  if (legacyAliases.length === 0) {
+    return metadata;
+  }
+  return {
+    ...(metadata ?? {}),
+    autoresearchclaw_deprecated_aliases: legacyAliases.map(({ alias, canonical }) => ({ alias, canonical })),
+    autoresearchclaw_legacy_alias_values: Object.fromEntries(legacyAliases.map(({ alias, value }) => [alias, value])),
+  };
+}
+
+function normalizeSubject(value: unknown, field: string): MemorySubject {
+  const record = ensureRecord(value, field);
+  ensureAllowedFields(record, MEMORY_SUBJECT_FIELDS, field);
+  return {
+    file_paths: normalizeOptionalStringArray(record.file_paths, `${field}.file_paths`),
+    artifact_ids: normalizeOptionalStringArray(record.artifact_ids, `${field}.artifact_ids`),
+    source_uris: normalizeOptionalStringArray(record.source_uris, `${field}.source_uris`),
+    commit: optionalNonEmptyString(record.commit, `${field}.commit`),
+    command: optionalNonEmptyString(record.command, `${field}.command`),
+    dataset: optionalNonEmptyString(record.dataset, `${field}.dataset`),
+    paper_id: optionalNonEmptyString(record.paper_id, `${field}.paper_id`),
+  };
 }
 
 function normalizeFollowups(value: unknown, field: string): AutoResearchClawFollowup[] {
@@ -794,6 +946,14 @@ function ensureReviewDecision(value: unknown, field: string): AutoResearchClawRe
 
 function ensureOutcome(value: unknown, field: string): MemoryOutcome {
   return ensureOneOf(value, ['worked', 'failed', 'partial', 'unknown'] as const, field);
+}
+
+function ensureMemoryEventType(value: unknown, field: string): MemoryEventType {
+  return ensureOneOf(value, MEMORY_EVENT_TYPES, field);
+}
+
+function ensureMemoryEventStatus(value: unknown, field: string): MemoryEventStatus {
+  return ensureOneOf(value, MEMORY_EVENT_STATUSES, field);
 }
 
 function ensureOneOf<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
@@ -861,6 +1021,17 @@ function ensureRecord(value: unknown, field: string): Record<string, unknown> {
     throw new MemoryCoreError('invalid_autoresearchclaw_field', `${field} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function ensureAllowedFields(record: Record<string, unknown>, allowedFields: Set<string>, field: string): void {
+  for (const key of Object.keys(record)) {
+    if (!allowedFields.has(key)) {
+      throw new MemoryCoreError(
+        'autoresearchclaw_unknown_field',
+        `${field}.${key} is not allowed by the AutoResearchClaw contract`,
+      );
+    }
+  }
 }
 
 function statusToOutcome(status: AutoResearchClawRunStatus | undefined): MemoryOutcome | undefined {

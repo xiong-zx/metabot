@@ -119,11 +119,7 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
       const artifact = tryReadJsonArtifact(artifactPath);
       if (artifact.status === 'parsed') {
         try {
-          return validateAutoResearchClawOutput(artifact.value, {
-            expectedProjectId: typeof handle.metadata?.project_id === 'string' ? handle.metadata.project_id : undefined,
-            expectedRunId: typeof handle.metadata?.run_id === 'string' ? handle.metadata.run_id : undefined,
-            projectRoot: record.workingDirectory,
-          });
+          return validateCollectedOutput(artifact.value, handle, record);
         } catch (error) {
           lastInvalidArtifact = error;
         }
@@ -137,7 +133,14 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
           artifact.status === 'missing' &&
           (await waitForFile(artifactPath, this.artifactGraceMs, this.pollIntervalMs))
         ) {
-          return readJsonArtifact(artifactPath);
+          try {
+            return validateCollectedOutput(readJsonArtifact(artifactPath), handle, record);
+          } catch (error) {
+            throw new Error(
+              `AutoResearchClaw output artifact failed contract validation: ${artifactPath}: ${errorMessage(error)}`,
+              { cause: error },
+            );
+          }
         }
         if (lastInvalidArtifact !== undefined) {
           throw new Error(
@@ -237,6 +240,18 @@ export class WorkerManagerAutoResearchClawAdapter implements AutoResearchClawWor
     ensureInsideRoot(absolutePath, projectRoot);
     return { relativePath, absolutePath };
   }
+}
+
+function validateCollectedOutput(
+  value: unknown,
+  handle: ResearchWorkerHandle,
+  record: NonNullable<ReturnType<WorkerManagerLike['getWorker']>>,
+): unknown {
+  return validateAutoResearchClawOutput(value, {
+    expectedProjectId: typeof handle.metadata?.project_id === 'string' ? handle.metadata.project_id : undefined,
+    expectedRunId: typeof handle.metadata?.run_id === 'string' ? handle.metadata.run_id : undefined,
+    projectRoot: record.workingDirectory,
+  });
 }
 
 function externalCompletionSummary(input: ResearchWorkerFinalizeInput): string {
