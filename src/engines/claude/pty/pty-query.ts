@@ -42,6 +42,7 @@ import type {
   RawJsonlRecord,
 } from './contract.js';
 import { createPtyClaudeSession } from './pty-session.js';
+import { hasClaudeRunningFooter } from './pty-readiness.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
@@ -641,8 +642,6 @@ export const ptyQuery = (args: {
   const SLASH_GRACE_MS = 6_000;
   /** Absolute cap before we stop watching (let the Stop/exit watchdogs handle). */
   const SLASH_MAX_MS = 30_000;
-  /** "Model is actively running" signal in the (squished) TUI footer. */
-  const RUNNING_MARKER = 'esctointerrupt';
   const TURN_START_TIMEOUT_MS = envPositiveInt('METABOT_CLAUDE_TURN_START_TIMEOUT_MS', 30_000);
   /**
    * Claude Code aborts a turn mid-stream by printing this line and returning to
@@ -694,8 +693,7 @@ export const ptyQuery = (args: {
     let sawRunning = false;
     while (!disposed) {
       if (!turnInFlight) return; // Stop hook already completed this turn
-      const screen = (session?.screen() ?? '').toLowerCase().replace(/\s+/g, '');
-      if (screen.includes(RUNNING_MARKER)) sawRunning = true;
+      if (hasClaudeRunningFooter(session?.screen() ?? '')) sawRunning = true;
       const elapsed = Date.now() - start;
       if (sawRunning) return; // real model turn — let the Stop-hook path finish it
       if (elapsed > SLASH_GRACE_MS) {
@@ -731,8 +729,7 @@ export const ptyQuery = (args: {
     const start = Date.now();
     while (!disposed && turnInFlight && currentTurnId === turnId) {
       if (currentTurnStarted) return;
-      const screen = (session?.screen() ?? '').toLowerCase().replace(/\s+/g, '');
-      if (screen.includes(RUNNING_MARKER)) {
+      if (hasClaudeRunningFooter(session?.screen() ?? '')) {
         currentTurnStarted = true;
         return;
       }
@@ -806,7 +803,7 @@ export const ptyQuery = (args: {
       // us nothing to judge on; treat that as running and wait rather than risk
       // closing a live turn.
       const screen = session?.screen() ?? '';
-      const running = !screen || screen.toLowerCase().replace(/\s+/g, '').includes(RUNNING_MARKER);
+      const running = !screen || hasClaudeRunningFooter(screen);
 
       if (matches.length > baseline && !running) {
         if (!idleSince) idleSince = Date.now();

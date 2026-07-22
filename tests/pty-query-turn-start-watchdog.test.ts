@@ -140,6 +140,29 @@ describe('ptyQuery turn-start watchdog', () => {
     await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
   });
 
+  it('does not accept a running-marker quote in the rendered answer body as turn-start proof', async () => {
+    fakeSession.screen.mockImplementation(() => [
+      'A model turn should show the "esc to interrupt" footer quickly.',
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent',
+    ].join('\n'));
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+
+    const next = query[Symbol.asyncIterator]().next();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(next).resolves.toMatchObject({
+      value: { type: 'result', subtype: 'error', is_error: true },
+    });
+    await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
+  });
+
   it('flushes a queued final assistant before the synthetic result', async () => {
     const { hookBridge, fireTurnComplete } = createHookBridge();
     scannerDrain.mockImplementationOnce(() => [
