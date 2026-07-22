@@ -104,6 +104,10 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function largeResponseText(label: string): string {
+  return `${label}:${'x'.repeat(300 * 1024)}`;
+}
+
 function expectShellCommandArgs(command: string, expectedArgs: string[], markerFiles: string[] = []): void {
   const argsFile = path.join(os.tmpdir(), `metabot-command-args-${process.pid}-${Math.random()}`);
   const result = spawnSync(
@@ -135,6 +139,26 @@ ${command}
   } finally {
     fs.rmSync(argsFile, { force: true });
   }
+}
+
+async function completedMemoryStatusForResult(result: unknown) {
+  const executeApiTask = vi.fn(() => new Promise(() => {}));
+  const ctx = makeCtx(executeApiTask);
+  const res = await call(ctx, 'POST', '/api/talk?async=true', {
+    botName: 'pm',
+    chatId: 'private-test',
+    prompt:
+      'projectId=mem-terminal-adversarial projectRoot=/root/workspaces/mem-terminal-adversarial domain=memory-core. Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.',
+    sendCards: false,
+  });
+  const taskId = res.json().taskId;
+  const task = ctx.asyncTaskStore.get(taskId)!;
+  ctx.asyncTaskStore.update(taskId, {
+    status: 'completed',
+    completedAt: task.createdAt + 10,
+    result,
+  });
+  return call(ctx, 'GET', `/api/talk/${taskId}`);
 }
 
 describe('/api/talk async UX', () => {
@@ -179,6 +203,40 @@ describe('/api/talk async UX', () => {
     expect(status.json()).not.toHaveProperty('finalPhase');
     expect(typeof status.json().elapsedMs).toBe('number');
     expect(status.json().result).toMatchObject({ success: true, responseText: 'done' });
+  });
+
+  it('preserves full production-flat async task results with generic 300KB responseText', async () => {
+    const responseText = largeResponseText('generic-large-terminal');
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText,
+      costUsd: 0.02,
+      durationMs: 321,
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.statusCode).toBe(200);
+    expect(status.json().result).toEqual({
+      success: true,
+      responseText,
+      costUsd: 0.02,
+      durationMs: 321,
+    });
+    expect(status.json().result.responseText).toHaveLength(responseText.length);
+    expect(status.json().result.responseText).not.toContain('[Truncated: string budget exceeded]');
   });
 
   it('running task status includes retry guidance and elapsed time', async () => {
@@ -616,6 +674,684 @@ describe('/api/talk async UX', () => {
     });
   });
 
+  it('preserves phased Memory Core context and structured evidence after async completion', async () => {
+    const responseText = [
+      'Memory operation complete.',
+      '```json',
+      JSON.stringify(
+        {
+          result: {
+            writes: {
+              events: [{ id: 'mem_evt_beta' }, { id: 'mem_evt_alpha' }, { id: 'mem_evt_alpha' }],
+              memoryUnits: [{ id: 'mem_unit_beta' }, { id: 'mem_unit_alpha' }, { id: 'mem_unit_alpha' }],
+              promotionRequest: { id: 'prom_req_terminal', status: 'pending_review' },
+              candidateIds: ['cand_terminal', 'cand_terminal'],
+              contextPack: { id: 'ctx_terminal_1' },
+              finalizationPhase: 'candidate_review_pending',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      '```',
+    ].join('\n');
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText, durationMs: 24 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-pass projectRoot=/root/workspaces/mem-terminal-pass domain=memory-core. Use natural language Memory Core operations only. Create one finding and one decision, request promotion approval, search, and generate a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      finalPhase: 'completed',
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_alpha', 'mem_evt_beta'],
+        memoryUnitIds: ['mem_unit_alpha', 'mem_unit_beta'],
+        promotionIds: ['prom_req_terminal'],
+        candidateIds: ['cand_terminal'],
+        contextPackIds: ['ctx_terminal_1'],
+      },
+      progress: {
+        kind: 'phased',
+        currentPhase: 'completed',
+        finalPhase: 'completed',
+        projectId: 'mem-terminal-pass',
+        projectRoot: '/root/workspaces/mem-terminal-pass',
+        domain: 'memory-core',
+        operation: 'write_search_context_pack',
+        expectedCompletionMs: 120_000,
+        timeoutBoundaryMs: 150_000,
+        evidence: {
+          eventIds: ['mem_evt_alpha', 'mem_evt_beta'],
+          memoryUnitIds: ['mem_unit_alpha', 'mem_unit_beta'],
+          promotionIds: ['prom_req_terminal'],
+          candidateIds: ['cand_terminal'],
+          contextPackIds: ['ctx_terminal_1'],
+        },
+        finalization: {
+          status: 'memory_operation_completed',
+          reviewState: 'pending_review',
+          evidenceState: 'structured_evidence_extracted',
+          overdueState: 'within_expected_window',
+          partialEvidence: false,
+        },
+        nextAction: expect.stringContaining(
+          `metabot research events/search/context-pack --root ${shellQuoteArg('/root/workspaces/mem-terminal-pass')} --project ${shellQuoteArg(
+            'mem-terminal-pass',
+          )}`,
+        ),
+      },
+      message: expect.stringContaining('Pending review evidence was detected'),
+      nextAction: expect.stringContaining('This task completed.'),
+      result: expect.objectContaining({ success: true, responseText }),
+    });
+  });
+
+  it('preserves full production-flat Memory Core result with adversarial 300KB responseText', async () => {
+    const responseText = JSON.stringify({
+      event_ids: ['mem_evt_large_response'],
+      padding: largeResponseText('memory-large-terminal'),
+    });
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText, durationMs: 77 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-large projectRoot=/root/workspaces/mem-terminal-large domain=memory-core. Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: {
+        success: true,
+        responseText,
+        durationMs: 77,
+      },
+    });
+    expect(status.json().result.responseText).toHaveLength(responseText.length);
+    expect(status.json().result.responseText).not.toContain('[Truncated: string budget exceeded]');
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('preserves phased Memory Core context and partial evidence after async failure', async () => {
+    const responseText = JSON.stringify({
+      partial: {
+        event_ids: ['mem_evt_fail_b', 'mem_evt_fail_a', 'mem_evt_fail_a'],
+        memory_unit_ids: ['mem_unit_fail'],
+        promotionIds: ['prom_req_fail'],
+        context_pack_id: 'ctx_fail',
+      },
+    });
+    const executeApiTask = vi.fn(async () => ({
+      success: false,
+      responseText,
+      error: 'memory core failed',
+      errorCode: 'memory_core_failed',
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-fail projectRoot=/root/workspaces/mem-terminal-fail domain=memory-core. Use natural language Memory Core operations only. Create one finding, request promotion approval, then search and build a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('failed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'failed',
+      phase: 'memory_operation_failed',
+      finalPhase: 'failed',
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_fail_a', 'mem_evt_fail_b'],
+        memoryUnitIds: ['mem_unit_fail'],
+        promotionIds: ['prom_req_fail'],
+        contextPackIds: ['ctx_fail'],
+      },
+      progress: {
+        kind: 'phased',
+        currentPhase: 'failed',
+        finalPhase: 'failed',
+        projectId: 'mem-terminal-fail',
+        operation: 'write_search_context_pack',
+        evidence: {
+          eventIds: ['mem_evt_fail_a', 'mem_evt_fail_b'],
+          memoryUnitIds: ['mem_unit_fail'],
+          promotionIds: ['prom_req_fail'],
+          contextPackIds: ['ctx_fail'],
+        },
+        finalization: {
+          status: 'memory_operation_failed',
+          reviewState: 'not_pending_review',
+          evidenceState: 'structured_evidence_extracted',
+          overdueState: 'within_expected_window',
+          partialEvidence: false,
+        },
+        error: {
+          status: 'memory_operation_failed',
+          code: 'memory_core_failed',
+          message: 'memory core failed',
+        },
+      },
+      message: expect.stringContaining('Memory Core operation failed'),
+      nextAction: expect.stringContaining('This task failed.'),
+      result: expect.objectContaining({
+        success: false,
+        responseText,
+        error: 'memory core failed',
+        errorCode: 'memory_core_failed',
+      }),
+    });
+  });
+
+  it('does not infer pending review from ids when terminal evidence explicitly says approved/finalized', async () => {
+    const responseText = JSON.stringify({
+      result: {
+        writes: {
+          promotionRequest: { id: 'prom_req_approved', status: 'approved' },
+          candidateIds: ['cand_approved'],
+          contextPack: { id: 'ctx_approved' },
+        },
+        reviewStatus: 'approved',
+        finalizationPhase: 'finalized',
+      },
+    });
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText, durationMs: 9 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-approved projectRoot=/root/workspaces/mem-terminal-approved domain=memory-core. Use natural language Memory Core operations only. Create one finding, explicitly approve the promotion, and return a final context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      finalPhase: 'completed',
+      memoryCoreEvidence: {
+        promotionIds: ['prom_req_approved'],
+        candidateIds: ['cand_approved'],
+        contextPackIds: ['ctx_approved'],
+      },
+      progress: {
+        kind: 'phased',
+        currentPhase: 'completed',
+        finalPhase: 'completed',
+        finalization: {
+          status: 'memory_operation_completed',
+          reviewState: 'not_pending_review',
+          evidenceState: 'structured_evidence_extracted',
+          overdueState: 'within_expected_window',
+          partialEvidence: false,
+        },
+      },
+      message: 'Memory Core operation completed. Structured Memory Core evidence was extracted into status fields.',
+      nextAction: expect.not.stringContaining('Review the pending candidate or promotion request'),
+      result: expect.objectContaining({ success: true, responseText }),
+    });
+  });
+
+  it('preserves timeout-boundary context when a Memory Core task completes late', async () => {
+    const executeApiTask = vi.fn(() => new Promise(() => {}));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-overdue projectRoot=/root/workspaces/mem-terminal-overdue domain=memory-core. Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+    const task = ctx.asyncTaskStore.get(taskId)!;
+    ctx.asyncTaskStore.update(taskId, {
+      status: 'completed',
+      createdAt: task.createdAt - 160_000,
+      completedAt: task.createdAt,
+      result: {
+        success: true,
+        responseText: '{"event_ids":["mem_evt_overdue"],"context_pack_id":"ctx_overdue"}',
+      },
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      finalPhase: 'completed',
+      progress: {
+        kind: 'phased',
+        currentPhase: 'completed',
+        finalPhase: 'completed',
+        elapsedMs: 160_000,
+        finalization: {
+          status: 'memory_operation_completed',
+          reviewState: 'not_pending_review',
+          evidenceState: 'structured_evidence_extracted',
+          overdueState: 'timeout_boundary_exceeded',
+          partialEvidence: true,
+        },
+      },
+      message: expect.stringContaining('after the timeout boundary'),
+      nextAction: expect.stringContaining('completed after the timeout boundary'),
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_overdue'],
+        contextPackIds: ['ctx_overdue'],
+      },
+    });
+  });
+
+  it('reports when no structured Memory Core evidence can be derived from the terminal result', async () => {
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done', durationMs: 5 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-opaque projectRoot=/root/workspaces/mem-terminal-opaque domain=memory-core. Use natural language Memory Core operations only. Create one finding and one decision, then search and generate a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      finalPhase: 'completed',
+      progress: {
+        kind: 'phased',
+        finalization: {
+          status: 'memory_operation_completed',
+          reviewState: 'not_pending_review',
+          evidenceState: 'no_structured_evidence',
+          overdueState: 'within_expected_window',
+          partialEvidence: false,
+        },
+      },
+      message: expect.stringContaining('No structured Memory Core evidence could be derived'),
+      nextAction: expect.stringContaining(
+        'recover event ids, memory unit ids, promotion/candidate ids, and context pack ids',
+      ),
+      result: expect.objectContaining({ success: true, responseText: 'done' }),
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+    expect(status.json().progress).not.toHaveProperty('evidence');
+  });
+
+  it('returns degraded Memory Core guidance for cyclic terminal evidence without throwing', async () => {
+    const cyclic: any = { eventIds: ['mem_evt_cycle'] };
+    cyclic.result = cyclic;
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: cyclic,
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_cycle'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+        evidence: {
+          eventIds: ['mem_evt_cycle'],
+        },
+      },
+      nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
+      result: { success: true, responseText: '' },
+    });
+  });
+
+  it('returns no-structured truncated guidance for very deep terminal evidence without throwing', async () => {
+    const deep: any = {};
+    let cursor = deep;
+    for (let index = 0; index < 20_000; index += 1) {
+      cursor.result = {};
+      cursor = cursor.result;
+    }
+    cursor.eventIds = ['mem_evt_too_deep'];
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: deep,
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      message: expect.stringContaining('bounded extraction truncated'),
+      nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('does not mark repeated shared evidence references as truncated', async () => {
+    const shared = { events: [{ id: 'mem_evt_shared' }] };
+    const evidence = { writes: shared, partial: shared };
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: evidence,
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_shared'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: { success: true, responseText: '' },
+    });
+    expect(status.json().nextAction).not.toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('does not mark unrelated non-envelope payload fields as truncated evidence', async () => {
+    const responseText = '';
+    const terminalResult = {
+      success: true,
+      responseText,
+      result: {
+        eventIds: ['mem_evt_flat'],
+        unrelatedLog: largeResponseText('not-memory-evidence'),
+      },
+      durationMs: 14,
+    };
+
+    const status = await completedMemoryStatusForResult(terminalResult);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_flat'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: terminalResult,
+    });
+    expect(status.json().nextAction).not.toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('degrades Memory Core evidence extraction instead of propagating throwing getters', async () => {
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      get() {
+        throw new Error('getter failed');
+      },
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: { success: true, responseText: '' },
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+    expect(status.json().nextAction).toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('deterministically truncates wide evidence arrays at the item budget without throwing', async () => {
+    const eventIds = Array.from({ length: 1_200 }, (_, index) => `mem_evt_${String(index).padStart(4, '0')}`);
+
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: JSON.stringify({ result: { eventIds } }),
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().memoryCoreEvidence.eventIds).toHaveLength(1_000);
+    expect(status.json().memoryCoreEvidence.eventIds[0]).toBe('mem_evt_0000');
+    expect(status.json().memoryCoreEvidence.eventIds[999]).toBe('mem_evt_0999');
+    expect(status.json().memoryCoreEvidence.eventIds).not.toContain('mem_evt_1199');
+    expect(status.json().progress.finalization.evidenceState).toBe('structured_evidence_truncated');
+    expect(status.json().nextAction).toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('does not mark approved, rejected, or completed promotions as pending review', async () => {
+    for (const promotionStatus of ['approved', 'rejected', 'completed']) {
+      const status = await completedMemoryStatusForResult({
+        success: true,
+        responseText: JSON.stringify({
+          result: {
+            writes: {
+              promotionRequest: { id: `prom_req_${promotionStatus}`, status: promotionStatus },
+              candidate: { id: `cand_${promotionStatus}`, status: promotionStatus },
+            },
+            reviewStatus: promotionStatus,
+            finalizationPhase: promotionStatus,
+          },
+        }),
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().progress.finalization.reviewState).toBe('not_pending_review');
+      expect(status.json().message).not.toContain('Pending review evidence was detected');
+      expect(status.json().nextAction).not.toContain('Review the pending candidate or promotion request');
+    }
+  });
+
+  it('excludes unrelated meta.unitId while collecting whitelisted Memory Core containers', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      result: {
+        meta: {
+          unitId: 'mem_unit_unrelated',
+        },
+        writes: {
+          events: [{ id: 'mem_evt_real' }],
+        },
+      },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().memoryCoreEvidence).toEqual({
+      eventIds: ['mem_evt_real'],
+    });
+    expect(status.json().memoryCoreEvidence.memoryUnitIds).toBeUndefined();
+  });
+
+  it('ignores malformed fenced JSON and still returns actionable Memory Core inspect guidance', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: '```json\n{"result":\n```',
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence',
+          reviewState: 'not_pending_review',
+        },
+      },
+      message: expect.stringContaining('No structured Memory Core evidence could be derived'),
+      nextAction: expect.stringContaining('metabot research events/search/context-pack'),
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('extracts the live e474eb45 responseText Memory Core payload shape with sorted dedupe', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: JSON.stringify({
+        events: {
+          finding: { eventId: 'mem_evt_finding', memoryUnitId: 'mem_unit_finding' },
+          decision: { eventId: 'mem_evt_decision', memoryUnitId: 'mem_unit_decision' },
+        },
+        promotionRequest: {
+          id: 'prom_req_live',
+          status: 'approved',
+          eventStatus: 'completed',
+        },
+        search: {
+          returned: [
+            { eventId: 'mem_evt_search_b', memoryUnitId: 'mem_unit_search_b' },
+            { eventId: 'mem_evt_search_a', memoryUnitId: 'mem_unit_search_a' },
+            { eventId: 'mem_evt_search_a', memoryUnitId: 'mem_unit_search_a' },
+          ],
+        },
+        contextPack: {
+          id: 'ctx_live',
+          includedEventIds: ['mem_evt_finding', 'mem_evt_context_only'],
+        },
+      }),
+    });
+
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: [
+          'mem_evt_context_only',
+          'mem_evt_decision',
+          'mem_evt_finding',
+          'mem_evt_search_a',
+          'mem_evt_search_b',
+        ],
+        memoryUnitIds: ['mem_unit_decision', 'mem_unit_finding', 'mem_unit_search_a', 'mem_unit_search_b'],
+        promotionIds: ['prom_req_live'],
+        contextPackIds: ['ctx_live'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+    });
+  });
+
+  it('quotes Memory Core terminal inspect commands for shell-safe project and root values', async () => {
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-memory-shell-safe-'));
+    const rootMarker = path.join(markerDir, 'root-injected');
+    const rootTickMarker = path.join(markerDir, 'root-backtick-injected');
+    const projectMarker = path.join(markerDir, 'project-injected');
+    const projectTickMarker = path.join(markerDir, 'project-backtick-injected');
+    const projectRoot = `/tmp/memory root/quoted "dir" $(touch\${IFS}${rootMarker}) \`touch\${IFS}${rootTickMarker}\` '&`;
+    const projectId = `memory $(touch\${IFS}${projectMarker}) \`touch\${IFS}${projectTickMarker}\` '& project`;
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: '{"event_ids":["mem_evt_safe"]}',
+      durationMs: 7,
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    try {
+      const res = await call(ctx, 'POST', '/api/talk?async=true', {
+        botName: 'pm',
+        chatId: 'private-test',
+        prompt: `projectId="${projectId.replace(/"/g, '\\"')}" projectRoot="${projectRoot.replace(
+          /"/g,
+          '\\"',
+        )}" domain="memory core". Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.`,
+        sendCards: false,
+      });
+      const taskId = res.json().taskId;
+
+      await eventually(() => {
+        expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+      });
+
+      const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+      expect(status.json()).toMatchObject({
+        progress: expect.objectContaining({
+          projectId,
+          projectRoot,
+          domain: 'memory core',
+        }),
+        nextAction: expect.stringContaining(
+          `metabot research events/search/context-pack --root ${shellQuoteArg(projectRoot)} --project ${shellQuoteArg(
+            projectId,
+          )}`,
+        ),
+      });
+      const command = String(status.json().nextAction)
+        .slice(String(status.json().nextAction).indexOf('metabot research events/search/context-pack'))
+        .split('. ')[0];
+      expectShellCommandArgs(
+        command,
+        ['research', 'events/search/context-pack', '--root', projectRoot, '--project', projectId],
+        [rootMarker, rootTickMarker, projectMarker, projectTickMarker],
+      );
+    } finally {
+      fs.rmSync(markerDir, { recursive: true, force: true });
+    }
+  });
+
   it('marks orphaned running tasks as failed after the stale timeout', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-07T00:00:00.000Z'));
@@ -702,6 +1438,35 @@ describe('/api/talk async UX', () => {
       success: true,
       responseText: 'fast',
     });
+  });
+
+  it('waitMs and async terminal status both preserve 300KB responseText', async () => {
+    const responseText = largeResponseText('wait-parity');
+    const waitCtx = makeCtx(vi.fn(async () => ({ success: true, responseText, durationMs: 5 })));
+    const waitRes = await call(waitCtx, 'POST', '/api/talk?waitMs=1000', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+
+    const asyncCtx = makeCtx(vi.fn(async () => ({ success: true, responseText, durationMs: 5 })));
+    const asyncRes = await call(asyncCtx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+    const taskId = asyncRes.json().taskId;
+    await eventually(() => {
+      expect(asyncCtx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+    const status = await call(asyncCtx, 'GET', `/api/talk/${taskId}`);
+
+    expect(waitRes.statusCode).toBe(200);
+    expect(waitRes.json().responseText).toBe(responseText);
+    expect(status.statusCode).toBe(200);
+    expect(status.json().result.responseText).toBe(responseText);
   });
 
   it('maps chat-busy talk failures to 409 with retry metadata', async () => {
