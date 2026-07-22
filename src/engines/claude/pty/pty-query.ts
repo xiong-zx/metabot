@@ -579,6 +579,29 @@ export const ptyQuery = (args: {
     return true;
   }
 
+  function classifyPromptSubmissionFailure(err: unknown): {
+    submission: 'not_submitted' | 'ambiguous';
+    reason: NonNullable<ModelTelemetry['promptFailureReason']>;
+  } {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('prompt input was not echoed')) {
+      return { submission: 'not_submitted', reason: 'input_not_echoed' };
+    }
+    if (message.includes('did not return to idle input')) {
+      return { submission: 'not_submitted', reason: 'tui_not_idle' };
+    }
+    if (message.includes('waiting for TUI input box')) {
+      return { submission: 'not_submitted', reason: 'tui_not_ready' };
+    }
+    if (message.includes('session disposed')) {
+      return { submission: 'not_submitted', reason: 'session_disposed' };
+    }
+    if (message.includes('prompt submit was not acknowledged')) {
+      return { submission: 'ambiguous', reason: 'submit_unacknowledged' };
+    }
+    return { submission: 'ambiguous', reason: 'unknown' };
+  }
+
   // ── Prompt loop ──────────────────────────────────────────────────────────
   async function runPromptLoop(): Promise<void> {
     try {
@@ -602,6 +625,8 @@ export const ptyQuery = (args: {
         const turnId = ++currentTurnId;
         try {
           const submission = await session.typePrompt(text);
+          turnModelTelemetry.promptSubmission = 'accepted';
+          turnModelTelemetry.promptFailureReason = undefined;
           logger.info(
             {
               turnId,
@@ -614,6 +639,9 @@ export const ptyQuery = (args: {
             'ptyQuery: prompt submission acknowledged',
           );
         } catch (err) {
+          const failure = classifyPromptSubmissionFailure(err);
+          turnModelTelemetry.promptSubmission = failure.submission;
+          turnModelTelemetry.promptFailureReason = failure.reason;
           logger.warn({ err }, 'ptyQuery: prompt submission failed');
           finishTurnWithError(
             'Claude Code TUI was not ready to accept the prompt; MetaBot closed this turn instead of leaving the Feishu card in thinking. Please retry the message, or reset the Claude session if it repeats.',

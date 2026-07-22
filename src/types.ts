@@ -98,6 +98,16 @@ export interface ModelTelemetry {
   sessionDisposition?: 'active' | 'retired';
   /** Machine-readable reason for retiring a session from resume mappings. */
   sessionRetireReason?: 'turn_start_timeout';
+  /** Whether the PTY accepted this turn's prompt, for bounded bridge recovery. */
+  promptSubmission?: 'accepted' | 'not_submitted' | 'ambiguous';
+  /** Machine-readable PTY input failure classification. */
+  promptFailureReason?:
+    | 'tui_not_ready'
+    | 'tui_not_idle'
+    | 'session_disposed'
+    | 'input_not_echoed'
+    | 'submit_unacknowledged'
+    | 'unknown';
 }
 
 export interface CardState {

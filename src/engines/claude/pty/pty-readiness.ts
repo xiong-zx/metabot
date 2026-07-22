@@ -1,4 +1,3 @@
-const PROMPT_MARKER_RE = /[❯⏵]/u;
 const INPUT_PROMPT_LINE_RE = /^\s*(?:❯|⏵(?!⏵))/u;
 const RUNNING_MARKER = 'esctointerrupt';
 
@@ -66,6 +65,7 @@ export function isClaudeResumeSummaryDialog(screen: string): boolean {
 
 export function classifyClaudeInputReadiness(screen: string): ClaudeInputReadiness {
   const ui = activeClaudeUi(screen);
+  const uiLines = ui.split('\n');
   const sq = ui.toLowerCase().replace(/\s+/g, '');
   const running = hasClaudeRunningFooter(screen);
   const menuUp =
@@ -73,7 +73,11 @@ export function classifyClaudeInputReadiness(screen: string): ClaudeInputReadine
     sq.includes('ctrl-gtoedit') ||
     sq.includes('shift+tabtoapprove') ||
     /[❯⏵]\d\./u.test(sq); // pointer on a numbered menu option
-  const hasInputBox = PROMPT_MARKER_RE.test(ui);
+  // The status footer starts with "⏵⏵ bypass permissions on". A broad search
+  // for either prompt glyph therefore classifies a footer-only/half-exited TUI
+  // as an input box and sends keystrokes into a process that cannot accept them.
+  // Require a real single-glyph prompt row instead.
+  const hasInputBox = uiLines.some((line) => INPUT_PROMPT_LINE_RE.test(line));
   return {
     hasInputBox,
     running,

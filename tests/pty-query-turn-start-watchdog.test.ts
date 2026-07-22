@@ -88,6 +88,50 @@ describe('ptyQuery turn-start watchdog', () => {
     vi.useRealTimers();
   });
 
+  it('marks a no-echo failure as definitely not submitted for a safe bridge retry', async () => {
+    fakeSession.typePrompt.mockRejectedValueOnce(
+      new Error('pty-session: prompt input was not echoed by the Claude TUI'),
+    );
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+
+    await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+      value: {
+        type: 'result',
+        subtype: 'error',
+        modelTelemetry: {
+          promptSubmission: 'not_submitted',
+          promptFailureReason: 'input_not_echoed',
+        },
+      },
+    });
+  });
+
+  it('does not mark an unacknowledged Enter as safe to retry', async () => {
+    fakeSession.typePrompt.mockRejectedValueOnce(
+      new Error('pty-session: prompt submit was not acknowledged by the Claude TUI'),
+    );
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+
+    await expect(query[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+      value: {
+        type: 'result',
+        subtype: 'error',
+        modelTelemetry: {
+          promptSubmission: 'ambiguous',
+          promptFailureReason: 'submit_unacknowledged',
+        },
+      },
+    });
+  });
+
   it('closes a non-slash prompt that never starts a model turn', async () => {
     const { hookBridge } = createHookBridge();
     const query = ptyQuery({
@@ -111,6 +155,7 @@ describe('ptyQuery turn-start watchdog', () => {
       subtype: 'error',
       is_error: true,
       modelTelemetry: {
+        promptSubmission: 'accepted',
         sessionDisposition: 'retired',
         sessionRetireReason: 'turn_start_timeout',
       },
