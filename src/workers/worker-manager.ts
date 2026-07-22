@@ -1068,7 +1068,7 @@ export class WorkerManager {
         if (record.resultSummary === undefined && result.responseText) {
           record.resultSummary = result.responseText.slice(0, 500);
         }
-        this.reconcileTerminalArtifact(record);
+        this.reconcileTerminalArtifact(record, { allowArtifactRecovery: false });
       } else if (result.success) {
         record.endTime = Date.now();
         record.durationMs = record.endTime - startTime;
@@ -1090,7 +1090,7 @@ export class WorkerManager {
     } catch (err: any) {
       if (record.status !== 'running') {
         ensureTerminalTiming(record);
-        this.reconcileTerminalArtifact(record);
+        this.reconcileTerminalArtifact(record, { allowArtifactRecovery: false });
       } else {
         record.endTime = Date.now();
         record.durationMs = record.endTime - startTime;

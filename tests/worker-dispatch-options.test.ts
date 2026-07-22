@@ -537,6 +537,95 @@ describe('WorkerManager dispatch execution options', () => {
     );
   });
 
+  it('preserves authoritative failed metadata when the worker executor resolves later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(
+      resultsPath,
+      JSON.stringify({
+        task: 'Summarize benchmark deltas',
+        metrics: { accuracy: 0.91, latency_ms: 12 },
+        notes: 'Durable results existed before the external failure became authoritative.',
+      }),
+    );
+    let finishWorker: ((value: { success: boolean; responseText: string; costUsd: number }) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<{ success: boolean; responseText: string; costUsd: number }>((resolve) => {
+            finishWorker = resolve;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+    await vi.waitFor(() => expect(finishWorker).toBeDefined());
+
+    const externallyFailed = manager.getWorker(record.id)!;
+    externallyFailed.status = 'failed';
+    externallyFailed.error = 'Memory Core marked the worker failed authoritatively';
+    externallyFailed.executionStatus = 'transport_error';
+    externallyFailed.endTime = externallyFailed.startTime + 4_321;
+    externallyFailed.durationMs = 4_321;
+    externallyFailed.resultSummary = 'Memory Core authoritative failure summary';
+
+    finishWorker?.({
+      success: true,
+      responseText: 'late executor success should not replace the authoritative failure',
+      costUsd: 0.22,
+    });
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'failed',
+      error: 'Memory Core marked the worker failed authoritatively',
+      executionStatus: 'transport_error',
+      endTime: externallyFailed.startTime + 4_321,
+      durationMs: 4_321,
+      resultSummary: 'Memory Core authoritative failure summary',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      detailRoute: `/api/workers/${record.id}`,
+      finalPayloadRef: `file://${resultsPath}`,
+      finalTranscriptRef: `worker-chat:${record.workerChatId}`,
+      costUsd: 0.22,
+    });
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'failed',
+      error: 'Memory Core marked the worker failed authoritatively',
+      executionStatus: 'transport_error',
+      endTime: externallyFailed.startTime + 4_321,
+      durationMs: 4_321,
+      resultSummary: 'Memory Core authoritative failure summary',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      detailRoute: `/api/workers/${record.id}`,
+      finalPayloadRef: `file://${resultsPath}`,
+      finalTranscriptRef: `worker-chat:${record.workerChatId}`,
+      costUsd: 0.22,
+    });
+  });
+
   it('preserves external completion metadata when the worker executor resolves with success false later', async () => {
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
@@ -615,6 +704,89 @@ describe('WorkerManager dispatch execution options', () => {
       artifactPath,
       resultSummary: 'Memory Core finalized artifact before executor reported failure',
       error: 'Memory Core completion is authoritative',
+    });
+  });
+
+  it('preserves authoritative failed metadata when the worker executor rejects later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(
+      resultsPath,
+      JSON.stringify({
+        task: 'Summarize benchmark deltas',
+        metrics: { accuracy: 0.91, latency_ms: 12 },
+        notes: 'Durable results existed before the external failure became authoritative.',
+      }),
+    );
+    let rejectWorker: ((error: Error) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<never>((_resolve, reject) => {
+            rejectWorker = reject;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+    await vi.waitFor(() => expect(rejectWorker).toBeDefined());
+
+    const externallyFailed = manager.getWorker(record.id)!;
+    externallyFailed.status = 'failed';
+    externallyFailed.error = 'Memory Core marked the worker failed authoritatively';
+    externallyFailed.executionStatus = 'timed_out';
+    externallyFailed.endTime = externallyFailed.startTime + 5_432;
+    externallyFailed.durationMs = 5_432;
+    externallyFailed.resultSummary = 'Memory Core authoritative failure summary';
+
+    rejectWorker?.(new Error('late transport failure should not replace the authoritative failure'));
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'failed',
+      error: 'Memory Core marked the worker failed authoritatively',
+      executionStatus: 'timed_out',
+      endTime: externallyFailed.startTime + 5_432,
+      durationMs: 5_432,
+      resultSummary: 'Memory Core authoritative failure summary',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      detailRoute: `/api/workers/${record.id}`,
+      finalPayloadRef: `file://${resultsPath}`,
+      finalTranscriptRef: `worker-chat:${record.workerChatId}`,
+    });
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'failed',
+      error: 'Memory Core marked the worker failed authoritatively',
+      executionStatus: 'timed_out',
+      endTime: externallyFailed.startTime + 5_432,
+      durationMs: 5_432,
+      resultSummary: 'Memory Core authoritative failure summary',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      detailRoute: `/api/workers/${record.id}`,
+      finalPayloadRef: `file://${resultsPath}`,
+      finalTranscriptRef: `worker-chat:${record.workerChatId}`,
     });
   });
 
