@@ -70,7 +70,7 @@ export function collectSourceInventory(sourceText: string, filePath = 'input.ts'
   const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   return {
     declarationSymbols: collectDeclarationSymbols(sourceFile),
-    diagnostics: collectSourceDiagnostics(sourceText),
+    diagnostics: collectSourceDiagnostics(sourceFile),
     exportedDeclarationSymbols: collectExportedDeclarationSymbols(sourceFile),
     importSpecifiers: collectImportSpecifiers(sourceFile),
     testNames: collectTestNames(sourceFile),
@@ -354,17 +354,106 @@ function collectImportSpecifiers(sourceFile: ts.SourceFile): string[] {
   return [...specifiers].sort();
 }
 
-function collectSourceDiagnostics(sourceText: string): string[] {
+function collectSourceDiagnostics(sourceFile: ts.SourceFile): string[] {
   const diagnostics: string[] = [];
-  if (hasConflictMarkers(sourceText)) diagnostics.push('unresolved-conflict-marker');
-  for (const item of MEMORY_CORE_FORBIDDEN_LEXICAL_PATTERNS) {
-    if (item.pattern.test(sourceText)) diagnostics.push(`forbidden-lexeme:${item.id}`);
-  }
+  if (hasConflictMarkersOutsideTriviaAndLiterals(sourceFile.text)) diagnostics.push('unresolved-conflict-marker');
+  diagnostics.push(...collectForbiddenSemanticLexemeDiagnostics(sourceFile));
   return diagnostics.sort();
 }
 
-function hasConflictMarkers(sourceText: string): boolean {
-  return /^\s*(?:<{7}|={7}|>{7})(?:\s|$)/m.test(sourceText);
+function collectForbiddenSemanticLexemeDiagnostics(sourceFile: ts.SourceFile): string[] {
+  const matchedIds = new Set<string>();
+
+  const visit = (node: ts.Node): void => {
+    const semanticText = semanticForbiddenLexemeText(node);
+    if (semanticText) {
+      for (const item of MEMORY_CORE_FORBIDDEN_LEXICAL_PATTERNS) {
+        if (item.pattern.test(semanticText)) matchedIds.add(item.id);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return [...matchedIds].sort().map((id) => `forbidden-lexeme:${id}`);
+}
+
+function semanticForbiddenLexemeText(node: ts.Node): string | undefined {
+  if (ts.isIdentifier(node)) return node.text;
+  if ((ts.isStringLiteral(node) || ts.isNumericLiteral(node)) && isStaticSemanticPropertyName(node)) return node.text;
+  return undefined;
+}
+
+function isStaticSemanticPropertyName(node: ts.StringLiteral | ts.NumericLiteral): boolean {
+  const parent = node.parent;
+  if (
+    (ts.isPropertyAssignment(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent) ||
+      ts.isEnumMember(parent)) &&
+    parent.name === node
+  ) {
+    return true;
+  }
+  return (
+    ts.isComputedPropertyName(parent) &&
+    parent.expression === node &&
+    parent.parent !== undefined &&
+    (ts.isPropertyAssignment(parent.parent) ||
+      ts.isPropertyDeclaration(parent.parent) ||
+      ts.isPropertySignature(parent.parent) ||
+      ts.isMethodDeclaration(parent.parent) ||
+      ts.isMethodSignature(parent.parent) ||
+      ts.isGetAccessorDeclaration(parent.parent) ||
+      ts.isSetAccessorDeclaration(parent.parent))
+  );
+}
+
+function hasConflictMarkersOutsideTriviaAndLiterals(sourceText: string): boolean {
+  return /^\s*(?:<{7}|={7}|>{7})(?:\s|$)/m.test(maskTriviaAndLiteralText(sourceText));
+}
+
+function maskTriviaAndLiteralText(sourceText: string): string {
+  const chars = sourceText.split('');
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    false,
+    ts.LanguageVariant.Standard,
+    sourceText,
+    undefined,
+    0,
+    sourceText.length,
+  );
+  let token = scanner.scan();
+  while (token !== ts.SyntaxKind.EndOfFileToken) {
+    if (shouldMaskToken(token)) {
+      maskRange(chars, scanner.getTokenStart(), scanner.getTextPos());
+    }
+    token = scanner.scan();
+  }
+  return chars.join('');
+}
+
+function shouldMaskToken(token: ts.SyntaxKind): boolean {
+  return (
+    token === ts.SyntaxKind.SingleLineCommentTrivia ||
+    token === ts.SyntaxKind.MultiLineCommentTrivia ||
+    token === ts.SyntaxKind.StringLiteral ||
+    token === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
+    token === ts.SyntaxKind.TemplateHead ||
+    token === ts.SyntaxKind.TemplateMiddle ||
+    token === ts.SyntaxKind.TemplateTail
+  );
+}
+
+function maskRange(chars: string[], start: number, end: number): void {
+  for (let index = start; index < end; index += 1) {
+    if (chars[index] !== '\n' && chars[index] !== '\r') chars[index] = ' ';
+  }
 }
 
 function hasExportModifier(statement: ts.Statement): boolean {

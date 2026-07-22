@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   collectSourceInventory,
@@ -35,6 +36,14 @@ describe('Memory Core merge hygiene path selector', () => {
 });
 
 describe('Memory Core merge hygiene inventories', () => {
+  it('does not diagnose this gate test file as its own fixture text', () => {
+    const inventory = collectSourceInventory(
+      readFileSync(new URL('./memory-core-merge-hygiene.test.ts', import.meta.url), 'utf8'),
+    );
+
+    expect(inventory.diagnostics).toEqual([]);
+  });
+
   it('collects test names and top-level declarations with the TS parser', () => {
     const inventory = collectSourceInventory(`
       export function keepPublicApi() {}
@@ -86,7 +95,7 @@ describe('Memory Core merge hygiene inventories', () => {
     });
   });
 
-  it('detects conflict markers and forbidden legacy candidate aliases', () => {
+  it('detects source-level conflict markers and forbidden legacy candidate aliases', () => {
     const inventory = collectSourceInventory(`
       export const output = {
         hypothesis_candidates: [],
@@ -102,6 +111,34 @@ describe('Memory Core merge hygiene inventories', () => {
       'forbidden-lexeme:legacy-autoresearchclaw-candidate-alias',
       'unresolved-conflict-marker',
     ]);
+  });
+
+  it('detects forbidden aliases in semantic property names', () => {
+    const inventory = collectSourceInventory(`
+      export const output = {
+        "finding_candidates": [],
+        ['decision_candidates']: [],
+      };
+    `);
+
+    expect(inventory.diagnostics).toEqual(['forbidden-lexeme:legacy-autoresearchclaw-candidate-alias']);
+  });
+
+  it('ignores conflict-marker and forbidden-alias fixture text in comments and literals', () => {
+    const leftMarker = '<'.repeat(7);
+    const middleMarker = '='.repeat(7);
+    const rightMarker = '>'.repeat(7);
+    const source = [
+      `// ${leftMarker} HEAD`,
+      `/* ${middleMarker} */`,
+      `const markerFixture = \`${leftMarker} HEAD`,
+      `${middleMarker}`,
+      `${rightMarker} parent\`;`,
+      `const aliasFixture = 'hypothesis_candidates finding_candidates decision_candidates';`,
+      `const bypassVariant = { hypothesis_candidate_count: 1, decision_candidate_total: 2 };`,
+    ].join('\n');
+
+    expect(collectSourceInventory(source).diagnostics).toEqual([]);
   });
 });
 
@@ -204,6 +241,50 @@ describe('Memory Core merge hygiene gate', () => {
       missingImportSpecifiers: ['../../memory-core/index.js'],
       parentRef: 'parent-a',
     });
+  });
+
+  it('passes a synthetic merge that changes gate source and tests without semantic loss', () => {
+    const gateSource = `
+      export function collectSourceInventory() {}
+      export const MEMORY_CORE_FORBIDDEN_LEXICAL_PATTERNS = [];
+    `;
+    const gateTest = `
+      import { collectSourceInventory } from '../src/release-gates/memory-core-merge-hygiene.js';
+      it('keeps gate coverage', () => collectSourceInventory());
+    `;
+    const files = new Map<string, string | undefined>([
+      ['parent-a:src/release-gates/memory-core-merge-hygiene.ts', gateSource],
+      ['parent-a:tests/memory-core-merge-hygiene.test.ts', gateTest],
+      ['parent-b:src/release-gates/memory-core-merge-hygiene.ts', gateSource],
+      ['parent-b:tests/memory-core-merge-hygiene.test.ts', gateTest],
+      ['merge:src/release-gates/memory-core-merge-hygiene.ts', gateSource],
+      ['merge:tests/memory-core-merge-hygiene.test.ts', gateTest],
+    ]);
+
+    const git: MergeHygieneGitReader = {
+      listChangedFiles() {
+        return ['src/release-gates/memory-core-merge-hygiene.ts', 'tests/memory-core-merge-hygiene.test.ts'];
+      },
+      readFileAtRef(ref, filePath) {
+        return files.get(`${ref}:${filePath}`);
+      },
+      resolveParentRefs() {
+        return ['parent-a', 'parent-b'];
+      },
+    };
+
+    const report = runMemoryCoreMergeHygiene({ git, mergeRef: 'merge' });
+
+    expect(report).toMatchObject({
+      checked: true,
+      mergeRef: 'merge',
+      ok: true,
+    });
+    expect(report.parentResults).toHaveLength(2);
+    expect(report.parentResults[0]?.changedPaths).toEqual([
+      'src/release-gates/memory-core-merge-hygiene.ts',
+      'tests/memory-core-merge-hygiene.test.ts',
+    ]);
   });
 
   it('skips cleanly when the current ref is not a merge commit', () => {
