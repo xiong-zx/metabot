@@ -155,6 +155,7 @@ metabot restart --wait --json --resume \
 - 2026-07-21 MEM-009 修复后，WorkerManager 对 `autoresearchclaw_output_v2` artifact 必须复用 `validateAutoResearchClawOutput` 深度校验；contract-invalid artifact 只能是 `artifactStatus=invalid` / `contractStatus=violated`，并在 `artifactError.code/message` 暴露原因，不能从失败 worker 恢复为 completed。Legacy candidate aliases 只在受控兼容路径归一化并发出 deprecation telemetry。
 - 2026-07-21 MEM-010/FIX-003：`/api/talk/:taskId` 终态 AutoResearchClaw 只把 `currentPhase` 标成 `completed`/`failed`，ingest/review 结果必须作为 Memory Core system-of-record 后续查询元数据呈现；`bin/metabot` 解析 feature CLI 时，source-tree launcher 必须有 `packages/cli/dist/index.js` 才算 ready，`METABOT_DEFAULT_ENV_FILE` 可指向 ready checkout 复用 CLI，env 文件和 PATH/显式 CLI symlink 会先 canonicalize 再做 ready check，但显式坏的 `METABOT_CORE_CLI` 必须 fail-closed。`set -e` 下 `_load_core_cli_config` 在缺少可选 token 时也要显式 `return 0`，否则 delegate 会提前退出。
 - 2026-07-22 bridge 由 PM2 以 `node --import tsx src/index.ts` 从**源码**运行（非构建产物），改完 `src/` 只需重启、无需 `npm run build`；`packages/server/dist/index.js` 是独立的 `metabot-core` 进程，不受 `src/` 改动影响。
+- 2026-07-22 Claude PTY 冷启动（`--resume` + 6 个 claude.ai 远程 MCP connector）到首个 model turn 可能需要 ~25s，turn-start watchdog 默认 30s 会误杀会话并丢掉用户消息。已在 `.env` 设 `METABOT_CLAUDE_TURN_START_TIMEOUT_MS=90000`（`.env` 由 `src/config.ts` 启动时加载，改后重启即生效，不依赖 PM2 重读 ecosystem）；`watchTurnStart` 现在会在判死前检测「prompt 仍留在 idle 输入框」并补敲一次回车、追加 `METABOT_CLAUDE_TURN_START_RESCUE_MS`（默认 20s）宽限窗口，自救失败才 interrupt + 退役。
 
 <!-- METABOT-WORKER -->
 

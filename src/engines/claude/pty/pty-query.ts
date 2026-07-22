@@ -42,7 +42,11 @@ import type {
   RawJsonlRecord,
 } from './contract.js';
 import { createPtyClaudeSession } from './pty-session.js';
-import { hasClaudeRunningFooter } from './pty-readiness.js';
+import {
+  classifyClaudeInputReadiness,
+  hasClaudePromptText,
+  hasClaudeRunningFooter,
+} from './pty-readiness.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
@@ -643,6 +647,8 @@ export const ptyQuery = (args: {
   /** Absolute cap before we stop watching (let the Stop/exit watchdogs handle). */
   const SLASH_MAX_MS = 30_000;
   const TURN_START_TIMEOUT_MS = envPositiveInt('METABOT_CLAUDE_TURN_START_TIMEOUT_MS', 30_000);
+  /** Extra window granted after the self-rescue Enter (see watchTurnStart). */
+  const TURN_START_RESCUE_MS = envPositiveInt('METABOT_CLAUDE_TURN_START_RESCUE_MS', 20_000);
   /**
    * Claude Code aborts a turn mid-stream by printing this line and returning to
    * the prompt — no Stop hook, so no terminal `result`. Anchored to a line start
@@ -727,6 +733,8 @@ export const ptyQuery = (args: {
    */
   async function watchTurnStart(turnId: number): Promise<void> {
     const start = Date.now();
+    let deadlineMs = TURN_START_TIMEOUT_MS;
+    let rescueAttempted = false;
     while (!disposed && turnInFlight && currentTurnId === turnId) {
       if (currentTurnStarted) return;
       if (hasClaudeRunningFooter(session?.screen() ?? '')) {
@@ -734,9 +742,30 @@ export const ptyQuery = (args: {
         return;
       }
       const elapsed = Date.now() - start;
-      if (elapsed > TURN_START_TIMEOUT_MS) {
+      if (elapsed > deadlineMs) {
+        // Self-rescue before retiring: on a cold start (--resume + remote MCP
+        // connectors still handshaking) the TUI can swallow the submit Enter,
+        // leaving the full prompt sitting in an idle input box. That state is
+        // recoverable — press Enter once more and grant one extra window
+        // instead of dropping the user's message with the session.
+        const rescueScreen = session?.screen() ?? '';
+        if (
+          !rescueAttempted &&
+          classifyClaudeInputReadiness(rescueScreen).idle &&
+          hasClaudePromptText(rescueScreen)
+        ) {
+          rescueAttempted = true;
+          deadlineMs = elapsed + TURN_START_RESCUE_MS;
+          logger.warn(
+            { turnId, elapsedMs: elapsed, rescueWindowMs: TURN_START_RESCUE_MS },
+            'ptyQuery: prompt still in idle input at turn-start deadline — resubmitting Enter',
+          );
+          session?.sendKeys('\r');
+          await sleep(500);
+          continue;
+        }
         logger.warn(
-          { turnId, timeoutMs: TURN_START_TIMEOUT_MS },
+          { turnId, timeoutMs: TURN_START_TIMEOUT_MS, elapsedMs: elapsed, rescueAttempted },
           'ptyQuery: prompt submitted but no model turn started — interrupting and closing turn',
         );
         if (terminalResultTurnId >= turnId) return;
@@ -749,7 +778,7 @@ export const ptyQuery = (args: {
         turnModelTelemetry.sessionDisposition = 'retired';
         turnModelTelemetry.sessionRetireReason = 'turn_start_timeout';
         finishTurnWithError(
-          `Claude Code did not start a model turn within ${Math.round(TURN_START_TIMEOUT_MS / 1000)}s after prompt submission. MetaBot interrupted the PTY, closed this turn, and retired the ambiguous PTY session instead of leaving the Feishu card in thinking or reusing unconsumed input. Please retry the message; MetaBot will resume the conversation in a new PTY.`,
+          `Claude Code did not start a model turn within ${Math.round(elapsed / 1000)}s after prompt submission${rescueAttempted ? ' (a second Enter was retried without effect)' : ''}. MetaBot interrupted the PTY, closed this turn, and retired the ambiguous PTY session instead of leaving the Feishu card in thinking or reusing unconsumed input. Please retry the message; MetaBot will resume the conversation in a new PTY.`,
           undefined,
           turnId,
         );
