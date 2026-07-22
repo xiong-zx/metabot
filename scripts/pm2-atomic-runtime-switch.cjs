@@ -82,6 +82,7 @@ try {
   if (typeof pm2.connect !== 'function'
     || typeof pm2.list !== 'function'
     || typeof pm2.Client?.executeRemote !== 'function'
+    || typeof Common.verifyConfs !== 'function'
     || typeof Common.resolveAppAttributes !== 'function'
     || typeof Common.mergeEnvironmentVariables !== 'function') {
     throw new Error(`PM2 ${pkg.version || 'unknown'} does not expose the required atomic restart API`);
@@ -91,7 +92,9 @@ try {
   const ecosystem = require(ecosystemPath);
   const app = (ecosystem.apps || []).find((entry) => entry && entry.name === appName);
   if (!app) throw new Error(`App ${appName} is missing from ${ecosystemPath}`);
-  target = Common.resolveAppAttributes({ cwd: targetRoot, pm2_home: pm2.pm2_home }, app);
+  const [verifiedApp] = Common.verifyConfs([app]);
+  if (!verifiedApp) throw new Error(`App ${appName} failed PM2 configuration validation`);
+  target = Common.resolveAppAttributes({ cwd: targetRoot, pm2_home: pm2.pm2_home }, verifiedApp);
   if (!target.env) target.env = {};
   target.env.PM2_HOME = pm2.pm2_home;
 } catch (err) {

@@ -30,13 +30,15 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     mkdirSync(join(runtimeB, 'scripts'), { recursive: true });
     cpSync(join(import.meta.dirname, '..', 'scripts', 'pm2-atomic-runtime-switch.cjs'), switchHelper);
     for (const [runtime, label] of [[runtimeA, 'A'], [runtimeB, 'B']] as const) {
-      const script = join(runtime, 'app.cjs');
+      const script = join(runtime, 'app.ts');
       writeFileSync(script, 'setInterval(() => {}, 1000);\n');
       chmodSync(script, 0o755);
       writeFileSync(join(runtime, 'ecosystem.config.cjs'), `module.exports={apps:[{
         name:${JSON.stringify(appName)},
         script:${JSON.stringify(script)},
         cwd:${JSON.stringify(runtime)},
+        interpreter:'node',
+        interpreter_args:'--no-warnings',
         env:{
           RUNTIME_LABEL:${JSON.stringify(label)},
           HTTP_PROXY:'http://127.0.0.1:7890',
@@ -62,7 +64,7 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     expect(readApp()).toMatchObject({
       status: 'online',
       cwd: runtimeA,
-      script: join(runtimeA, 'app.cjs'),
+      script: join(runtimeA, 'app.ts'),
       runtime: 'A',
     });
 
@@ -83,7 +85,7 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     expect(readApp()).toMatchObject({
       status: 'online',
       cwd: runtimeB,
-      script: join(runtimeB, 'app.cjs'),
+      script: join(runtimeB, 'app.ts'),
       runtime: 'B',
       httpProxy: 'http://127.0.0.1:7890',
       httpsProxy: 'http://127.0.0.1:7890',
@@ -93,6 +95,8 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
       serviceAppId: 'shared-app',
       metabotHome: runtimeB,
       restartRequestId: '',
+      execInterpreter: 'node',
+      nodeArgs: ['--no-warnings'],
     });
   }, 20_000);
 
@@ -128,6 +132,8 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
       serviceAppId: pm2Env.FEISHU_SERVICE_APP_ID,
       metabotHome: pm2Env.METABOT_HOME,
       restartRequestId: pm2Env.METABOT_RESTART_REQUEST_ID,
+      execInterpreter: pm2Env.exec_interpreter,
+      nodeArgs: pm2Env.node_args,
     };
   }
 
