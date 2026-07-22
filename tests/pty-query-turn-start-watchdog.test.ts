@@ -298,6 +298,69 @@ describe('ptyQuery turn-start watchdog', () => {
     await expect(iterator.next()).resolves.toMatchObject({ done: true });
   });
 
+  it('resubmits Enter when the prompt is still in an idle input box, then lets the turn run', async () => {
+    process.env.METABOT_CLAUDE_TURN_START_RESCUE_MS = '100';
+    fakeSession.sendKeys.mockReset();
+    fakeSession.screen.mockImplementation(() => '❯ hello');
+    fakeSession.sendKeys.mockImplementation((data: string) => {
+      if (data === '\r') {
+        fakeSession.screen.mockImplementation(() => '∴ Thinking… (esc to interrupt)');
+      }
+    });
+    const { hookBridge, fireTurnComplete } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+    const first = iterator.next();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fakeSession.sendKeys).toHaveBeenCalledWith('\r');
+    expect(fakeSession.interrupt).not.toHaveBeenCalled();
+
+    fakeSession.screen.mockImplementation(() => '❯ ');
+    fireTurnComplete();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await first;
+    expect(result.value).toMatchObject({ type: 'result' });
+    expect((result.value as any).is_error).toBeFalsy();
+    delete process.env.METABOT_CLAUDE_TURN_START_RESCUE_MS;
+    await query.dispose?.();
+  });
+
+  it('retires the session when the rescue Enter also fails to start a turn', async () => {
+    process.env.METABOT_CLAUDE_TURN_START_RESCUE_MS = '100';
+    fakeSession.sendKeys.mockReset();
+    fakeSession.screen.mockImplementation(() => '❯ hello');
+    const { hookBridge } = createHookBridge();
+    const query = ptyQuery({
+      prompt: onePromptThenWait('hello'),
+      options: { cwd: '/tmp', logger, hookBridge: hookBridge as any },
+    });
+    const iterator = query[Symbol.asyncIterator]();
+    const first = iterator.next();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    const result = await first;
+
+    expect(fakeSession.sendKeys).toHaveBeenCalledTimes(1);
+    expect(fakeSession.sendKeys).toHaveBeenCalledWith('\r');
+    expect(result.value).toMatchObject({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      modelTelemetry: {
+        sessionDisposition: 'retired',
+        sessionRetireReason: 'turn_start_timeout',
+      },
+    });
+    expect(String((result.value as any).result)).toContain('a second Enter was retried');
+    expect(fakeSession.interrupt).toHaveBeenCalled();
+    delete process.env.METABOT_CLAUDE_TURN_START_RESCUE_MS;
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+  });
+
   it('does not type a later prompt into a PTY retired after ambiguous submission', async () => {
     let releaseSecond!: () => void;
     const secondReady = new Promise<void>((resolve) => {
