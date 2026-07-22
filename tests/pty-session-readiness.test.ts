@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { classifyClaudeInputReadiness, isClaudeResumeSummaryDialog } from '../src/engines/claude/pty/pty-session.js';
+import {
+  classifyClaudeInputReadiness,
+  isClaudeResumeSummaryDialog,
+  RESUME_SUMMARY_READY_TIMEOUT_MS,
+} from '../src/engines/claude/pty/pty-session.js';
 
 describe('classifyClaudeInputReadiness', () => {
   it('treats a plain input prompt as idle', () => {
@@ -68,6 +72,10 @@ describe('isClaudeResumeSummaryDialog', () => {
 
   it('recognises the long-session resume summary prompt', () => {
     expect(isClaudeResumeSummaryDialog(resumeDialog)).toBe(true);
+  });
+
+  it('allows model-backed compaction to outlive the normal startup timeout', () => {
+    expect(RESUME_SUMMARY_READY_TIMEOUT_MS).toBe(10 * 60_000);
   });
 
   it('keeps the resume prompt classified as a blocking menu', () => {

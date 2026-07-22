@@ -28,6 +28,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
 const PROMPT_MARKER_RE = /[❯⏵]/u;
+const INITIAL_READY_TIMEOUT_MS = 30_000;
+/** Bounded window for Claude's model-backed compaction after summary resume. */
+export const RESUME_SUMMARY_READY_TIMEOUT_MS = 10 * 60_000;
 
 export interface ClaudeInputReadiness {
   hasInputBox: boolean;
@@ -280,10 +283,10 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   }
 
   private async waitForReady(): Promise<void> {
-    const TIMEOUT = 30_000;
     const POLL = 150;
     const SETTLE = 2500;
-    let deadline = Date.now() + TIMEOUT;
+    let activeTimeoutMs = INITIAL_READY_TIMEOUT_MS;
+    let deadline = Date.now() + activeTimeoutMs;
     let resumeSummaryAccepted = false;
 
     while (Date.now() < deadline) {
@@ -295,8 +298,10 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
         resumeSummaryAccepted = true;
         this.log.info('pty-session: confirming recommended resume-from-summary option');
         this.term.write('\r');
-        // Give summary restoration its own full readiness window.
-        deadline = Date.now() + TIMEOUT;
+        // Summary restoration runs a model-backed /compact. Large sessions can
+        // take minutes, so give that phase its own bounded readiness window.
+        activeTimeoutMs = RESUME_SUMMARY_READY_TIMEOUT_MS;
+        deadline = Date.now() + activeTimeoutMs;
         await sleep(POLL);
         continue;
       }
@@ -309,7 +314,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     throw new Error(
-      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯/⏵). ` +
+      `pty-session: timeout (${activeTimeoutMs}ms) waiting for TUI input box (❯/⏵). ` +
         `Current screen: ${this.screen().slice(-500)}`,
     );
   }
