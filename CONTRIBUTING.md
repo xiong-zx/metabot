@@ -38,6 +38,19 @@ src/
 
 ## How to Contribute
 
+## Development Commands
+
+```bash
+npm run typecheck    # No-emit gate for bridge + root referenced workspaces + packages/web-ui
+npm run test:cli     # Canonical root entrypoint for packages/cli Vitest
+npm run check:merge-hygiene:memory-core  # Merge-only Memory Core semantic-loss gate
+npm test             # Run Vitest plus workspace tests
+npm run lint         # ESLint check
+npm run build        # Full build, including legacy web/
+```
+
+`npm run typecheck` intentionally checks `tsconfig.bridge.json`, every workspace referenced from the root solution config (`packages/cli-core`, `packages/metamemory`, `packages/skill-hub`, `packages/cli`, `packages/server`), and `packages/web-ui`. The legacy top-level `web/` app remains excluded from this no-emit gate and is validated by `npm run build:web` / `npm run build`.
+
 ### Reporting Bugs
 
 - Use the [Bug Report](https://github.com/xvirobotics/metabot/issues/new?template=bug_report.md) template

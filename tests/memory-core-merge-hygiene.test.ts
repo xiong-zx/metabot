@@ -10,18 +10,22 @@ import {
 } from '../src/release-gates/memory-core-merge-hygiene.js';
 
 describe('Memory Core merge hygiene path selector', () => {
-  it('targets Memory Core and AutoResearchClaw TypeScript paths only', () => {
+  it('targets Memory Core, AutoResearchClaw, WorkerManager, and known integration TypeScript paths', () => {
     expect(
       selectMemoryCoreMergeHygienePaths([
         'src/memory-core/research-loop-runner.ts',
         './tests/memory-core-autoresearchclaw-contract.test.ts',
         'packages/cli/tests/research-memory.test.ts',
         'src/workers/worker-manager.ts',
+        'src/api/routes/task-routes.ts',
+        'src/mcp/research-memory-mcp-tools.ts',
         'tests/task-scheduler-one-time.test.ts',
         'src/bridge/message-bridge.ts',
       ]),
     ).toEqual([
       'packages/cli/tests/research-memory.test.ts',
+      'src/api/routes/task-routes.ts',
+      'src/mcp/research-memory-mcp-tools.ts',
       'src/memory-core/research-loop-runner.ts',
       'src/workers/worker-manager.ts',
       'tests/memory-core-autoresearchclaw-contract.test.ts',
@@ -36,6 +40,7 @@ describe('Memory Core merge hygiene inventories', () => {
       export function keepPublicApi() {}
       const internalValue = 1;
       export { keepPublicApi as keepPublicApiAlias };
+      import { readFile } from 'node:fs/promises';
 
       describe('suite', () => {
         it('keeps existing test name', () => {});
@@ -48,6 +53,9 @@ describe('Memory Core merge hygiene inventories', () => {
       'export:keepPublicApiAlias',
       'function:keepPublicApi',
     ]);
+    expect(inventory.diagnostics).toEqual([]);
+    expect(inventory.exportedDeclarationSymbols).toEqual(['export:keepPublicApiAlias', 'function:keepPublicApi']);
+    expect(inventory.importSpecifiers).toEqual(['node:fs/promises']);
     expect(inventory.testNames).toEqual(['keeps existing test name', 'keeps skipped test name']);
   });
 
@@ -56,17 +64,44 @@ describe('Memory Core merge hygiene inventories', () => {
       diffInventories(
         {
           declarationSymbols: ['function:keepPublicApi', 'type:StableType'],
+          diagnostics: [],
+          exportedDeclarationSymbols: ['function:keepPublicApi', 'type:StableType'],
+          importSpecifiers: ['../memory-core/index.js'],
           testNames: ['preserves research memory flow'],
         },
         {
           declarationSymbols: ['function:keepPublicApi'],
+          diagnostics: ['src/api/routes/task-routes.ts:unresolved-conflict-marker'],
+          exportedDeclarationSymbols: [],
+          importSpecifiers: [],
           testNames: [],
         },
       ),
     ).toEqual({
+      diagnostics: ['src/api/routes/task-routes.ts:unresolved-conflict-marker'],
       missingDeclarationSymbols: ['type:StableType'],
+      missingExportedDeclarationSymbols: ['function:keepPublicApi', 'type:StableType'],
+      missingImportSpecifiers: ['../memory-core/index.js'],
       missingTestNames: ['preserves research memory flow'],
     });
+  });
+
+  it('detects conflict markers and forbidden legacy candidate aliases', () => {
+    const inventory = collectSourceInventory(`
+      export const output = {
+        hypothesis_candidates: [],
+      };
+      <<<<<<< HEAD
+      export const local = true;
+      =======
+      export const incoming = true;
+      >>>>>>> parent
+    `);
+
+    expect(inventory.diagnostics).toEqual([
+      'forbidden-lexeme:legacy-autoresearchclaw-candidate-alias',
+      'unresolved-conflict-marker',
+    ]);
   });
 });
 
@@ -75,7 +110,7 @@ describe('Memory Core merge hygiene gate', () => {
     const files = new Map<string, string | undefined>([
       [
         'parent-a:src/memory-core/research-loop-runner.ts',
-        `export function keepPublicApi() {}\nexport type StableType = { ok: true };\n`,
+        `import '../api/routes/research-memory-routes.js';\nexport function keepPublicApi() {}\nexport type StableType = { ok: true };\n`,
       ],
       [
         'parent-a:tests/memory-core-autoresearchclaw-contract.test.ts',
@@ -83,12 +118,12 @@ describe('Memory Core merge hygiene gate', () => {
       ],
       [
         'merge:src/memory-core/research-loop-runner.ts',
-        `export function keepPublicApi() {}\n`,
+        `function keepPublicApi() {}\nexport const output = { decision_candidates: [] };\n`,
       ],
       ['merge:tests/memory-core-autoresearchclaw-contract.test.ts', `describe('noop', () => {});\n`],
       [
         'parent-b:src/memory-core/research-loop-runner.ts',
-        `export function keepPublicApi() {}\nexport type StableType = { ok: true };\n`,
+        `import '../api/routes/research-memory-routes.js';\nexport function keepPublicApi() {}\nexport type StableType = { ok: true };\n`,
       ],
       [
         'parent-b:tests/memory-core-autoresearchclaw-contract.test.ts',
@@ -117,15 +152,58 @@ describe('Memory Core merge hygiene gate', () => {
     expect(report.checked).toBe(true);
     expect(report.ok).toBe(false);
     expect(report.parentResults[0]).toMatchObject({
-      changedPaths: [
-        'src/memory-core/research-loop-runner.ts',
-        'tests/memory-core-autoresearchclaw-contract.test.ts',
-      ],
+      changedPaths: ['src/memory-core/research-loop-runner.ts', 'tests/memory-core-autoresearchclaw-contract.test.ts'],
       missingDeclarationSymbols: ['type:StableType'],
+      missingExportedDeclarationSymbols: ['function:keepPublicApi', 'type:StableType'],
+      missingImportSpecifiers: ['../api/routes/research-memory-routes.js'],
       missingTestNames: ['preserves research memory flow'],
       parentRef: 'parent-a',
     });
+    expect(report.parentResults[0]?.diagnostics).toEqual([
+      'src/memory-core/research-loop-runner.ts:forbidden-lexeme:legacy-autoresearchclaw-candidate-alias',
+    ]);
     expect(formatMemoryCoreMergeHygieneReport(report)).toContain('missing tests: preserves research memory flow');
+    expect(formatMemoryCoreMergeHygieneReport(report)).toContain(
+      'missing exported declarations: function:keepPublicApi, type:StableType',
+    );
+  });
+
+  it('fails when a known integration route keeps declarations but drops visibility and imports', () => {
+    const files = new Map<string, string | undefined>([
+      [
+        'parent-a:src/api/routes/task-routes.ts',
+        `import { ingest } from '../../memory-core/index.js';\nexport function buildAutoResearchStatus() { return ingest; }\n`,
+      ],
+      ['merge:src/api/routes/task-routes.ts', `function buildAutoResearchStatus() { return true; }\n`],
+      [
+        'parent-b:src/api/routes/task-routes.ts',
+        `import { ingest } from '../../memory-core/index.js';\nexport function buildAutoResearchStatus() { return ingest; }\n`,
+      ],
+    ]);
+
+    const git: MergeHygieneGitReader = {
+      listChangedFiles() {
+        return ['src/api/routes/task-routes.ts'];
+      },
+      readFileAtRef(ref, filePath) {
+        return files.get(`${ref}:${filePath}`);
+      },
+      resolveParentRefs() {
+        return ['parent-a', 'parent-b'];
+      },
+    };
+
+    const report = runMemoryCoreMergeHygiene({ git, mergeRef: 'merge' });
+
+    expect(report.checked).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.parentResults[0]).toMatchObject({
+      changedPaths: ['src/api/routes/task-routes.ts'],
+      missingDeclarationSymbols: [],
+      missingExportedDeclarationSymbols: ['function:buildAutoResearchStatus'],
+      missingImportSpecifiers: ['../../memory-core/index.js'],
+      parentRef: 'parent-a',
+    });
   });
 
   it('skips cleanly when the current ref is not a merge commit', () => {

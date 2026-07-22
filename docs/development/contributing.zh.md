@@ -29,7 +29,7 @@ npm run dev
 
 ```bash
 npm run dev          # 热重载开发服务器（tsx）
-npm run typecheck    # 受支持的根级 no-emit 校验（solution refs + web-ui）
+npm run typecheck    # no-emit 校验 bridge + 根 solution 引用工作区 + packages/web-ui
 npm test             # 运行测试（vitest）
 npm run test:cli     # 从根目录运行 packages/cli Vitest 的标准入口
 npm run check:merge-hygiene:memory-core  # 仅针对 merge commit 的 Memory Core 语义丢失门禁
@@ -37,6 +37,8 @@ npm run lint         # ESLint 检查
 npm run format       # Prettier 格式化
 npm run build        # TypeScript 编译到 dist/
 ```
+
+`npm run typecheck` 会显式检查 `tsconfig.bridge.json`、根 solution config 引用的所有工作区（`packages/cli-core`、`packages/metamemory`、`packages/skill-hub`、`packages/cli`、`packages/server`）以及受支持的包内 React UI `packages/web-ui`。顶层旧版 `web/` 应用不属于该 no-emit 门禁；它由 `npm run build:web` 和完整 `npm run build` 校验。
 
 ## 如何贡献
 

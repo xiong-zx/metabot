@@ -5,14 +5,34 @@ import ts from 'typescript';
 export const MEMORY_CORE_MERGE_HYGIENE_PATH_PATTERN =
   /^(?:src|tests|packages)\/.*(?:memory-core|research-memory|autoresearchclaw|worker-manager).*\.ts$/;
 
+export const MEMORY_CORE_MERGE_HYGIENE_PATH_PATTERNS = [
+  MEMORY_CORE_MERGE_HYGIENE_PATH_PATTERN,
+  /^src\/api\/routes\/(?:research-memory-routes|task-routes|worker-routes)\.ts$/,
+  /^src\/mcp\/(?:research-memory-mcp-tools|worker-manager-mcp)\.ts$/,
+  /^tests\/(?:research-memory|memory-core|worker-dispatch|worker-manager|task-routes).*\.test\.ts$/,
+] as const;
+
+export const MEMORY_CORE_FORBIDDEN_LEXICAL_PATTERNS = [
+  {
+    id: 'legacy-autoresearchclaw-candidate-alias',
+    pattern: /\b(?:hypothesis_candidates|finding_candidates|decision_candidates)\b/,
+  },
+] as const;
+
 export interface SourceInventory {
   declarationSymbols: string[];
+  diagnostics: string[];
+  exportedDeclarationSymbols: string[];
+  importSpecifiers: string[];
   testNames: string[];
 }
 
 export interface ParentMergeHygieneResult {
   changedPaths: string[];
+  diagnostics: string[];
+  missingExportedDeclarationSymbols: string[];
   missingDeclarationSymbols: string[];
+  missingImportSpecifiers: string[];
   missingTestNames: string[];
   parentRef: string;
 }
@@ -38,7 +58,8 @@ export interface RunMergeHygieneOptions {
 }
 
 export function isMemoryCoreMergeHygienePath(filePath: string): boolean {
-  return MEMORY_CORE_MERGE_HYGIENE_PATH_PATTERN.test(normalizeRepoPath(filePath));
+  const normalized = normalizeRepoPath(filePath);
+  return MEMORY_CORE_MERGE_HYGIENE_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 export function selectMemoryCoreMergeHygienePaths(paths: Iterable<string>): string[] {
@@ -49,6 +70,9 @@ export function collectSourceInventory(sourceText: string, filePath = 'input.ts'
   const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   return {
     declarationSymbols: collectDeclarationSymbols(sourceFile),
+    diagnostics: collectSourceDiagnostics(sourceText),
+    exportedDeclarationSymbols: collectExportedDeclarationSymbols(sourceFile),
+    importSpecifiers: collectImportSpecifiers(sourceFile),
     testNames: collectTestNames(sourceFile),
   };
 }
@@ -56,19 +80,27 @@ export function collectSourceInventory(sourceText: string, filePath = 'input.ts'
 export function diffInventories(
   parentInventory: SourceInventory,
   mergeInventory: SourceInventory,
-): Pick<ParentMergeHygieneResult, 'missingDeclarationSymbols' | 'missingTestNames'> {
+): Pick<
+  ParentMergeHygieneResult,
+  | 'diagnostics'
+  | 'missingDeclarationSymbols'
+  | 'missingExportedDeclarationSymbols'
+  | 'missingImportSpecifiers'
+  | 'missingTestNames'
+> {
   return {
-    missingDeclarationSymbols: subtractItems(
-      parentInventory.declarationSymbols,
-      mergeInventory.declarationSymbols,
+    diagnostics: mergeInventory.diagnostics,
+    missingDeclarationSymbols: subtractItems(parentInventory.declarationSymbols, mergeInventory.declarationSymbols),
+    missingExportedDeclarationSymbols: subtractItems(
+      parentInventory.exportedDeclarationSymbols,
+      mergeInventory.exportedDeclarationSymbols,
     ),
+    missingImportSpecifiers: subtractItems(parentInventory.importSpecifiers, mergeInventory.importSpecifiers),
     missingTestNames: subtractItems(parentInventory.testNames, mergeInventory.testNames),
   };
 }
 
-export function runMemoryCoreMergeHygiene(
-  options: RunMergeHygieneOptions = {},
-): MemoryCoreMergeHygieneReport {
+export function runMemoryCoreMergeHygiene(options: RunMergeHygieneOptions = {}): MemoryCoreMergeHygieneReport {
   const mergeRef = options.mergeRef ?? 'HEAD';
   const git = options.git ?? createGitReader(options.cwd ?? process.cwd());
   const parentRefs = git.resolveParentRefs(mergeRef);
@@ -89,7 +121,10 @@ export function runMemoryCoreMergeHygiene(
     const missing = diffInventories(parentInventory, mergeInventory);
     return {
       changedPaths,
+      diagnostics: missing.diagnostics,
       missingDeclarationSymbols: missing.missingDeclarationSymbols,
+      missingExportedDeclarationSymbols: missing.missingExportedDeclarationSymbols,
+      missingImportSpecifiers: missing.missingImportSpecifiers,
       missingTestNames: missing.missingTestNames,
       parentRef,
     } satisfies ParentMergeHygieneResult;
@@ -97,14 +132,21 @@ export function runMemoryCoreMergeHygiene(
 
   const checked = parentResults.some((result) => result.changedPaths.length > 0);
   const ok = parentResults.every(
-    (result) => result.missingDeclarationSymbols.length === 0 && result.missingTestNames.length === 0,
+    (result) =>
+      result.diagnostics.length === 0 &&
+      result.missingDeclarationSymbols.length === 0 &&
+      result.missingExportedDeclarationSymbols.length === 0 &&
+      result.missingImportSpecifiers.length === 0 &&
+      result.missingTestNames.length === 0,
   );
   return {
     checked,
     mergeRef,
     ok,
     parentResults,
-    ...(checked ? {} : { skippedReason: 'No Memory Core / AutoResearchClaw TypeScript paths changed across merge parents.' }),
+    ...(checked
+      ? {}
+      : { skippedReason: 'No Memory Core / AutoResearchClaw TypeScript paths changed across merge parents.' }),
   };
 }
 
@@ -119,12 +161,27 @@ export function formatMemoryCoreMergeHygieneReport(report: MemoryCoreMergeHygien
 
   const lines = [`Memory Core merge hygiene failed for ${report.mergeRef}:`];
   for (const result of report.parentResults) {
-    if (result.missingTestNames.length === 0 && result.missingDeclarationSymbols.length === 0) continue;
+    if (
+      result.diagnostics.length === 0 &&
+      result.missingTestNames.length === 0 &&
+      result.missingDeclarationSymbols.length === 0 &&
+      result.missingExportedDeclarationSymbols.length === 0 &&
+      result.missingImportSpecifiers.length === 0
+    ) {
+      continue;
+    }
     lines.push(`- Parent ${result.parentRef}`);
     if (result.changedPaths.length > 0) lines.push(`  changed: ${result.changedPaths.join(', ')}`);
+    if (result.diagnostics.length > 0) lines.push(`  diagnostics: ${result.diagnostics.join(', ')}`);
     if (result.missingTestNames.length > 0) lines.push(`  missing tests: ${result.missingTestNames.join(', ')}`);
     if (result.missingDeclarationSymbols.length > 0) {
       lines.push(`  missing declarations: ${result.missingDeclarationSymbols.join(', ')}`);
+    }
+    if (result.missingExportedDeclarationSymbols.length > 0) {
+      lines.push(`  missing exported declarations: ${result.missingExportedDeclarationSymbols.join(', ')}`);
+    }
+    if (result.missingImportSpecifiers.length > 0) {
+      lines.push(`  missing import specifiers: ${result.missingImportSpecifiers.join(', ')}`);
     }
   }
   return lines.join('\n');
@@ -164,7 +221,10 @@ function createGitReader(cwd: string): MergeHygieneGitReader {
   return {
     listChangedFiles(parentRef, mergeRef) {
       const output = execGit(['diff', '--name-only', parentRef, mergeRef, '--', 'tests', 'src', 'packages'], cwd);
-      return output.split('\n').map((line) => line.trim()).filter(Boolean);
+      return output
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
     },
     readFileAtRef(ref, filePath) {
       try {
@@ -187,6 +247,9 @@ function execGit(args: string[], cwd: string): string {
 
 function aggregateInventory(ref: string, filePaths: string[], git: MergeHygieneGitReader): SourceInventory {
   const declarationSymbols = new Set<string>();
+  const diagnostics = new Set<string>();
+  const exportedDeclarationSymbols = new Set<string>();
+  const importSpecifiers = new Set<string>();
   const testNames = new Set<string>();
 
   for (const filePath of filePaths) {
@@ -194,11 +257,17 @@ function aggregateInventory(ref: string, filePaths: string[], git: MergeHygieneG
     if (contents === undefined) continue;
     const inventory = collectSourceInventory(contents, filePath);
     for (const symbol of inventory.declarationSymbols) declarationSymbols.add(symbol);
+    for (const diagnostic of inventory.diagnostics) diagnostics.add(`${filePath}:${diagnostic}`);
+    for (const symbol of inventory.exportedDeclarationSymbols) exportedDeclarationSymbols.add(symbol);
+    for (const specifier of inventory.importSpecifiers) importSpecifiers.add(specifier);
     for (const testName of inventory.testNames) testNames.add(testName);
   }
 
   return {
     declarationSymbols: [...declarationSymbols].sort(),
+    diagnostics: [...diagnostics].sort(),
+    exportedDeclarationSymbols: [...exportedDeclarationSymbols].sort(),
+    importSpecifiers: [...importSpecifiers].sort(),
     testNames: [...testNames].sort(),
   };
 }
@@ -246,6 +315,20 @@ function collectStatementSymbols(statement: ts.Statement, symbols: Set<string>):
   }
 }
 
+function collectExportedDeclarationSymbols(sourceFile: ts.SourceFile): string[] {
+  const symbols = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    collectStatementSymbols(statement, exportedSymbolsForStatement(statement, symbols));
+  }
+  return [...symbols].sort();
+}
+
+function exportedSymbolsForStatement(statement: ts.Statement, symbols: Set<string>): Set<string> {
+  if (hasExportModifier(statement)) return symbols;
+  if (ts.isExportDeclaration(statement)) return symbols;
+  return new Set<string>();
+}
+
 function variableDeclarationKind(declarationList: ts.VariableDeclarationList): 'const' | 'let' | 'var' {
   if (declarationList.flags & ts.NodeFlags.Const) return 'const';
   if (declarationList.flags & ts.NodeFlags.Let) return 'let';
@@ -258,6 +341,37 @@ function collectBindingNames(declarations: ts.NodeArray<ts.VariableDeclaration>)
     appendBindingName(declaration.name, names);
   }
   return names;
+}
+
+function collectImportSpecifiers(sourceFile: ts.SourceFile): string[] {
+  const specifiers = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const moduleSpecifier = stringLiteralText(statement.moduleSpecifier);
+    if (!moduleSpecifier) continue;
+    specifiers.add(moduleSpecifier);
+  }
+  return [...specifiers].sort();
+}
+
+function collectSourceDiagnostics(sourceText: string): string[] {
+  const diagnostics: string[] = [];
+  if (hasConflictMarkers(sourceText)) diagnostics.push('unresolved-conflict-marker');
+  for (const item of MEMORY_CORE_FORBIDDEN_LEXICAL_PATTERNS) {
+    if (item.pattern.test(sourceText)) diagnostics.push(`forbidden-lexeme:${item.id}`);
+  }
+  return diagnostics.sort();
+}
+
+function hasConflictMarkers(sourceText: string): boolean {
+  return /^\s*(?:<{7}|={7}|>{7})(?:\s|$)/m.test(sourceText);
+}
+
+function hasExportModifier(statement: ts.Statement): boolean {
+  return (
+    ts.canHaveModifiers(statement) &&
+    ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) === true
+  );
 }
 
 function appendBindingName(name: ts.BindingName, names: string[]): void {

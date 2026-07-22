@@ -29,6 +29,9 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # Merge-only semantic-loss sweep for Memory Core / AutoResearchClaw.
+      # It checks targeted bridge/workspace/integration TypeScript paths across
+      # each merge parent and skips non-merge commits.
       - name: Memory Core merge hygiene
         run: npm run check:merge-hygiene:memory-core
 
