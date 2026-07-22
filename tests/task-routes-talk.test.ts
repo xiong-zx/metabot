@@ -104,6 +104,10 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function largeResponseText(label: string): string {
+  return `${label}:${'x'.repeat(300 * 1024)}`;
+}
+
 function expectShellCommandArgs(command: string, expectedArgs: string[], markerFiles: string[] = []): void {
   const argsFile = path.join(os.tmpdir(), `metabot-command-args-${process.pid}-${Math.random()}`);
   const result = spawnSync(
@@ -199,6 +203,40 @@ describe('/api/talk async UX', () => {
     expect(status.json()).not.toHaveProperty('finalPhase');
     expect(typeof status.json().elapsedMs).toBe('number');
     expect(status.json().result).toMatchObject({ success: true, responseText: 'done' });
+  });
+
+  it('preserves full production-flat async task results with generic 300KB responseText', async () => {
+    const responseText = largeResponseText('generic-large-terminal');
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText,
+      costUsd: 0.02,
+      durationMs: 321,
+    }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.statusCode).toBe(200);
+    expect(status.json().result).toEqual({
+      success: true,
+      responseText,
+      costUsd: 0.02,
+      durationMs: 321,
+    });
+    expect(status.json().result.responseText).toHaveLength(responseText.length);
+    expect(status.json().result.responseText).not.toContain('[Truncated: string budget exceeded]');
   });
 
   it('running task status includes retry guidance and elapsed time', async () => {
@@ -722,6 +760,49 @@ describe('/api/talk async UX', () => {
     });
   });
 
+  it('preserves full production-flat Memory Core result with adversarial 300KB responseText', async () => {
+    const responseText = JSON.stringify({
+      event_ids: ['mem_evt_large_response'],
+      padding: largeResponseText('memory-large-terminal'),
+    });
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText, durationMs: 77 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-large projectRoot=/root/workspaces/mem-terminal-large domain=memory-core. Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: {
+        success: true,
+        responseText,
+        durationMs: 77,
+      },
+    });
+    expect(status.json().result.responseText).toHaveLength(responseText.length);
+    expect(status.json().result.responseText).not.toContain('[Truncated: string budget exceeded]');
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
   it('preserves phased Memory Core context and partial evidence after async failure', async () => {
     const responseText = JSON.stringify({
       partial: {
@@ -950,8 +1031,13 @@ describe('/api/talk async UX', () => {
   it('returns degraded Memory Core guidance for cyclic terminal evidence without throwing', async () => {
     const cyclic: any = { eventIds: ['mem_evt_cycle'] };
     cyclic.result = cyclic;
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: cyclic,
+    });
 
-    const status = await completedMemoryStatusForResult({ success: true, result: cyclic });
+    const status = await completedMemoryStatusForResult(result);
     expect(status.statusCode).toBe(200);
     expect(status.json()).toMatchObject({
       status: 'completed',
@@ -969,11 +1055,7 @@ describe('/api/talk async UX', () => {
         },
       },
       nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
-      result: expect.objectContaining({
-        result: expect.objectContaining({
-          result: '[Circular]',
-        }),
-      }),
+      result: { success: true, responseText: '' },
     });
   });
 
@@ -985,8 +1067,13 @@ describe('/api/talk async UX', () => {
       cursor = cursor.result;
     }
     cursor.eventIds = ['mem_evt_too_deep'];
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: deep,
+    });
 
-    const status = await completedMemoryStatusForResult({ success: true, result: deep });
+    const status = await completedMemoryStatusForResult(result);
     expect(status.statusCode).toBe(200);
     expect(status.json()).toMatchObject({
       status: 'completed',
@@ -1001,6 +1088,85 @@ describe('/api/talk async UX', () => {
       nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
     });
     expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('does not mark repeated shared evidence references as truncated', async () => {
+    const shared = { events: [{ id: 'mem_evt_shared' }] };
+    const evidence = { writes: shared, partial: shared };
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      value: evidence,
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_shared'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: { success: true, responseText: '' },
+    });
+    expect(status.json().nextAction).not.toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('does not mark unrelated non-envelope payload fields as truncated evidence', async () => {
+    const responseText = '';
+    const terminalResult = {
+      success: true,
+      responseText,
+      result: {
+        eventIds: ['mem_evt_flat'],
+        unrelatedLog: largeResponseText('not-memory-evidence'),
+      },
+      durationMs: 14,
+    };
+
+    const status = await completedMemoryStatusForResult(terminalResult);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_flat'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: terminalResult,
+    });
+    expect(status.json().nextAction).not.toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('degrades Memory Core evidence extraction instead of propagating throwing getters', async () => {
+    const result = { success: true, responseText: '' };
+    Object.defineProperty(result, 'memoryCoreEvidence', {
+      enumerable: false,
+      get() {
+        throw new Error('getter failed');
+      },
+    });
+
+    const status = await completedMemoryStatusForResult(result);
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      result: { success: true, responseText: '' },
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+    expect(status.json().nextAction).toContain('Bounded terminal extraction was truncated');
   });
 
   it('deterministically truncates wide evidence arrays at the item budget without throwing', async () => {
@@ -1272,6 +1438,35 @@ describe('/api/talk async UX', () => {
       success: true,
       responseText: 'fast',
     });
+  });
+
+  it('waitMs and async terminal status both preserve 300KB responseText', async () => {
+    const responseText = largeResponseText('wait-parity');
+    const waitCtx = makeCtx(vi.fn(async () => ({ success: true, responseText, durationMs: 5 })));
+    const waitRes = await call(waitCtx, 'POST', '/api/talk?waitMs=1000', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+
+    const asyncCtx = makeCtx(vi.fn(async () => ({ success: true, responseText, durationMs: 5 })));
+    const asyncRes = await call(asyncCtx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt: 'hello',
+      sendCards: false,
+    });
+    const taskId = asyncRes.json().taskId;
+    await eventually(() => {
+      expect(asyncCtx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+    const status = await call(asyncCtx, 'GET', `/api/talk/${taskId}`);
+
+    expect(waitRes.statusCode).toBe(200);
+    expect(waitRes.json().responseText).toBe(responseText);
+    expect(status.statusCode).toBe(200);
+    expect(status.json().result.responseText).toBe(responseText);
   });
 
   it('maps chat-busy talk failures to 409 with retry metadata', async () => {

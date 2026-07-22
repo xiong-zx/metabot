@@ -525,7 +525,7 @@ function taskStatusResponse(task: {
       : (memoryTerminalStatus?.nextAction ?? terminalNextAction(preflight)),
     ...(preflight === undefined ? {} : { preflight }),
     ...(memoryTerminalStatus?.evidence === undefined ? {} : { memoryCoreEvidence: memoryTerminalStatus.evidence }),
-    result: safeTaskResultForResponse(task.result),
+    result: task.result,
   };
 }
 
@@ -692,7 +692,6 @@ interface MemoryCoreEvidenceCollectorState {
   degraded: boolean;
   nodeCount: number;
   stringBytes: number;
-  visited: WeakSet<object>;
 }
 
 type MemoryCoreEvidenceContext =
@@ -710,6 +709,7 @@ interface MemoryCoreEvidenceFrame {
   value: unknown;
   context: MemoryCoreEvidenceContext;
   depth: number;
+  exit?: boolean;
 }
 
 const MEMORY_CORE_EVIDENCE_MAX_DEPTH = 48;
@@ -717,93 +717,6 @@ const MEMORY_CORE_EVIDENCE_MAX_NODES = 3_000;
 const MEMORY_CORE_EVIDENCE_MAX_ARRAY_ITEMS = 1_000;
 const MEMORY_CORE_EVIDENCE_MAX_STRING_BYTES = 256_000;
 const MEMORY_CORE_EVIDENCE_MAX_ID_BYTES = 512;
-const TASK_RESULT_RESPONSE_MAX_DEPTH = 48;
-const TASK_RESULT_RESPONSE_MAX_NODES = 5_000;
-const TASK_RESULT_RESPONSE_MAX_ARRAY_ITEMS = 1_000;
-const TASK_RESULT_RESPONSE_MAX_STRING_BYTES = 256_000;
-
-function safeTaskResultForResponse(value: unknown): unknown {
-  const root = safeTaskResultInitialClone(value);
-  if (!isRecord(root) && !Array.isArray(root)) return root;
-  if (!isRecord(value) && !Array.isArray(value)) return root;
-
-  const visited = new WeakSet<object>();
-  const stack: Array<{
-    source: Record<string, unknown> | unknown[];
-    target: Record<string, unknown> | unknown[];
-    depth: number;
-  }> = [
-    { source: value, target: root, depth: 0 } as {
-      source: Record<string, unknown> | unknown[];
-      target: Record<string, unknown> | unknown[];
-      depth: number;
-    },
-  ];
-  let nodeCount = 0;
-
-  while (stack.length > 0) {
-    const frame = stack.pop()!;
-    if (visited.has(frame.source)) continue;
-    visited.add(frame.source);
-    if (frame.depth >= TASK_RESULT_RESPONSE_MAX_DEPTH) {
-      safeTaskResultMarkTruncated(frame.target);
-      continue;
-    }
-    const entries = Array.isArray(frame.source)
-      ? frame.source.slice(0, TASK_RESULT_RESPONSE_MAX_ARRAY_ITEMS).map((item, index) => [String(index), item] as const)
-      : Object.entries(frame.source);
-    if (Array.isArray(frame.source) && frame.source.length > TASK_RESULT_RESPONSE_MAX_ARRAY_ITEMS) {
-      (frame.target as unknown[]).push('[Truncated: array item budget exceeded]');
-    }
-    for (const [key, child] of entries) {
-      if (nodeCount >= TASK_RESULT_RESPONSE_MAX_NODES) {
-        safeTaskResultAssign(frame.target, key, '[Truncated: result node budget exceeded]');
-        continue;
-      }
-      nodeCount += 1;
-      const childClone = safeTaskResultInitialClone(child);
-      safeTaskResultAssign(frame.target, key, childClone);
-      if ((isRecord(child) || Array.isArray(child)) && (isRecord(childClone) || Array.isArray(childClone))) {
-        if (visited.has(child)) {
-          safeTaskResultAssign(frame.target, key, '[Circular]');
-        } else {
-          stack.push({ source: child, target: childClone, depth: frame.depth + 1 });
-        }
-      }
-    }
-  }
-
-  return root;
-}
-
-function safeTaskResultInitialClone(value: unknown): unknown {
-  if (typeof value === 'string') {
-    if (Buffer.byteLength(value, 'utf8') > TASK_RESULT_RESPONSE_MAX_STRING_BYTES) {
-      return '[Truncated: string budget exceeded]';
-    }
-    return value;
-  }
-  if (Array.isArray(value)) return [];
-  if (isRecord(value)) return {};
-  return value;
-}
-
-function safeTaskResultAssign(target: Record<string, unknown> | unknown[], key: string, value: unknown): void {
-  if (Array.isArray(target)) {
-    target[Number(key)] = value;
-    return;
-  }
-  target[key] = value;
-}
-
-function safeTaskResultMarkTruncated(target: Record<string, unknown> | unknown[]): void {
-  if (Array.isArray(target)) {
-    target.push('[Truncated: result depth budget exceeded]');
-    return;
-  }
-  target.__truncated = 'result depth budget exceeded';
-}
-
 function memoryTerminalStatusDetails(
   status: string,
   preflight: Record<string, unknown>,
@@ -974,7 +887,6 @@ function extractMemoryCoreTerminalEvidence(result: unknown): {
     degraded: false,
     nodeCount: 0,
     stringBytes: 0,
-    visited: new WeakSet<object>(),
   };
   const roots = collectMemoryCoreEvidenceRoots(result, state);
   for (const root of roots) {
@@ -1009,11 +921,13 @@ function collectMemoryCoreEvidenceRoots(
   const rootRecord = isRecord(result) ? result : undefined;
   if (rootRecord === undefined) return roots;
 
-  const parsedResponseText = parseMemoryCoreResponsePayload(rootRecord.responseText, state);
+  const responseText = readMemoryCoreEvidenceProperty(rootRecord, 'responseText', state);
+  const parsedResponseText = parseMemoryCoreResponsePayload(responseText.value, state);
   if (parsedResponseText !== undefined) roots.push({ value: parsedResponseText, context: 'root' });
 
   for (const key of ['memoryCoreEvidence', 'evidence', 'result', 'results', 'data', 'partial', 'writes']) {
-    if (key in rootRecord) roots.push({ value: rootRecord[key], context: 'trusted' });
+    const child = readMemoryCoreEvidenceProperty(rootRecord, key, state);
+    if (child.exists) roots.push({ value: child.value, context: 'trusted' });
   }
 
   if (!isAsyncTaskResultEnvelope(rootRecord)) roots.push({ value: rootRecord, context: 'root' });
@@ -1056,8 +970,13 @@ function collectMemoryCoreEvidenceFromRoot(
   state: MemoryCoreEvidenceCollectorState,
 ): void {
   const stack: MemoryCoreEvidenceFrame[] = [{ value: root, context: rootContext, depth: 0 }];
+  const activePath = new WeakSet<object>();
   while (stack.length > 0) {
     const frame = stack.pop()!;
+    if ((isRecord(frame.value) || Array.isArray(frame.value)) && frame.exit === true) {
+      activePath.delete(frame.value);
+      continue;
+    }
     if (frame.depth > MEMORY_CORE_EVIDENCE_MAX_DEPTH) {
       state.degraded = true;
       continue;
@@ -1072,16 +991,17 @@ function collectMemoryCoreEvidenceFromRoot(
       reserveMemoryCoreEvidenceString(frame.value, state);
       continue;
     }
+    if (!isRecord(frame.value) && !Array.isArray(frame.value)) continue;
+    if (activePath.has(frame.value)) {
+      state.degraded = true;
+      continue;
+    }
+    activePath.add(frame.value);
+    stack.push({ ...frame, exit: true });
     if (Array.isArray(frame.value)) {
       collectMemoryCoreEvidenceArray(frame, state, stack);
       continue;
     }
-    if (!isRecord(frame.value)) continue;
-    if (state.visited.has(frame.value)) {
-      state.degraded = true;
-      continue;
-    }
-    state.visited.add(frame.value);
     collectMemoryCoreIdsFromRecord(frame.value, frame.context, state);
     collectMemoryCorePendingReviewFromRecord(frame.value, frame.context, state);
     collectMemoryCoreChildContainers({ ...frame, value: frame.value }, state, stack);
@@ -1106,15 +1026,15 @@ function collectMemoryCoreChildContainers(
   state: MemoryCoreEvidenceCollectorState,
   stack: MemoryCoreEvidenceFrame[],
 ): void {
-  const entries = Object.entries(frame.value);
+  const entries = memoryCoreEvidenceEntries(frame.value, state);
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const [key, child] = entries[index]!;
+    const childContext = memoryCoreChildContext(frame.context, normalizeEvidenceKey(key));
+    if (childContext === undefined) continue;
     if (typeof child === 'string') {
       reserveMemoryCoreEvidenceString(child, state);
       continue;
     }
-    const childContext = memoryCoreChildContext(frame.context, normalizeEvidenceKey(key));
-    if (childContext === undefined) continue;
     stack.push({ value: child, context: childContext, depth: frame.depth + 1 });
   }
 }
@@ -1183,7 +1103,7 @@ function collectMemoryCoreIdsFromRecord(
   context: MemoryCoreEvidenceContext,
   state: MemoryCoreEvidenceCollectorState,
 ): void {
-  for (const [key, value] of Object.entries(record)) {
+  for (const [key, value] of memoryCoreEvidenceEntries(record, state)) {
     const normalizedKey = normalizeEvidenceKey(key);
     const target = memoryCoreBucketForKey(normalizedKey, context);
     if (target !== undefined) collectMemoryCoreValue(target, value, state);
@@ -1319,7 +1239,7 @@ function collectMemoryCorePendingReviewFromRecord(
   state: MemoryCoreEvidenceCollectorState,
 ): void {
   if (!memoryCorePendingReviewTrustedContext(context)) return;
-  for (const [key, value] of Object.entries(record)) {
+  for (const [key, value] of memoryCoreEvidenceEntries(record, state)) {
     const normalizedKey = normalizeEvidenceKey(key);
     if (typeof value === 'boolean' && memoryCorePendingReviewBoolean(normalizedKey, value)) {
       state.pendingReview = true;
@@ -1343,6 +1263,39 @@ function memoryCorePendingReviewBoolean(normalizedKey: string, value: boolean): 
     normalizedKey === 'candidatepending' ||
     normalizedKey === 'promotionpending'
   );
+}
+
+function memoryCoreEvidenceEntries(
+  record: Record<string, unknown>,
+  state: MemoryCoreEvidenceCollectorState,
+): Array<[string, unknown]> {
+  let keys: string[];
+  try {
+    keys = Object.keys(record);
+  } catch {
+    state.degraded = true;
+    return [];
+  }
+  const entries: Array<[string, unknown]> = [];
+  for (const key of keys) {
+    const child = readMemoryCoreEvidenceProperty(record, key, state);
+    if (child.exists) entries.push([key, child.value]);
+  }
+  return entries;
+}
+
+function readMemoryCoreEvidenceProperty(
+  record: Record<string, unknown>,
+  key: string,
+  state: MemoryCoreEvidenceCollectorState,
+): { exists: boolean; value?: unknown } {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) return { exists: false };
+    return { exists: true, value: record[key] };
+  } catch {
+    state.degraded = true;
+    return { exists: false };
+  }
 }
 
 function normalizeEvidenceKey(key: string): string {
