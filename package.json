@@ -48,6 +48,7 @@
     "openai": "^6.29.0",
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
+    "tsx": "^4.21.0",
     "undici": "^7.24.5",
     "ws": "^8.19.0",
     "xlsx": "^0.18.5"
@@ -58,7 +59,6 @@
     "@types/node": "^22.0.0",
     "eslint": "^10.0.2",
     "prettier": "^3.8.1",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "vitest": "^3.2.4"

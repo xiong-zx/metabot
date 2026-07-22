@@ -406,6 +406,30 @@ _restart_state_dir() {
   fi
 }
 
+# The bridge is launched as `node --import tsx src/index.ts`, so tsx must be
+# resolvable from METABOT_HOME at spawn time. Agent shells spawned by the
+# bridge inherit NODE_ENV=production (ecosystem.config.cjs), and a bare
+# `npm install` run in such a shell prunes devDependencies — which used to
+# remove tsx and send the next restart into a 10x crash-loop until PM2 gave
+# up ("errored"). tsx now lives in dependencies, but verify before every
+# (re)start anyway and self-heal if some other pruning path removed it.
+_ensure_runtime_deps() {
+  if (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1); then
+    return 0
+  fi
+  warn "tsx is not resolvable from $METABOT_HOME — repairing before touching PM2."
+  (cd "$METABOT_HOME" && NODE_ENV=development npm install --include=dev --no-audit --no-fund) || {
+    error "npm install failed; refusing to restart into a guaranteed crash-loop."
+    echo "  Fix dependencies first: cd $METABOT_HOME && npm install --include=dev"
+    return 1
+  }
+  (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1) || {
+    error "tsx is still missing after npm install; refusing to restart."
+    return 1
+  }
+  success "Runtime dependencies repaired."
+}
+
 # Drop a breadcrumb so the bridge knows it was just restarted. After
 # `pm2 restart` the node process (and every Claude session) is killed and
 # respawned, so the agent that issued the restart loses all memory of having
@@ -618,6 +642,7 @@ _wait_bridge_health() {
 }
 
 cmd_start() {
+  _ensure_runtime_deps || return 1
   pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env
   if _wait_bridge_health 60; then
     pm2 save --force
@@ -709,6 +734,12 @@ cmd_restart() {
     [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s"}\n' "$request_id"
     info "Restart request $request_id was already attempted; no second restart was issued."
     return 0
+  fi
+
+  if ! _ensure_runtime_deps; then
+    _mark_restart_request_failed "$request_id" "Runtime dependencies missing (tsx unresolvable) and repair failed"
+    [[ "$json" == true ]] && printf '{"ok":false,"reason":"runtime-deps-missing","requestId":"%s"}\n' "$request_id"
+    return 1
   fi
 
   _write_restart_breadcrumb
