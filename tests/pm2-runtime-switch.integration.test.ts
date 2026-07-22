@@ -14,7 +14,15 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
   const runtimeA = join(root, 'runtime-a');
   const runtimeB = join(root, 'runtime-b');
   const switchHelper = join(runtimeB, 'scripts', 'pm2-atomic-runtime-switch.cjs');
-  const env = { ...process.env, PM2_HOME: pm2Home };
+  const env = {
+    ...process.env,
+    PM2_HOME: pm2Home,
+    BOTS_CONFIG: '/shared/bots.json',
+    METABOT_DEFAULT_ENV_FILE: '/shared/default.env',
+    WIKI_SYNC_STATE_DIR: '/shared/wiki-state',
+    FEISHU_SERVICE_APP_ID: 'shared-app',
+  };
+  delete env.METABOT_RESTART_REQUEST_ID;
 
   beforeAll(() => {
     mkdirSync(runtimeA, { recursive: true });
@@ -22,14 +30,22 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     mkdirSync(join(runtimeB, 'scripts'), { recursive: true });
     cpSync(join(import.meta.dirname, '..', 'scripts', 'pm2-atomic-runtime-switch.cjs'), switchHelper);
     for (const [runtime, label] of [[runtimeA, 'A'], [runtimeB, 'B']] as const) {
-      const script = join(runtime, 'app.cjs');
+      const script = join(runtime, 'app.ts');
       writeFileSync(script, 'setInterval(() => {}, 1000);\n');
       chmodSync(script, 0o755);
       writeFileSync(join(runtime, 'ecosystem.config.cjs'), `module.exports={apps:[{
         name:${JSON.stringify(appName)},
         script:${JSON.stringify(script)},
         cwd:${JSON.stringify(runtime)},
-        env:{RUNTIME_LABEL:${JSON.stringify(label)},HTTP_PROXY:'http://127.0.0.1:7890',HTTPS_PROXY:'http://127.0.0.1:7890'}
+        interpreter:'node',
+        interpreter_args:'--no-warnings',
+        env:{
+          RUNTIME_LABEL:${JSON.stringify(label)},
+          HTTP_PROXY:'http://127.0.0.1:7890',
+          HTTPS_PROXY:'http://127.0.0.1:7890',
+          ${label === 'A' ? "BOTS_CONFIG:'/shared/bots.json',METABOT_DEFAULT_ENV_FILE:'/shared/default.env',WIKI_SYNC_STATE_DIR:'/shared/wiki-state',FEISHU_SERVICE_APP_ID:'shared-app'," : ""}
+          ${label === 'A' ? "METABOT_HOME:'/old/runtime',METABOT_RESTART_REQUEST_ID:'old-request'" : `METABOT_HOME:${JSON.stringify(runtime)}`}
+        }
       }]};\n`);
     }
   });
@@ -48,7 +64,7 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     expect(readApp()).toMatchObject({
       status: 'online',
       cwd: runtimeA,
-      script: join(runtimeA, 'app.cjs'),
+      script: join(runtimeA, 'app.ts'),
       runtime: 'A',
     });
 
@@ -69,10 +85,18 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
     expect(readApp()).toMatchObject({
       status: 'online',
       cwd: runtimeB,
-      script: join(runtimeB, 'app.cjs'),
+      script: join(runtimeB, 'app.ts'),
       runtime: 'B',
       httpProxy: 'http://127.0.0.1:7890',
       httpsProxy: 'http://127.0.0.1:7890',
+      botsConfig: '/shared/bots.json',
+      defaultEnvFile: '/shared/default.env',
+      wikiSyncStateDir: '/shared/wiki-state',
+      serviceAppId: 'shared-app',
+      metabotHome: runtimeB,
+      restartRequestId: '',
+      execInterpreter: 'node',
+      nodeArgs: ['--no-warnings'],
     });
   }, 20_000);
 
@@ -102,6 +126,14 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
       runtime: pm2Env.RUNTIME_LABEL,
       httpProxy: pm2Env.HTTP_PROXY,
       httpsProxy: pm2Env.HTTPS_PROXY,
+      botsConfig: pm2Env.BOTS_CONFIG,
+      defaultEnvFile: pm2Env.METABOT_DEFAULT_ENV_FILE,
+      wikiSyncStateDir: pm2Env.WIKI_SYNC_STATE_DIR,
+      serviceAppId: pm2Env.FEISHU_SERVICE_APP_ID,
+      metabotHome: pm2Env.METABOT_HOME,
+      restartRequestId: pm2Env.METABOT_RESTART_REQUEST_ID,
+      execInterpreter: pm2Env.exec_interpreter,
+      nodeArgs: pm2Env.node_args,
     };
   }
 
