@@ -589,7 +589,8 @@ function syncWorkerDetailRefs(record: WorkerRecord): void {
   }
   if (record.artifactPath) {
     record.finalPayloadRef = `file://${record.artifactPath}`;
-    record.deliveryStatus = record.artifactStatus === 'valid_complete' ? 'full' : 'file_only';
+    record.deliveryStatus =
+      record.status === 'completed' && record.artifactStatus === 'valid_complete' ? 'full' : 'file_only';
     return;
   }
   if (record.status === 'failed' || record.status === 'aborted') {
@@ -599,19 +600,36 @@ function syncWorkerDetailRefs(record: WorkerRecord): void {
   record.deliveryStatus = record.resultSummary && record.resultSummary.length >= 500 ? 'truncated' : 'chat_only';
 }
 
+function ensureTerminalTiming(record: WorkerRecord): void {
+  if (record.endTime === undefined) {
+    record.endTime = record.durationMs !== undefined ? record.startTime + record.durationMs : Date.now();
+  }
+  if (record.durationMs === undefined) {
+    record.durationMs = Math.max(0, record.endTime - record.startTime);
+  }
+}
+
 function reconcileTerminalWorkerRecord(
   record: WorkerRecord,
   options: {
     onLegacyAliasDeprecation?: (event: AutoResearchClawLegacyAliasDeprecationTelemetry) => void;
+    allowArtifactRecovery?: boolean;
   } = {},
 ): void {
   if (!isTerminalWorkerStatus(record.status)) return;
+
+  if (record.executionStatus === undefined || record.executionStatus === 'running') {
+    if (record.status === 'completed') record.executionStatus = 'completed';
+    else if (record.status === 'aborted') record.executionStatus = 'aborted';
+    else record.executionStatus = classifyExecutionStatus(record.error);
+  }
 
   const contract = normalizeWorkerOutputContract(record.outputContract) ?? inferOutputContract(record);
   if (contract) {
     record.outputContract = contract;
   }
 
+  const allowArtifactRecovery = options.allowArtifactRecovery ?? record.recoveryStatus !== 'manual_required';
   const shouldInspectArtifact = !!contract || record.status === 'failed';
   if (shouldInspectArtifact) {
     const artifact = inspectWorkerArtifacts(record.workingDirectory, contract, options);
@@ -620,7 +638,7 @@ function reconcileTerminalWorkerRecord(
     if (artifact.path) record.artifactPath = artifact.path;
     if (artifact.error) record.artifactError = artifact.error;
     else delete record.artifactError;
-    if (record.status === 'failed' && artifact.status === 'valid_complete') {
+    if (record.status === 'failed' && artifact.status === 'valid_complete' && allowArtifactRecovery) {
       record.terminalError = record.error;
       delete record.error;
       record.status = 'completed';
@@ -658,6 +676,7 @@ function trackedWorkerFields(record: WorkerRecord): Record<string, unknown> {
     error: record.error,
     terminalError: record.terminalError,
     resultSummary: record.resultSummary,
+    executionStatus: record.executionStatus,
   };
 }
 
@@ -880,7 +899,10 @@ export class WorkerManager {
     }
 
     record.status = 'aborted';
+    record.executionStatus = 'aborted';
     record.endTime = Date.now();
+    ensureTerminalTiming(record);
+    this.reconcileTerminalArtifact(record);
     this.persist();
     this.logger.info({ workerId: id }, 'Worker aborted');
     return true;
@@ -891,10 +913,12 @@ export class WorkerManager {
     if (!record || record.status !== 'running') return false;
 
     record.status = 'completed';
+    record.executionStatus = 'completed';
     record.endTime = Date.now();
     record.durationMs = record.endTime - record.startTime;
     record.resultSummary = patch.resultSummary ?? record.resultSummary;
     if (patch.error !== undefined) record.error = patch.error;
+    this.reconcileTerminalArtifact(record);
     this.persist();
 
     const bot = this.registry.get(record.botName);
@@ -996,9 +1020,10 @@ export class WorkerManager {
       const bot = this.registry.get(record.botName);
       if (!bot) {
         record.status = 'failed';
-        record.endTime = Date.now();
-        record.durationMs = record.endTime - record.startTime;
         record.error = 'metabot restarted while worker was running; bot not found during worker recovery';
+        record.recoveryStatus = 'manual_required';
+        ensureTerminalTiming(record);
+        this.reconcileTerminalArtifact(record, { allowArtifactRecovery: false });
         this.persist();
         this.logger.warn(
           { workerId: record.id, botName: record.botName },
@@ -1035,20 +1060,27 @@ export class WorkerManager {
         idleTimeoutMs: record.idleTimeoutMs,
       });
 
-      record.endTime = Date.now();
-      record.durationMs = record.endTime - startTime;
-      record.costUsd = result.costUsd;
-
       if (record.status !== 'running') {
+        ensureTerminalTiming(record);
+        if (record.costUsd === undefined && result.costUsd !== undefined) {
+          record.costUsd = result.costUsd;
+        }
         if (record.resultSummary === undefined && result.responseText) {
           record.resultSummary = result.responseText.slice(0, 500);
         }
+        this.reconcileTerminalArtifact(record, { allowArtifactRecovery: false });
       } else if (result.success) {
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - startTime;
+        record.costUsd = result.costUsd;
         record.status = 'completed';
         record.executionStatus = 'completed';
         record.resultSummary = result.responseText?.slice(0, 500) || '';
         this.reconcileTerminalArtifact(record);
       } else {
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - startTime;
+        record.costUsd = result.costUsd;
         record.status = 'failed';
         record.error = result.error || 'Worker task failed';
         record.executionStatus = classifyExecutionStatus(record.error);
@@ -1056,19 +1088,29 @@ export class WorkerManager {
         this.reconcileTerminalArtifact(record);
       }
     } catch (err: any) {
-      record.endTime = Date.now();
-      record.durationMs = record.endTime - startTime;
-      record.status = record.status === 'aborted' ? 'aborted' : 'failed';
-      record.error = err.message || 'Unknown error';
-      record.executionStatus = record.status === 'aborted' ? 'aborted' : classifyExecutionStatus(record.error);
-      if (record.status === 'failed') this.reconcileTerminalArtifact(record);
+      if (record.status !== 'running') {
+        ensureTerminalTiming(record);
+        this.reconcileTerminalArtifact(record, { allowArtifactRecovery: false });
+      } else {
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - startTime;
+        record.status = 'failed';
+        record.error = err.message || 'Unknown error';
+        record.executionStatus = classifyExecutionStatus(record.error);
+        this.reconcileTerminalArtifact(record);
+      }
     }
 
     this.persist();
     await this.notifyPm(record);
   }
 
-  private reconcileTerminalArtifact(record: WorkerRecord): void {
+  private reconcileTerminalArtifact(
+    record: WorkerRecord,
+    options: {
+      allowArtifactRecovery?: boolean;
+    } = {},
+  ): void {
     reconcileTerminalWorkerRecord(record, {
       onLegacyAliasDeprecation: (event) => {
         this.logger.warn(
@@ -1083,6 +1125,7 @@ export class WorkerManager {
           'AutoResearchClaw output used deprecated memory_event_candidates aliases',
         );
       },
+      allowArtifactRecovery: options.allowArtifactRecovery,
     });
   }
 

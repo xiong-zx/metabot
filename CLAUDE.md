@@ -84,13 +84,13 @@ lark-cli base records list ...                           # Query bitable
 4. **Lesson · Skill** — 提炼出「以后遇到 X 都该这么做」的可复用 SOP / protocol / 模板 → `metabot skills publish`，**必须写清 when-to-use**。Skill 是写给别人用的，笔记本走 Memory。
 5. **Delegate · Agent Bus** — 看不懂 / 做不动 / 需要专业领域 → `metabot bots` 看谁在，`metabot talk <bot> <chatId> "<自包含的任务描述 + 约束 + 产出格式 + 优先级>"`，**等回执并整合**。
 
-| 你刚刚 …                    | 该用哪个                              |
-| --------------------------- | ------------------------------------- |
-| 状态变了 / 进展 / 卡点      | `metabot t5t push` / `bottleneck`     |
-| 做完里程碑、有数据 / 图     | `metabot memory create --html`        |
-| 总结出可复用方法 / SOP      | `metabot skills publish`（写 when-to-use） |
-| 别人比你更擅长这块          | `metabot talk <bot> <chat> "..."`     |
-| 目标 / 评判标准不清         | 问主人 → 写 `t5t goal` + `evaluator`  |
+| 你刚刚 …                | 该用哪个                                   |
+| ----------------------- | ------------------------------------------ |
+| 状态变了 / 进展 / 卡点  | `metabot t5t push` / `bottleneck`          |
+| 做完里程碑、有数据 / 图 | `metabot memory create --html`             |
+| 总结出可复用方法 / SOP  | `metabot skills publish`（写 when-to-use） |
+| 别人比你更擅长这块      | `metabot talk <bot> <chat> "..."`          |
+| 目标 / 评判标准不清     | 问主人 → 写 `t5t goal` + `evaluator`       |
 
 **反模式（别这样）：** 闷头干一周不更新 T5T｜没目标就开工｜可复用经验只写在 chat 里｜什么都自己扛｜里程碑只发一句「做完了」｜写 Skill 不写 when-to-use。
 
@@ -108,13 +108,13 @@ lark-cli base records list ...                           # Query bitable
 
 本仓库按工作流分支，**提交前先选对分支**，别把不同工作流混进同一个 commit：
 
-| 分支 | 用途 | 谁往这提交 |
-|---|---|---|
-| `main` | 稳定/发布分支，只经 PR 合入，历史干净 | 不直接提交 |
-| `feat/agent-team` | agent team / template 相关开发 | team / template 任务 |
-| `feat/memory-core` | memory core + auto research（两者**不拆**，同一条），当前 stacked 在 `feat/agent-team` 之上 | memory / auto-research 任务 |
-| `fix/<描述>` | 日常小 bug，短命分支，修完尽快合 | 单个 bug 修复 |
-| `dev` | 集成 + 部署分支：多 feature 合一起跑 live 服务；不对外 PR、不追求干净历史 | 只做集成/联调，别在这开发新特性 |
+| 分支               | 用途                                                                                        | 谁往这提交                      |
+| ------------------ | ------------------------------------------------------------------------------------------- | ------------------------------- |
+| `main`             | 稳定/发布分支，只经 PR 合入，历史干净                                                       | 不直接提交                      |
+| `feat/agent-team`  | agent team / template 相关开发                                                              | team / template 任务            |
+| `feat/memory-core` | memory core + auto research（两者**不拆**，同一条），当前 stacked 在 `feat/agent-team` 之上 | memory / auto-research 任务     |
+| `fix/<描述>`       | 日常小 bug，短命分支，修完尽快合                                                            | 单个 bug 修复                   |
+| `dev`              | 集成 + 部署分支：多 feature 合一起跑 live 服务；不对外 PR、不追求干净历史                   | 只做集成/联调，别在这开发新特性 |
 
 - 一个 commit 只做一件事；memory 的活别碰 agent-team 的文件，反之亦然。
 - **禁止**直接往 `main` 提交；**禁止** rebase / force-push 任何共享分支（`dev`、已推送的 `feat/*`）。
@@ -156,6 +156,11 @@ metabot restart --wait --json --resume \
 - 2026-07-21 MEM-010/FIX-003：`/api/talk/:taskId` 终态 AutoResearchClaw 只把 `currentPhase` 标成 `completed`/`failed`，ingest/review 结果必须作为 Memory Core system-of-record 后续查询元数据呈现；`bin/metabot` 解析 feature CLI 时，source-tree launcher 必须有 `packages/cli/dist/index.js` 才算 ready，`METABOT_DEFAULT_ENV_FILE` 可指向 ready checkout 复用 CLI，env 文件和 PATH/显式 CLI symlink 会先 canonicalize 再做 ready check，但显式坏的 `METABOT_CORE_CLI` 必须 fail-closed。`set -e` 下 `_load_core_cli_config` 在缺少可选 token 时也要显式 `return 0`，否则 delegate 会提前退出。
 - 2026-07-22 bridge 由 PM2 以 `node --import tsx src/index.ts` 从**源码**运行（非构建产物），改完 `src/` 只需重启、无需 `npm run build`；`packages/server/dist/index.js` 是独立的 `metabot-core` 进程，不受 `src/` 改动影响。
 - 2026-07-22 Claude PTY 冷启动（`--resume` + 6 个 claude.ai 远程 MCP connector）到首个 model turn 可能需要 ~25s，turn-start watchdog 默认 30s 会误杀会话并丢掉用户消息。已在 `.env` 设 `METABOT_CLAUDE_TURN_START_TIMEOUT_MS=90000`（`.env` 由 `src/config.ts` 启动时加载，改后重启即生效，不依赖 PM2 重读 ecosystem）；`watchTurnStart` 现在会在判死前检测「prompt 仍留在 idle 输入框」并补敲一次回车、追加 `METABOT_CLAUDE_TURN_START_RESCUE_MS`（默认 20s）宽限窗口，自救失败才 interrupt + 退役。
+- 2026-07-22 MEM-004 review ba812859：`/api/talk/:taskId` 的 Memory Core terminal evidence 解析必须保持 bounded + whitelist-only。不要恢复递归全树扫描或 `unitId` 这类全局 key 推断；只从受信任 Memory Core 容器/形状（如 `result/writes/partial/evidence`、`events.finding/decision`、`promotionRequest`、`search.returned`、`contextPack`）提取 ID。pending review 只能来自显式 pending/review-pending status/phase/boolean，approved/rejected/completed promotion/candidate 不能被标成 pending。遇到 cycle/deep/wide/oversized payload 时应降级为 truncated/no_structured guidance 并指向 Memory Core system-of-record inspect。
+- 2026-07-22 MEM-011 发布门禁：根级 TypeScript no-emit 校验统一走 `npm run typecheck`；该脚本显式检查 `tsconfig.bridge.json`、根 solution config 引用的工作区（`packages/cli-core`、`packages/metamemory`、`packages/skill-hub`、`packages/cli`、`packages/server`）和 `packages/web-ui`，顶层旧版 `web/` 不在 no-emit 门禁内，靠 `npm run build:web` / `npm run build` 校验。从仓库根目录运行 CLI Vitest 统一走 `npm run test:cli`，避免误用根级 Vitest 配置。Memory Core / AutoResearchClaw merge semantic-loss sweep 统一走 `npm run check:merge-hygiene:memory-core`；该门禁只在 merge commit 上做 parent-vs-merge 对比，平时非 merge commit 会 skip。
+- 2026-07-22 MEM-011 merge-hygiene detector 不能用 raw source substring 扫描自身覆盖到的 test/gate files，否则 adversarial fixtures 会 self-poison；forbidden AutoResearchClaw legacy candidate aliases 应按 TS AST identifier / semantic property name 检测，Git conflict markers 应先 mask comments 与 string/template literals 后再查 raw marker line。该设计保留真实 source-level 检测，同时允许测试中放字符串/注释 fixture。
+- 2026-07-22 MEM-011 merge-hygiene lifecycle：GitHub Actions `pull_request` checkout 的 `refs/pull/*/merge` 是 synthetic CI merge，不是发布集成 merge；CI workflow 用 step-level `if: github.event_name != 'pull_request'` 跳过 production parent-vs-merge scan，CLI 本身不做 env-based skip，避免 spoofed PR env 抑制真实 merge commit 扫描。`push` 到真实 merge commit、以及手动/本地 `--merge <ref>` 仍会执行 parent-vs-merge semantic-loss scan；PR 上仍靠 `npm test` 跑 gate 单测/对抗测试。
+- 2026-07-22 MEM-011 CLI 测试隔离：`packages/cli/vitest.config.ts` 必须显式 `fileParallelism:false` + `pool:'forks'` + `poolOptions.forks.isolate:true`，且不能启用 `singleFork:true`；Vitest 3 的 `singleFork` 会让多个测试文件共享同一个 child process/global context，CLI 测试替换/修改 `process.env` 和 `vi.stubGlobal` 时会泄漏到后续文件。用 `packages/cli/tests/isolation-env-{a,b}.test.ts` 的双文件行为回归证明 per-file isolation 生效；发布前 canonical `npm test` 需要连续多次稳定通过，不能只用 isolated CLI run 代替。
 
 <!-- METABOT-WORKER -->
 

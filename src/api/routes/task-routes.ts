@@ -481,7 +481,14 @@ function taskStatusResponse(task: {
   const running = task.status === 'accepted' || task.status === 'running';
   const retryAfterMs = running ? 2000 : undefined;
   const preflight = taskPreflightFromPrompt(task.prompt);
-  const terminalProgress = running ? undefined : terminalTaskProgress(task.status, preflight, elapsedMs, task.result);
+  const memoryTerminalStatus =
+    !running && preflight?.kind === 'memory_core'
+      ? memoryTerminalStatusDetails(task.status, preflight, elapsedMs, task.result)
+      : undefined;
+  const terminalProgress =
+    running || memoryTerminalStatus !== undefined
+      ? memoryTerminalStatus?.progress
+      : terminalTaskProgress(task.status, preflight, elapsedMs, task.result);
   const statusCommand = talkStatusCommand(task.id);
   return {
     taskId: task.id,
@@ -497,7 +504,9 @@ function taskStatusResponse(task: {
         : taskProgress(preflight, elapsedMs, retryAfterMs)
       : terminalProgress,
     ...(preflight?.runId === undefined ? {} : { runId: preflight.runId }),
-    ...(!running && preflight?.kind === 'autoresearchclaw' ? { finalPhase: task.status } : {}),
+    ...(!running && (preflight?.kind === 'autoresearchclaw' || preflight?.kind === 'memory_core')
+      ? { finalPhase: task.status }
+      : {}),
     botName: task.botName,
     chatId: task.chatId,
     createdAt: new Date(task.createdAt).toISOString(),
@@ -506,13 +515,16 @@ function taskStatusResponse(task: {
     statusUrl: `/api/talk/${encodeURIComponent(task.id)}`,
     statusCommand,
     retryAfterMs,
-    message: running ? runningMessage(preflight, elapsedMs) : terminalMessage(task.status, preflight),
+    message: running
+      ? runningMessage(preflight, elapsedMs)
+      : (memoryTerminalStatus?.message ?? terminalMessage(task.status, preflight)),
     nextAction: running
       ? preflight === undefined
         ? `Run ${statusCommand} again after 2s. For AutoResearchClaw tasks, also ask for the matching Memory Core run status.`
         : taskNextAction(task.id, preflight, elapsedMs)
-      : terminalNextAction(preflight),
+      : (memoryTerminalStatus?.nextAction ?? terminalNextAction(preflight)),
     ...(preflight === undefined ? {} : { preflight }),
+    ...(memoryTerminalStatus?.evidence === undefined ? {} : { memoryCoreEvidence: memoryTerminalStatus.evidence }),
     result: task.result,
   };
 }
@@ -641,6 +653,677 @@ function terminalTaskProgress(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+interface MemoryCoreTerminalEvidence {
+  eventIds?: string[];
+  memoryUnitIds?: string[];
+  promotionIds?: string[];
+  candidateIds?: string[];
+  contextPackIds?: string[];
+}
+
+interface MemoryCoreTerminalStatusDetails {
+  progress: Record<string, unknown>;
+  message: string;
+  nextAction: string;
+  evidence?: MemoryCoreTerminalEvidence;
+}
+
+type MemoryCoreEvidenceState =
+  | 'structured_evidence_extracted'
+  | 'structured_evidence_truncated'
+  | 'no_structured_evidence'
+  | 'no_structured_evidence_truncated';
+
+type MemoryCoreEvidenceBucketName = 'eventIds' | 'memoryUnitIds' | 'promotionIds' | 'candidateIds' | 'contextPackIds';
+
+interface MemoryCoreEvidenceBuckets {
+  eventIds: Set<string>;
+  memoryUnitIds: Set<string>;
+  promotionIds: Set<string>;
+  candidateIds: Set<string>;
+  contextPackIds: Set<string>;
+}
+
+interface MemoryCoreEvidenceCollectorState {
+  buckets: MemoryCoreEvidenceBuckets;
+  pendingReview: boolean;
+  degraded: boolean;
+  nodeCount: number;
+  stringBytes: number;
+}
+
+type MemoryCoreEvidenceContext =
+  | 'root'
+  | 'trusted'
+  | 'event'
+  | 'memoryUnit'
+  | 'promotion'
+  | 'candidate'
+  | 'contextPack'
+  | 'search'
+  | 'searchReturned';
+
+interface MemoryCoreEvidenceFrame {
+  value: unknown;
+  context: MemoryCoreEvidenceContext;
+  depth: number;
+  exit?: boolean;
+}
+
+const MEMORY_CORE_EVIDENCE_MAX_DEPTH = 48;
+const MEMORY_CORE_EVIDENCE_MAX_NODES = 3_000;
+const MEMORY_CORE_EVIDENCE_MAX_ARRAY_ITEMS = 1_000;
+const MEMORY_CORE_EVIDENCE_MAX_STRING_BYTES = 256_000;
+const MEMORY_CORE_EVIDENCE_MAX_ID_BYTES = 512;
+function memoryTerminalStatusDetails(
+  status: string,
+  preflight: Record<string, unknown>,
+  elapsedMs: number,
+  result: unknown,
+): MemoryCoreTerminalStatusDetails {
+  const resultRecord = isRecord(result) ? result : undefined;
+  const errorMessage = typeof resultRecord?.error === 'string' ? resultRecord.error : undefined;
+  const errorCode = typeof resultRecord?.errorCode === 'string' ? resultRecord.errorCode : undefined;
+  const extracted = extractMemoryCoreTerminalEvidence(result);
+  const evidence = extracted.evidence;
+  const evidenceState = memoryCoreEvidenceState(evidence, extracted.degraded);
+  const reviewState = extracted.pendingReview === true ? 'pending_review' : 'not_pending_review';
+  const overdueState = memoryTerminalOverdueState(elapsedMs, preflight);
+  const completed = status === 'completed';
+  const progress: Record<string, unknown> = {
+    kind: 'phased',
+    currentPhase: completed ? 'completed' : 'failed',
+    finalPhase: status,
+    elapsedMs,
+    projectId: preflight.projectId,
+    projectRoot: preflight.projectRoot,
+    domain: preflight.domain,
+    operation: preflight.operation,
+    expectedCompletionMs: memoryExpectedCompletionMs(preflight),
+    timeoutBoundaryMs: memoryTimeoutBoundaryMs(preflight),
+    stages: preflight.stages,
+    finalization: {
+      status: completed ? 'memory_operation_completed' : 'memory_operation_failed',
+      reviewState,
+      evidenceState,
+      overdueState,
+      partialEvidence: evidence !== undefined && overdueState !== 'within_expected_window',
+    },
+    nextAction: memoryTerminalNextAction(
+      preflight,
+      status,
+      overdueState,
+      evidence,
+      extracted.pendingReview,
+      extracted.degraded,
+    ),
+  };
+  if (evidence !== undefined) {
+    progress.evidence = evidence;
+  }
+  if (!completed) {
+    progress.error = {
+      status: 'memory_operation_failed',
+      ...(errorCode === undefined ? {} : { code: errorCode }),
+      ...(errorMessage === undefined ? {} : { message: errorMessage }),
+    };
+  }
+  return {
+    progress,
+    message: memoryTerminalMessage(status, overdueState, evidenceState, extracted.pendingReview),
+    nextAction: String(progress.nextAction),
+    evidence,
+  };
+}
+
+function memoryTerminalMessage(
+  status: string,
+  overdueState: 'within_expected_window' | 'expected_completion_overdue' | 'timeout_boundary_exceeded',
+  evidenceState: MemoryCoreEvidenceState,
+  pendingReview: boolean,
+): string {
+  const outcome = status === 'completed' ? 'completed' : 'failed';
+  const review = pendingReview ? ' Pending review evidence was detected.' : '';
+  const evidence = memoryTerminalEvidenceMessage(evidenceState);
+  if (overdueState === 'timeout_boundary_exceeded') {
+    return `Memory Core operation ${outcome} after the timeout boundary.${review}${evidence} Verify any partial evidence directly in Memory Core.`;
+  }
+  if (overdueState === 'expected_completion_overdue') {
+    return `Memory Core operation ${outcome} after the expected completion window but before the timeout boundary.${review}${evidence}`;
+  }
+  return `Memory Core operation ${outcome}.${review}${evidence}`;
+}
+
+function memoryCoreEvidenceState(
+  evidence: MemoryCoreTerminalEvidence | undefined,
+  degraded: boolean,
+): MemoryCoreEvidenceState {
+  if (evidence === undefined) return degraded ? 'no_structured_evidence_truncated' : 'no_structured_evidence';
+  return degraded ? 'structured_evidence_truncated' : 'structured_evidence_extracted';
+}
+
+function memoryTerminalEvidenceMessage(evidenceState: MemoryCoreEvidenceState): string {
+  if (evidenceState === 'structured_evidence_extracted') {
+    return ' Structured Memory Core evidence was extracted into status fields.';
+  }
+  if (evidenceState === 'structured_evidence_truncated') {
+    return ' Structured Memory Core evidence was extracted into status fields, but bounded extraction truncated additional terminal payload content.';
+  }
+  if (evidenceState === 'no_structured_evidence_truncated') {
+    return ' No structured Memory Core evidence could be safely derived before bounded extraction truncated terminal payload content.';
+  }
+  return ' No structured Memory Core evidence could be derived from the terminal result.';
+}
+
+function memoryTerminalNextAction(
+  preflight: Record<string, unknown>,
+  status: string,
+  overdueState: 'within_expected_window' | 'expected_completion_overdue' | 'timeout_boundary_exceeded',
+  evidence: MemoryCoreTerminalEvidence | undefined,
+  pendingReview: boolean,
+  degraded: boolean,
+): string {
+  const inspectCommand =
+    typeof preflight.projectRoot === 'string' && typeof preflight.projectId === 'string'
+      ? researchEvidenceCommand(preflight.projectRoot, preflight.projectId)
+      : undefined;
+  const inspectText =
+    inspectCommand === undefined
+      ? 'Inspect Memory Core directly using the project root and project id.'
+      : `Inspect Memory Core with ${inspectCommand}.`;
+  const reviewText = pendingReview
+    ? ' Review the pending candidate or promotion request before treating this as finalized.'
+    : '';
+  const evidenceText =
+    evidence === undefined
+      ? ' Use the system-of-record response there to recover event ids, memory unit ids, promotion/candidate ids, and context pack ids.'
+      : ' Cross-check the structured ids in this status against the system-of-record response.';
+  const degradationText = degraded
+    ? ' Bounded terminal extraction was truncated; treat this status as partial guidance and use Memory Core as the authoritative source.'
+    : '';
+  if (status !== 'completed') {
+    if (overdueState === 'timeout_boundary_exceeded') {
+      return `${inspectText} This task failed after the timeout boundary and may only have partial evidence.${reviewText}${evidenceText}${degradationText}`;
+    }
+    if (overdueState === 'expected_completion_overdue') {
+      return `${inspectText} This task failed after the expected completion window and may have partial evidence.${reviewText}${evidenceText}${degradationText}`;
+    }
+    return `${inspectText} This task failed.${reviewText}${evidenceText}${degradationText}`;
+  }
+  if (overdueState === 'timeout_boundary_exceeded') {
+    return `${inspectText} This task completed after the timeout boundary; verify any partial-evidence path and final state directly in Memory Core.${reviewText}${evidenceText}${degradationText}`;
+  }
+  if (overdueState === 'expected_completion_overdue') {
+    return `${inspectText} This task completed after the expected completion window; verify the final state directly in Memory Core.${reviewText}${evidenceText}${degradationText}`;
+  }
+  return `${inspectText} This task completed.${reviewText}${evidenceText}${degradationText}`;
+}
+
+function memoryTerminalOverdueState(
+  elapsedMs: number,
+  preflight: Record<string, unknown>,
+): 'within_expected_window' | 'expected_completion_overdue' | 'timeout_boundary_exceeded' {
+  if (elapsedMs >= memoryTimeoutBoundaryMs(preflight)) return 'timeout_boundary_exceeded';
+  if (elapsedMs >= memoryExpectedCompletionMs(preflight)) return 'expected_completion_overdue';
+  return 'within_expected_window';
+}
+
+function extractMemoryCoreTerminalEvidence(result: unknown): {
+  evidence: MemoryCoreTerminalEvidence | undefined;
+  pendingReview: boolean;
+  degraded: boolean;
+} {
+  const state: MemoryCoreEvidenceCollectorState = {
+    buckets: {
+      eventIds: new Set<string>(),
+      memoryUnitIds: new Set<string>(),
+      promotionIds: new Set<string>(),
+      candidateIds: new Set<string>(),
+      contextPackIds: new Set<string>(),
+    },
+    pendingReview: false,
+    degraded: false,
+    nodeCount: 0,
+    stringBytes: 0,
+  };
+  const roots = collectMemoryCoreEvidenceRoots(result, state);
+  for (const root of roots) {
+    collectMemoryCoreEvidenceFromRoot(root.value, root.context, state);
+  }
+  const buckets = state.buckets;
+  const evidence: MemoryCoreTerminalEvidence = {
+    ...(buckets.eventIds.size === 0 ? {} : { eventIds: [...buckets.eventIds].sort() }),
+    ...(buckets.memoryUnitIds.size === 0 ? {} : { memoryUnitIds: [...buckets.memoryUnitIds].sort() }),
+    ...(buckets.promotionIds.size === 0 ? {} : { promotionIds: [...buckets.promotionIds].sort() }),
+    ...(buckets.candidateIds.size === 0 ? {} : { candidateIds: [...buckets.candidateIds].sort() }),
+    ...(buckets.contextPackIds.size === 0 ? {} : { contextPackIds: [...buckets.contextPackIds].sort() }),
+  };
+  return {
+    evidence: Object.keys(evidence).length === 0 ? undefined : evidence,
+    pendingReview: state.pendingReview,
+    degraded: state.degraded,
+  };
+}
+
+function collectMemoryCoreEvidenceRoots(
+  result: unknown,
+  state: MemoryCoreEvidenceCollectorState,
+): Array<{ value: unknown; context: MemoryCoreEvidenceContext }> {
+  const roots: Array<{ value: unknown; context: MemoryCoreEvidenceContext }> = [];
+  const parsedResult = parseMemoryCoreResponsePayload(result, state);
+  if (parsedResult !== undefined) {
+    roots.push({ value: parsedResult, context: 'root' });
+    return roots;
+  }
+
+  const rootRecord = isRecord(result) ? result : undefined;
+  if (rootRecord === undefined) return roots;
+
+  const responseText = readMemoryCoreEvidenceProperty(rootRecord, 'responseText', state);
+  const parsedResponseText = parseMemoryCoreResponsePayload(responseText.value, state);
+  if (parsedResponseText !== undefined) roots.push({ value: parsedResponseText, context: 'root' });
+
+  for (const key of ['memoryCoreEvidence', 'evidence', 'result', 'results', 'data', 'partial', 'writes']) {
+    const child = readMemoryCoreEvidenceProperty(rootRecord, key, state);
+    if (child.exists) roots.push({ value: child.value, context: 'trusted' });
+  }
+
+  if (!isAsyncTaskResultEnvelope(rootRecord)) roots.push({ value: rootRecord, context: 'root' });
+  return roots;
+}
+
+function isAsyncTaskResultEnvelope(record: Record<string, unknown>): boolean {
+  return (
+    'responseText' in record ||
+    'success' in record ||
+    'durationMs' in record ||
+    'error' in record ||
+    'errorCode' in record
+  );
+}
+
+function parseMemoryCoreResponsePayload(value: unknown, state: MemoryCoreEvidenceCollectorState): unknown {
+  if (typeof value !== 'string') return undefined;
+  if (!reserveMemoryCoreEvidenceString(value, state)) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const direct = tryParseJson(trimmed);
+  if (direct !== undefined) return direct;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/iu);
+  if (fenced?.[1] === undefined) return undefined;
+  return tryParseJson(fenced[1].trim());
+}
+
+function tryParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function collectMemoryCoreEvidenceFromRoot(
+  root: unknown,
+  rootContext: MemoryCoreEvidenceContext,
+  state: MemoryCoreEvidenceCollectorState,
+): void {
+  const stack: MemoryCoreEvidenceFrame[] = [{ value: root, context: rootContext, depth: 0 }];
+  const activePath = new WeakSet<object>();
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if ((isRecord(frame.value) || Array.isArray(frame.value)) && frame.exit === true) {
+      activePath.delete(frame.value);
+      continue;
+    }
+    if (frame.depth > MEMORY_CORE_EVIDENCE_MAX_DEPTH) {
+      state.degraded = true;
+      continue;
+    }
+    if (state.nodeCount >= MEMORY_CORE_EVIDENCE_MAX_NODES) {
+      state.degraded = true;
+      continue;
+    }
+    state.nodeCount += 1;
+
+    if (typeof frame.value === 'string') {
+      reserveMemoryCoreEvidenceString(frame.value, state);
+      continue;
+    }
+    if (!isRecord(frame.value) && !Array.isArray(frame.value)) continue;
+    if (activePath.has(frame.value)) {
+      state.degraded = true;
+      continue;
+    }
+    activePath.add(frame.value);
+    stack.push({ ...frame, exit: true });
+    if (Array.isArray(frame.value)) {
+      collectMemoryCoreEvidenceArray(frame, state, stack);
+      continue;
+    }
+    collectMemoryCoreIdsFromRecord(frame.value, frame.context, state);
+    collectMemoryCorePendingReviewFromRecord(frame.value, frame.context, state);
+    collectMemoryCoreChildContainers({ ...frame, value: frame.value }, state, stack);
+  }
+}
+
+function collectMemoryCoreEvidenceArray(
+  frame: MemoryCoreEvidenceFrame,
+  state: MemoryCoreEvidenceCollectorState,
+  stack: MemoryCoreEvidenceFrame[],
+): void {
+  const items = frame.value as unknown[];
+  const limit = Math.min(items.length, MEMORY_CORE_EVIDENCE_MAX_ARRAY_ITEMS);
+  if (items.length > limit) state.degraded = true;
+  for (let index = limit - 1; index >= 0; index -= 1) {
+    stack.push({ value: items[index], context: frame.context, depth: frame.depth + 1 });
+  }
+}
+
+function collectMemoryCoreChildContainers(
+  frame: MemoryCoreEvidenceFrame & { value: Record<string, unknown> },
+  state: MemoryCoreEvidenceCollectorState,
+  stack: MemoryCoreEvidenceFrame[],
+): void {
+  const entries = memoryCoreEvidenceEntries(frame.value, state);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const [key, child] = entries[index]!;
+    const childContext = memoryCoreChildContext(frame.context, normalizeEvidenceKey(key));
+    if (childContext === undefined) continue;
+    if (typeof child === 'string') {
+      reserveMemoryCoreEvidenceString(child, state);
+      continue;
+    }
+    stack.push({ value: child, context: childContext, depth: frame.depth + 1 });
+  }
+}
+
+function memoryCoreChildContext(
+  parentContext: MemoryCoreEvidenceContext,
+  normalizedKey: string,
+): MemoryCoreEvidenceContext | undefined {
+  if (parentContext === 'search') {
+    if (
+      normalizedKey === 'returned' ||
+      normalizedKey === 'returnedevents' ||
+      normalizedKey === 'returnedresults' ||
+      normalizedKey === 'results'
+    ) {
+      return 'searchReturned';
+    }
+    return undefined;
+  }
+  if (parentContext === 'event') {
+    if (
+      normalizedKey === 'finding' ||
+      normalizedKey === 'findings' ||
+      normalizedKey === 'decision' ||
+      normalizedKey === 'decisions'
+    ) {
+      return 'event';
+    }
+    return undefined;
+  }
+  if (parentContext !== 'root' && parentContext !== 'trusted') return undefined;
+  if (
+    normalizedKey === 'result' ||
+    normalizedKey === 'results' ||
+    normalizedKey === 'data' ||
+    normalizedKey === 'output' ||
+    normalizedKey === 'write' ||
+    normalizedKey === 'writes' ||
+    normalizedKey === 'partial' ||
+    normalizedKey === 'memorycoreevidence' ||
+    normalizedKey === 'evidence'
+  ) {
+    return 'trusted';
+  }
+  if (
+    normalizedKey === 'events' ||
+    normalizedKey === 'memoryevents' ||
+    normalizedKey === 'finding' ||
+    normalizedKey === 'decision'
+  ) {
+    return 'event';
+  }
+  if (normalizedKey === 'memoryunits' || normalizedKey === 'units') return 'memoryUnit';
+  if (normalizedKey === 'promotionrequest' || normalizedKey === 'promotionrequests' || normalizedKey === 'promotions') {
+    return 'promotion';
+  }
+  if (normalizedKey === 'candidate' || normalizedKey === 'candidates') return 'candidate';
+  if (normalizedKey === 'contextpack' || normalizedKey === 'contextpacks') return 'contextPack';
+  if (normalizedKey === 'search' || normalizedKey === 'searchresult' || normalizedKey === 'searchresults')
+    return 'search';
+  return undefined;
+}
+
+function collectMemoryCoreIdsFromRecord(
+  record: Record<string, unknown>,
+  context: MemoryCoreEvidenceContext,
+  state: MemoryCoreEvidenceCollectorState,
+): void {
+  for (const [key, value] of memoryCoreEvidenceEntries(record, state)) {
+    const normalizedKey = normalizeEvidenceKey(key);
+    const target = memoryCoreBucketForKey(normalizedKey, context);
+    if (target !== undefined) collectMemoryCoreValue(target, value, state);
+    if (context === 'contextPack' && normalizedKey === 'includedeventids') {
+      collectMemoryCoreValue('eventIds', value, state);
+    }
+    if (context === 'contextPack' && normalizedKey === 'includedmemoryunitids') {
+      collectMemoryCoreValue('memoryUnitIds', value, state);
+    }
+  }
+}
+
+function memoryCoreBucketForKey(
+  normalizedKey: string,
+  context: MemoryCoreEvidenceContext,
+): MemoryCoreEvidenceBucketName | undefined {
+  if (context === 'event') {
+    if (normalizedKey === 'id' || normalizedKey === 'eventid' || normalizedKey === 'memoryeventid') return 'eventIds';
+    if (normalizedKey === 'memoryunitid') return 'memoryUnitIds';
+    return undefined;
+  }
+  if (context === 'memoryUnit') {
+    if (normalizedKey === 'id' || normalizedKey === 'memoryunitid') return 'memoryUnitIds';
+    return undefined;
+  }
+  if (context === 'promotion') {
+    if (normalizedKey === 'id' || normalizedKey === 'promotionid' || normalizedKey === 'promotionrequestid') {
+      return 'promotionIds';
+    }
+    return undefined;
+  }
+  if (context === 'candidate') {
+    if (normalizedKey === 'id' || normalizedKey === 'candidateid') return 'candidateIds';
+    return undefined;
+  }
+  if (context === 'contextPack') {
+    if (normalizedKey === 'id' || normalizedKey === 'contextpackid') return 'contextPackIds';
+    return undefined;
+  }
+  if (context === 'searchReturned') {
+    if (normalizedKey === 'eventid' || normalizedKey === 'memoryeventid') return 'eventIds';
+    if (normalizedKey === 'memoryunitid') return 'memoryUnitIds';
+    return undefined;
+  }
+  if (context !== 'root' && context !== 'trusted') return undefined;
+  if (
+    normalizedKey === 'eventid' ||
+    normalizedKey === 'eventids' ||
+    normalizedKey === 'memoryeventid' ||
+    normalizedKey === 'memoryeventids' ||
+    normalizedKey === 'evidenceeventids' ||
+    normalizedKey === 'sourceeventids' ||
+    normalizedKey === 'includedeventids' ||
+    normalizedKey === 'approvedeventids' ||
+    normalizedKey === 'rejectedeventids'
+  ) {
+    return 'eventIds';
+  }
+  if (
+    normalizedKey === 'memoryunitid' ||
+    normalizedKey === 'memoryunitids' ||
+    normalizedKey === 'includedmemoryunitids' ||
+    normalizedKey === 'sourcememoryunitids'
+  ) {
+    return 'memoryUnitIds';
+  }
+  if (normalizedKey === 'promotionid' || normalizedKey === 'promotionids' || normalizedKey === 'promotionrequestid') {
+    return 'promotionIds';
+  }
+  if (normalizedKey === 'candidateid' || normalizedKey === 'candidateids') {
+    return 'candidateIds';
+  }
+  if (
+    normalizedKey === 'contextpackid' ||
+    normalizedKey === 'contextpackids' ||
+    normalizedKey === 'sourcecontextpackids'
+  ) {
+    return 'contextPackIds';
+  }
+  return undefined;
+}
+
+function collectMemoryCoreValue(
+  target: MemoryCoreEvidenceBucketName,
+  value: unknown,
+  state: MemoryCoreEvidenceCollectorState,
+): void {
+  if (typeof value === 'string') {
+    collectMemoryCoreId(target, value, state);
+    return;
+  }
+  if (!Array.isArray(value)) return;
+  const limit = Math.min(value.length, MEMORY_CORE_EVIDENCE_MAX_ARRAY_ITEMS);
+  if (value.length > limit) state.degraded = true;
+  for (let index = 0; index < limit; index += 1) {
+    const item = value[index];
+    if (typeof item === 'string') collectMemoryCoreId(target, item, state);
+  }
+}
+
+function collectMemoryCoreId(
+  target: MemoryCoreEvidenceBucketName,
+  value: string,
+  state: MemoryCoreEvidenceCollectorState,
+): void {
+  if (!reserveMemoryCoreEvidenceString(value, state)) return;
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  if (Buffer.byteLength(trimmed, 'utf8') > MEMORY_CORE_EVIDENCE_MAX_ID_BYTES) {
+    state.degraded = true;
+    return;
+  }
+  state.buckets[target].add(trimmed);
+}
+
+function reserveMemoryCoreEvidenceString(value: string, state: MemoryCoreEvidenceCollectorState): boolean {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > MEMORY_CORE_EVIDENCE_MAX_STRING_BYTES) {
+    state.degraded = true;
+    return false;
+  }
+  if (state.stringBytes + bytes > MEMORY_CORE_EVIDENCE_MAX_STRING_BYTES) {
+    state.degraded = true;
+    return false;
+  }
+  state.stringBytes += bytes;
+  return true;
+}
+
+function collectMemoryCorePendingReviewFromRecord(
+  record: Record<string, unknown>,
+  context: MemoryCoreEvidenceContext,
+  state: MemoryCoreEvidenceCollectorState,
+): void {
+  if (!memoryCorePendingReviewTrustedContext(context)) return;
+  for (const [key, value] of memoryCoreEvidenceEntries(record, state)) {
+    const normalizedKey = normalizeEvidenceKey(key);
+    if (typeof value === 'boolean' && memoryCorePendingReviewBoolean(normalizedKey, value)) {
+      state.pendingReview = true;
+    }
+    if (typeof value === 'string' && memoryCorePendingReviewString(normalizedKey, value)) {
+      state.pendingReview = true;
+    }
+  }
+}
+
+function memoryCorePendingReviewTrustedContext(context: MemoryCoreEvidenceContext): boolean {
+  return context === 'root' || context === 'trusted' || context === 'promotion' || context === 'candidate';
+}
+
+function memoryCorePendingReviewBoolean(normalizedKey: string, value: boolean): boolean {
+  if (!value) return false;
+  return (
+    normalizedKey === 'pendingreview' ||
+    normalizedKey === 'reviewpending' ||
+    normalizedKey === 'approvalpending' ||
+    normalizedKey === 'candidatepending' ||
+    normalizedKey === 'promotionpending'
+  );
+}
+
+function memoryCoreEvidenceEntries(
+  record: Record<string, unknown>,
+  state: MemoryCoreEvidenceCollectorState,
+): Array<[string, unknown]> {
+  let keys: string[];
+  try {
+    keys = Object.keys(record);
+  } catch {
+    state.degraded = true;
+    return [];
+  }
+  const entries: Array<[string, unknown]> = [];
+  for (const key of keys) {
+    const child = readMemoryCoreEvidenceProperty(record, key, state);
+    if (child.exists) entries.push([key, child.value]);
+  }
+  return entries;
+}
+
+function readMemoryCoreEvidenceProperty(
+  record: Record<string, unknown>,
+  key: string,
+  state: MemoryCoreEvidenceCollectorState,
+): { exists: boolean; value?: unknown } {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) return { exists: false };
+    return { exists: true, value: record[key] };
+  } catch {
+    state.degraded = true;
+    return { exists: false };
+  }
+}
+
+function normalizeEvidenceKey(key: string): string {
+  return key.replace(/[_\-\s]/g, '').toLowerCase();
+}
+
+function memoryCorePendingReviewString(normalizedKey: string, value: string): boolean {
+  if (
+    normalizedKey !== 'status' &&
+    normalizedKey !== 'phase' &&
+    normalizedKey !== 'reviewstatus' &&
+    normalizedKey !== 'approvalstatus' &&
+    normalizedKey !== 'promotionstatus' &&
+    normalizedKey !== 'eventstatus' &&
+    normalizedKey !== 'finalizationphase' &&
+    normalizedKey !== 'candidatestatus'
+  ) {
+    return false;
+  }
+  const normalizedValue = value.replace(/[_\-\s]/g, '').toLowerCase();
+  return (
+    normalizedValue === 'pending' ||
+    normalizedValue === 'pendingreview' ||
+    normalizedValue === 'reviewpending' ||
+    normalizedValue === 'candidatereviewpending' ||
+    normalizedValue === 'promotionreviewpending' ||
+    normalizedValue === 'reviewrequired'
+  );
 }
 
 function terminalMessage(status: string, preflight: Record<string, unknown> | undefined): string {
