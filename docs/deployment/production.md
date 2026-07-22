@@ -37,7 +37,11 @@ pm2 status                           # process status
 Runtime/worktree changes use one PM2 daemon restart RPC through `metabot
 deploy-runtime`. The command resolves and verifies the target `cwd` and script
 without deleting the PM2 app entry. Run it from SSH or another supervisor
-outside the MetaBot process tree; it refuses an in-process runtime switch.
+outside the MetaBot process tree; it refuses an in-process runtime switch. The
+atomic switch keeps shared bot configuration, credential references, session
+storage, Wiki/MetaMemory state directories, and network settings from the live
+process while the target ecosystem owns runtime-specific settings such as
+`METABOT_HOME`.
 
 ## Build for Production
 

@@ -12,6 +12,54 @@ if (!process.argv[2] || !fs.existsSync(path.join(targetRoot, 'ecosystem.config.c
   process.exit(2);
 }
 
+const SHARED_ENV_KEYS = new Set([
+  'BOTS_CONFIG',
+  'SESSION_STORE_DIR',
+  'METABOT_DEFAULT_ENV_FILE',
+  'WIKI_SYNC_STATE_DIR',
+  'API_PORT',
+  'API_SECRET',
+  'LOG_LEVEL',
+  'META_MEMORY_URL',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'REQUESTS_CA_BUNDLE',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS',
+]);
+
+const SHARED_ENV_PREFIXES = [
+  'FEISHU_',
+  'TELEGRAM_',
+  'WECHAT_',
+  'MEMORY_',
+  'METABOT_CORE_',
+  'METABOT_MEMORY_',
+  'WIKI_',
+];
+
+const DEPLOYMENT_ENV_KEYS = [
+  'METABOT_RESTART_REQUEST_ID',
+  'METABOT_RESTART_REASON',
+  'METABOT_RESTART_SOURCE',
+  'METABOT_RESTART_RESUME',
+  'METABOT_BOT_NAME',
+  'METABOT_CHAT_ID',
+];
+
+function selectSharedEnvironment(currentEnv) {
+  return Object.fromEntries(Object.entries(currentEnv || {}).filter(([key, value]) => (
+    value !== undefined
+    && value !== null
+    && (SHARED_ENV_KEYS.has(key) || SHARED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)))
+  )));
+}
+
 function resolvePm2Root() {
   if (process.env.PM2_MODULE_ROOT) return path.resolve(process.env.PM2_MODULE_ROOT);
   const pm2Bin = execFileSync('which', ['pm2'], { encoding: 'utf8' }).trim();
@@ -62,6 +110,12 @@ pm2.connect((connectError) => {
     // immutable and updates only env. Its daemon restart RPC can atomically
     // apply a fully resolved current_conf without deleting the app entry.
     const env = Common.mergeEnvironmentVariables(target);
+    const inheritedEnv = selectSharedEnvironment(current.pm2_env?.env);
+    const targetEnv = env.current_conf?.env || {};
+    const deploymentEnv = Object.fromEntries(DEPLOYMENT_ENV_KEYS.map((key) => [key, process.env[key] || '']));
+    const mergedEnv = { ...inheritedEnv, ...targetEnv, ...deploymentEnv };
+    Object.assign(env, mergedEnv);
+    env.current_conf.env = mergedEnv;
     pm2.Client.executeRemote('restartProcessId', { id: current.pm_id, env }, (restartError) => {
       if (restartError) return finish(restartError);
       pm2.list((verifyError, updatedRows) => {

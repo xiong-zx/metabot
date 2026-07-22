@@ -14,7 +14,15 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
   const runtimeA = join(root, 'runtime-a');
   const runtimeB = join(root, 'runtime-b');
   const switchHelper = join(runtimeB, 'scripts', 'pm2-atomic-runtime-switch.cjs');
-  const env = { ...process.env, PM2_HOME: pm2Home };
+  const env = {
+    ...process.env,
+    PM2_HOME: pm2Home,
+    BOTS_CONFIG: '/shared/bots.json',
+    METABOT_DEFAULT_ENV_FILE: '/shared/default.env',
+    WIKI_SYNC_STATE_DIR: '/shared/wiki-state',
+    FEISHU_SERVICE_APP_ID: 'shared-app',
+  };
+  delete env.METABOT_RESTART_REQUEST_ID;
 
   beforeAll(() => {
     mkdirSync(runtimeA, { recursive: true });
@@ -29,7 +37,13 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
         name:${JSON.stringify(appName)},
         script:${JSON.stringify(script)},
         cwd:${JSON.stringify(runtime)},
-        env:{RUNTIME_LABEL:${JSON.stringify(label)},HTTP_PROXY:'http://127.0.0.1:7890',HTTPS_PROXY:'http://127.0.0.1:7890'}
+        env:{
+          RUNTIME_LABEL:${JSON.stringify(label)},
+          HTTP_PROXY:'http://127.0.0.1:7890',
+          HTTPS_PROXY:'http://127.0.0.1:7890',
+          ${label === 'A' ? "BOTS_CONFIG:'/shared/bots.json',METABOT_DEFAULT_ENV_FILE:'/shared/default.env',WIKI_SYNC_STATE_DIR:'/shared/wiki-state',FEISHU_SERVICE_APP_ID:'shared-app'," : ""}
+          ${label === 'A' ? "METABOT_HOME:'/old/runtime',METABOT_RESTART_REQUEST_ID:'old-request'" : `METABOT_HOME:${JSON.stringify(runtime)}`}
+        }
       }]};\n`);
     }
   });
@@ -73,6 +87,12 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
       runtime: 'B',
       httpProxy: 'http://127.0.0.1:7890',
       httpsProxy: 'http://127.0.0.1:7890',
+      botsConfig: '/shared/bots.json',
+      defaultEnvFile: '/shared/default.env',
+      wikiSyncStateDir: '/shared/wiki-state',
+      serviceAppId: 'shared-app',
+      metabotHome: runtimeB,
+      restartRequestId: '',
     });
   }, 20_000);
 
@@ -102,6 +122,12 @@ suite('PM2 atomic runtime switching (isolated PM2_HOME)', () => {
       runtime: pm2Env.RUNTIME_LABEL,
       httpProxy: pm2Env.HTTP_PROXY,
       httpsProxy: pm2Env.HTTPS_PROXY,
+      botsConfig: pm2Env.BOTS_CONFIG,
+      defaultEnvFile: pm2Env.METABOT_DEFAULT_ENV_FILE,
+      wikiSyncStateDir: pm2Env.WIKI_SYNC_STATE_DIR,
+      serviceAppId: pm2Env.FEISHU_SERVICE_APP_ID,
+      metabotHome: pm2Env.METABOT_HOME,
+      restartRequestId: pm2Env.METABOT_RESTART_REQUEST_ID,
     };
   }
 
