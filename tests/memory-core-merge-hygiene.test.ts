@@ -1,4 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   collectSourceInventory,
@@ -9,6 +13,10 @@ import {
   selectMemoryCoreMergeHygienePaths,
   type MergeHygieneGitReader,
 } from '../src/release-gates/memory-core-merge-hygiene.js';
+
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const mergeHygieneScript = join(repoRoot, 'scripts/check-memory-core-merge-hygiene.ts');
+const tsxCli = join(repoRoot, 'node_modules/tsx/dist/cli.mjs');
 
 describe('Memory Core merge hygiene path selector', () => {
   it('targets Memory Core, AutoResearchClaw, WorkerManager, and known integration TypeScript paths', () => {
@@ -145,37 +153,18 @@ describe('Memory Core merge hygiene inventories', () => {
 });
 
 describe('Memory Core merge hygiene gate', () => {
-  it('skips production semantic-loss scan for GitHub pull_request synthetic merge refs', () => {
-    const git: MergeHygieneGitReader = {
-      listChangedFiles() {
-        throw new Error('synthetic pull_request merge refs must not run the production scan');
-      },
-      readFileAtRef() {
-        throw new Error('synthetic pull_request merge refs must not read parent inventories');
-      },
-      resolveParentRefs() {
-        throw new Error('synthetic pull_request merge refs must not resolve merge parents');
-      },
-    };
-
+  it('does not allow spoofed GitHub pull_request env to suppress a genuine merge scan', () => {
     const report = runMemoryCoreMergeHygiene({
-      env: {
-        GITHUB_ACTIONS: 'true',
-        GITHUB_EVENT_NAME: 'pull_request',
-        GITHUB_REF: 'refs/pull/123/merge',
-      },
-      git,
+      git: makeDeletedTargetGitReader('keeps genuine merge coverage'),
       mergeRef: 'HEAD',
-      mergeRefExplicit: false,
     });
 
-    expect(report).toEqual({
-      checked: false,
-      mergeRef: 'HEAD',
-      ok: true,
-      parentResults: [],
-      skippedReason:
-        'GitHub pull_request checked out refs/pull/*/merge, a synthetic CI merge ref; production parent-vs-merge semantic-loss scan runs on pushed merge commits or explicit --merge refs.',
+    expect(report.checked).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.parentResults[0]).toMatchObject({
+      changedPaths: ['tests/memory-core-autoresearchclaw-contract.test.ts'],
+      missingTestNames: ['keeps genuine merge coverage'],
+      parentRef: 'parent-a',
     });
   });
 
@@ -264,14 +253,8 @@ describe('Memory Core merge hygiene gate', () => {
     };
 
     const report = runMemoryCoreMergeHygiene({
-      env: {
-        GITHUB_ACTIONS: 'true',
-        GITHUB_EVENT_NAME: 'push',
-        GITHUB_REF: 'refs/heads/main',
-      },
       git,
       mergeRef: 'HEAD',
-      mergeRefExplicit: false,
     });
 
     expect(report.checked).toBe(true);
@@ -309,14 +292,8 @@ describe('Memory Core merge hygiene gate', () => {
     };
 
     const report = runMemoryCoreMergeHygiene({
-      env: {
-        GITHUB_ACTIONS: 'true',
-        GITHUB_EVENT_NAME: 'pull_request',
-        GITHUB_REF: 'refs/pull/123/merge',
-      },
       git,
       mergeRef: 'merge',
-      mergeRefExplicit: true,
     });
 
     expect(report.checked).toBe(true);
@@ -427,4 +404,150 @@ describe('Memory Core merge hygiene gate', () => {
       skippedReason: 'HEAD is not a merge commit; Memory Core merge hygiene runs only on merge commits.',
     });
   });
+
+  it('keeps the GitHub pull_request synthetic-merge exception in the workflow step condition', () => {
+    const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+    const step = workflow.match(
+      /- name: Memory Core merge hygiene[\s\S]*?run: npm run check:merge-hygiene:memory-core/,
+    );
+
+    expect(step?.[0]).toContain("if: github.event_name != 'pull_request'");
+    expect(workflow).not.toContain('GITHUB_REF');
+    expect(workflow).not.toContain(
+      'refs/pull/*/merge, a synthetic CI merge ref; production parent-vs-merge semantic-loss scan runs',
+    );
+  });
 });
+
+describe('Memory Core merge hygiene real git CLI probes', () => {
+  it('scans a genuine delete merge under spoofed pull_request env and keeps --json stdout clean', () => {
+    const repo = createDeleteMergeRepo();
+    try {
+      const result = runMergeHygieneCli(repo, ['--json'], {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_REF: 'refs/pull/123/merge',
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('');
+      const report = JSON.parse(result.stdout) as ReturnType<typeof runMemoryCoreMergeHygiene>;
+      expect(report.checked).toBe(true);
+      expect(report.ok).toBe(false);
+      expect(
+        report.parentResults.some((parent) => parent.missingTestNames.includes('keeps real delete coverage')),
+      ).toBe(true);
+    } finally {
+      rmSync(repo, { force: true, recursive: true });
+    }
+  });
+
+  it('scans a genuine add merge and keeps missing-parent git-show stderr out of --json output', () => {
+    const repo = createAddMergeRepo();
+    try {
+      const result = runMergeHygieneCli(repo, ['--json']);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+      const report = JSON.parse(result.stdout) as ReturnType<typeof runMemoryCoreMergeHygiene>;
+      expect(report.checked).toBe(true);
+      expect(report.ok).toBe(true);
+      expect(report.parentResults.some((parent) => parent.changedPaths.includes('src/memory-core/added.ts'))).toBe(
+        true,
+      );
+    } finally {
+      rmSync(repo, { force: true, recursive: true });
+    }
+  });
+});
+
+function makeDeletedTargetGitReader(testName: string): MergeHygieneGitReader {
+  const files = new Map<string, string | undefined>([
+    ['parent-a:tests/memory-core-autoresearchclaw-contract.test.ts', `it('${testName}', () => {});\n`],
+    ['parent-b:tests/memory-core-autoresearchclaw-contract.test.ts', undefined],
+    ['HEAD:tests/memory-core-autoresearchclaw-contract.test.ts', undefined],
+  ]);
+
+  return {
+    listChangedFiles() {
+      return ['tests/memory-core-autoresearchclaw-contract.test.ts'];
+    },
+    readFileAtRef(ref, filePath) {
+      return files.get(`${ref}:${filePath}`);
+    },
+    resolveParentRefs() {
+      return ['parent-a', 'parent-b'];
+    },
+  };
+}
+
+function createDeleteMergeRepo(): string {
+  const repo = createGitRepo();
+  writeRepoFile(repo, 'README.md', 'base\n');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'base']);
+  git(repo, ['checkout', '-b', 'parent-a']);
+  writeRepoFile(
+    repo,
+    'tests/memory-core-autoresearchclaw-contract.test.ts',
+    "it('keeps real delete coverage', () => {});\n",
+  );
+  git(repo, ['add', 'tests/memory-core-autoresearchclaw-contract.test.ts']);
+  git(repo, ['commit', '-m', 'add memory coverage']);
+  git(repo, ['checkout', 'main']);
+  git(repo, ['checkout', '-b', 'parent-b']);
+  writeRepoFile(repo, 'README.md', 'base\nparent-b\n');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'update unrelated file']);
+  git(repo, ['checkout', 'parent-a']);
+  git(repo, ['merge', '--no-ff', '--no-commit', 'parent-b']);
+  rmSync(join(repo, 'tests/memory-core-autoresearchclaw-contract.test.ts'));
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '-m', 'merge and delete memory coverage']);
+  return repo;
+}
+
+function createAddMergeRepo(): string {
+  const repo = createGitRepo();
+  writeRepoFile(repo, 'README.md', 'base\n');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'base']);
+  git(repo, ['checkout', '-b', 'parent-a']);
+  writeRepoFile(repo, 'README.md', 'base\nparent-a\n');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'update unrelated file']);
+  git(repo, ['checkout', 'main']);
+  git(repo, ['checkout', '-b', 'parent-b']);
+  writeRepoFile(repo, 'src/memory-core/added.ts', 'export function keepAddedMemoryApi() { return true; }\n');
+  git(repo, ['add', 'src/memory-core/added.ts']);
+  git(repo, ['commit', '-m', 'add memory api']);
+  git(repo, ['checkout', 'parent-a']);
+  git(repo, ['merge', '--no-ff', 'parent-b', '-m', 'merge added memory api']);
+  return repo;
+}
+
+function createGitRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'metabot-merge-hygiene-'));
+  git(repo, ['init', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'merge-hygiene@example.test']);
+  git(repo, ['config', 'user.name', 'Merge Hygiene Test']);
+  return repo;
+}
+
+function writeRepoFile(repo: string, filePath: string, contents: string): void {
+  const absolutePath = join(repo, filePath);
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  writeFileSync(absolutePath, contents);
+}
+
+function git(repo: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function runMergeHygieneCli(repo: string, args: string[], env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, [tsxCli, mergeHygieneScript, ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  });
+}

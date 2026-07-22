@@ -45,12 +45,6 @@ export interface MemoryCoreMergeHygieneReport {
   skippedReason?: string;
 }
 
-export interface MergeHygieneRuntimeEnv {
-  GITHUB_ACTIONS?: string;
-  GITHUB_EVENT_NAME?: string;
-  GITHUB_REF?: string;
-}
-
 export interface MergeHygieneGitReader {
   listChangedFiles(parentRef: string, mergeRef: string): string[];
   readFileAtRef(ref: string, filePath: string): string | undefined;
@@ -59,10 +53,8 @@ export interface MergeHygieneGitReader {
 
 export interface RunMergeHygieneOptions {
   cwd?: string;
-  env?: MergeHygieneRuntimeEnv;
   git?: MergeHygieneGitReader;
   mergeRef?: string;
-  mergeRefExplicit?: boolean;
 }
 
 export function isMemoryCoreMergeHygienePath(filePath: string): boolean {
@@ -110,18 +102,6 @@ export function diffInventories(
 
 export function runMemoryCoreMergeHygiene(options: RunMergeHygieneOptions = {}): MemoryCoreMergeHygieneReport {
   const mergeRef = options.mergeRef ?? 'HEAD';
-  const mergeRefExplicit = options.mergeRefExplicit ?? options.mergeRef !== undefined;
-  if (shouldSkipSyntheticPullRequestMergeScan(options.env ?? process.env, mergeRefExplicit)) {
-    return {
-      checked: false,
-      mergeRef,
-      ok: true,
-      parentResults: [],
-      skippedReason:
-        'GitHub pull_request checked out refs/pull/*/merge, a synthetic CI merge ref; production parent-vs-merge semantic-loss scan runs on pushed merge commits or explicit --merge refs.',
-    };
-  }
-
   const git = options.git ?? createGitReader(options.cwd ?? process.cwd());
   const parentRefs = git.resolveParentRefs(mergeRef);
   if (parentRefs.length < 2) {
@@ -209,7 +189,6 @@ export function formatMemoryCoreMergeHygieneReport(report: MemoryCoreMergeHygien
 
 export function runMemoryCoreMergeHygieneCli(args: string[]): number {
   let mergeRef = 'HEAD';
-  let mergeRefExplicit = false;
   let json = false;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -218,7 +197,6 @@ export function runMemoryCoreMergeHygieneCli(args: string[]): number {
       const next = args[index + 1];
       if (!next) throw new Error('--merge requires a ref');
       mergeRef = next;
-      mergeRefExplicit = true;
       index += 1;
       continue;
     }
@@ -229,23 +207,18 @@ export function runMemoryCoreMergeHygieneCli(args: string[]): number {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  const report = runMemoryCoreMergeHygiene({ mergeRef, mergeRefExplicit });
+  const report = runMemoryCoreMergeHygiene({ mergeRef });
   const rendered = json ? `${JSON.stringify(report, null, 2)}\n` : `${formatMemoryCoreMergeHygieneReport(report)}\n`;
+  if (json) {
+    process.stdout.write(rendered);
+    return report.ok ? 0 : 1;
+  }
   if (report.ok) {
     process.stdout.write(rendered);
     return 0;
   }
   process.stderr.write(rendered);
   return 1;
-}
-
-function shouldSkipSyntheticPullRequestMergeScan(env: MergeHygieneRuntimeEnv, mergeRefExplicit: boolean): boolean {
-  if (mergeRefExplicit) return false;
-  return (
-    env.GITHUB_ACTIONS === 'true' &&
-    env.GITHUB_EVENT_NAME === 'pull_request' &&
-    /^refs\/pull\/\d+\/merge$/.test(env.GITHUB_REF ?? '')
-  );
 }
 
 function createGitReader(cwd: string): MergeHygieneGitReader {
@@ -273,7 +246,24 @@ function createGitReader(cwd: string): MergeHygieneGitReader {
 }
 
 function execGit(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    throw new Error(formatGitFailure(args, error), { cause: error });
+  }
+}
+
+function formatGitFailure(args: string[], error: unknown): string {
+  const stderr = gitFailureStderr(error).trim();
+  const command = `git ${args.join(' ')}`;
+  return stderr ? `${command} failed: ${stderr}` : `${command} failed`;
+}
+
+function gitFailureStderr(error: unknown): string {
+  if (typeof error !== 'object' || error === null || !('stderr' in error)) return '';
+  const stderr = (error as { stderr?: unknown }).stderr;
+  if (Buffer.isBuffer(stderr)) return stderr.toString('utf8');
+  return typeof stderr === 'string' ? stderr : '';
 }
 
 function aggregateInventory(ref: string, filePaths: string[], git: MergeHygieneGitReader): SourceInventory {
