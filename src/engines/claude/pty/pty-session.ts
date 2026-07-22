@@ -22,54 +22,28 @@ import type {
   PtyClaudeSessionOptions,
   PtyPromptSubmission,
 } from './contract.js';
+import {
+  classifyClaudeInputReadiness,
+  classifyClaudeSubmissionAcknowledgement,
+  isClaudeResumeSummaryDialog,
+} from './pty-readiness.js';
+
+export {
+  classifyClaudeInputReadiness,
+  classifyClaudeSubmissionAcknowledgement,
+  hasClaudePromptText,
+  hasClaudeRunningFooter,
+  isClaudeResumeSummaryDialog,
+} from './pty-readiness.js';
+export type { ClaudeInputReadiness } from './pty-readiness.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
-const PROMPT_MARKER_RE = /[❯⏵]/u;
 const INITIAL_READY_TIMEOUT_MS = 30_000;
 /** Bounded window for Claude's model-backed compaction after summary resume. */
 export const RESUME_SUMMARY_READY_TIMEOUT_MS = 10 * 60_000;
-
-export interface ClaudeInputReadiness {
-  hasInputBox: boolean;
-  running: boolean;
-  menuUp: boolean;
-  idle: boolean;
-}
-
-/**
- * Claude Code asks this question when an old/large session is resumed. The
- * recommended first option preserves continuity through a summary, but the
- * dialog blocks the normal input box until it is confirmed.
- */
-export function isClaudeResumeSummaryDialog(screen: string): boolean {
-  const sq = screen.toLowerCase().replace(/\s+/g, '');
-  return (
-    sq.includes('resumefromsummary') &&
-    sq.includes('resumefullsessionas-is') &&
-    sq.includes('entertoconfirm') &&
-    /[❯⏵]1\./u.test(sq)
-  );
-}
-
-export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness {
-  const sq = tail.toLowerCase().replace(/\s+/g, '');
-  const running = sq.includes('esctointerrupt');
-  const menuUp =
-    sq.includes('entertoselect') ||
-    sq.includes('ctrl-gtoedit') ||
-    sq.includes('shift+tabtoapprove') ||
-    /[❯⏵]\d\./u.test(sq); // pointer on a numbered menu option
-  const hasInputBox = PROMPT_MARKER_RE.test(tail);
-  return {
-    hasInputBox,
-    running,
-    menuUp,
-    idle: hasInputBox && !running && !menuUp,
-  };
-}
 
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
@@ -393,10 +367,8 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const current = this.screen();
-      const readiness = classifyClaudeInputReadiness(current);
-      if (readiness.running) return 'running';
-      if (current && current !== submittedScreen && !readiness.idle) return 'accepted';
-      if (current && current !== submittedScreen && readiness.idle) return 'accepted';
+      const acknowledgement = classifyClaudeSubmissionAcknowledgement(submittedScreen, current);
+      if (acknowledgement) return acknowledgement;
       await sleep(50);
     }
     return null;
