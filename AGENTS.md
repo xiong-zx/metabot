@@ -39,6 +39,17 @@
 
 ## MetaBot 重启安全
 
+标准调用形式（改完 `src/` 让 bridge 生效时用这个，不要自己拼 `pm2`）：
+
+```bash
+metabot restart --wait --json --resume \
+  --reason "<为什么重启>" --source pm --bot <botName> --chat <chatId>
+```
+
+裸 `pm2 restart metabot` 也能起来，但会跳过 tsx 依赖预检（`_ensure_runtime_deps`）、重启面包屑（`_write_restart_breadcrumb`）、requestId 原子 claim 和 `restart-requests.json` 审计台账——**看起来成功，实则失去保护**。其中面包屑缺失会让被 `--resume` 恢复的 agent 重新读到"请重启"并再次重启，形成循环。
+
+重启会杀掉 bridge 的所有子进程，包括发起重启的那个会话本身；会话随后由 `--resume <sessionId>` 从 JSONL 恢复历史，**对话看起来毫无断裂但进程已全换**，不要据此判断"重启没发生"。
+
 - MetaBot 自身启动的 Bot、Agent、Worker、Codex、Claude 或 shell 子进程，禁止执行或建议 `pm2 delete metabot` / `pm2 stop metabot` 后再 `pm2 start ...`。第一步会杀死执行第二步的进程树。
 - 同一 runtime 的普通重启只使用 `metabot restart`（底层为单次 `pm2 restart metabot --update-env`）。不得把 `pm2 save` 放在旧进程的重启 shell 中；由新进程健康检查通过后保存 PM2 状态。
 - 切换 cwd/script/worktree 必须从 MetaBot 进程树之外的 SSH、supervisor 或独立部署控制器执行 `metabot deploy-runtime --runtime <dir>`。该命令在内部调用时必须 fail closed。

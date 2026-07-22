@@ -119,6 +119,25 @@ lark-cli base records list ...                           # Query bitable
 - 要跑 live 验证 → 把 feature 分支合进 `dev`；要评审 / 进 `main` → 从 feature 分支开 PR。
 - feature 分支从 `main` 拉；若新工作依赖别的 feature（如 memory-core 依赖 agent-team），就 stack 在那条 feature 上，别硬拆成独立分支。
 
+## MetaBot 重启安全
+
+改完 `src/` 需要让 bridge 生效时，**一律走 `metabot restart`，不要自己拼 `pm2` 命令**：
+
+```bash
+metabot restart --wait --json --resume \
+  --reason "<为什么重启>" --source pm --bot <botName> --chat <chatId>
+```
+
+- 同一 runtime 的普通重启只用 `metabot restart`（底层就是单次 `pm2 restart metabot --update-env`）。裸 `pm2 restart` 能跑通，但会跳过下面四层保护，属于**看起来成功、实则失去保护**的操作：
+  - `_ensure_runtime_deps`：重启前校验 tsx 可解析，缺失则拒绝重启，避免撞进 10 次崩溃循环直到 PM2 放弃（bridge 用 `node --import tsx` 直接跑 `src/index.ts`，tsx 一旦被 prod install 剪掉就起不来）
+  - `_write_restart_breadcrumb`：落 `last-restart.json`，bridge 启动时注入提示。**没有它，被 `--resume` 恢复的 agent 会在历史里重新读到"请重启"，然后再重启一次，形成循环**
+  - `_claim_restart_request`：按 requestId 原子 claim，重复请求返回 duplicate 而不是真重启
+  - `--wait`：等健康检查 + 终态落 `restart-requests.json` 审计台账，而不是靠 `sleep` 猜
+- MetaBot 自身启动的 Bot / Agent / Worker / Codex / Claude / shell 子进程，禁止 `pm2 delete metabot` 或 `pm2 stop metabot` 后再 `pm2 start`——第一步会杀掉执行第二步的进程树。也不要把 `pm2 save` 放进旧进程的重启 shell，由新进程健康检查通过后再保存。
+- 切换 cwd / script / worktree 必须从 MetaBot 进程树**之外**的 SSH、supervisor 或独立控制器执行 `metabot deploy-runtime --runtime <dir>`；该命令在进程树内部调用时 fail closed。
+- 恢复 turn 里看到已有 restart requestId / breadcrumb，只做健康检查、验收和剩余工作；同一 requestId 不得再触发一次真实重启。
+
+> 重启会杀掉 bridge 的所有子进程，包括发起重启的那个 Claude 会话本身。会话随后由 `--resume <sessionId>` 拉起、从 JSONL 恢复历史，所以**对话看起来毫无断裂，但进程已经全换了**——不要据此认为"重启没发生"。
 
 <!-- METABOT-WORKER -->
 # Worker Agent 规范
