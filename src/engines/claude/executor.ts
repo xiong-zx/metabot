@@ -11,6 +11,7 @@ import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
 import { resolveClaudePath } from './resolve-executable.js';
+import { CONTEXT_WINDOW_200K, FABLE_5_MODEL_RE } from '../../utils/model-id.js';
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
 
@@ -302,8 +303,7 @@ function apiContextEnv(apiContext: ApiContext | undefined): Record<string, strin
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.
  */
-export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
-const FABLE_5_MODEL_RE = /^claude-fable-5(?:$|\[)/;
+export const DEFAULT_AUTO_COMPACT_WINDOW = String(CONTEXT_WINDOW_200K);
 
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;

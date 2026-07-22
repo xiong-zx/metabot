@@ -15,6 +15,7 @@
 
 import type { SDKMessage } from '../executor.js';
 import type { AdaptJsonlRecord, SynthesizeResult, RawJsonlRecord } from './contract.js';
+import { resolveContextWindow } from '../../../utils/model-id.js';
 
 /**
  * Record types that should be silently dropped — they carry no information
@@ -217,12 +218,19 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     // (processResultMessage) picks the model with the highest cost and surfaces
     // that key as the displayed model name — so use the REAL model captured off
     // the assistant jsonl records, falling back to a placeholder only if unknown.
+    //
+    // contextWindow must come from the CONFIGURED model, not `args.model`: only
+    // the configured id carries the `[1m]` suffix that selects the 1M window
+    // (the API echoes back a bare id). Reading it off `args.model` would report
+    // 200K for every 1M session — the "ctx: 37.8k/200k" bug.
     if (args.usage.inputTokens !== undefined || args.usage.outputTokens !== undefined) {
+      const configuredModel =
+        args.modelTelemetry?.configuredModel || args.modelTelemetry?.spawnModel || args.model;
       msg.modelUsage = {
         [args.model || 'unknown']: {
           inputTokens: args.usage.inputTokens ?? 0,
           outputTokens: args.usage.outputTokens ?? 0,
-          contextWindow: 200000,
+          contextWindow: resolveContextWindow(configuredModel),
           costUSD: args.usage.costUSD ?? 0,
         },
       };
