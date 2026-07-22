@@ -26,6 +26,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Must precede the type check. `npm run typecheck` covers the workspace
+      # projects (packages/cli, metamemory, skill-hub), and those import
+      # @xvirobotics/cli-core etc. through `exports -> dist/`. Until these thin
+      # libraries are built, their .d.ts files do not exist and the type check
+      # fails with TS2307 "Cannot find module '@xvirobotics/cli-core/...'".
+      # The predecessor step (`npx tsc --noEmit`) only checked the root bridge
+      # project, so it tolerated running before the build; the root typecheck
+      # does not. The workspace test suites below need the build for the same
+      # reason.
+      - name: Build workspace libraries
+        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub
+
       - name: Type check
         run: npm run typecheck
 
@@ -38,13 +50,6 @@ jobs:
       - name: Memory Core merge hygiene
         if: github.event_name != 'pull_request'
         run: npm run check:merge-hygiene:memory-core
-
-      # Workspace test suites (packages/cli, metamemory, skill-hub) import the
-      # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
-      # exports -> dist/). `tsc --noEmit` above does not emit, so build them
-      # before running tests or the imports fail to resolve.
-      - name: Build workspace libraries
-        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub
 
       - name: Run tests
         run: npm test
