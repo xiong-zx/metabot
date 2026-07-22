@@ -31,7 +31,10 @@ jobs:
 
       # Merge-only semantic-loss sweep for Memory Core / AutoResearchClaw.
       # It checks targeted bridge/workspace/integration TypeScript paths across
-      # each merge parent and skips non-merge commits.
+      # each real merge parent and skips non-merge commits. In pull_request CI,
+      # actions/checkout uses refs/pull/*/merge, a synthetic test merge; the
+      # CLI skips only that production parent-vs-merge scan while npm test below
+      # still exercises the gate's unit/adversarial coverage.
       - name: Memory Core merge hygiene
         run: npm run check:merge-hygiene:memory-core
 

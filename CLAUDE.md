@@ -157,6 +157,7 @@ metabot restart --wait --json --resume \
 - 2026-07-22 bridge 由 PM2 以 `node --import tsx src/index.ts` 从**源码**运行（非构建产物），改完 `src/` 只需重启、无需 `npm run build`；`packages/server/dist/index.js` 是独立的 `metabot-core` 进程，不受 `src/` 改动影响。
 - 2026-07-22 MEM-011 发布门禁：根级 TypeScript no-emit 校验统一走 `npm run typecheck`；该脚本显式检查 `tsconfig.bridge.json`、根 solution config 引用的工作区（`packages/cli-core`、`packages/metamemory`、`packages/skill-hub`、`packages/cli`、`packages/server`）和 `packages/web-ui`，顶层旧版 `web/` 不在 no-emit 门禁内，靠 `npm run build:web` / `npm run build` 校验。从仓库根目录运行 CLI Vitest 统一走 `npm run test:cli`，避免误用根级 Vitest 配置。Memory Core / AutoResearchClaw merge semantic-loss sweep 统一走 `npm run check:merge-hygiene:memory-core`；该门禁只在 merge commit 上做 parent-vs-merge 对比，平时非 merge commit 会 skip。
 - 2026-07-22 MEM-011 merge-hygiene detector 不能用 raw source substring 扫描自身覆盖到的 test/gate files，否则 adversarial fixtures 会 self-poison；forbidden AutoResearchClaw legacy candidate aliases 应按 TS AST identifier / semantic property name 检测，Git conflict markers 应先 mask comments 与 string/template literals 后再查 raw marker line。该设计保留真实 source-level 检测，同时允许测试中放字符串/注释 fixture。
+- 2026-07-22 MEM-011 merge-hygiene lifecycle：GitHub Actions `pull_request` checkout 的 `refs/pull/*/merge` 是 synthetic CI merge，不是发布集成 merge；默认 `npm run check:merge-hygiene:memory-core` 在该环境只 skip production parent-vs-merge scan，仍靠 `npm test` 跑 gate 单测/对抗测试。`push` 到真实 merge commit、以及手动/本地显式 `--merge <ref>` 仍会执行 parent-vs-merge semantic-loss scan。
 
 <!-- METABOT-WORKER -->
 

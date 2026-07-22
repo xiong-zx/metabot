@@ -45,6 +45,12 @@ export interface MemoryCoreMergeHygieneReport {
   skippedReason?: string;
 }
 
+export interface MergeHygieneRuntimeEnv {
+  GITHUB_ACTIONS?: string;
+  GITHUB_EVENT_NAME?: string;
+  GITHUB_REF?: string;
+}
+
 export interface MergeHygieneGitReader {
   listChangedFiles(parentRef: string, mergeRef: string): string[];
   readFileAtRef(ref: string, filePath: string): string | undefined;
@@ -53,8 +59,10 @@ export interface MergeHygieneGitReader {
 
 export interface RunMergeHygieneOptions {
   cwd?: string;
+  env?: MergeHygieneRuntimeEnv;
   git?: MergeHygieneGitReader;
   mergeRef?: string;
+  mergeRefExplicit?: boolean;
 }
 
 export function isMemoryCoreMergeHygienePath(filePath: string): boolean {
@@ -102,6 +110,18 @@ export function diffInventories(
 
 export function runMemoryCoreMergeHygiene(options: RunMergeHygieneOptions = {}): MemoryCoreMergeHygieneReport {
   const mergeRef = options.mergeRef ?? 'HEAD';
+  const mergeRefExplicit = options.mergeRefExplicit ?? options.mergeRef !== undefined;
+  if (shouldSkipSyntheticPullRequestMergeScan(options.env ?? process.env, mergeRefExplicit)) {
+    return {
+      checked: false,
+      mergeRef,
+      ok: true,
+      parentResults: [],
+      skippedReason:
+        'GitHub pull_request checked out refs/pull/*/merge, a synthetic CI merge ref; production parent-vs-merge semantic-loss scan runs on pushed merge commits or explicit --merge refs.',
+    };
+  }
+
   const git = options.git ?? createGitReader(options.cwd ?? process.cwd());
   const parentRefs = git.resolveParentRefs(mergeRef);
   if (parentRefs.length < 2) {
@@ -189,6 +209,7 @@ export function formatMemoryCoreMergeHygieneReport(report: MemoryCoreMergeHygien
 
 export function runMemoryCoreMergeHygieneCli(args: string[]): number {
   let mergeRef = 'HEAD';
+  let mergeRefExplicit = false;
   let json = false;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -197,6 +218,7 @@ export function runMemoryCoreMergeHygieneCli(args: string[]): number {
       const next = args[index + 1];
       if (!next) throw new Error('--merge requires a ref');
       mergeRef = next;
+      mergeRefExplicit = true;
       index += 1;
       continue;
     }
@@ -207,7 +229,7 @@ export function runMemoryCoreMergeHygieneCli(args: string[]): number {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  const report = runMemoryCoreMergeHygiene({ mergeRef });
+  const report = runMemoryCoreMergeHygiene({ mergeRef, mergeRefExplicit });
   const rendered = json ? `${JSON.stringify(report, null, 2)}\n` : `${formatMemoryCoreMergeHygieneReport(report)}\n`;
   if (report.ok) {
     process.stdout.write(rendered);
@@ -215,6 +237,15 @@ export function runMemoryCoreMergeHygieneCli(args: string[]): number {
   }
   process.stderr.write(rendered);
   return 1;
+}
+
+function shouldSkipSyntheticPullRequestMergeScan(env: MergeHygieneRuntimeEnv, mergeRefExplicit: boolean): boolean {
+  if (mergeRefExplicit) return false;
+  return (
+    env.GITHUB_ACTIONS === 'true' &&
+    env.GITHUB_EVENT_NAME === 'pull_request' &&
+    /^refs\/pull\/\d+\/merge$/.test(env.GITHUB_REF ?? '')
+  );
 }
 
 function createGitReader(cwd: string): MergeHygieneGitReader {
@@ -380,12 +411,22 @@ function collectForbiddenSemanticLexemeDiagnostics(sourceFile: ts.SourceFile): s
 
 function semanticForbiddenLexemeText(node: ts.Node): string | undefined {
   if (ts.isIdentifier(node)) return node.text;
-  if ((ts.isStringLiteral(node) || ts.isNumericLiteral(node)) && isStaticSemanticPropertyName(node)) return node.text;
+  if (
+    (ts.isStringLiteral(node) || ts.isNumericLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+    isStaticSemanticPropertyName(node)
+  ) {
+    return node.text;
+  }
   return undefined;
 }
 
-function isStaticSemanticPropertyName(node: ts.StringLiteral | ts.NumericLiteral): boolean {
+function isStaticSemanticPropertyName(
+  node: ts.StringLiteral | ts.NumericLiteral | ts.NoSubstitutionTemplateLiteral,
+): boolean {
   const parent = node.parent;
+  if (ts.isElementAccessExpression(parent) && parent.argumentExpression === node) {
+    return true;
+  }
   if (
     (ts.isPropertyAssignment(parent) ||
       ts.isPropertyDeclaration(parent) ||

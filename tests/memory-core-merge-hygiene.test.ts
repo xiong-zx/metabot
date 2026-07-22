@@ -119,6 +119,8 @@ describe('Memory Core merge hygiene inventories', () => {
         "finding_candidates": [],
         ['decision_candidates']: [],
       };
+      output['hypothesis_candidates'] = [];
+      output[\`finding_candidates\`] = [];
     `);
 
     expect(inventory.diagnostics).toEqual(['forbidden-lexeme:legacy-autoresearchclaw-candidate-alias']);
@@ -143,6 +145,40 @@ describe('Memory Core merge hygiene inventories', () => {
 });
 
 describe('Memory Core merge hygiene gate', () => {
+  it('skips production semantic-loss scan for GitHub pull_request synthetic merge refs', () => {
+    const git: MergeHygieneGitReader = {
+      listChangedFiles() {
+        throw new Error('synthetic pull_request merge refs must not run the production scan');
+      },
+      readFileAtRef() {
+        throw new Error('synthetic pull_request merge refs must not read parent inventories');
+      },
+      resolveParentRefs() {
+        throw new Error('synthetic pull_request merge refs must not resolve merge parents');
+      },
+    };
+
+    const report = runMemoryCoreMergeHygiene({
+      env: {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_REF: 'refs/pull/123/merge',
+      },
+      git,
+      mergeRef: 'HEAD',
+      mergeRefExplicit: false,
+    });
+
+    expect(report).toEqual({
+      checked: false,
+      mergeRef: 'HEAD',
+      ok: true,
+      parentResults: [],
+      skippedReason:
+        'GitHub pull_request checked out refs/pull/*/merge, a synthetic CI merge ref; production parent-vs-merge semantic-loss scan runs on pushed merge commits or explicit --merge refs.',
+    });
+  });
+
   it('fails when a merge result drops targeted parent declarations or tests', () => {
     const files = new Map<string, string | undefined>([
       [
@@ -203,6 +239,89 @@ describe('Memory Core merge hygiene gate', () => {
     expect(formatMemoryCoreMergeHygieneReport(report)).toContain(
       'missing exported declarations: function:keepPublicApi, type:StableType',
     );
+  });
+
+  it('checks actual pushed merge commits and fails accidental targeted test deletion', () => {
+    const files = new Map<string, string | undefined>([
+      [
+        'parent-a:tests/memory-core-autoresearchclaw-contract.test.ts',
+        `it('keeps pushed merge coverage', () => {});\n`,
+      ],
+      ['parent-b:tests/memory-core-autoresearchclaw-contract.test.ts', undefined],
+      ['merge:tests/memory-core-autoresearchclaw-contract.test.ts', undefined],
+    ]);
+
+    const git: MergeHygieneGitReader = {
+      listChangedFiles() {
+        return ['tests/memory-core-autoresearchclaw-contract.test.ts'];
+      },
+      readFileAtRef(ref, filePath) {
+        return files.get(`${ref}:${filePath}`);
+      },
+      resolveParentRefs() {
+        return ['parent-a', 'parent-b'];
+      },
+    };
+
+    const report = runMemoryCoreMergeHygiene({
+      env: {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_EVENT_NAME: 'push',
+        GITHUB_REF: 'refs/heads/main',
+      },
+      git,
+      mergeRef: 'HEAD',
+      mergeRefExplicit: false,
+    });
+
+    expect(report.checked).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.parentResults[0]).toMatchObject({
+      changedPaths: ['tests/memory-core-autoresearchclaw-contract.test.ts'],
+      missingTestNames: ['keeps pushed merge coverage'],
+      parentRef: 'parent-a',
+    });
+  });
+
+  it('preserves explicit merge-ref scans even inside pull_request CI', () => {
+    const files = new Map<string, string | undefined>([
+      [
+        'parent-a:tests/memory-core-autoresearchclaw-contract.test.ts',
+        `it('keeps explicit merge coverage', () => {});\n`,
+      ],
+      ['merge:tests/memory-core-autoresearchclaw-contract.test.ts', undefined],
+      [
+        'parent-b:tests/memory-core-autoresearchclaw-contract.test.ts',
+        `it('keeps explicit merge coverage', () => {});\n`,
+      ],
+    ]);
+
+    const git: MergeHygieneGitReader = {
+      listChangedFiles() {
+        return ['tests/memory-core-autoresearchclaw-contract.test.ts'];
+      },
+      readFileAtRef(ref, filePath) {
+        return files.get(`${ref}:${filePath}`);
+      },
+      resolveParentRefs() {
+        return ['parent-a', 'parent-b'];
+      },
+    };
+
+    const report = runMemoryCoreMergeHygiene({
+      env: {
+        GITHUB_ACTIONS: 'true',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_REF: 'refs/pull/123/merge',
+      },
+      git,
+      mergeRef: 'merge',
+      mergeRefExplicit: true,
+    });
+
+    expect(report.checked).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.parentResults[0]?.missingTestNames).toEqual(['keeps explicit merge coverage']);
   });
 
   it('fails when a known integration route keeps declarations but drops visibility and imports', () => {
