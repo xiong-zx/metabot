@@ -607,6 +607,12 @@ function reconcileTerminalWorkerRecord(
 ): void {
   if (!isTerminalWorkerStatus(record.status)) return;
 
+  if (record.executionStatus === undefined || record.executionStatus === 'running') {
+    if (record.status === 'completed') record.executionStatus = 'completed';
+    else if (record.status === 'aborted') record.executionStatus = 'aborted';
+    else record.executionStatus = classifyExecutionStatus(record.error);
+  }
+
   const contract = normalizeWorkerOutputContract(record.outputContract) ?? inferOutputContract(record);
   if (contract) {
     record.outputContract = contract;
@@ -658,6 +664,7 @@ function trackedWorkerFields(record: WorkerRecord): Record<string, unknown> {
     error: record.error,
     terminalError: record.terminalError,
     resultSummary: record.resultSummary,
+    executionStatus: record.executionStatus,
   };
 }
 
@@ -891,10 +898,12 @@ export class WorkerManager {
     if (!record || record.status !== 'running') return false;
 
     record.status = 'completed';
+    record.executionStatus = 'completed';
     record.endTime = Date.now();
     record.durationMs = record.endTime - record.startTime;
     record.resultSummary = patch.resultSummary ?? record.resultSummary;
     if (patch.error !== undefined) record.error = patch.error;
+    this.reconcileTerminalArtifact(record);
     this.persist();
 
     const bot = this.registry.get(record.botName);
@@ -1035,20 +1044,30 @@ export class WorkerManager {
         idleTimeoutMs: record.idleTimeoutMs,
       });
 
-      record.endTime = Date.now();
-      record.durationMs = record.endTime - startTime;
-      record.costUsd = result.costUsd;
-
       if (record.status !== 'running') {
+        if (record.endTime === undefined) {
+          record.endTime = Date.now();
+          record.durationMs = record.endTime - startTime;
+        }
+        if (record.costUsd === undefined && result.costUsd !== undefined) {
+          record.costUsd = result.costUsd;
+        }
         if (record.resultSummary === undefined && result.responseText) {
           record.resultSummary = result.responseText.slice(0, 500);
         }
+        this.reconcileTerminalArtifact(record);
       } else if (result.success) {
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - startTime;
+        record.costUsd = result.costUsd;
         record.status = 'completed';
         record.executionStatus = 'completed';
         record.resultSummary = result.responseText?.slice(0, 500) || '';
         this.reconcileTerminalArtifact(record);
       } else {
+        record.endTime = Date.now();
+        record.durationMs = record.endTime - startTime;
+        record.costUsd = result.costUsd;
         record.status = 'failed';
         record.error = result.error || 'Worker task failed';
         record.executionStatus = classifyExecutionStatus(record.error);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +29,34 @@ function autoResearchOutput(overrides: Record<string, unknown> = {}): Record<str
     recommended_followups: [],
     tool_trace: [{ tool: 'vitest', summary: 'Validated worker artifact contract', status: 'completed' }],
     ...overrides,
+  };
+}
+
+function persistedWorker(sessionStoreDir: string, workerId: string): any {
+  const records = JSON.parse(readFileSync(join(sessionStoreDir, 'workers.json'), 'utf-8'));
+  return records.find((record: any) => record.id === workerId);
+}
+
+function quickStatusFields(record: any): Record<string, unknown> {
+  return {
+    status: record.status,
+    executionStatus: record.executionStatus,
+    outputContract: record.outputContract
+      ? {
+          name: record.outputContract.name,
+          requiredArtifact: record.outputContract.requiredArtifact,
+          expectedArtifacts: record.outputContract.expectedArtifacts,
+        }
+      : undefined,
+    artifactStatus: record.artifactStatus,
+    contractStatus: record.contractStatus,
+    deliveryStatus: record.deliveryStatus,
+    recoveryStatus: record.recoveryStatus,
+    artifactPath: record.artifactPath,
+    artifactError: record.artifactError,
+    detailRoute: record.detailRoute,
+    finalPayloadRef: record.finalPayloadRef,
+    finalTranscriptRef: record.finalTranscriptRef,
   };
 }
 
@@ -311,6 +339,202 @@ describe('WorkerManager dispatch execution options', () => {
     expect(finalRecord.artifactStatus).toBe('valid_complete');
     expect(finalRecord.artifactPath).toBe(artifactPath);
     expect(finalRecord.terminalError).toContain('2 minutes');
+  });
+
+  it('externally completes an AutoResearchClaw worker with valid terminal artifact metadata', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, JSON.stringify(autoResearchOutput()));
+    const executeApiTask = vi.fn(() => new Promise(() => {}));
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nWrite the contract artifact.',
+      model: 'gpt-5.5',
+    });
+
+    await vi.waitFor(() => expect(executeApiTask).toHaveBeenCalled());
+    expect(
+      manager.completeWorkerFromExternal(record.id, {
+        resultSummary: 'Memory Core finalized artifact',
+      }),
+    ).toBe(true);
+
+    const expected = {
+      status: 'completed',
+      executionStatus: 'completed',
+      outputContract: { name: 'autoresearchclaw_output_v2', requiredArtifact: true },
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'full',
+      recoveryStatus: 'none',
+      artifactPath,
+      artifactError: undefined,
+      detailRoute: `/api/workers/${record.id}`,
+      finalPayloadRef: `file://${artifactPath}`,
+      finalTranscriptRef: `worker-chat:${record.workerChatId}`,
+    };
+    expect(quickStatusFields(manager.getWorker(record.id)!)).toMatchObject(expected);
+    expect(quickStatusFields(persistedWorker(sessionStoreDir, record.id))).toMatchObject(expected);
+    expect(bridge.stopChatTask).toHaveBeenCalledWith(record.workerChatId);
+  });
+
+  it('externally completed AutoResearchClaw workers do not satisfy missing or invalid artifacts', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const manager = new WorkerManager(
+      {
+        get: vi.fn(() => ({
+          bridge: {
+            executeApiTask: vi.fn(() => new Promise(() => {})),
+            stopChatTask: vi.fn(),
+          },
+        })),
+      } as any,
+      logger,
+      { defaultModel: 'gpt-5.4', maxPerPm: 8 },
+    );
+
+    const missing = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nNo artifact exists yet.',
+      model: 'gpt-5.5',
+    });
+    expect(manager.completeWorkerFromExternal(missing.id, { resultSummary: 'Memory Core finalized without artifact' })).toBe(
+      true,
+    );
+    expect(quickStatusFields(manager.getWorker(missing.id)!)).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      artifactStatus: 'missing',
+      contractStatus: 'violated',
+      deliveryStatus: 'chat_only',
+      recoveryStatus: 'none',
+      artifactPath: undefined,
+      artifactError: undefined,
+    });
+    expect(quickStatusFields(persistedWorker(sessionStoreDir, missing.id))).toMatchObject(
+      quickStatusFields(manager.getWorker(missing.id)!),
+    );
+
+    const invalidDir = mkdtempSync(join(tmpdir(), 'metabot-worker-invalid-external-'));
+    try {
+      const artifactDir = join(invalidDir, '.metabot-memory', 'autoresearchclaw');
+      const artifactPath = join(artifactDir, 'run-smoke-output.json');
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(
+        artifactPath,
+        JSON.stringify(
+          autoResearchOutput({
+            memory_event_candidates: [{ type: 'finding' }],
+          }),
+        ),
+      );
+      const invalid = manager.dispatch({
+        botName: 'research-pm',
+        pmChatId: 'pm-chat',
+        workingDirectory: invalidDir,
+        prompt: '# AutoResearchClaw Run\nArtifact is malformed.',
+        model: 'gpt-5.5',
+      });
+
+      expect(manager.completeWorkerFromExternal(invalid.id, { resultSummary: 'Memory Core rejected artifact' })).toBe(
+        true,
+      );
+      expect(quickStatusFields(manager.getWorker(invalid.id)!)).toMatchObject({
+        status: 'completed',
+        executionStatus: 'completed',
+        artifactStatus: 'invalid',
+        contractStatus: 'violated',
+        deliveryStatus: 'file_only',
+        recoveryStatus: 'none',
+        artifactPath,
+        artifactError: {
+          code: 'invalid_autoresearchclaw_field',
+          message: expect.stringContaining('memory_event_candidates[0].summary'),
+          path: artifactPath,
+        },
+      });
+      expect(quickStatusFields(persistedWorker(sessionStoreDir, invalid.id))).toMatchObject(
+        quickStatusFields(manager.getWorker(invalid.id)!),
+      );
+    } finally {
+      rmSync(invalidDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves external terminal metadata when the worker executor resolves later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, JSON.stringify(autoResearchOutput()));
+    let finishWorker: ((value: { success: boolean; responseText: string; costUsd: number }) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<{ success: boolean; responseText: string; costUsd: number }>((resolve) => {
+            finishWorker = resolve;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nWrite the contract artifact.',
+      model: 'gpt-5.5',
+    });
+    await vi.waitFor(() => expect(finishWorker).toBeDefined());
+    expect(
+      manager.completeWorkerFromExternal(record.id, {
+        resultSummary: 'Memory Core finalized artifact before executor returned',
+      }),
+    ).toBe(true);
+    const externallyCompleted = manager.getWorker(record.id)!;
+    const externalEndTime = externallyCompleted.endTime;
+    const externalDurationMs = externallyCompleted.durationMs;
+
+    finishWorker?.({
+      success: true,
+      responseText: 'late executor callback should not replace Memory Core summary',
+      costUsd: 0.25,
+    });
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      artifactPath,
+      costUsd: 0.25,
+      resultSummary: 'Memory Core finalized artifact before executor returned',
+    });
+    expect(finalRecord.endTime).toBe(externalEndTime);
+    expect(finalRecord.durationMs).toBe(externalDurationMs);
+    expect(quickStatusFields(persistedWorker(sessionStoreDir, record.id))).toMatchObject(
+      quickStatusFields(finalRecord),
+    );
   });
 
   it('classifies malformed AutoResearchClaw artifacts as invalid before contract satisfaction', async () => {
