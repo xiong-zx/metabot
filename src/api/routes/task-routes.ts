@@ -808,10 +808,9 @@ function extractMemoryCoreTerminalEvidence(result: unknown): {
   };
   let pendingReview = false;
   for (const root of roots) {
-    walkMemoryCoreEvidence(root, buckets, { pendingReview: false }, []);
+    walkMemoryCoreEvidence(root, buckets, []);
     pendingReview ||= memoryCorePendingReviewFromRoot(root);
   }
-  pendingReview ||= buckets.promotionIds.size > 0 || buckets.candidateIds.size > 0;
   const evidence: MemoryCoreTerminalEvidence = {
     ...(buckets.eventIds.size === 0 ? {} : { eventIds: [...buckets.eventIds].sort() }),
     ...(buckets.memoryUnitIds.size === 0 ? {} : { memoryUnitIds: [...buckets.memoryUnitIds].sort() }),
@@ -867,11 +866,10 @@ function walkMemoryCoreEvidence(
     candidateIds: Set<string>;
     contextPackIds: Set<string>;
   },
-  state: { pendingReview: boolean },
   path: string[],
 ): void {
   if (Array.isArray(value)) {
-    for (const item of value) walkMemoryCoreEvidence(item, buckets, state, path);
+    for (const item of value) walkMemoryCoreEvidence(item, buckets, path);
     return;
   }
   if (!isRecord(value)) return;
@@ -879,7 +877,6 @@ function walkMemoryCoreEvidence(
     const normalized = normalizeEvidenceKey(key);
     if (typeof child === 'string') {
       collectMemoryCoreId(normalized, child, buckets, path);
-      if (memoryCorePendingReviewString(normalized, child)) state.pendingReview = true;
       continue;
     }
     if (Array.isArray(child)) {
@@ -889,11 +886,11 @@ function walkMemoryCoreEvidence(
           if (isRecord(item) && typeof item.id === 'string') {
             collectMemoryCoreId(memoryCoreCollectionKind(normalized)!, item.id, buckets, path.concat(normalized));
           }
-          walkMemoryCoreEvidence(item, buckets, state, path.concat(normalized));
+          walkMemoryCoreEvidence(item, buckets, path.concat(normalized));
         }
         continue;
       }
-      for (const item of child) walkMemoryCoreEvidence(item, buckets, state, path.concat(normalized));
+      for (const item of child) walkMemoryCoreEvidence(item, buckets, path.concat(normalized));
       continue;
     }
     if (isRecord(child)) {
@@ -906,7 +903,7 @@ function walkMemoryCoreEvidence(
       if (normalized === 'candidate' && typeof child.id === 'string') {
         collectMemoryCoreId('candidateid', child.id, buckets, path.concat(normalized));
       }
-      walkMemoryCoreEvidence(child, buckets, state, path.concat(normalized));
+      walkMemoryCoreEvidence(child, buckets, path.concat(normalized));
     }
   }
 }

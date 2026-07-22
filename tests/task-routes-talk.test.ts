@@ -757,7 +757,7 @@ describe('/api/talk async UX', () => {
         },
         finalization: {
           status: 'memory_operation_failed',
-          reviewState: 'pending_review',
+          reviewState: 'not_pending_review',
           evidenceState: 'structured_evidence_extracted',
           overdueState: 'within_expected_window',
           partialEvidence: false,
@@ -769,13 +769,69 @@ describe('/api/talk async UX', () => {
         },
       },
       message: expect.stringContaining('Memory Core operation failed'),
-      nextAction: expect.stringContaining('Review the pending candidate or promotion request'),
+      nextAction: expect.stringContaining('This task failed.'),
       result: expect.objectContaining({
         success: false,
         responseText,
         error: 'memory core failed',
         errorCode: 'memory_core_failed',
       }),
+    });
+  });
+
+  it('does not infer pending review from ids when terminal evidence explicitly says approved/finalized', async () => {
+    const responseText = JSON.stringify({
+      result: {
+        writes: {
+          promotionRequest: { id: 'prom_req_approved', status: 'approved' },
+          candidateIds: ['cand_approved'],
+          contextPack: { id: 'ctx_approved' },
+        },
+        reviewStatus: 'approved',
+        finalizationPhase: 'finalized',
+      },
+    });
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText, durationMs: 9 }));
+    const ctx = makeCtx(executeApiTask);
+
+    const res = await call(ctx, 'POST', '/api/talk?async=true', {
+      botName: 'pm',
+      chatId: 'private-test',
+      prompt:
+        'projectId=mem-terminal-approved projectRoot=/root/workspaces/mem-terminal-approved domain=memory-core. Use natural language Memory Core operations only. Create one finding, explicitly approve the promotion, and return a final context pack.',
+      sendCards: false,
+    });
+    const taskId = res.json().taskId;
+
+    await eventually(() => {
+      expect(ctx.asyncTaskStore.get(taskId)?.status).toBe('completed');
+    });
+
+    const status = await call(ctx, 'GET', `/api/talk/${taskId}`);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      finalPhase: 'completed',
+      memoryCoreEvidence: {
+        promotionIds: ['prom_req_approved'],
+        candidateIds: ['cand_approved'],
+        contextPackIds: ['ctx_approved'],
+      },
+      progress: {
+        kind: 'phased',
+        currentPhase: 'completed',
+        finalPhase: 'completed',
+        finalization: {
+          status: 'memory_operation_completed',
+          reviewState: 'not_pending_review',
+          evidenceState: 'structured_evidence_extracted',
+          overdueState: 'within_expected_window',
+          partialEvidence: false,
+        },
+      },
+      message: 'Memory Core operation completed. Structured Memory Core evidence was extracted into status fields.',
+      nextAction: expect.not.stringContaining('Review the pending candidate or promotion request'),
+      result: expect.objectContaining({ success: true, responseText }),
     });
   });
 
