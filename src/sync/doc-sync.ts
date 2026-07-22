@@ -565,7 +565,7 @@ export class DocSync {
     const allMappings = this.store.getAllDocMappings();
 
     for (const mapping of allMappings) {
-      let doc: FullDocument | null = null;
+      let doc: FullDocument | null;
       try {
         doc = await this.fetchDocument(mapping.memoryDocId);
       } catch {

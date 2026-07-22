@@ -250,7 +250,7 @@ function distributionCoreBaseUrl(req: http.IncomingMessage): string {
 
   const host = firstHeaderValue(req.headers['x-forwarded-host']) || firstHeaderValue(req.headers.host);
   const proto = firstHeaderValue(req.headers['x-forwarded-proto'])
-    || (Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted) ? 'https' : 'http');
+    || ((req.socket as unknown as { encrypted?: boolean }).encrypted ? 'https' : 'http');
   if (host) {
     const inferred = normalizeBaseUrl(`${proto}://${host}`);
     if (inferred) return inferred;

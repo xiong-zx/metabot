@@ -29,11 +29,16 @@ npm run dev
 
 ```bash
 npm run dev          # Hot-reload dev server (tsx)
+npm run typecheck    # No-emit gate for bridge + root referenced workspaces + packages/web-ui
 npm test             # Run tests (vitest)
+npm run test:cli     # Canonical root entrypoint for packages/cli Vitest
+npm run check:merge-hygiene:memory-core  # Merge-only Memory Core semantic-loss gate
 npm run lint         # ESLint check
 npm run format       # Prettier format
 npm run build        # TypeScript compile to dist/
 ```
+
+`npm run typecheck` intentionally checks `tsconfig.bridge.json`, every workspace referenced from the root solution config (`packages/cli-core`, `packages/metamemory`, `packages/skill-hub`, `packages/cli`, `packages/server`), and the supported packaged React UI in `packages/web-ui`. The legacy top-level `web/` app is not part of this no-emit gate; it is validated by `npm run build:web` and the full `npm run build`.
 
 ## How to Contribute
 
