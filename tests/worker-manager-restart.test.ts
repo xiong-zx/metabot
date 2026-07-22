@@ -58,21 +58,24 @@ describe('WorkerManager restart recovery', () => {
     process.env.SESSION_STORE_DIR = dir;
     vi.resetModules();
 
-    fs.writeFileSync(path.join(dir, 'workers.json'), JSON.stringify([
-      {
-        id: 'worker-1',
-        botName: 'pm-codex',
-        pmChatId: 'oc_pm',
-        workerChatId: 'worker-worker-1',
-        workingDirectory: dir,
-        prompt: 'continue worker task',
-        label: 'validation',
-        model: 'gpt-5.4',
-        engine: 'codex',
-        status: 'running',
-        startTime: Date.now() - 60_000,
-      },
-    ]));
+    fs.writeFileSync(
+      path.join(dir, 'workers.json'),
+      JSON.stringify([
+        {
+          id: 'worker-1',
+          botName: 'pm-codex',
+          pmChatId: 'oc_pm',
+          workerChatId: 'worker-worker-1',
+          workingDirectory: dir,
+          prompt: 'continue worker task',
+          label: 'validation',
+          model: 'gpt-5.4',
+          engine: 'codex',
+          status: 'running',
+          startTime: Date.now() - 60_000,
+        },
+      ]),
+    );
 
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
     const executeApiTask = vi.fn(async ({ chatId }: { chatId: string }) => ({
@@ -90,11 +93,13 @@ describe('WorkerManager restart recovery', () => {
     });
 
     await vi.waitFor(() => {
-      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
-        chatId: 'worker-worker-1',
-        prompt: 'continue worker task',
-        lifecycleKey: 'worker:worker-1',
-      }));
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'worker-worker-1',
+          prompt: 'continue worker task',
+          lifecycleKey: 'worker:worker-1',
+        }),
+      );
     });
     await vi.waitFor(() => {
       expect(manager.getWorker('worker-1')).toMatchObject({
@@ -103,10 +108,12 @@ describe('WorkerManager restart recovery', () => {
       });
     });
     await vi.waitFor(() => {
-      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
-        chatId: 'oc_pm',
-        lifecycleKey: 'worker-notify:worker-1',
-      }));
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'oc_pm',
+          lifecycleKey: 'worker-notify:worker-1',
+        }),
+      );
     });
   });
 
@@ -114,34 +121,74 @@ describe('WorkerManager restart recovery', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-worker-restart-'));
     process.env.SESSION_STORE_DIR = dir;
     vi.resetModules();
+    const resultsPath = path.join(dir, 'results.json');
+    fs.writeFileSync(
+      resultsPath,
+      JSON.stringify({
+        task: 'Summarize recovery state',
+        metrics: { attempts: 1 },
+        notes: 'Durable worker evidence existed before bridge recovery failed.',
+      }),
+    );
 
-    fs.writeFileSync(path.join(dir, 'workers.json'), JSON.stringify([
-      {
-        id: 'worker-missing',
-        botName: 'missing-bot',
-        pmChatId: 'oc_pm',
-        workerChatId: 'worker-missing',
-        workingDirectory: dir,
-        prompt: 'continue worker task',
-        model: 'gpt-5.4',
-        engine: 'codex',
-        status: 'running',
-        startTime: Date.now() - 60_000,
-      },
-    ]));
+    fs.writeFileSync(
+      path.join(dir, 'workers.json'),
+      JSON.stringify([
+        {
+          id: 'worker-missing',
+          botName: 'missing-bot',
+          pmChatId: 'oc_pm',
+          workerChatId: 'worker-missing',
+          workingDirectory: dir,
+          prompt: 'research worker: continue worker task',
+          model: 'gpt-5.4',
+          engine: 'codex',
+          status: 'running',
+          startTime: Date.now() - 60_000,
+        },
+      ]),
+    );
 
     const { WorkerManager } = await import('../src/workers/worker-manager.js');
-    const manager = new WorkerManager(
-      { get: vi.fn(() => undefined) } as any,
-      logger,
-      { defaultModel: 'gpt-5.4', maxPerPm: 5 },
-    );
+    const manager = new WorkerManager({ get: vi.fn(() => undefined) } as any, logger, {
+      defaultModel: 'gpt-5.4',
+      maxPerPm: 5,
+    });
 
     await vi.waitFor(() => {
       expect(manager.getWorker('worker-missing')).toMatchObject({
         status: 'failed',
+        executionStatus: 'failed',
+        artifactStatus: 'valid_complete',
+        contractStatus: 'satisfied',
+        deliveryStatus: 'file_only',
+        recoveryStatus: 'manual_required',
+        artifactPath: resultsPath,
+        detailRoute: '/api/workers/worker-missing',
+        finalPayloadRef: `file://${resultsPath}`,
+        finalTranscriptRef: 'worker-chat:worker-missing',
         error: expect.stringContaining('bot not found'),
+        durationMs: expect.any(Number),
       });
     });
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'workers.json'), 'utf-8'));
+    expect(persisted).toContainEqual(
+      expect.objectContaining({
+        id: 'worker-missing',
+        status: 'failed',
+        executionStatus: 'failed',
+        artifactStatus: 'valid_complete',
+        contractStatus: 'satisfied',
+        deliveryStatus: 'file_only',
+        recoveryStatus: 'manual_required',
+        artifactPath: resultsPath,
+        detailRoute: '/api/workers/worker-missing',
+        finalPayloadRef: `file://${resultsPath}`,
+        finalTranscriptRef: 'worker-chat:worker-missing',
+        error: expect.stringContaining('bot not found'),
+        endTime: expect.any(Number),
+        durationMs: expect.any(Number),
+      }),
+    );
   });
 });
