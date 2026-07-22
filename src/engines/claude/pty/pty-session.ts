@@ -36,6 +36,21 @@ export interface ClaudeInputReadiness {
   idle: boolean;
 }
 
+/**
+ * Claude Code asks this question when an old/large session is resumed. The
+ * recommended first option preserves continuity through a summary, but the
+ * dialog blocks the normal input box until it is confirmed.
+ */
+export function isClaudeResumeSummaryDialog(screen: string): boolean {
+  const sq = screen.toLowerCase().replace(/\s+/g, '');
+  return (
+    sq.includes('resumefromsummary') &&
+    sq.includes('resumefullsessionas-is') &&
+    sq.includes('entertoconfirm') &&
+    /[❯⏵]1\./u.test(sq)
+  );
+}
+
 export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness {
   const sq = tail.toLowerCase().replace(/\s+/g, '');
   const running = sq.includes('esctointerrupt');
@@ -268,10 +283,23 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const TIMEOUT = 30_000;
     const POLL = 150;
     const SETTLE = 2500;
-    const start = Date.now();
+    let deadline = Date.now() + TIMEOUT;
+    let resumeSummaryAccepted = false;
 
-    while (Date.now() - start < TIMEOUT) {
+    while (Date.now() < deadline) {
       const screen = this.screen();
+      if (!resumeSummaryAccepted && isClaudeResumeSummaryDialog(screen)) {
+        if (!this.term || this.disposed) {
+          throw new Error('pty-session: cannot confirm resume summary — session disposed');
+        }
+        resumeSummaryAccepted = true;
+        this.log.info('pty-session: confirming recommended resume-from-summary option');
+        this.term.write('\r');
+        // Give summary restoration its own full readiness window.
+        deadline = Date.now() + TIMEOUT;
+        await sleep(POLL);
+        continue;
+      }
       if (classifyClaudeInputReadiness(screen).idle) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
