@@ -408,9 +408,9 @@ describe('WorkerManager dispatch execution options', () => {
       prompt: '# AutoResearchClaw Run\nNo artifact exists yet.',
       model: 'gpt-5.5',
     });
-    expect(manager.completeWorkerFromExternal(missing.id, { resultSummary: 'Memory Core finalized without artifact' })).toBe(
-      true,
-    );
+    expect(
+      manager.completeWorkerFromExternal(missing.id, { resultSummary: 'Memory Core finalized without artifact' }),
+    ).toBe(true);
     expect(quickStatusFields(manager.getWorker(missing.id)!)).toMatchObject({
       status: 'completed',
       executionStatus: 'completed',
@@ -535,6 +535,323 @@ describe('WorkerManager dispatch execution options', () => {
     expect(quickStatusFields(persistedWorker(sessionStoreDir, record.id))).toMatchObject(
       quickStatusFields(finalRecord),
     );
+  });
+
+  it('preserves external completion metadata when the worker executor resolves with success false later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, JSON.stringify(autoResearchOutput()));
+    let finishWorker:
+      | ((value: { success: boolean; responseText: string; error: string; costUsd: number }) => void)
+      | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<{ success: boolean; responseText: string; error: string; costUsd: number }>((resolve) => {
+            finishWorker = resolve;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nWrite the contract artifact.',
+      model: 'gpt-5.5',
+    });
+    await vi.waitFor(() => expect(finishWorker).toBeDefined());
+    expect(
+      manager.completeWorkerFromExternal(record.id, {
+        resultSummary: 'Memory Core finalized artifact before executor reported failure',
+        error: 'Memory Core completion is authoritative',
+      }),
+    ).toBe(true);
+    const externallyCompleted = manager.getWorker(record.id)!;
+    const externalEndTime = externallyCompleted.endTime;
+    const externalDurationMs = externallyCompleted.durationMs;
+
+    finishWorker?.({
+      success: false,
+      responseText: 'late executor failure should not replace authoritative summary',
+      error: 'Task timed out (2 minutes limit)',
+      costUsd: 0.15,
+    });
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'full',
+      artifactPath,
+      costUsd: 0.15,
+      resultSummary: 'Memory Core finalized artifact before executor reported failure',
+      error: 'Memory Core completion is authoritative',
+    });
+    expect(finalRecord.endTime).toBe(externalEndTime);
+    expect(finalRecord.durationMs).toBe(externalDurationMs);
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      endTime: externalEndTime,
+      durationMs: externalDurationMs,
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'full',
+      artifactPath,
+      resultSummary: 'Memory Core finalized artifact before executor reported failure',
+      error: 'Memory Core completion is authoritative',
+    });
+  });
+
+  it('preserves external completion metadata when the worker executor rejects later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const artifactDir = join(workdir, '.metabot-memory', 'autoresearchclaw');
+    const artifactPath = join(artifactDir, 'run-smoke-output.json');
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(artifactPath, JSON.stringify(autoResearchOutput()));
+    let rejectWorker: ((error: Error) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<never>((_resolve, reject) => {
+            rejectWorker = reject;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: '# AutoResearchClaw Run\nWrite the contract artifact.',
+      model: 'gpt-5.5',
+    });
+    await vi.waitFor(() => expect(rejectWorker).toBeDefined());
+    expect(
+      manager.completeWorkerFromExternal(record.id, {
+        resultSummary: 'Memory Core finalized artifact before executor rejected',
+        error: 'Memory Core completion is authoritative',
+      }),
+    ).toBe(true);
+    const externallyCompleted = manager.getWorker(record.id)!;
+    const externalEndTime = externallyCompleted.endTime;
+    const externalDurationMs = externallyCompleted.durationMs;
+
+    rejectWorker?.(new Error('late transport failure'));
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'full',
+      artifactPath,
+      resultSummary: 'Memory Core finalized artifact before executor rejected',
+      error: 'Memory Core completion is authoritative',
+    });
+    expect(finalRecord.endTime).toBe(externalEndTime);
+    expect(finalRecord.durationMs).toBe(externalDurationMs);
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'completed',
+      executionStatus: 'completed',
+      endTime: externalEndTime,
+      durationMs: externalDurationMs,
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'full',
+      artifactPath,
+      resultSummary: 'Memory Core finalized artifact before executor rejected',
+      error: 'Memory Core completion is authoritative',
+    });
+  });
+
+  it('keeps an aborted worker aborted with file-only artifact evidence when the executor resolves later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    const resultsPath = join(workdir, 'results.json');
+    writeFileSync(
+      resultsPath,
+      JSON.stringify({
+        task: 'Summarize benchmark deltas',
+        metrics: { accuracy: 0.91, latency_ms: 12 },
+        notes: 'Results were already durable before the abort finished.',
+      }),
+    );
+    let finishWorker: ((value: { success: boolean; responseText: string; costUsd: number }) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<{ success: boolean; responseText: string; costUsd: number }>((resolve) => {
+            finishWorker = resolve;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+    await vi.waitFor(() => expect(finishWorker).toBeDefined());
+    expect(manager.abortWorker(record.id)).toBe(true);
+
+    const abortedRecord = manager.getWorker(record.id)!;
+    const abortedEndTime = abortedRecord.endTime;
+    const abortedDurationMs = abortedRecord.durationMs;
+    expect(abortedRecord).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+    });
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      endTime: abortedEndTime,
+      durationMs: abortedDurationMs,
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+    });
+
+    finishWorker?.({
+      success: true,
+      responseText: 'late worker completion should not un-abort the worker',
+      costUsd: 0.22,
+    });
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      costUsd: 0.22,
+    });
+    expect(finalRecord.endTime).toBe(abortedEndTime);
+    expect(finalRecord.durationMs).toBe(abortedDurationMs);
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      endTime: abortedEndTime,
+      durationMs: abortedDurationMs,
+      artifactStatus: 'valid_complete',
+      contractStatus: 'satisfied',
+      deliveryStatus: 'file_only',
+      artifactPath: resultsPath,
+      costUsd: 0.22,
+    });
+  });
+
+  it('keeps an aborted worker aborted with duration when the executor rejects later', async () => {
+    const { WorkerManager } = await import('../src/workers/worker-manager.js');
+    let rejectWorker: ((error: Error) => void) | undefined;
+    const executeApiTask = vi.fn(({ chatId }: { chatId: string }) =>
+      chatId.startsWith('worker-')
+        ? new Promise<never>((_resolve, reject) => {
+            rejectWorker = reject;
+          })
+        : Promise.resolve({ success: true, responseText: 'notified' }),
+    );
+    const bridge = { executeApiTask, stopChatTask: vi.fn() };
+    const registry = { get: vi.fn(() => ({ bridge })) } as any;
+    const manager = new WorkerManager(registry, logger, { defaultModel: 'gpt-5.4', maxPerPm: 8 });
+
+    const record = manager.dispatch({
+      botName: 'research-pm',
+      pmChatId: 'pm-chat',
+      workingDirectory: workdir,
+      prompt: 'research worker: write results.json',
+      model: 'gpt-5.4',
+    });
+    await vi.waitFor(() => expect(rejectWorker).toBeDefined());
+    expect(manager.abortWorker(record.id)).toBe(true);
+
+    const abortedRecord = manager.getWorker(record.id)!;
+    const abortedEndTime = abortedRecord.endTime;
+    const abortedDurationMs = abortedRecord.durationMs;
+    expect(abortedRecord).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      artifactStatus: 'missing',
+      contractStatus: 'violated',
+      deliveryStatus: 'failed',
+    });
+    expect(abortedDurationMs).toBeTypeOf('number');
+    expect(abortedDurationMs).toBeGreaterThanOrEqual(0);
+
+    rejectWorker?.(new Error('late transport failure should not replace the abort'));
+    await vi.waitFor(() =>
+      expect(executeApiTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: 'pm-chat',
+          lifecycleKey: `worker-notify:${record.id}`,
+        }),
+      ),
+    );
+
+    const finalRecord = manager.getWorker(record.id)!;
+    expect(finalRecord).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      artifactStatus: 'missing',
+      contractStatus: 'violated',
+      deliveryStatus: 'failed',
+    });
+    expect(finalRecord.endTime).toBe(abortedEndTime);
+    expect(finalRecord.durationMs).toBe(abortedDurationMs);
+    expect(finalRecord.error).toBeUndefined();
+    expect(persistedWorker(sessionStoreDir, record.id)).toMatchObject({
+      status: 'aborted',
+      executionStatus: 'aborted',
+      endTime: abortedEndTime,
+      durationMs: abortedDurationMs,
+      artifactStatus: 'missing',
+      contractStatus: 'violated',
+      deliveryStatus: 'failed',
+    });
   });
 
   it('classifies malformed AutoResearchClaw artifacts as invalid before contract satisfaction', async () => {
