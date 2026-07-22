@@ -7,6 +7,7 @@
  * here — do NOT copy these into individual builder files.
  */
 import type { CardLifecycleStage, CardStatus, ModelTelemetry } from '../types.js';
+import { stripModelSuffix } from '../utils/model-id.js';
 
 // ---------------------------------------------------------------------------
 // Status display config
@@ -54,18 +55,29 @@ function shortModel(model: string): string {
   return model.replace(/^claude-/, '');
 }
 
-/** Format configured/runtime model provenance without hiding fallback. */
+/**
+ * Format configured/runtime model provenance without hiding fallback.
+ *
+ * The `a → b` arrow means the model actually changed (a fallback). Compare with
+ * the local-only `[1m]` suffix stripped: the API echoes back a bare model id, so
+ * a configured `claude-opus-4-8[1m]` legitimately shows up at runtime as
+ * `claude-opus-4-8` with nothing having changed. Comparing raw ids rendered that
+ * as a spurious `opus-4-8[1m] → opus-4-8`.
+ *
+ * When they match modulo the suffix, display the configured id — it keeps the
+ * `[1m]` marker visible, which the runtime id has dropped.
+ */
 export function formatModelTelemetry(
   telemetry: ModelTelemetry | undefined,
   legacyModel: string | undefined,
 ): string | undefined {
   const configured = telemetry?.configuredModel || telemetry?.spawnModel;
   const runtime = telemetry?.runtimeModel || legacyModel;
-  if (configured && runtime && configured !== runtime) {
+  if (configured && runtime && stripModelSuffix(configured) !== stripModelSuffix(runtime)) {
     const fallback = telemetry?.fallbackModel || telemetry?.fallbackOriginalModel ? ' (fallback)' : '';
     return `model: ${shortModel(configured)} → ${shortModel(runtime)}${fallback}`;
   }
-  const model = runtime || configured;
+  const model = configured || runtime;
   return model ? `model: ${shortModel(model)}` : undefined;
 }
 

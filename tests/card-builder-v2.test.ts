@@ -387,6 +387,48 @@ describe('buildCardV2', () => {
     }
   });
 
+  /**
+   * The `a → b` arrow means the model actually changed. The `[1m]` suffix is a
+   * Claude Code local flag that the API strips from the id it echoes back, so
+   * configured `claude-opus-4-8[1m]` vs runtime `claude-opus-4-8` is the SAME
+   * model — rendering an arrow there falsely reports a fallback.
+   */
+  it('does not report a fallback when only the [1m] suffix differs', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'done',
+      toolCalls: [],
+      model: 'claude-opus-4-8',
+      modelTelemetry: {
+        configuredModel: 'claude-opus-4-8[1m]',
+        spawnModel: 'claude-opus-4-8[1m]',
+        runtimeModel: 'claude-opus-4-8',
+        runtimeModelSource: 'assistant_jsonl',
+      },
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
+    expect(text).not.toContain('→');
+    expect(text).not.toContain('fallback');
+    expect(text).toContain('opus-4-8[1m]');            // keeps the 1M marker visible
+  });
+
+  it('reports the full context window for a 1M session', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'done',
+      toolCalls: [],
+      model: 'claude-opus-4-8',
+      totalTokens: 37_800,
+      contextWindow: 1_000_000,
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
+    expect(text).toContain('ctx: 37.8k/1000k (4%)');
+  });
+
   it('truncates long content', () => {
     const state: CardState = {
       status:       'complete',
