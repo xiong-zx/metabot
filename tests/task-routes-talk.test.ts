@@ -137,6 +137,26 @@ ${command}
   }
 }
 
+async function completedMemoryStatusForResult(result: unknown) {
+  const executeApiTask = vi.fn(() => new Promise(() => {}));
+  const ctx = makeCtx(executeApiTask);
+  const res = await call(ctx, 'POST', '/api/talk?async=true', {
+    botName: 'pm',
+    chatId: 'private-test',
+    prompt:
+      'projectId=mem-terminal-adversarial projectRoot=/root/workspaces/mem-terminal-adversarial domain=memory-core. Use natural language Memory Core operations only. Create one finding, search, and generate a context pack.',
+    sendCards: false,
+  });
+  const taskId = res.json().taskId;
+  const task = ctx.asyncTaskStore.get(taskId)!;
+  ctx.asyncTaskStore.update(taskId, {
+    status: 'completed',
+    completedAt: task.createdAt + 10,
+    result,
+  });
+  return call(ctx, 'GET', `/api/talk/${taskId}`);
+}
+
 describe('/api/talk async UX', () => {
   it('accepts query async mode and exposes task status', async () => {
     const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'done', durationMs: 12 }));
@@ -925,6 +945,188 @@ describe('/api/talk async UX', () => {
     });
     expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
     expect(status.json().progress).not.toHaveProperty('evidence');
+  });
+
+  it('returns degraded Memory Core guidance for cyclic terminal evidence without throwing', async () => {
+    const cyclic: any = { eventIds: ['mem_evt_cycle'] };
+    cyclic.result = cyclic;
+
+    const status = await completedMemoryStatusForResult({ success: true, result: cyclic });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      memoryCoreEvidence: {
+        eventIds: ['mem_evt_cycle'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+        evidence: {
+          eventIds: ['mem_evt_cycle'],
+        },
+      },
+      nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
+      result: expect.objectContaining({
+        result: expect.objectContaining({
+          result: '[Circular]',
+        }),
+      }),
+    });
+  });
+
+  it('returns no-structured truncated guidance for very deep terminal evidence without throwing', async () => {
+    const deep: any = {};
+    let cursor = deep;
+    for (let index = 0; index < 20_000; index += 1) {
+      cursor.result = {};
+      cursor = cursor.result;
+    }
+    cursor.eventIds = ['mem_evt_too_deep'];
+
+    const status = await completedMemoryStatusForResult({ success: true, result: deep });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'completed',
+      phase: 'memory_operation_completed',
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence_truncated',
+          reviewState: 'not_pending_review',
+        },
+      },
+      message: expect.stringContaining('bounded extraction truncated'),
+      nextAction: expect.stringContaining('Bounded terminal extraction was truncated'),
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('deterministically truncates wide evidence arrays at the item budget without throwing', async () => {
+    const eventIds = Array.from({ length: 1_200 }, (_, index) => `mem_evt_${String(index).padStart(4, '0')}`);
+
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: JSON.stringify({ result: { eventIds } }),
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().memoryCoreEvidence.eventIds).toHaveLength(1_000);
+    expect(status.json().memoryCoreEvidence.eventIds[0]).toBe('mem_evt_0000');
+    expect(status.json().memoryCoreEvidence.eventIds[999]).toBe('mem_evt_0999');
+    expect(status.json().memoryCoreEvidence.eventIds).not.toContain('mem_evt_1199');
+    expect(status.json().progress.finalization.evidenceState).toBe('structured_evidence_truncated');
+    expect(status.json().nextAction).toContain('Bounded terminal extraction was truncated');
+  });
+
+  it('does not mark approved, rejected, or completed promotions as pending review', async () => {
+    for (const promotionStatus of ['approved', 'rejected', 'completed']) {
+      const status = await completedMemoryStatusForResult({
+        success: true,
+        responseText: JSON.stringify({
+          result: {
+            writes: {
+              promotionRequest: { id: `prom_req_${promotionStatus}`, status: promotionStatus },
+              candidate: { id: `cand_${promotionStatus}`, status: promotionStatus },
+            },
+            reviewStatus: promotionStatus,
+            finalizationPhase: promotionStatus,
+          },
+        }),
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().progress.finalization.reviewState).toBe('not_pending_review');
+      expect(status.json().message).not.toContain('Pending review evidence was detected');
+      expect(status.json().nextAction).not.toContain('Review the pending candidate or promotion request');
+    }
+  });
+
+  it('excludes unrelated meta.unitId while collecting whitelisted Memory Core containers', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      result: {
+        meta: {
+          unitId: 'mem_unit_unrelated',
+        },
+        writes: {
+          events: [{ id: 'mem_evt_real' }],
+        },
+      },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().memoryCoreEvidence).toEqual({
+      eventIds: ['mem_evt_real'],
+    });
+    expect(status.json().memoryCoreEvidence.memoryUnitIds).toBeUndefined();
+  });
+
+  it('ignores malformed fenced JSON and still returns actionable Memory Core inspect guidance', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: '```json\n{"result":\n```',
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      progress: {
+        finalization: {
+          evidenceState: 'no_structured_evidence',
+          reviewState: 'not_pending_review',
+        },
+      },
+      message: expect.stringContaining('No structured Memory Core evidence could be derived'),
+      nextAction: expect.stringContaining('metabot research events/search/context-pack'),
+    });
+    expect(status.json()).not.toHaveProperty('memoryCoreEvidence');
+  });
+
+  it('extracts the live e474eb45 responseText Memory Core payload shape with sorted dedupe', async () => {
+    const status = await completedMemoryStatusForResult({
+      success: true,
+      responseText: JSON.stringify({
+        events: {
+          finding: { eventId: 'mem_evt_finding', memoryUnitId: 'mem_unit_finding' },
+          decision: { eventId: 'mem_evt_decision', memoryUnitId: 'mem_unit_decision' },
+        },
+        promotionRequest: {
+          id: 'prom_req_live',
+          status: 'approved',
+          eventStatus: 'completed',
+        },
+        search: {
+          returned: [
+            { eventId: 'mem_evt_search_b', memoryUnitId: 'mem_unit_search_b' },
+            { eventId: 'mem_evt_search_a', memoryUnitId: 'mem_unit_search_a' },
+            { eventId: 'mem_evt_search_a', memoryUnitId: 'mem_unit_search_a' },
+          ],
+        },
+        contextPack: {
+          id: 'ctx_live',
+          includedEventIds: ['mem_evt_finding', 'mem_evt_context_only'],
+        },
+      }),
+    });
+
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      memoryCoreEvidence: {
+        eventIds: [
+          'mem_evt_context_only',
+          'mem_evt_decision',
+          'mem_evt_finding',
+          'mem_evt_search_a',
+          'mem_evt_search_b',
+        ],
+        memoryUnitIds: ['mem_unit_decision', 'mem_unit_finding', 'mem_unit_search_a', 'mem_unit_search_b'],
+        promotionIds: ['prom_req_live'],
+        contextPackIds: ['ctx_live'],
+      },
+      progress: {
+        finalization: {
+          evidenceState: 'structured_evidence_extracted',
+          reviewState: 'not_pending_review',
+        },
+      },
+    });
   });
 
   it('quotes Memory Core terminal inspect commands for shell-safe project and root values', async () => {
