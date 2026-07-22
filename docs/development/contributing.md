@@ -29,7 +29,10 @@ npm run dev
 
 ```bash
 npm run dev          # Hot-reload dev server (tsx)
+npm run typecheck    # Supported root no-emit gate (solution refs + web-ui)
 npm test             # Run tests (vitest)
+npm run test:cli     # Canonical root entrypoint for packages/cli Vitest
+npm run check:merge-hygiene:memory-core  # Merge-only Memory Core semantic-loss gate
 npm run lint         # ESLint check
 npm run format       # Prettier format
 npm run build        # TypeScript compile to dist/

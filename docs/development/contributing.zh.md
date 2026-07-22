@@ -29,7 +29,10 @@ npm run dev
 
 ```bash
 npm run dev          # 热重载开发服务器（tsx）
+npm run typecheck    # 受支持的根级 no-emit 校验（solution refs + web-ui）
 npm test             # 运行测试（vitest）
+npm run test:cli     # 从根目录运行 packages/cli Vitest 的标准入口
+npm run check:merge-hygiene:memory-core  # 仅针对 merge commit 的 Memory Core 语义丢失门禁
 npm run lint         # ESLint 检查
 npm run format       # Prettier 格式化
 npm run build        # TypeScript 编译到 dist/
