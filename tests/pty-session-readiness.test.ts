@@ -18,12 +18,21 @@ describe('classifyClaudeInputReadiness', () => {
     });
   });
 
-  it('treats the newer Claude prompt marker as idle', () => {
+  it('does not confuse the double-chevron status footer with an input prompt', () => {
     expect(
       classifyClaudeInputReadiness(
         'Press Ctrl-C again to exit\n⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent',
       ),
     ).toMatchObject({
+      hasInputBox: false,
+      running: false,
+      menuUp: false,
+      idle: false,
+    });
+  });
+
+  it('treats a real single-chevron input prompt as idle', () => {
+    expect(classifyClaudeInputReadiness('Welcome\n⏵ ')).toMatchObject({
       hasInputBox: true,
       running: false,
       menuUp: false,
@@ -43,7 +52,7 @@ describe('classifyClaudeInputReadiness', () => {
     expect(
       classifyClaudeInputReadiness('Thinking...\n⏵⏵ Esc to interrupt'),
     ).toMatchObject({
-      hasInputBox: true,
+      hasInputBox: false,
       running: true,
       idle: false,
     });

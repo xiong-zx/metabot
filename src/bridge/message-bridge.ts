@@ -2871,6 +2871,67 @@ export class MessageBridge {
         }
       }
 
+      // A prompt that never reached Enter is safe to retry without duplicating work.
+      if (
+        lastState.status === 'error' &&
+        engineName === 'claude' &&
+        lastState.modelTelemetry?.promptSubmission === 'not_submitted' &&
+        !abortController.signal.aborted
+      ) {
+        this.logger.warn(
+          { chatId, reason: lastState.modelTelemetry.promptFailureReason },
+          'Claude PTY did not submit prompt; rebuilding executor and retrying once',
+        );
+        lastState = {
+          ...lastState,
+          status: 'running',
+          responseText: '',
+          errorMessage: undefined,
+          lifecycleStage: 'recovering',
+        };
+        const recoveringState = {
+          ...lastState,
+          responseText: '_Claude terminal was unavailable; reconnecting and retrying once..._',
+        };
+        await this.sender.updateCard(messageId, recoveringState);
+        this.recordCardLifecycle(chatId, messageId, recoveringState, 'chat-retry');
+
+        try {
+          // The failed path never pressed Enter, so the persisted transcript is
+          // safe to resume. Replace only the unresponsive PTY and preserve the
+          // conversation/session mapping. One retry is bounded by this branch.
+          await this.releaseChatExecutor(chatId, 'pty-prompt-not-submitted');
+          const retryHandle = await this.runOneTurn(chatId, engineName, {
+            prompt: runtimePrompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+            onTeamEvent,
+          });
+          executionHandle.finish();
+          runningTask.executionHandle = retryHandle;
+
+          for await (const message of retryHandle.stream) {
+            if (abortController.signal.aborted) break;
+            resetIdleTimer();
+            const state = withCardLifecycle(processor.processMessage(message), undefined, lifecycleKey);
+            lastState = state;
+            this.recordCardLifecycle(chatId, messageId, state, 'chat-retry');
+            sessionRetired = this.updateSessionMappingFromStream(chatId, engineName, message, processor)
+              || sessionRetired;
+            if (state.status === 'complete' || state.status === 'error') break;
+            rateLimiter.schedule(() => {
+              this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
+            });
+          }
+          await rateLimiter.cancelAndWait();
+        } catch (retryErr) {
+          this.logger.error({ err: retryErr, chatId }, 'Claude PTY prompt retry failed');
+          lastState = {
+            ...lastState,
+            status: 'error',
+            errorMessage: retryErr instanceof Error ? retryErr.message : 'Claude PTY prompt retry failed',
+          };
+        }
+      }
+
       // Auto-retry with fresh session when Claude can't find the conversation
       if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
         this.logger.info({ chatId }, 'Stale session detected, retrying with fresh session');
