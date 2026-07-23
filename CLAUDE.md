@@ -106,20 +106,61 @@ lark-cli base records list ...                           # Query bitable
 
 ## Git 分支工作流（提交前必读）
 
-本仓库按工作流分支，**提交前先选对分支**，别把不同工作流混进同一个 commit：
+核心规则一句话：**`main` 是主干，`dev` 是一次性联调场，`dev` 永远不并入 `main`。**
 
-| 分支               | 用途                                                                                        | 谁往这提交                      |
-| ------------------ | ------------------------------------------------------------------------------------------- | ------------------------------- |
-| `main`             | 稳定/发布分支，只经 PR 合入，历史干净                                                       | 不直接提交                      |
-| `feat/agent-team`  | agent team / template 相关开发                                                              | team / template 任务            |
-| `feat/memory-core` | memory core + auto research（两者**不拆**，同一条），当前 stacked 在 `feat/agent-team` 之上 | memory / auto-research 任务     |
-| `fix/<描述>`       | 日常小 bug，短命分支，修完尽快合                                                            | 单个 bug 修复                   |
-| `dev`              | 集成 + 部署分支：多 feature 合一起跑 live 服务；不对外 PR、不追求干净历史                   | 只做集成/联调，别在这开发新特性 |
+这一条同时保证了「每个 PR 天生干净」（PR 从 `feat/*` / `fix/*` 开，不从 `dev` 开）和「`dev` 不必每个位置都可发布」（它从不发布）。这是 `linux-next` 的模式：集成一切供测试，从不并入 mainline，随时可重建。
 
-- 一个 commit 只做一件事；memory 的活别碰 agent-team 的文件，反之亦然。
-- **禁止**直接往 `main` 提交；**禁止** rebase / force-push 任何共享分支（`dev`、已推送的 `feat/*`）。
-- 要跑 live 验证 → 把 feature 分支合进 `dev`；要评审 / 进 `main` → 从 feature 分支开 PR。
-- feature 分支从 `main` 拉；若新工作依赖别的 feature（如 memory-core 依赖 agent-team），就 stack 在那条 feature 上，别硬拆成独立分支。
+| 分支         | 角色                                             | 从哪切出 | 到哪去                | 可否重写历史             |
+| ------------ | ------------------------------------------------ | -------- | --------------------- | ------------------------ |
+| `main`       | 主干，唯一可发布                                 | —        | 部署 / 发布           | **禁止**                 |
+| `feat/<描述>` | 一个功能，长短命均可                             | `main`   | PR → `main`           | 未推送前可 rebase        |
+| `fix/<描述>`  | 一个修复，短命，修完尽快合                       | `main`   | PR → `main`           | 未推送前可 rebase        |
+| `dev`        | 一次性联调场 = 服务当前运行的内容                | `main`   | **哪也不去**          | **允许 force-push**      |
+
+- **禁止**直接往 `main` 提交；**禁止** rebase / force-push `main` 与任何已推送的 `feat/*` / `fix/*`。
+- `dev` 是上一条的**明确例外**：没有任何东西从 `dev` 流出，重写它伤不到任何人，因此 `git reset --hard main` + force-push 是 `dev` 的正常维护手段，用来清掉积累的 merge 噪声。
+- 一个 commit 只做一件事；不同功能的活不要混进同一个 commit。
+- **合进 `dev` 是 feature 的_测试_路径，不是_发布_路径。** feature 进 `main` 只走 PR，与 `dev` 无关。
+
+### feature 之间如何取用彼此的成果
+
+- 对方**已合入 `main`** → 在自己分支上 `git merge main`。这是常规的跟进主干。
+- 对方**尚未完成** → **stack**：直接从对方分支切出（`git checkout -b feat/A feat/B`），或在自己分支上 `git merge feat/B`。此时 A 的 PR 会包含 B 的 commit，所以**必须等 B 先合入 `main`，A 的 PR 才会变干净**；在 GitHub 上把 A 的 PR base 设成 `feat/B`，B 合并后 base 会自动切到 `main`。
+- 不要为了"独立"硬拆有真实依赖的工作。
+
+### 长命 feature 如何跟上修复
+
+在 feature 分支上 `git merge main`（**不是 `git merge dev`**）。修复经 `fix/*` → PR → `main` 后，所有 feature 从 `main` 取用。合 `dev` 会把别人未完成的功能拖进你的 PR。
+
+### 发布节奏
+
+feature 初步可用即可 PR 进 `main` 发布给用户试用，反馈回来再从 `main` 切 `fix/<描述>` 继续改。**「可发布」指「不崩、可用」，不是「功能完美」**；小步合入 + 后续小 PR，远比长命分支健康。
+
+### live 验证与重启位置（固定，不要漂移）
+
+**服务永远只从 `/root/metabot` 运行，该 checkout 永远停在 `dev`。绝不在 `feat/*` 的 worktree 里重启服务。**
+
+要 live 测某个 feature：
+
+```bash
+cd /root/metabot            # 唯一 runtime，永远是这里
+git merge feat/A            # 把要测的合进来
+metabot restart --wait --json --resume --reason "live test feat/A" --source pm --bot <botName> --chat <chatId>
+```
+
+`dev` 乱了或要换一组测：
+
+```bash
+cd /root/metabot
+git reset --hard main       # dev 是一次性的，随时重建
+git merge feat/B
+metabot restart --wait --json --resume --reason "live test feat/B" --source pm --bot <botName> --chat <chatId>
+```
+
+这样 `metabot restart` 永远在同一目录、同一分支上执行。`metabot deploy-runtime` 只在真要更换 runtime checkout 时用，日常联调用不到——见「MetaBot 重启安全」。
+
+### merge 后的 semantic loss sweep
+
 - 非平凡 merge 后不能只看 conflict 文件；必须分别对两个 parents 做 semantic loss sweep，至少比对 test-name inventory 和 exported/declaration symbol inventory。可先用 `git diff --name-only <parent> HEAD -- tests src packages | rg '^(tests|src|packages)/.*\.ts$'` 取文件，再用 `rg -n "^\\s*(it|test)\\("` 与 `rg -n "^\\s*export\\s+(function|class|const|type|interface|enum)|^\\s*(function|class|const|type|interface|enum)\\s+"` 生成 parent/merge 清单后 `comm -23`；任何丢失都要补回或在 commit 说明中解释，因格式换行产生的符号假阳性也必须逐项核验并记录。
 
 ## MetaBot 重启安全
@@ -161,6 +202,8 @@ metabot restart --wait --json --resume \
 - 2026-07-22 MEM-011 merge-hygiene detector 不能用 raw source substring 扫描自身覆盖到的 test/gate files，否则 adversarial fixtures 会 self-poison；forbidden AutoResearchClaw legacy candidate aliases 应按 TS AST identifier / semantic property name 检测，Git conflict markers 应先 mask comments 与 string/template literals 后再查 raw marker line。该设计保留真实 source-level 检测，同时允许测试中放字符串/注释 fixture。
 - 2026-07-22 MEM-011 merge-hygiene lifecycle：GitHub Actions `pull_request` checkout 的 `refs/pull/*/merge` 是 synthetic CI merge，不是发布集成 merge；CI workflow 用 step-level `if: github.event_name != 'pull_request'` 跳过 production parent-vs-merge scan，CLI 本身不做 env-based skip，避免 spoofed PR env 抑制真实 merge commit 扫描。`push` 到真实 merge commit、以及手动/本地 `--merge <ref>` 仍会执行 parent-vs-merge semantic-loss scan；PR 上仍靠 `npm test` 跑 gate 单测/对抗测试。
 - 2026-07-22 MEM-011 CLI 测试隔离：`packages/cli/vitest.config.ts` 必须显式 `fileParallelism:false` + `pool:'forks'` + `poolOptions.forks.isolate:true`，且不能启用 `singleFork:true`；Vitest 3 的 `singleFork` 会让多个测试文件共享同一个 child process/global context，CLI 测试替换/修改 `process.env` 和 `vi.stubGlobal` 时会泄漏到后续文件。用 `packages/cli/tests/isolation-env-{a,b}.test.ts` 的双文件行为回归证明 per-file isolation 生效；发布前 canonical `npm test` 需要连续多次稳定通过，不能只用 isolated CLI run 代替。
+- 2026-07-23 **worktree 门禁结果可能失真**：worktree 位于 `/root/metabot/worktrees/<name>`，若其中没有自己的 `node_modules`，Node 与 TypeScript 会**向上**查找并命中 `/root/metabot/node_modules`，其 `@xvirobotics/*` 是指向 `/root/metabot/packages/*` 的符号链接——也就是 **`dev` 分支的、已构建的**那一份。结果是你以为在验证 worktree 里的代码，实际部分解析到了 `dev` 的产物，`npm test` / `npm run typecheck` 会假绿。在 worktree 里跑发布门禁前必须先 `npm_config_nodedir=/usr npm_config_strict_ssl=false npm ci`（该 flag 组合规避 node-pty/node-gyp 的 `SELF_SIGNED_CERT_IN_CHAIN`），确认 `ls node_modules/@xvirobotics` 存在且指向本 worktree 的 `packages/*` 后再采信结果。
+- 2026-07-23 CI `check` job 的步骤顺序有硬约束：`Build workspace libraries`（构建 `@xvirobotics/cli-core` / `metamemory` / `skill-hub`）**必须早于** `npm run typecheck`。根 typecheck 覆盖 7 个 project，其中 `packages/cli` / `metamemory` / `skill-hub` 经 `exports -> dist/` 导入 cli-core，未构建时报 `TS2307 Cannot find module '@xvirobotics/cli-core/...'`。MEM-011 把该步从 `npx tsc --noEmit`（只查根 bridge project，容忍先于构建）换成 `npm run typecheck` 时未同步调整顺序，且因 CI 只在 push/PR 到 `main`/`dev` 时触发、相关分支从未推送，该顺序一直未被执行到。注意此故障**在本地复现不出来**（本地 TypeScript 的 project-reference source redirect 会绕开缺失的 dist），只能靠 CI 暴露。
 
 <!-- METABOT-WORKER -->
 
