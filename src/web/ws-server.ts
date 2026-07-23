@@ -12,6 +12,7 @@ import { ChatSubscriptionManager } from './chat-subscriptions.js';
 import { GroupManager, type ChatGroup } from './group-manager.js';
 import { StreamingASRSession, createStreamingASRSession, isStreamingASRAvailable } from '../api/streaming-asr.js';
 import type { SessionRegistry, SessionRecord, SessionMessage } from '../session/session-registry.js';
+import { resolveWithinRoot } from '../utils/managed-path.js';
 
 // ─── Timing-safe secret comparison ─────────────────────────────────────────
 
@@ -539,11 +540,20 @@ async function handleChat(
       onOutputFiles: (files) => {
         if (ws.readyState !== WebSocket.OPEN) return;
         // Copy output files to uploads dir so they're accessible via /api/files/
-        const uploadsDir = path.join(os.tmpdir(), 'metabot-uploads', chatId);
+        const uploadsRoot = path.resolve(path.join(os.tmpdir(), 'metabot-uploads'));
+        const uploadsDir = resolveWithinRoot(uploadsRoot, chatId);
+        if (!uploadsDir || uploadsDir === uploadsRoot) {
+          logger.warn({ chatId }, 'Refusing to copy output files outside the uploads root');
+          return;
+        }
         fs.mkdirSync(uploadsDir, { recursive: true });
         for (const file of files) {
           try {
-            const destPath = path.join(uploadsDir, file.fileName);
+            const destPath = resolveWithinRoot(uploadsDir, file.fileName);
+            if (!destPath || destPath === uploadsDir) {
+              logger.warn({ file: file.fileName }, 'Refusing to copy output file outside the chat uploads directory');
+              continue;
+            }
             fs.copyFileSync(file.filePath, destPath);
             const ext = file.extension.replace('.', '');
             const mimeMap: Record<string, string> = {

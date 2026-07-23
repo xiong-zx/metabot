@@ -312,6 +312,34 @@ describe('chat routes', () => {
     expect(allowed.status).toBe(201);
   });
 
+  it('rejects invalid DM membership changes with stable errors', async () => {
+    kit = await startTestServer('chat-dm-membership', { uiAllowedEmails: ['@xvirobotics.com'] });
+
+    const invalid = await webJson(kit, 'POST', '/api/chat/conversations', ALICE, {
+      kind: 'dm',
+      participants: [
+        { kind: 'user', ref: BOB },
+        { kind: 'user', ref: 'eve@xvirobotics.com' },
+      ],
+    });
+    expect(invalid.status).toBe(400);
+    expect(JSON.parse(invalid.body).error).toBe('dm_participant_count_invalid');
+
+    const dm = await webJson(kit, 'POST', '/api/chat/conversations/user-dm', ALICE, {
+      userRef: BOB,
+    });
+    expect(dm.status).toBe(200);
+    const add = await webJson(
+      kit,
+      'POST',
+      `/api/chat/conversations/${JSON.parse(dm.body).id}/participants`,
+      ALICE,
+      { kind: 'user', ref: 'eve@xvirobotics.com' },
+    );
+    expect(add.status).toBe(409);
+    expect(JSON.parse(add.body).error).toBe('dm_participants_immutable');
+  });
+
   it('normalizes user participants to lowercase email refs', async () => {
     kit = await startTestServer('chat-user-normalize', { uiAllowedEmails: ['@xvirobotics.com'] });
     const created = await webJson(kit, 'POST', '/api/chat/conversations', ALICE, {
