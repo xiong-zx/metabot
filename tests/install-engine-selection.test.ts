@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL_SOURCE = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+const POWERSHELL_INSTALL_SOURCE = fs.readFileSync(path.join(REPO_ROOT, 'install.ps1'), 'utf-8');
 
 function extractGenerator(variable: string): string {
   const marker = `${variable}=$(node -e "`;
@@ -16,6 +17,17 @@ function extractGenerator(variable: string): string {
   const bodyEnd = INSTALL_SOURCE.indexOf('\n    " ', bodyStart);
   if (bodyEnd === -1) throw new Error(`Missing end of ${variable} generator in install.sh`);
   return INSTALL_SOURCE.slice(bodyStart, bodyEnd);
+}
+
+function extractPowerShellGenerator(variable: string): string {
+  const marker = `$${variable} = node -e "`;
+  const start = POWERSHELL_INSTALL_SOURCE.indexOf(marker);
+  if (start === -1) throw new Error(`Missing ${variable} generator in install.ps1`);
+
+  const bodyStart = start + marker.length;
+  const bodyEnd = POWERSHELL_INSTALL_SOURCE.indexOf('" $', bodyStart);
+  if (bodyEnd === -1) throw new Error(`Missing end of ${variable} generator in install.ps1`);
+  return POWERSHELL_INSTALL_SOURCE.slice(bodyStart, bodyEnd);
 }
 
 const platforms = [
@@ -36,13 +48,26 @@ const platforms = [
   },
 ] as const;
 
+const powerShellPlatforms = [
+  {
+    name: 'PowerShell Feishu',
+    generator: extractPowerShellGenerator('FeishuBotsJson'),
+    args: ['bot', 'cli_test', 'secret', 'C:\\workspace'],
+  },
+  {
+    name: 'PowerShell Telegram',
+    generator: extractPowerShellGenerator('TelegramBotsJson'),
+    args: ['bot', 'telegram-token', 'C:\\workspace'],
+  },
+] as const;
+
 function generateBot(generator: string, args: readonly string[], engine: string): Record<string, unknown> {
   const output = execFileSync(process.execPath, ['-e', generator, ...args, engine], { encoding: 'utf-8' });
   return JSON.parse(output)[0] as Record<string, unknown>;
 }
 
 describe('interactive installer engine selection', () => {
-  for (const platform of platforms) {
+  for (const platform of [...platforms, ...powerShellPlatforms]) {
     it(`${platform.name} persists Claude explicitly`, () => {
       const bot = generateBot(platform.generator, platform.args, 'claude');
 
@@ -55,7 +80,7 @@ describe('interactive installer engine selection', () => {
       const bot = generateBot(platform.generator, platform.args, 'kimi');
 
       expect(bot.engine).toBe('kimi');
-      expect(bot.kimi).toEqual({ thinking: true });
+      expect(bot.kimi).toEqual({ model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' });
       expect(bot.codex).toBeUndefined();
     });
 

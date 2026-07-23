@@ -128,6 +128,18 @@ function Test-Command {
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Test-VersionAtLeast {
+    param(
+        [string]$Version,
+        [string]$Minimum
+    )
+    try {
+        return ([version]($Version.TrimStart('v')) -ge [version]($Minimum.TrimStart('v')))
+    } catch {
+        return $false
+    }
+}
+
 # ============================================================================
 # Phase 0: Banner + environment detection
 # ============================================================================
@@ -203,14 +215,14 @@ if (Test-Command "git") {
 }
 
 # Node.js
+$MinimumNodeVersion = "22.19.0"
 $NeedNode = $false
 if (Test-Command "node") {
     $NodeVer = (node --version) -replace '^v', ''
-    $NodeMajor = [int]($NodeVer.Split('.')[0])
-    if ($NodeMajor -ge 20) {
+    if (Test-VersionAtLeast $NodeVer $MinimumNodeVersion) {
         Write-Success "Node.js found: v$NodeVer"
     } else {
-        Write-Warn "Node.js v$NodeVer found, but v20+ is required."
+        Write-Warn "Node.js v$NodeVer found, but v$MinimumNodeVersion+ is required."
         $NeedNode = $true
     }
 } else {
@@ -229,7 +241,7 @@ if ($NeedNode) {
                 winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
                 # Refresh PATH
                 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-                if (Test-Command "node") { $NodeInstalled = $true; Write-Success "Node.js installed via winget" }
+                if ((Test-Command "node") -and (Test-VersionAtLeast ((node --version) -replace '^v', '') $MinimumNodeVersion)) { $NodeInstalled = $true; Write-Success "Node.js installed via winget" }
             } catch {
                 Write-Warn "winget install failed, trying alternatives..."
             }
@@ -241,7 +253,7 @@ if ($NeedNode) {
             try {
                 choco install nodejs-lts -y
                 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-                if (Test-Command "node") { $NodeInstalled = $true; Write-Success "Node.js installed via Chocolatey" }
+                if ((Test-Command "node") -and (Test-VersionAtLeast ((node --version) -replace '^v', '') $MinimumNodeVersion)) { $NodeInstalled = $true; Write-Success "Node.js installed via Chocolatey" }
             } catch {
                 Write-Warn "Chocolatey install failed, trying alternatives..."
             }
@@ -252,18 +264,18 @@ if ($NeedNode) {
             Write-Info "Installing Node.js via scoop..."
             try {
                 scoop install nodejs-lts
-                if (Test-Command "node") { $NodeInstalled = $true; Write-Success "Node.js installed via scoop" }
+                if ((Test-Command "node") -and (Test-VersionAtLeast ((node --version) -replace '^v', '') $MinimumNodeVersion)) { $NodeInstalled = $true; Write-Success "Node.js installed via scoop" }
             } catch {
                 Write-Warn "scoop install failed."
             }
         }
 
         if (-not $NodeInstalled) {
-            Write-Err "Automatic install failed. Please install Node.js 20+ manually from https://nodejs.org/"
+            Write-Err "Automatic install failed. Please install Node.js $MinimumNodeVersion+ manually from https://nodejs.org/"
             $Missing = 1
         }
     } else {
-        Write-Err "Node.js 20+ is required. Install manually and re-run."
+        Write-Err "Node.js $MinimumNodeVersion+ is required. Install manually and re-run."
         exit 1
     }
 }
@@ -374,7 +386,7 @@ if (-not $SkipConfig) {
     Write-Host ""
     Write-Host "Working Directory:" -ForegroundColor White
     $DefaultWorkDir = Join-Path $env:USERPROFILE "metabot-workspace"
-    $WorkDir = Read-Input "Project directory for Claude to work in" $DefaultWorkDir
+    $WorkDir = Read-Input "Project directory for the Agent to work in" $DefaultWorkDir
     if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
     Write-Success "Working directory: $WorkDir"
 
@@ -523,11 +535,15 @@ BOTS_CONFIG=./bots.json
 API_PORT=$ApiPort
 API_SECRET=$ApiSecret
 
-# Claude AI Authentication
+# Agent Engine Authentication
 "@
 
     if ($ClaudeAuthMethod -eq "subscription") {
         $envContent += "`n# Using Claude Code Subscription (OAuth). Run 'claude login' to authenticate."
+    } elseif ($ClaudeAuthMethod -eq "kimi") {
+        $envContent += "`n# Using Kimi Code 0.27+ (default model: kimi-code/k3). Run 'kimi login' to authenticate."
+    } elseif ($ClaudeAuthMethod -eq "codex") {
+        $envContent += "`n# Using Codex CLI. Run 'codex login' to authenticate."
     } elseif ($ClaudeAuthEnvLines) {
         $envContent += "`n$ClaudeAuthEnvLines"
     }
@@ -558,16 +574,17 @@ META_MEMORY_URL=$MemoryServerUrl
     $BotsJson = Join-Path $MetabotHome "bots.json"
     $FeishuBotsJson = "[]"
     $TelegramBotsJson = "[]"
+    $BotEngine = if ($env:METABOT_ENGINE) { $env:METABOT_ENGINE } else { "claude" }
 
     if ($SetupFeishu) {
-        $FeishuBotsJson = node -e "console.log(JSON.stringify([{name:process.argv[1],feishuAppId:process.argv[2],feishuAppSecret:process.argv[3],defaultWorkingDirectory:process.argv[4]}],null,2))" $BotName $FeishuAppId $FeishuAppSecret $WorkDir
+        $FeishuBotsJson = node -e "const e=process.argv[5];const b={name:process.argv[1],engine:e,feishuAppId:process.argv[2],feishuAppSecret:process.argv[3],defaultWorkingDirectory:process.argv[4]};if(e==='kimi')b.kimi={model:'kimi-code/k3',thinking:true,permissionMode:'auto'};if(e==='codex')b.codex={approvalPolicy:'never',sandbox:'workspace-write'};console.log(JSON.stringify([b],null,2))" $BotName $FeishuAppId $FeishuAppSecret $WorkDir $BotEngine
         $FeishuBotsJson = $FeishuBotsJson -join "`n"
     }
 
     if ($SetupTelegram) {
         $TgName = $BotName
         if ($SetupFeishu) { $TgName = "$BotName-telegram" }
-        $TelegramBotsJson = node -e "console.log(JSON.stringify([{name:process.argv[1],telegramBotToken:process.argv[2],defaultWorkingDirectory:process.argv[3]}],null,2))" $TgName $TelegramBotToken $WorkDir
+        $TelegramBotsJson = node -e "const e=process.argv[4];const b={name:process.argv[1],engine:e,telegramBotToken:process.argv[2],defaultWorkingDirectory:process.argv[3]};if(e==='kimi')b.kimi={model:'kimi-code/k3',thinking:true,permissionMode:'auto'};if(e==='codex')b.codex={approvalPolicy:'never',sandbox:'workspace-write'};console.log(JSON.stringify([b],null,2))" $TgName $TelegramBotToken $WorkDir $BotEngine
         $TelegramBotsJson = $TelegramBotsJson -join "`n"
     }
 
@@ -582,7 +599,12 @@ META_MEMORY_URL=$MemoryServerUrl
 Write-Step "Phase 6: Installing skills and setting up workspace"
 
 $SkillsDir = Join-Path $env:USERPROFILE ".claude\skills"
+$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$CodexSkillsDir = Join-Path $CodexHome "skills"
+$AgentsSkillsDir = Join-Path $env:USERPROFILE ".agents\skills"
 New-Item -ItemType Directory -Path $SkillsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $CodexSkillsDir -Force | Out-Null
+New-Item -ItemType Directory -Path $AgentsSkillsDir -Force | Out-Null
 
 # Sanity check: the bundled skill tree must exist in the checked-out repo.
 # If it's missing, the user's checkout is stale (predates the skill bundling
@@ -605,32 +627,20 @@ if (Test-Path $LegacyMetaskillDir) {
     Write-Info "Removed legacy metaskill skill from $SkillsDir (now opt-in -- see src\skills\metaskill\)"
 }
 
-# Install metamemory skill
-Write-Info "Installing metamemory skill..."
-New-Item -ItemType Directory -Path (Join-Path $SkillsDir "metamemory") -Force | Out-Null
-Copy-Item (Join-Path $MetabotHome "src\memory\skill\SKILL.md") (Join-Path $SkillsDir "metamemory\SKILL.md") -Force
-# Clean up old skill location if it exists
-$oldSkillDir = Join-Path $env:USERPROFILE ".claude\skills\memory"
-if (Test-Path $oldSkillDir) { Remove-Item $oldSkillDir -Recurse -Force }
-Write-Success "metamemory skill installed -> $(Join-Path $SkillsDir 'metamemory')"
-
-# Install metabot skill
-Write-Info "Installing metabot skill..."
-New-Item -ItemType Directory -Path (Join-Path $SkillsDir "metabot") -Force | Out-Null
-Copy-Item (Join-Path $MetabotHome "src\skills\metabot\SKILL.md") (Join-Path $SkillsDir "metabot\SKILL.md") -Force
-Write-Success "metabot skill installed -> $(Join-Path $SkillsDir 'metabot')"
-
-# Install voice skill
-Write-Info "Installing voice skill..."
-New-Item -ItemType Directory -Path (Join-Path $SkillsDir "voice") -Force | Out-Null
-Copy-Item (Join-Path $MetabotHome "src\skills\voice\SKILL.md") (Join-Path $SkillsDir "voice\SKILL.md") -Force
-Write-Success "voice skill installed -> $(Join-Path $SkillsDir 'voice')"
-
-# Install skill-hub skill
-Write-Info "Installing skill-hub skill..."
-New-Item -ItemType Directory -Path (Join-Path $SkillsDir "skill-hub") -Force | Out-Null
-Copy-Item (Join-Path $MetabotHome "src\skills\skill-hub\SKILL.md") (Join-Path $SkillsDir "skill-hub\SKILL.md") -Force
-Write-Success "skill-hub skill installed -> $(Join-Path $SkillsDir 'skill-hub')"
+# Install MetaBot-owned bundles for Claude, Codex, and Agent Skills roots.
+$MetaBotSkillSources = [ordered]@{
+    "metabot" = (Join-Path $MetabotHome "packages\skills\metabot")
+    "metabot-team" = (Join-Path $MetabotHome "packages\skills\metabot-team")
+    "voice" = (Join-Path $MetabotHome "src\skills\voice")
+}
+foreach ($skillRoot in @($SkillsDir, $CodexSkillsDir, $AgentsSkillsDir)) {
+    foreach ($skillName in $MetaBotSkillSources.Keys) {
+        $skillDestination = Join-Path $skillRoot $skillName
+        New-Item -ItemType Directory -Path $skillDestination -Force | Out-Null
+        Get-ChildItem -LiteralPath ($MetaBotSkillSources[$skillName]) -Force | Copy-Item -Destination $skillDestination -Recurse -Force
+        Write-Success "$skillName installed -> $skillDestination"
+    }
+}
 
 # Install feishu-doc skill (only when Feishu is configured)
 $HasFeishu = $false
@@ -667,33 +677,51 @@ if (-not $SkipConfig) {
 # Deploy skills + CLAUDE.md to bot working directory
 if ($DeployWorkDir) {
     $SkillsDest = Join-Path $DeployWorkDir ".claude\skills"
+    $CodexSkillsDest = Join-Path $DeployWorkDir ".codex\skills"
+    $AgentsSkillsDest = Join-Path $DeployWorkDir ".agents\skills"
 
     # metaskill (agent-team generator) and metaschedule (persistent server-side
     # scheduler) are no longer deployed by default -- copy them from
     # $MetabotHome\src\skills\ if needed. CC native CronCreate / /loop already
     # cover ad-hoc, session-scoped scheduling.
-    $deploySkills = @("metamemory", "metabot", "voice", "skill-hub")
+    $deploySkills = @("metabot", "metabot-team", "voice")
     if ($HasFeishu) { $deploySkills += "feishu-doc" }
 
     foreach ($skill in $deploySkills) {
         $skillSrc = Join-Path $SkillsDir $skill
         if (Test-Path $skillSrc) {
-            $skillDst = Join-Path $SkillsDest $skill
-            New-Item -ItemType Directory -Path $skillDst -Force | Out-Null
-            Copy-Item "$skillSrc\*" $skillDst -Recurse -Force
-            Write-Success "Deployed $skill -> $skillDst"
+            foreach ($workspaceSkillRoot in @($SkillsDest, $CodexSkillsDest, $AgentsSkillsDest)) {
+                $skillDst = Join-Path $workspaceSkillRoot $skill
+                New-Item -ItemType Directory -Path $skillDst -Force | Out-Null
+                Copy-Item "$skillSrc\*" $skillDst -Recurse -Force
+                Write-Success "Deployed $skill -> $skillDst"
+            }
         }
     }
 
     # Deploy CLAUDE.md to working directory
     $workspaceClaude = Join-Path $MetabotHome "src\workspace\CLAUDE.md"
     if (Test-Path $workspaceClaude) {
-        Copy-Item $workspaceClaude (Join-Path $DeployWorkDir "CLAUDE.md") -Force
-        Write-Success "Deployed CLAUDE.md -> $(Join-Path $DeployWorkDir 'CLAUDE.md')"
+        $deployClaude = Join-Path $DeployWorkDir "CLAUDE.md"
+        if (Test-Path $deployClaude) {
+            Write-Info "Preserved existing CLAUDE.md at $deployClaude"
+        } else {
+            Copy-Item $workspaceClaude $deployClaude -Force
+            Write-Success "Deployed CLAUDE.md -> $deployClaude"
+        }
+        $workspaceAgents = Join-Path $DeployWorkDir "AGENTS.md"
+        if (-not (Test-Path $workspaceAgents)) {
+            Copy-Item $deployClaude $workspaceAgents -Force
+            Write-Success "Deployed AGENTS.md -> $workspaceAgents"
+        }
     }
 } else {
     Write-Warn "Could not determine working directory, skipping workspace deployment"
 }
+
+# Kimi Code 0.27+ can be installed via:
+#   npm install -g @moonshot-ai/kimi-code@latest
+# Minimum supported Kimi Code version: 0.27.0
 
 # Install CLI tools with .cmd wrappers for CMD/PowerShell
 $LocalBin = Join-Path $env:USERPROFILE ".local\bin"

@@ -75,10 +75,10 @@ export class CommandHandler {
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,
     /**
-     * List the recent Claude sessions for this chat's working directory
-     * (newest first). Backs the direct `/resume <id>` form. Read-only.
+     * List the recent sessions for this chat's active engine and working
+     * directory (newest first). Backs the direct `/resume <id>` form.
      */
-    private listSessions: (chatId: string) => SessionSummary[],
+    private listSessions: (chatId: string) => SessionSummary[] | Promise<SessionSummary[]>,
     /**
      * Swap the chat into a previous Claude session: re-point the sessionId,
      * reset usage counters, release the persistent executor so the next turn
@@ -146,8 +146,8 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
-          '`/effort low|medium|high|xhigh` - Set Codex reasoning effort for this chat',
-          '`/resume` - List & switch to a previous Claude session (Claude only)',
+          '`/effort low|medium|high|xhigh|max|ultra` - Set Codex reasoning effort for this chat',
+          '`/resume` - List & switch to a previous Claude/Codex/Kimi session',
           '`/resume <id>` - Resume a session directly by id prefix',
           '`/btw <q>` (alias `/bytheway`) - Run a side branch without writing back to the main session',
           '`/btwc <q>` (alias `/bythewayc`) - Continue the previous /btw side branch',
@@ -825,13 +825,15 @@ export class CommandHandler {
         { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: 'Fastest · 200k context' },
       ];
       const kimiModels = [
-        { id: 'kimi-for-coding', label: 'Kimi for Coding', note: 'Subscription default · 256k context · thinking' },
-        { id: 'kimi-k2', label: 'Kimi K2', note: 'Legacy coding model' },
+        { id: 'kimi-code/k3', label: 'Kimi K3', note: 'Current Kimi Code default · 1M context · thinking' },
+        { id: 'kimi-code/kimi-for-coding-highspeed', label: 'Kimi Highspeed', note: 'Lower-latency coding profile' },
       ];
       const codexModels = [
-        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Recommended Codex model for ChatGPT subscription users' },
+        { id: 'gpt-5.6', label: 'GPT 5.6', note: 'Current flagship Codex-compatible model' },
+        { id: 'gpt-5.6-terra', label: 'GPT 5.6 Terra', note: 'Variant tuned for large-context planning' },
+        { id: 'gpt-5.6-luna', label: 'GPT 5.6 Luna', note: 'Variant tuned for rapid coding iteration' },
+        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Recommended fallback for ChatGPT subscription users' },
         { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Codex coding model, when available in your Codex account' },
-        { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
       const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : claudeModels;
       const header = activeEngine === 'kimi'
@@ -908,7 +910,9 @@ export class CommandHandler {
           '- `/effort low` — fastest',
           '- `/effort medium` — balanced',
           '- `/effort high` — deeper reasoning',
-          '- `/effort xhigh` — maximum Codex-supported effort',
+          '- `/effort xhigh` — extra-high reasoning',
+          '- `/effort max` — maximum reasoning depth',
+          '- `/effort ultra` — maximum reasoning with auto-delegation',
           '- `/effort reset` — clear session override',
         ].join('\n'),
       );
@@ -919,7 +923,7 @@ export class CommandHandler {
       await this.sender.sendTextNotice(
         chatId,
         'ℹ️ Codex effort only',
-        `This chat is on \`${activeEngine}\`. Switch with \`/model codex\`, then use \`/effort high\` or \`/effort xhigh\`.`,
+        `This chat is on \`${activeEngine}\`. Switch with \`/model codex\`, then use \`/effort high\`, \`/effort max\`, or \`/effort ultra\`.`,
         'blue',
       );
       return;
@@ -940,7 +944,7 @@ export class CommandHandler {
       await this.sender.sendTextNotice(
         chatId,
         '❌ Invalid Effort',
-        'Use one of: `low`, `medium`, `high`, `xhigh`. `max` is accepted as an alias for `xhigh`.',
+        'Use one of: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.',
         'red',
       );
       return;
@@ -956,23 +960,23 @@ export class CommandHandler {
   }
 
   /**
-   * `/resume <id-or-prefix>` — switch the chat directly into a previous Claude
+   * `/resume <id-or-prefix>` — switch the chat directly into a previous engine
    * session by (a prefix of) its session id. Bare `/resume` is intercepted by
    * the bridge picker before reaching here; we keep a usage notice as a
    * defensive fallback.
    *
-   * Gated to the Claude engine (transcripts are claude-specific) and refused
-   * while a turn is running (the swap would race the in-flight executor).
+   * Gated to the engines with durable session discovery and refused while a
+   * turn is running (the swap would race the in-flight executor).
    */
   private async handleResumeCommand(msg: IncomingMessage, arg: string): Promise<void> {
     const { chatId } = msg;
     const session = this.sessionManager.getSession(chatId);
     const activeEngine = session.engine ?? resolveEngineName(this.config);
-    if (activeEngine !== 'claude') {
+    if (activeEngine !== 'claude' && activeEngine !== 'codex' && activeEngine !== 'kimi') {
       await this.sender.sendTextNotice(
         chatId,
-        '❌ /resume is Claude-only',
-        `This chat is on the \`${activeEngine}\` engine. Session resume is only available for the Claude engine.`,
+        '❌ /resume unsupported',
+        `This chat is on the \`${activeEngine}\` engine. Session resume is available for Claude, Codex, and Kimi.`,
         'red',
       );
       return;
@@ -998,12 +1002,12 @@ export class CommandHandler {
       return;
     }
 
-    const sessions = this.listSessions(chatId);
+    const sessions = await this.listSessions(chatId);
     if (sessions.length === 0) {
       await this.sender.sendTextNotice(
         chatId,
         'ℹ️ No Previous Sessions',
-        'No earlier Claude sessions were found for this chat\'s working directory.',
+        `No earlier ${activeEngine} sessions were found for this chat's working directory.`,
         'blue',
       );
       return;
@@ -1058,9 +1062,9 @@ export class CommandHandler {
       case 'claude':
         return '`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
       case 'kimi':
-        return '`kimi-for-coding`, `kimi-k2`';
+        return '`kimi-code/k3`, `kimi-code/kimi-for-coding-highspeed`';
       case 'codex':
-        return '`gpt-5.5`, `gpt-5.5-codex`, `gpt-5.2-codex`';
+        return '`gpt-5.6`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-codex`';
     }
   }
 
@@ -1166,8 +1170,16 @@ function actorRoleField(value: unknown): TeamActorRole | undefined {
 function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | undefined {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') return 'reset';
-  if (normalized === 'max') return 'xhigh';
-  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') return normalized;
+  if (
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh' ||
+    normalized === 'max' ||
+    normalized === 'ultra'
+  ) {
+    return normalized;
+  }
   return undefined;
 }
 

@@ -39,6 +39,9 @@ export interface Engine {
 export interface Executor {
   startExecution(options: ExecutorOptions): ExecutionHandle;
   execute(options: ExecutorOptions): AsyncGenerator<SDKMessage>;
+  /** Optional native mid-turn steering keyed by the bridge chat id. */
+  canSteer?(chatId: string): boolean;
+  steer?(chatId: string, prompt: string): Promise<'steered' | 'no-active-turn'>;
 }
 
 export type StreamProcessorLike = StreamProcessor;

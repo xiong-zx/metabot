@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import {
   claudeProjectsDir,
   listClaudeSessions,
 } from '../src/engines/claude/session-lister.js';
+import { listCodexSessions } from '../src/engines/codex/session-lister.js';
 
 /**
  * session-lister backs the Feishu `/resume` command. It reads the on-disk
@@ -126,5 +128,51 @@ describe('listClaudeSessions', () => {
     // newest two: index 4 then 3
     expect(out[0].preview).toBe('prompt 4');
     expect(out[1].preview).toBe('prompt 3');
+  });
+});
+
+describe('listCodexSessions', () => {
+  it('reads cwd-filtered Codex threads from state_5.sqlite', () => {
+    const codexHome = path.join(home, '.codex');
+    fs.mkdirSync(codexHome, { recursive: true });
+    const db = new Database(path.join(codexHome, 'state_5.sqlite'));
+    db.exec(`
+      CREATE TABLE threads (
+        id TEXT PRIMARY KEY,
+        rollout_path TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        model_provider TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sandbox_policy TEXT NOT NULL,
+        approval_mode TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER,
+        first_user_message TEXT NOT NULL DEFAULT '',
+        preview TEXT NOT NULL DEFAULT ''
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO threads
+      (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, updated_at_ms, first_user_message, preview)
+      VALUES (?, ?, ?, ?, 'vscode', 'openai', ?, ?, 'workspace-write', 'never', 0, ?, ?, ?)
+    `);
+    insert.run('codex-old', 'sessions/old.jsonl', 1, 1, CWD, 'old title', 1000, 'old prompt', '');
+    insert.run('codex-new', 'sessions/new.jsonl', 2, 2, CWD, 'new title', 3000, 'new prompt', 'new preview');
+    insert.run('codex-other', 'sessions/other.jsonl', 3, 3, '/other/project', 'other title', 4000, 'other prompt', '');
+    db.close();
+
+    const out = listCodexSessions({
+      workingDirectory: CWD,
+      homeDir: home,
+      currentSessionId: 'codex-old',
+    });
+
+    expect(out.map((s) => s.sessionId)).toEqual(['codex-new', 'codex-old']);
+    expect(out[0].preview).toBe('new preview');
+    expect(out[1].preview).toBe('old prompt');
+    expect(out[1].isCurrent).toBe(true);
   });
 });

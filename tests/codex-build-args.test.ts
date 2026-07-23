@@ -3,17 +3,17 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyCodexRuntimeOverrides, buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
-import type { CodexBotConfig } from '../src/config.js';
+import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
   const cwd = '/work/proj';
   const prompt = 'run pwd';
 
-  it('defaults approval policy to "never" and sandbox to "danger-full-access"', () => {
+  it('defaults approval policy to "never" and sandbox to "workspace-write"', () => {
     const args = buildCodexArgs({}, cwd, prompt, undefined, undefined);
     expect(args).toEqual([
       '-a', 'never',
-      '--sandbox', 'danger-full-access',
+      '--sandbox', 'workspace-write',
       '-C', cwd,
       'exec', '--json', '--color', 'never', '--skip-git-repo-check', prompt,
     ]);
@@ -74,6 +74,14 @@ describe('buildCodexArgs', () => {
   it('uses codex.reasoningEffort when no per-turn effort is provided', () => {
     const args = buildCodexArgs({ reasoningEffort: 'xhigh' }, cwd, prompt, undefined, undefined);
     expect(args).toContain('model_reasoning_effort="xhigh"');
+  });
+
+  it('passes max and ultra through as distinct Codex effort levels', () => {
+    expect(normalizeCodexReasoningEffort('ultracode')).toBeUndefined();
+    expect(normalizeCodexReasoningEffort('max')).toBe('max');
+    expect(normalizeCodexReasoningEffort('ultra')).toBe('ultra');
+    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'max')).toContain('model_reasoning_effort="max"');
+    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'ultra')).toContain('model_reasoning_effort="ultra"');
   });
 
   it('lets extraArgs override per-turn reasoning effort', () => {

@@ -23,6 +23,7 @@ import { buildPmSystemPrompt } from '../pm-prompt.js';
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
 const CODEX_AUTH_ENV_VARS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
+const CODEX_EXIT_GRACE_MS = 1000;
 
 export function resolveCodexPath(explicitPath?: string): string {
   const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
@@ -427,7 +428,7 @@ export function buildCodexArgs(
     args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
     args.push('-a', codexConfig.approvalPolicy ?? 'never');
-    args.push('--sandbox', codexConfig.sandbox ?? 'danger-full-access');
+    args.push('--sandbox', codexConfig.sandbox ?? 'workspace-write');
   }
 
   args.push('-C', cwd);
@@ -511,13 +512,16 @@ export class CodexExecutor {
     let pendingResult: SDKMessage | undefined;
     let stderr = '';
     let stdoutBuffer = '';
+    let terminalResultDelivered = false;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
 
     const executable = resolveCodexPath(codexConfig.executable);
     this.logger.info({ cwd, hasSession: !!effectiveSessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
 
     const finishWithError = (message: string): void => {
-      if (sawResult) return;
+      if (terminalResultDelivered) return;
       sawResult = true;
+      terminalResultDelivered = true;
       queue.enqueue({
         type: 'result',
         subtype: abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution',
@@ -527,6 +531,28 @@ export class CodexExecutor {
         is_error: true,
         errors: [message],
       });
+      queue.finish();
+    };
+
+    const deliverPendingResult = (): void => {
+      if (!pendingResult || terminalResultDelivered) return;
+      terminalResultDelivered = true;
+      const snapshot = state.lastUsage
+        ? { usage: state.lastUsage, contextWindow: state.contextWindow }
+        : readLastTokenCountFromSession(state.sessionId ?? effectiveSessionId, effectiveCodexHome);
+      queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
+      queue.finish();
+
+      exitTimer = setTimeout(() => {
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
+        this.logger.warn({ pid: child.pid }, 'Codex emitted a terminal result but did not exit; terminating process');
+        child.kill('SIGTERM');
+        const killTimer = setTimeout(() => {
+          if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        }, CODEX_EXIT_GRACE_MS);
+        killTimer.unref?.();
+      }, CODEX_EXIT_GRACE_MS);
+      exitTimer.unref?.();
     };
 
     const emitEvent = (event: CodexJsonEvent): void => {
@@ -535,6 +561,7 @@ export class CodexExecutor {
         if (message.type === 'result') {
           sawResult = true;
           pendingResult = message;
+          deliverPendingResult();
         } else {
           queue.enqueue(message);
         }
@@ -582,9 +609,9 @@ export class CodexExecutor {
       });
       child.on('error', (err) => {
         finishWithError(err.message);
-        queue.finish();
       });
       child.on('close', (code, signal) => {
+        if (exitTimer) clearTimeout(exitTimer);
         if (stdoutBuffer.trim()) {
           try {
             emitEvent(JSON.parse(stdoutBuffer) as CodexJsonEvent);
@@ -595,11 +622,8 @@ export class CodexExecutor {
         if (code !== 0 && !sawResult) {
           const suffix = stderr.trim() ? `: ${stderr.trim()}` : '';
           finishWithError(`Codex exited with ${signal ? `signal ${signal}` : `code ${code}`}${suffix}`);
-        } else if (pendingResult) {
-          const snapshot = state.lastUsage
-            ? { usage: state.lastUsage, contextWindow: state.contextWindow }
-            : readLastTokenCountFromSession(state.sessionId ?? effectiveSessionId, effectiveCodexHome);
-          queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
+        } else {
+          deliverPendingResult();
         }
         if (stderr.trim()) {
           this.logger.debug({ stderr: stderr.trim() }, 'Codex stderr');
@@ -617,6 +641,7 @@ export class CodexExecutor {
         this.logger.warn({ engine: 'codex' }, 'resolveQuestion called on Codex executor — not implemented');
       },
       finish: () => {
+        if (exitTimer) clearTimeout(exitTimer);
         if (child && !child.killed) child.kill('SIGTERM');
         queue.finish();
       },
