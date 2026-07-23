@@ -154,6 +154,7 @@ export class CommandHandler {
           '`/cat <path> [start] [end]` - Show a file or line range without starting the agent',
           '`/ls [path]` - List a directory without starting the agent',
           '`/memory` - Memory document commands',
+          '`@Bot /group-reply mention|all|status` - Feishu group reply mode (scoped to this Agent and group)',
           '`/help` - Show this help message',
           '',
           '**Agent Commands:**',

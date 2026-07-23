@@ -10,8 +10,16 @@ export interface RouteResult {
   body: unknown;
 }
 
+const MAX_REFERENCES_DECOMPRESSED_BYTES = 10 * 1024 * 1024;
+
 function err(status: number, error: string): RouteResult {
   return { status, body: { error } };
+}
+
+function isBufferTooLargeError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && error.code === 'ERR_BUFFER_TOO_LARGE';
 }
 
 export function listSkills(store: SkillStore, cred: Credential): RouteResult {
@@ -88,10 +96,12 @@ export function getSkillReferences(store: SkillStore, name: string, cred: Creden
   if (!content?.referencesTar) return err(404, 'no_references');
   let parsed: { files?: unknown };
   try {
-    parsed = JSON.parse(zlib.gunzipSync(content.referencesTar).toString('utf8')) as {
-      files?: unknown;
-    };
-  } catch {
+    const unpacked = zlib.gunzipSync(content.referencesTar, {
+      maxOutputLength: MAX_REFERENCES_DECOMPRESSED_BYTES,
+    });
+    parsed = JSON.parse(unpacked.toString('utf8')) as { files?: unknown };
+  } catch (error) {
+    if (isBufferTooLargeError(error)) return err(413, 'references_too_large');
     return err(500, 'references_corrupt');
   }
   if (!Array.isArray(parsed.files)) return err(500, 'references_corrupt');

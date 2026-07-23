@@ -57,9 +57,19 @@ If the service starts but Feishu events don't arrive:
 
 ## Bot Doesn't Reply in Group Chats
 
-The bot only responds when **@mentioned** in group chats. In DMs it replies to all messages. This is by design.
+Multi-member groups default to `mention` mode. Make sure you @mention the exact
+bot you expect to answer; mentioning another bot or user does not route the
+message to this bot. In DMs it replies to all messages.
 
-Exception: **2-member groups** (1 user + 1 bot) are treated like DMs — no @mention required.
+**2-member groups** (1 user + 1 bot) default to DM-like `all` mode. The group
+owner can inspect the effective mode with `@Bot /group-reply status` and switch
+it with `@Bot /group-reply mention` or `@Bot /group-reply all`.
+
+If a mode change is rejected, verify that the sender is the group owner and the
+Feishu/Lark app has `im:chat:readonly`. Ownership lookup uses the public Lark
+chat API and fails closed, so a lookup or permission failure never changes the
+mode. A saved per-bot, per-chat mode overrides `groupNoMention` and the
+2-member-group default.
 
 ## FAQ
 

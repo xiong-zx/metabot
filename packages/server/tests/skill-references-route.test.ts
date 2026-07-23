@@ -79,4 +79,50 @@ describe('GET /api/skills/:name/references', () => {
     expect(refs.status).toBe(404);
     expect(refs.body.error).toBe('skill_not_found');
   });
+
+  it('rejects references that expand beyond the decompressed size limit', async () => {
+    kit = await startTestServer('skill-refs-too-large');
+
+    const issue = await call(kit.baseUrl, 'POST', '/admin/credentials/issue', kit.adminToken, {
+      botName: 'refs-bot', ownerName: 'refs-owner', role: 'member', publishSkill: true,
+    });
+    const memberToken = issue.body.token as string;
+
+    // Highly compressible input keeps the request fixture small while crossing
+    // the 10 MiB decompressed-output boundary by a single byte.
+    const referencesTar = zlib
+      .gzipSync(Buffer.alloc(10 * 1024 * 1024 + 1))
+      .toString('base64');
+    const pub = await call(kit.baseUrl, 'POST', '/api/skills/oversized-refs/publish', memberToken, {
+      skillMd: `---\nname: oversized-refs\ndescription: oversized refs\n---\nbody`,
+      referencesTar,
+      visibility: 'published',
+    });
+    expect(pub.status).toBe(201);
+
+    const refs = await call(kit.baseUrl, 'GET', '/api/skills/oversized-refs/references', memberToken);
+    expect(refs.status).toBe(413);
+    expect(refs.body.error).toBe('references_too_large');
+  });
+
+  it('keeps reporting malformed gzip payloads as corrupt references', async () => {
+    kit = await startTestServer('skill-refs-corrupt');
+
+    const issue = await call(kit.baseUrl, 'POST', '/admin/credentials/issue', kit.adminToken, {
+      botName: 'refs-bot', ownerName: 'refs-owner', role: 'member', publishSkill: true,
+    });
+    const memberToken = issue.body.token as string;
+    const referencesTar = Buffer.from('not a gzip payload').toString('base64');
+
+    const pub = await call(kit.baseUrl, 'POST', '/api/skills/corrupt-refs/publish', memberToken, {
+      skillMd: `---\nname: corrupt-refs\ndescription: corrupt refs\n---\nbody`,
+      referencesTar,
+      visibility: 'published',
+    });
+    expect(pub.status).toBe(201);
+
+    const refs = await call(kit.baseUrl, 'GET', '/api/skills/corrupt-refs/references', memberToken);
+    expect(refs.status).toBe(500);
+    expect(refs.body.error).toBe('references_corrupt');
+  });
 });
