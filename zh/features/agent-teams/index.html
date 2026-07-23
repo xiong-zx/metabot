@@ -1,0 +1,2775 @@
+
+<!doctype html>
+<html lang="zh" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="构建受监督的、自我进化的 Agent 组织的基础设施">
+      
+      
+      
+        <link rel="canonical" href="https://xvirobotics.com/metabot/zh/features/agent-teams/">
+      
+      
+        <link rel="prev" href="../goal-loops/">
+      
+      
+        <link rel="next" href="../auto-research/">
+      
+      
+        
+          <link rel="alternate" href="../../../features/agent-teams/" hreflang="en">
+        
+          <link rel="alternate" href="./" hreflang="zh">
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Agent 团队 - MetaBot</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="blue" data-md-color-accent="blue">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#agent" class="md-skip">
+          跳转至
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="页眉">
+    <a href="../../" title="MetaBot" class="md-header__button md-logo" aria-label="MetaBot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MetaBot
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Agent 团队
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="blue" data-md-color-accent="blue"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="blue" data-md-color-accent="blue"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="选择当前语言">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../../features/agent-teams/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="zh" class="md-select__link">
+              中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="搜索" placeholder="搜索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="查找">
+        
+        <button type="reset" class="md-search__icon md-icon" title="清空当前内容" aria-label="清空当前内容" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            正在初始化搜索引擎
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/xvirobotics/metabot" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    xvirobotics/metabot
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="标签" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../" class="md-tabs__link">
+        
+  
+  
+    
+  
+  首页
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/installation/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  快速开始
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/architecture/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  核心概念
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../metaskill/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  功能
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../configuration/environment-variables/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  配置
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../usage/chat-commands/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  使用
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/api/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  参考
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/production/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  部署
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/contributing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  开发
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../troubleshooting/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  故障排除
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../about/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  关于
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="导航栏" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../" title="MetaBot" class="md-nav__button md-logo" aria-label="MetaBot" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MetaBot
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/xvirobotics/metabot" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    xvirobotics/metabot
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    首页
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    快速开始
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    快速开始
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    安装
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    快速配置
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/feishu-app-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    飞书应用配置
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    核心概念
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    核心概念
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    架构
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/session-isolation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    会话隔离
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    安全
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    功能
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    功能
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metaskill/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MetaSkill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../goal-loops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    目标循环
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent 团队
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent 团队
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        功能
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#template-instance-pinning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        目标模型：Template / Instance / Pinning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pm-manager-agent-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        权限边界：PM / Manager / Agent / Worker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared Rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        实施计划
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI 工作流
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        卡片展示
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supervisor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supervisor 阶段
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#botsjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bots.json 中的常驻团队
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        命令参考
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        当前限制
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        相关
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../auto-research/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    自动科研系统
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-core/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory Core
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metamemory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MetaMemory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../web-ui/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../peers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Peers 联邦
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    任务调度
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wiki-sync/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wiki 同步
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    微信接入
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../voice-jarvis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    语音助手
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../outputs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    输出文件
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    配置
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    配置
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/environment-variables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    环境变量
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/multi-bot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    多 Bot 模式
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    使用
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    使用
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/chat-commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    聊天命令
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/example-prompts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    示例提示词
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/use-cases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    使用场景
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    参考
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    参考
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REST API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli-metabot/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    metabot CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    部署
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    部署
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/production/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    生产部署
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    开发
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    开发
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    贡献指南
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/project-structure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    项目结构
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    故障排除
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../about/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    关于
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        功能
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#template-instance-pinning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        目标模型：Template / Instance / Pinning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pm-manager-agent-worker" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        权限边界：PM / Manager / Agent / Worker
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared Rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        实施计划
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI 工作流
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        卡片展示
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supervisor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supervisor 阶段
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#botsjson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bots.json 中的常驻团队
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        命令参考
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        当前限制
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        相关
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="agent">Agent 团队<a class="headerlink" href="#agent" title="Permanent link">&para;</a></h1>
+<p>MetaBot Agent 团队让用户面对的 Bot / PM 通过本地 bridge 协调一组内部 Agent。协调模型是引擎中立的：团队可以声明 Claude、Codex 或 Kimi Agent，所有协调状态都落在 bridge 数据库里，而不是藏在单个模型会话中。实际执行仍走当前 bridge 和 session-engine 路径，因此每个配置的引擎都必须被该 bridge 运行时支持。</p>
+<h2 id="_1">功能<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
+<p>Agent 团队用于更大的运行时协作：</p>
+<ul>
+<li><strong>Agent Team Template</strong> 定义默认 agents、shared prompts、skills、workflow policy、quality gates 和默认执行参数。</li>
+<li><strong>Agent Team Instance</strong> 是某个聊天/项目里的运行态，持有独立 agents、邮箱消息、共享任务、runs、虚拟 chat 和 activity card。</li>
+<li><strong>PM Bot</strong> 创建或复用团队实例，分配任务，并整合对用户的最终结果。</li>
+<li><strong>Agent</strong> 运行在执行该团队的 bridge 上的独立会话里。Legacy team 使用 <code>team:&lt;team&gt;:&lt;agent&gt;</code>；scoped runtime instance 使用 <code>teaminst:&lt;instanceId&gt;:&lt;agent&gt;</code>。</li>
+<li>Agents 通过 <code>metabot teams</code> 协调，因此进展对 PM、其他 Agents、飞书卡片和后续 supervisor 自动化都是可见的。</li>
+</ul>
+<p>这是 <a href="../metaskill/">MetaSkill</a> 的运行时对应：MetaSkill 生成可移植的团队 prompts 和 skills；Agent 团队负责运行一个真实团队。</p>
+<h2 id="template-instance-pinning">目标模型：Template / Instance / Pinning<a class="headerlink" href="#template-instance-pinning" title="Permanent link">&para;</a></h2>
+<p><code>bots.json</code> 中的 <code>agentTeams</code> 应作为可启动的 <strong>Agent Team Template</strong>，不是全局共享运行态。bridge 启动或导入配置时，把这些模板写入 versioned template store；运行时每个聊天/项目创建自己的 <strong>Agent Team Instance</strong>。</p>
+<p>关键规则：</p>
+<ul>
+<li>Template 可以共享，runtime instance 必须隔离。</li>
+<li>默认 scope 是 <code>chat</code>：一个飞书聊天窗口对应一个项目实例。</li>
+<li><code>project</code> scope 需要显式 <code>projectId</code>，用于多个聊天共享一个项目。</li>
+<li><code>global</code> scope 只用于少数公共运维/跨项目专家组，必须显式开启，不作为默认。</li>
+<li>每个 instance 必须 pin 到不可变的 <code>templateId@version</code> 和内容 digest。</li>
+<li>Template 更新不会自动改变正在运行的 instance；升级必须生成 diff/migration plan，并由 PM 或用户批准。</li>
+<li>Instance 可以保留旧版本、手动 refresh 到新版本，或在失败时回滚到旧 pin。</li>
+</ul>
+<p>示例：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Template: research-codex v3
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>Instance: research-codex@chat:oc_project_a
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>  pinned_template: research-codex v2
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>  PM: pm-codex
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>  virtual chats:
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    teaminst:&lt;instanceId&gt;:manager
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    teaminst:&lt;instanceId&gt;:planner
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    teaminst:&lt;instanceId&gt;:coder
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>Instance: research-codex@chat:oc_project_b
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>  pinned_template: research-codex v3
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>  PM: pm-claude
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>  virtual chats:
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    teaminst:&lt;instanceId&gt;:manager
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    teaminst:&lt;instanceId&gt;:planner
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    teaminst:&lt;instanceId&gt;:reviewer
+</code></pre></div>
+<p>当前实现仍保留兼容 legacy <code>teamName</code> 的 CLI/API selector，但 scoped runtime instance 已经把 child rows 写入 <code>instance_id</code>，并把 Agent 执行会话改为 <code>teaminst:&lt;instanceId&gt;:&lt;agent&gt;</code>。剩余风险主要在旧的 <code>teamName</code> 协调入口以及还没完全 instance-keyed 的 activity/recovery 路径。</p>
+<h2 id="pm-manager-agent-worker">权限边界：PM / Manager / Agent / Worker<a class="headerlink" href="#pm-manager-agent-worker" title="Permanent link">&para;</a></h2>
+<p>PM 和 team manager 不是同一级角色：</p>
+<table>
+<thead>
+<tr>
+<th>角色</th>
+<th>可以做</th>
+<th>不应做</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PM Bot</td>
+<td>创建/绑定 team instance、在配额内创建或停止 Agents、批准 template/rules 升级、批准 <code>worker_dispatch</code>、面向用户汇报</td>
+<td>直接把未审批的项目经验写成全局 template/rules</td>
+</tr>
+<tr>
+<td>Team manager Agent</td>
+<td>协调内部 Agents、维护内部 tasks、汇总状态、发现阻塞、向 PM 请求 worker 或审批</td>
+<td>创建新 Agents、执行 <code>worker_dispatch</code>、重启服务、提升 template、修改高权限 rules</td>
+</tr>
+<tr>
+<td>普通 Agent</td>
+<td>完成自己的 planner/coder/experiment/reviewer 职责，产出结构化结果</td>
+<td>创建 Agents、修改 template、跨项目读取未授权上下文</td>
+</tr>
+<tr>
+<td>Worker</td>
+<td>执行一次性代码/实验/检索/评测任务，完成后返回结构化结果</td>
+<td>持有长期 memory、承担团队协调角色</td>
+</tr>
+</tbody>
+</table>
+<p>Research team 可以包含 <code>manager -&gt; planner/coder/experiment/reviewer</code> 循环。manager 的价值是把 PM 从内部协调中释放出来，但 manager 不能继承 PM 的高权限。</p>
+<h2 id="shared-rules">Shared Rules<a class="headerlink" href="#shared-rules" title="Permanent link">&para;</a></h2>
+<p>Bots、Agents 和 Workers 需要共享 rules，但 rules 不能只散落在 prompt 或数据库里。目标是用 versioned RuleSet 编译出每次运行的 Rules Context Pack。</p>
+<p>推荐层级：</p>
+<ol>
+<li>System/runtime safety rules：不可由用户配置覆盖。</li>
+<li>Org/global rules：所有 Bot、Agent、Worker 共享，例如“改完代码后同步更新说明文档和对应 MetaMemory，并报告未完成项”。</li>
+<li>Bot-level rules：某个 Bot 的入口职责、权限和默认行为。</li>
+<li>Team template rules：某个 template 的流程、质量门禁、memory policy、shared skills。</li>
+<li>Team instance / project rules：当前聊天/项目的约定，包括本地 <code>AGENTS.md</code>、<code>CLAUDE.md</code>、数据路径和实验约定。</li>
+<li>Agent role rules：planner/coder/experiment/reviewer/manager 的职责边界。</li>
+<li>Worker rules：所有 worker 的执行要求，以及可选的 worker label rules，例如 <code>worker:nightly</code>。</li>
+<li>Task/message rules：当前任务的临时要求。</li>
+</ol>
+<p>合并规则：</p>
+<ul>
+<li>每条 rule 带来源、版本、scope、是否可覆盖、适用对象和更新时间。</li>
+<li>更具体的 rule 可以覆盖默认值，但不能覆盖不可覆盖的安全/权限规则。</li>
+<li>编译后的 Rules Context Pack 必须带 provenance，方便排查“为什么这个 Agent 收到了这条规则”。</li>
+<li>Template 和 RuleSet 都按版本和 digest pin；已有 instance 不自动跟随 <code>latest</code>。</li>
+<li>Project instance 可以通过 promotion proposal 提出 rule/template patch。PM、用户、admin、manager 和 agent 可以创建 proposal；worker 只能把候选变更回报给 agent/manager 或 PM，不能直接创建 proposal。只有 PM、用户或 admin 可以 approve/reject。批准后才写入新的 template 或 RuleSet 版本；已有 instance 继续保持 pinned，除非显式迁移。</li>
+<li>MetaMemory 记录设计决策、候选规则和审批结论，但不应成为唯一 runtime source；template/rules 需要支持 export/import，便于维护和审查。</li>
+</ul>
+<p>代码开发类 Bot/Agent/Worker 的默认全局 rule 应至少包含：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>如果改动代码或配置，必须同步检查是否需要更新说明文档和对应 MetaMemory。
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>如果没有更新，最终汇报要说明原因。
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>如果测试没有运行或失败，最终汇报要明确说明。
+</code></pre></div>
+<h2 id="_2">实施计划<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>当前实现状态：</p>
+<ul>
+<li>已实现：从 <code>bots.json</code> bootstrap 的 versioned template store、template digest、chat/project/global instance resolver、legacy/runtime team metadata pinning、Agent/Task/Message/Run rows 的物理 <code>instance_id</code> 列和 backfill/sync、runtime team 的 instance-scoped Agent supervisor chat/session ID、重启恢复时清理内部 <code>worker-</code>、<code>team:</code>、<code>teaminst:</code> active-task 记录、runtime instance 的 RuleSet refs pinning、<code>instances resolve</code> 时显式追加并 pin RuleSet refs、team config 对 pinned RuleSet refs / quotas / <code>pmBot</code> 的显式更新、versioned RuleSet store、RuleSet export/diff/import 控制面、promotion proposal 及 PM/user/admin 审批、first-class <code>agent-role</code> / <code>worker</code> RuleSet 选择、Rules Context Pack 生成、Bot turn、Agent Team run、Worker dispatch prompt 的 Rules Context Pack 注入、只允许 PM/admin/user 执行 team 生命周期、Agent 创建/停止/删除、run stop、worker dispatch、服务重启和 template/rule promotion 的权限门禁、Agent、temporary Agent、scoped team count、queue backlog、active runs 的 quota enforcement、temporary Agent TTL 回收，以及现有 team 路由的 <code>instanceId</code> 查找。</li>
+<li>已实现 CLI/API：<code>metabot teams templates ...</code>、<code>metabot teams proposals ...</code>、<code>metabot teams instances ...</code>、<code>metabot teams rules ...</code>，其中 <code>rules export/diff/import</code> 已补齐。现有 <code>&lt;team&gt;</code> 命令位置可以传 team name，也可以传 <code>instanceId</code>；chat/project scoped instance 建议优先传 <code>instanceId</code>。</li>
+<li>已实现最小 activity-card lifecycle：<code>CardState.lifecycleStage</code> / <code>lifecycleKey</code>、飞书 v1/v2 卡片对非 closed 阶段的渲染、MessageBridge 对 <code>received</code>、<code>executing</code>、<code>recovering</code>、<code>blocked</code>、<code>closed</code> 的归一化，普通聊天、continuation、bytheway、spontaneous activity、direct Agent activity card、scheduled task、worker、Agent Team run 和 API task 主要路径上的稳定 lifecycle key 生成/透传，以及按 <code>lifecycleKey</code> 落盘的轻量 <code>SESSION_STORE_DIR/card-lifecycle.json</code> store。Agent Team activity card 在可用时会持久化 <code>teamName</code>、<code>instanceId</code>、<code>agentName</code>、<code>runId</code>、<code>taskIds</code> metadata，并可通过 <code>GET /api/agent-teams/&lt;team&gt;/activity</code> 与 <code>metabot teams activity &lt;team&gt;</code> 查询过滤后的历史。</li>
+<li>已实现重启去重增量：restart recovery 给 continuation scheduled task 写稳定的 chat-scoped <code>dedupeKey</code>（<code>botName + chatId</code>），<code>TaskScheduler</code> 遇到相同 key 的 pending/executing task 会复用，不再重复排队；Worker dispatch 支持显式 <code>dedupeKey</code>，同一 <code>pmChatId + dedupeKey</code> 会复用 running 或近期 completed worker；final card delivery 会在 lifecycle record 上写 <code>finalDeliveredAt</code> / <code>finalDeliveryStatus</code> marker，避免同一 lifecycleKey 重复投递 final。</li>
+<li>已实现重启恢复加固：bridge 启动时即使没有 fresh controlled-restart breadcrumb，只要还存在未过期的 active chat/API task record，也会把被打断卡片标为 <code>recovering</code> 并排 recovery continuation，而不是显示 <code>Task interrupted by service restart</code>。</li>
+<li>已实现重启前 preflight guard、checkpoint handshake 和 bounded ready timeout：普通 <code>/restart service</code> 会检查记录中的活跃 bot/agent turn；如果还有其他工作在运行，会阻止服务重启。blocked/scheduled/forced/timed_out restart request 会记录到 <code>SESSION_STORE_DIR/restart-requests.json</code>；被阻塞的聊天会收到带同一个 <code>requestId</code> 的 restart-prepare 通知，可以回复 <code>/restart ready &lt;requestId&gt; [checkpoint note]</code>；发起方再次执行 <code>/restart service</code> 时会复用该 request，等当前 blockers 都 ready 后再安排重启。blocked request 默认有 10 分钟 ready timeout（可用 <code>METABOT_RESTART_READY_TIMEOUT_MS</code> 配置）；timeout 只会把 request 标成 <code>timed_out</code>，不会自动强制重启。<code>/restart service --force &lt;reason&gt;</code> 是显式覆盖路径。同聊天 scheduled restart 会保留 active-task record，让 restart recovery 可以排 continuation，而不是丢掉被中断的 turn。</li>
+<li>已实现 config/authority 加固：<code>loadAppConfig()</code> 会保留 <code>bots.json</code> 中已受支持的 Agent Team template 字段（<code>quotas</code>、<code>ruleSetRefs</code>、<code>pmBot</code>、scoped instance metadata、temporary Agent lifecycle metadata），HTTP/CLI surface 在 team 生命周期、创建/停止/删除 Agent、停止 run、批准 promotion、直接 import template/rules、resolve instance、更新 team config 时也不再把缺失的 <code>actorRole</code> 当作 PM 权限。Worker dispatch/abort/redirect API 和 MCP 也要求显式 PM/user/admin <code>actorRole</code> / <code>actor_role</code>；受控服务重启会拒绝 manager/agent/worker actor role。</li>
+<li>已实现 Web UI activity history：Team tab 会拉取 Agent Team 实例列表，并通过 <code>GET /api/agent-teams/&lt;team&gt;/activity</code> 展示 Agent Team lifecycle activity；选择具体 sub-agent 时按 <code>agentName</code> 过滤，同时保留原 bot task activity。</li>
+<li>已实现 UI lease/checkpoint 增量：<code>card-lifecycle.json</code> 记录现在包含 <code>leaseOwner</code>、<code>leaseExpiresAt</code>、<code>checkpointNote</code>、<code>checkpointBy</code>、<code>checkpointAt</code>、<code>restartRequestId</code>；非终态 card 自动刷新 lease，closed card 自动释放 lease。<code>/restart ready &lt;requestId&gt; [checkpoint note]</code> 会把 blocker 的 checkpoint 写回对应 lifecycle record。</li>
+<li>已实现 post-restart readiness report：受控重启后 recovery 会向 requester 和 blocker chats 汇报 requestId、状态、ready 进度、是否 timed out、queued continuations 和受影响 chats，并用 <code>reportedAt</code> 去重。</li>
+<li>已实现原子重启执行：restart request 会经过 <code>scheduled/forced -&gt; restarting -&gt; healthy/failed</code>，同一 <code>requestId</code> 只能认领一次 PM2 操作；旧 bridge 只提交一次同 runtime 的 <code>pm2 restart --update-env</code>，新 bridge 负责健康检查与 <code>pm2 save</code>。MetaBot 进程树内禁止切换 runtime/worktree，必须由外部 <code>metabot deploy-runtime</code> 执行。</li>
+<li>仍待实现：把主协调 key 从 legacy <code>teamName</code> surface 全量切到 <code>instanceId</code>，以及更完整的业务语义级 instance/run/message dedupe 审计视图。</li>
+</ul>
+<p>Phase 1：数据模型和解析器</p>
+<ul>
+<li>新增 template store：<code>templateId</code>、<code>version</code>、<code>digest</code>、<code>agents</code>、<code>sharedPrompts</code>、<code>skills</code>、<code>workflowPolicy</code>、<code>qualityGates</code>、<code>ruleSetRefs</code>。</li>
+<li>新增 instance store：<code>instanceId</code>、<code>templateId</code>、<code>templateVersion</code>、<code>scopeType</code>、<code>scopeKey</code>、<code>chatId</code>、<code>projectId</code>、<code>pmBot</code>、<code>status</code>、<code>quotas</code>。</li>
+<li>将 tasks/messages/runs/session/chat/activity card 从 <code>teamName</code> 迁移到 <code>instanceId</code>。</li>
+<li>新增 resolver：<code>resolveTeam(templateName, chatId, projectId, createIfMissing)</code>。</li>
+</ul>
+<p>Phase 2：template bootstrap 和 export/import</p>
+<ul>
+<li><code>bots.json</code> 只作为 bootstrap/template seed。</li>
+<li>启动时把 <code>agentTeams</code> 导入 versioned template store，内容变化生成新版本。</li>
+<li>支持 <code>metabot teams templates export/import/diff</code>.</li>
+<li>不在运行时 instance 中保存 secrets，只保存引用。</li>
+</ul>
+<p>Phase 3：权限、配额和回收</p>
+<ul>
+<li>为 PM、manager、Agent、Worker 定义 capability policy。</li>
+<li>限制每个 chat/project 的 team 数、Agent 数、temporary Agent 数、active runs、队列长度和 idle TTL。team 数、Agent 数、temporary Agent 数、active runs 和队列长度已实现；idle TTL 已覆盖 temporary Agents。</li>
+<li>临时 Agent 过期后归档或停止；有任务的 Agent 先 stop/requeue，再回收。</li>
+<li>manager 只能请求 PM 创建 Agent、派 Worker 或重启服务，不能直接执行高权限操作。</li>
+</ul>
+<p>默认 quota 字段：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th style="text-align: right;">默认值</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>maxAgents</code></td>
+<td style="text-align: right;">8</td>
+<td>每个 team instance 的 active Agents</td>
+</tr>
+<tr>
+<td><code>maxTemporaryAgents</code></td>
+<td style="text-align: right;">3</td>
+<td>每个 team instance 的 temporary Agents</td>
+</tr>
+<tr>
+<td><code>maxParallelRunsPerAgent</code></td>
+<td style="text-align: right;">4</td>
+<td>每个 Agent 的并发 runs</td>
+</tr>
+<tr>
+<td><code>maxTeamsPerScope</code></td>
+<td style="text-align: right;">3</td>
+<td>每个 chat/project/global scope 的 active team instances</td>
+</tr>
+<tr>
+<td><code>maxQueuedTasks</code></td>
+<td style="text-align: right;">64</td>
+<td>每个 team instance 的 pending / in-progress tasks</td>
+</tr>
+<tr>
+<td><code>maxActiveRuns</code></td>
+<td style="text-align: right;">16</td>
+<td>每个 team instance 的 running runs</td>
+</tr>
+</tbody>
+</table>
+<p>Phase 4：shared rules 编译</p>
+<ul>
+<li>建立 RuleSet store，支持版本、digest、scope、export/import。</li>
+<li>在 Bot turn、Agent run、Worker dispatch 前编译 Rules Context Pack。Bot turn 会收到 global/bot/task rules，Agent Team run 会收到 global/team/role/task rules，Worker dispatch 会收到 global/bot/worker/task rules。</li>
+<li>记录 rules load log 和冲突处理结果，便于审计。</li>
+</ul>
+<p>Phase 5：activity card 和恢复</p>
+<ul>
+<li><code>displayChatIds</code> 移到 instance。</li>
+<li>卡片状态改为 bounded state machine：received、acknowledged、executing、checkpointing、responding、closed、recovering、blocked。当前 bridge 已有 lifecycle 字段、飞书渲染、主要 card/task 路径上的 lifecycle key、轻量 JSON lifecycle store、lease/checkpoint 字段，以及 Web UI/API/CLI activity history。Agent Team activity record 在可用时会带 instance/run/task metadata；restart readiness ACK 会把 checkpoint note 写入对应 lifecycle record。</li>
+<li>普通服务重启前，如果记录中还有其他活跃 turn，则先阻止重启，并把 blocker snapshot 记录到 restart <code>requestId</code> 下。被阻塞的聊天会收到 restart-prepare 通知和 checkpoint 命令；等 blockers 确认 ready 后，发起方重试 <code>/restart service</code> 即可继续同一 request。</li>
+<li><code>/restart status</code> 会展示最近持久化的 restart request 和第一条 blocker，运维者可以直接在飞书里查看 blocked restart，不必读日志或 JSON 文件。</li>
+<li>被阻止的参与者可以用 <code>/restart ready &lt;requestId&gt; [checkpoint note]</code> 确认已经准备好；ACK 会持久化到 restart request，<code>/restart status</code> 会显示 <code>ready=x/y</code> 进度。重试时会复用同一个 blocked request，不会丢失 readiness。</li>
+<li>blocked restart request 有有界 ready timeout。超时后 request 会被标为 <code>timed_out</code>，<code>/restart status</code> 会显示 timeout 状态；MetaBot 会要求发起方等待 blockers 完成后重试，或用 <code>/restart service --force &lt;reason&gt;</code> 做显式紧急覆盖。</li>
+<li>重启完成后，restart recovery 会向 requester 和 blocker chats 发送 post-restart readiness report；每个 request 只报告一次。</li>
+<li>如果 bridge 是从非受控路径重启，但仍能找到最近的 active task record，restart recovery 现在会排一个带有“没有 fresh controlled-restart breadcrumb”说明的 continuation，而不是把卡片置为 failed 并要求用户重发。</li>
+<li>重启恢复时基于 instance/run/message dedupe key，避免重复派发 worker 或重复最终回复。restart-continuation scheduler 路径已有稳定 dedupe key；Worker dispatch 已支持调用方显式传 <code>dedupeKey</code> 复用 running/近期 completed worker；final delivery 已通过 lifecycle delivery marker 避免同一 lifecycleKey 重复 final。后续需要把这些 key 和审计视图统一到 first-class <code>instanceId</code> / run / message 模型上。</li>
+</ul>
+<h2 id="cli">CLI 工作流<a class="headerlink" href="#cli" title="Permanent link">&para;</a></h2>
+<p>所有协调都使用 <code>metabot teams</code>：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>metabot<span class="w"> </span>teams<span class="w"> </span>create<span class="w"> </span>metabot-dev<span class="w"> </span>--description<span class="w"> </span><span class="s2">&quot;MetaBot implementation team&quot;</span><span class="w"> </span>--actor-role<span class="w"> </span>pm
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>metabot<span class="w"> </span>teams<span class="w"> </span>agents<span class="w"> </span>spawn<span class="w"> </span>metabot-dev<span class="w"> </span>cli-engineer<span class="w"> </span>--role<span class="w"> </span>implementation<span class="w"> </span>--actor-role<span class="w"> </span>pm<span class="w"> </span>--engine<span class="w"> </span>codex<span class="w"> </span>--prompt<span class="w"> </span><span class="s2">&quot;Own CLI UX, tests, and docs.&quot;</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>create<span class="w"> </span>metabot-dev<span class="w"> </span><span class="s2">&quot;Add runs CLI&quot;</span><span class="w"> </span>--description<span class="w"> </span><span class="s2">&quot;Expose runs create/update in bash and TS CLIs.&quot;</span><span class="w"> </span>--owner<span class="w"> </span>cli-engineer
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>metabot<span class="w"> </span>teams<span class="w"> </span>send<span class="w"> </span>metabot-dev<span class="w"> </span>cli-engineer<span class="w"> </span><span class="s2">&quot;Start task 4.&quot;</span><span class="w"> </span>--from<span class="w"> </span>lead<span class="w"> </span>--summary<span class="w"> </span><span class="s2">&quot;assign task 4&quot;</span>
+</code></pre></div>
+<p>对于 scoped runtime team，先运行 <code>metabot teams instances resolve &lt;template&gt; --chat &lt;chatId&gt; --rule-ref &lt;name[@version]&gt; --actor-role pm</code>，或查看 <code>metabot teams instances list</code>。返回的 <code>instanceId</code> 可以用在命令参考中所有 <code>&lt;team&gt;</code> 位置，例如 <code>metabot teams tasks list ati_...</code>。</p>
+<p>如果项目创建后还要追加新的 pinned 约定，用 <code>metabot teams config &lt;instanceId&gt; --rule-ref &lt;name[@version]&gt; --pm-bot &lt;name&gt; --actor-role pm</code>；需要时也可以一起传 <code>--max-temporary-agents 5</code> 这类 quota 参数。这样更新的是当前 runtime instance，不会偷偷跟随 <code>latest</code>。</p>
+<p>Agent 每一轮通常先读取邮箱和任务：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>metabot<span class="w"> </span>teams<span class="w"> </span>inbox<span class="w"> </span>metabot-dev<span class="w"> </span>cli-engineer<span class="w"> </span>--unread<span class="w"> </span>--read
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>get<span class="w"> </span>metabot-dev<span class="w"> </span><span class="m">4</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>update<span class="w"> </span>metabot-dev<span class="w"> </span><span class="m">4</span><span class="w"> </span>--status<span class="w"> </span>in_progress<span class="w"> </span>--owner<span class="w"> </span>cli-engineer
+</code></pre></div>
+<p>完成后写入结果并通知 lead：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>update<span class="w"> </span>metabot-dev<span class="w"> </span><span class="m">4</span><span class="w"> </span>--status<span class="w"> </span>completed<span class="w"> </span>--result<span class="w"> </span><span class="s2">&quot;Added runs create/update to bash and TS CLI; production smoke passed.&quot;</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>metabot<span class="w"> </span>teams<span class="w"> </span>send<span class="w"> </span>metabot-dev<span class="w"> </span>lead<span class="w"> </span><span class="s2">&quot;Completed task 4: runs create/update is live.&quot;</span><span class="w"> </span>--from<span class="w"> </span>cli-engineer<span class="w"> </span>--summary<span class="w"> </span><span class="s2">&quot;task 4 complete&quot;</span>
+</code></pre></div>
+<h2 id="runs">Runs<a class="headerlink" href="#runs" title="Permanent link">&para;</a></h2>
+<p>Runs 表示 Agent 的后台执行记录。Supervisor 和飞书卡片快照都会用它展示进行中或已完成的后台工作。</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>list<span class="w"> </span>metabot-dev
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>create<span class="w"> </span>metabot-dev<span class="w"> </span>--agent<span class="w"> </span>cli-engineer<span class="w"> </span>--task-id<span class="w"> </span><span class="m">4</span><span class="w"> </span>--status<span class="w"> </span>running<span class="w"> </span>--output<span class="w"> </span><span class="s2">&quot;Starting smoke test&quot;</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>update<span class="w"> </span>metabot-dev<span class="w"> </span>&lt;runId&gt;<span class="w"> </span>--status<span class="w"> </span>completed<span class="w"> </span>--output<span class="w"> </span><span class="s2">&quot;Smoke passed&quot;</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>output<span class="w"> </span>metabot-dev<span class="w"> </span>&lt;runId&gt;
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>stop<span class="w"> </span>metabot-dev<span class="w"> </span>&lt;runId&gt;<span class="w"> </span>--actor-role<span class="w"> </span>pm
+</code></pre></div>
+<p>合法 run 状态包括 <code>running</code>、<code>completed</code>、<code>failed</code> 和 <code>stopped</code>。<code>metabot teams runs stop</code> 现在会在可用时走 supervisor：把 run 标记为 <code>stopped</code>，请求 bridge 停止该 Agent chat task，把已分配且 in-progress 的任务重新排回 <code>pending</code> 并写入 stop 说明，同时抑制迟到的 executor output，避免延迟返回的成功结果覆盖 stopped run。</p>
+<p>失败 run 的处理：</p>
+<ul>
+<li>手动 CLI 使用者应在失败时设置 <code>--status failed --error "&lt;reason&gt;"</code>。</li>
+<li>Background activity 面板会展示 failed run，并在有 error 时展示错误内容。</li>
+<li><code>metabot teams runs output &lt;team&gt; &lt;runId&gt;</code> 会返回 <code>output</code> 和 <code>error</code>，lead 不需要直接查数据库即可查看失败原因。</li>
+<li>Supervisor 会把崩溃或执行不成功的 run 标记为 <code>failed</code>，保存 error 字符串，把已分配且 in-progress 的任务重新排回 <code>pending</code> 并在 <code>result</code> 写入失败上下文，把 agent 恢复为 idle，并由非 lead Agent 给 <code>lead</code> 发失败消息。下一次 supervisor tick 可以再次拾取该任务；lead 负责决定是否允许重试、转派或停止团队。</li>
+</ul>
+<h2 id="_3">卡片展示<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
+<p>Bridge 会从 Agent Teams store 构建团队快照：</p>
+<ul>
+<li><strong>Team</strong> 面板刻意保持紧凑。若有 agent 在工作，会显示 <code>⏳ 2/4 working</code> 这样的计数，并为每个 working agent 展示一行简短活动（最多两行，之后显示 <code>+N more working</code>）；idle agent 不再逐个列出。若没有任何 agent 在工作，整个面板会折叠成单行 <code>💤 idle (4 agents)</code>；如果还有未完成工作，则会追加任务总数和最多两个 open task 主题。</li>
+<li>较长的 team id 会按展示用途缩短，例如 <code>research-codex@chat:oc_abc…</code> 会显示为 <code>research-codex</code>。</li>
+<li><strong>Background activity</strong> 面板展示 runs、状态以及最新 output 或 error。</li>
+<li>卡片展示的任务状态包括 <code>pending</code>、<code>in_progress</code> 和 <code>completed</code>；<code>deleted</code> 任务会隐藏。</li>
+</ul>
+<p>这些卡片状态来自 <code>/api/agent-teams/&lt;team&gt;</code> 数据，因此 CLI 更新会立即影响 bridge 可渲染的内容。</p>
+<p>卡片按 chat 绑定展示。只有当前 chat 命中团队的 <code>displayChatIds</code> 或 <code>chatIds</code> 时，该团队才会显示；active teams 不会全局出现在所有飞书会话里。<code>team:metabot-dev:cli-engineer</code> 这类 Agent 执行会话可放在 <code>chatIds</code>，面向用户的飞书会话应放在 <code>displayChatIds</code>。</p>
+<h2 id="supervisor">Supervisor 阶段<a class="headerlink" href="#supervisor" title="Permanent link">&para;</a></h2>
+<p>Agent Team supervisor 是 bridge 侧循环。启用后，它扫描 active teams，找到有未读消息或已分配 pending 任务的 agents，创建 run，标记 agent 为 working，并在该 agent 的独立会话中执行。Run 结束后，它记录 output 或 error，并给 lead 发消息。</p>
+<p>运行细节：</p>
+<ul>
+<li>用 <code>METABOT_AGENT_TEAM_SUPERVISOR=0</code> 关闭循环。</li>
+<li>用 <code>METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS</code> 调整轮询间隔。</li>
+<li>在 <code>bots.json</code> 设置 <code>agentTeamExecutionBot</code>，或用 <code>METABOT_AGENT_TEAM_EXECUTION_BOT</code> 固定由哪个 bridge bot 执行 Agent run。建议使用非特权 PM/内部 worker bot，例如 <code>research-pm</code>；当 <code>manager</code> 是第一个注册 bot 时，不要依赖注册顺序。</li>
+<li>如果团队实例带有 <code>pmBot</code>（例如 PM 创建的 chat/project 作用域运行时实例），且该 bot 已注册，则该实例会优先通过自己的 <code>pmBot</code> 执行，优先级高于全局 <code>agentTeamExecutionBot</code>。这样 <code>pm-claude</code> 拥有的实例无需改全局配置也会继续跑在 <code>pm-claude</code> 上；该团队的活动卡片也会复用同一个 bot。</li>
+<li>没有可用的 <code>pmBot</code>、也没有显式 execution bot 时，Supervisor 依次回退到 <code>metabot</code>、<code>research-pm</code>、第一个非 <code>manager</code> bot、最后才是第一个已注册 bot。</li>
+<li>Supervisor 启动 run 时，会把已分配的 pending 任务改为 <code>in_progress</code>。</li>
+<li>Supervisor 会为 Agent chat 设置配置的 session engine，但目前还不会在派发前校验每个引擎的能力。在 runtime capability checks 或 per-engine adapters 落地前，常驻团队应使用本地 bridge 已知可工作的引擎。</li>
+</ul>
+<h2 id="botsjson"><code>bots.json</code> 中的常驻团队<a class="headerlink" href="#botsjson" title="Permanent link">&para;</a></h2>
+<p>下面描述的是当前实现。目标模型会把这里的 <code>agentTeams</code> 作为 template seed 导入 versioned template store，而不是继续作为全局运行态。</p>
+<p>CLI-only 设置适合临时团队。常驻团队在 <code>bots.json</code> 的 <code>agentTeams</code> 下声明，bridge 启动时会把它们 reconcile 到团队 store。启用热加载时，修改 <code>bots.json</code> 会自动 reconcile；设置 <code>METABOT_AGENT_TEAMS_HOT_RELOAD=0</code> 可关闭 watcher。</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">&quot;feishuBots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;metabot&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;engine&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;codex&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;feishu&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;appId&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;appSecret&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="p">],</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">  </span><span class="nt">&quot;agentTeamExecutionBot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;metabot&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span><span class="nt">&quot;agentTeams&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">    </span><span class="p">{</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;metabot-dev&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">      </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;MetaBot implementation team&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;active&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="w">      </span><span class="nt">&quot;chatIds&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;team:metabot-dev:cli-engineer&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;team:metabot-dev:runtime-engineer&quot;</span><span class="p">],</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="w">      </span><span class="nt">&quot;displayChatIds&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;oc_feishu_chat_id&quot;</span><span class="p">],</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">      </span><span class="nt">&quot;agents&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cli-engineer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;implementation&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;engine&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;codex&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Own teams CLI, command UX, tests, and docs.&quot;</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;runtime-engineer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;runtime&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;engine&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;codex&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;prompt&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Own bridge runtime, store, supervisor, and cards.&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="w">      </span><span class="p">],</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="w">      </span><span class="nt">&quot;tasks&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;subject&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Document Agent Teams workflow&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;owner&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cli-engineer&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="w">      </span><span class="p">]</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="w">  </span><span class="p">]</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>lead</code> 不是全局保留名。对于 <code>metabot-dev</code> 这样的顶层团队，当前面向用户的 bot
+就是 leader，因此不需要额外创建一个顶层 <code>lead</code> member。没有 active <code>lead</code>
+member 时，发给 <code>lead</code> 的消息会被当成 leader activity，并通过面向用户的 Agent
+Activity card 推出来。嵌套 team 或子项目仍然可以定义独立的 <code>lead</code> member；这种情况下
+<code>team:&lt;team&gt;:lead</code> 会像其他 member session 一样运行。</p>
+<p>Reconcile 行为：</p>
+<ul>
+<li>已配置团队按 name 创建或更新。</li>
+<li>已配置 agents 和 tasks 会 upsert。</li>
+<li>如果某个已配置团队移除了 agents，且仍至少列出一个期望 agent，缺失的既有 agents 会标记为 <code>stopped</code>。</li>
+<li>曾经出现在 <code>agentTeams</code> 中的团队会标记为 <code>managedByConfig</code>；后续如果从配置中移除，reconcile 会把它标记为 <code>stopped</code>。</li>
+<li>手动 CLI 创建的团队会保留，除非它和已配置团队同名。</li>
+</ul>
+<p>既有数据库的 rollout 注意事项：<code>managed_by_config</code> 列添加到既有 Agent Teams DB 时默认是 false。之前已经存在的 resident/config-created teams 只有在 bridge 从 <code>bots.json</code> reconcile 过一次后，才会被视为配置托管。部署这个变更后，请在保留期望 <code>bots.json</code> <code>agentTeams</code> 的情况下重启 bridge，或触发一次热加载。只有完成这次 reconcile 后，才应依赖“从 <code>agentTeams</code> 移除团队”作为 rollback 机制来停止旧 resident team。</p>
+<h2 id="_4">命令参考<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>metabot<span class="w"> </span>teams<span class="w"> </span>list
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>metabot<span class="w"> </span>teams<span class="w"> </span>create<span class="w"> </span>&lt;team&gt;<span class="w"> </span><span class="o">[</span>--description<span class="w"> </span>&lt;text&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>metabot<span class="w"> </span>teams<span class="w"> </span>delete<span class="w"> </span>&lt;team&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>metabot<span class="w"> </span>teams<span class="w"> </span>status<span class="w"> </span>&lt;team&gt;
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>metabot<span class="w"> </span>teams<span class="w"> </span>start<span class="w"> </span>&lt;team&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>metabot<span class="w"> </span>teams<span class="w"> </span>stop<span class="w"> </span>&lt;team&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>metabot<span class="w"> </span>teams<span class="w"> </span>agents<span class="w"> </span>list<span class="w"> </span>&lt;team&gt;
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>metabot<span class="w"> </span>teams<span class="w"> </span>agents<span class="w"> </span>spawn<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;name&gt;<span class="w"> </span><span class="o">[</span>--role<span class="w"> </span>&lt;agent-role&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span><span class="w"> </span><span class="o">[</span>--engine<span class="w"> </span>claude<span class="p">|</span>codex<span class="p">|</span>kimi<span class="o">]</span><span class="w"> </span><span class="o">[</span>--prompt<span class="w"> </span>&lt;text&gt;<span class="o">]</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>metabot<span class="w"> </span>teams<span class="w"> </span>agents<span class="w"> </span>stop<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;name&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>metabot<span class="w"> </span>teams<span class="w"> </span>agents<span class="w"> </span>delete<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;name&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>metabot<span class="w"> </span>teams<span class="w"> </span>send<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;to&gt;<span class="w"> </span>&lt;message&gt;<span class="w"> </span><span class="o">[</span>--from<span class="w"> </span>&lt;name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--summary<span class="w"> </span>&lt;text&gt;<span class="o">]</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>metabot<span class="w"> </span>teams<span class="w"> </span>inbox<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;name&gt;<span class="w"> </span><span class="o">[</span>--unread<span class="o">]</span><span class="w"> </span><span class="o">[</span>--read<span class="o">]</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>list<span class="w"> </span>&lt;team&gt;
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>create<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;subject&gt;<span class="w"> </span><span class="o">[</span>--description<span class="w"> </span>&lt;text&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--owner<span class="w"> </span>&lt;name&gt;<span class="o">]</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>get<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;id&gt;
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a>metabot<span class="w"> </span>teams<span class="w"> </span>tasks<span class="w"> </span>update<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--status<span class="w"> </span>pending<span class="p">|</span>in_progress<span class="p">|</span>completed<span class="p">|</span>deleted<span class="o">]</span><span class="w"> </span><span class="o">[</span>--owner<span class="w"> </span>&lt;name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--result<span class="w"> </span>&lt;text&gt;<span class="o">]</span>
+<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>list<span class="w"> </span>&lt;team&gt;
+<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>create<span class="w"> </span>&lt;team&gt;<span class="w"> </span><span class="o">[</span>--agent<span class="w"> </span>&lt;name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--task-id<span class="w"> </span>&lt;id&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--status<span class="w"> </span>running<span class="p">|</span>completed<span class="p">|</span>failed<span class="p">|</span>stopped<span class="o">]</span><span class="w"> </span><span class="o">[</span>--output<span class="w"> </span>&lt;text&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--error<span class="w"> </span>&lt;text&gt;<span class="o">]</span>
+<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>update<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;runId&gt;<span class="w"> </span><span class="o">[</span>--status<span class="w"> </span>running<span class="p">|</span>completed<span class="p">|</span>failed<span class="p">|</span>stopped<span class="o">]</span><span class="w"> </span><span class="o">[</span>--output<span class="w"> </span>&lt;text&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--error<span class="w"> </span>&lt;text&gt;<span class="o">]</span>
+<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>output<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;runId&gt;
+<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a>metabot<span class="w"> </span>teams<span class="w"> </span>runs<span class="w"> </span>stop<span class="w"> </span>&lt;team&gt;<span class="w"> </span>&lt;runId&gt;<span class="w"> </span><span class="o">[</span>--actor-role<span class="w"> </span>admin<span class="p">|</span>user<span class="p">|</span>pm<span class="o">]</span>
+</code></pre></div>
+<h2 id="_5">当前限制<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Agent Teams 是本地 bridge 状态，不是 metabot-core 状态。请在 bridge 主机上使用，或配置 <code>METABOT_URL</code> 和 <code>API_SECRET</code> 后远程访问。</li>
+<li>引擎中立指协调模型中立，不代表所有引擎都天然支持所有执行能力。Agent 引擎选择仍走当前 bridge/session-engine 边界。</li>
+<li>Supervisor 可以执行 Agent，但 lead 仍然负责整合质量和最终用户汇报。</li>
+<li><code>runs stop</code> 会通过 bridge supervisor 请求取消并重新排队已分配任务，但实际取消仍取决于当前引擎任务是否响应 bridge stop signal。</li>
+<li>Runs 存储文本 output 和 error；大型产物仍应走常规输出文件路径。</li>
+</ul>
+<h2 id="_6">相关<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../../reference/cli-metabot/">metabot CLI</a> — 完整 CLI 参考</li>
+<li><a href="../metaskill/">MetaSkill</a> — 先生成团队 prompts 和 skills，再运行</li>
+<li><a href="../goal-loops/">目标循环</a> — 给团队一个更长周期的目标</li>
+<li><a href="../peers/">Peers 联邦</a> — 跨 MetaBot 实例路由工作</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  回到页面顶部
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/xvirobotics/metabot" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.indexes", "content.code.copy", "content.tabs.link", "search.highlight", "search.suggest"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "\u5df2\u590d\u5236", "clipboard.copy": "\u590d\u5236", "search.result.more.one": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.more.other": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 # \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.none": "\u6ca1\u6709\u627e\u5230\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.one": "\u627e\u5230 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.other": "# \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.placeholder": "\u952e\u5165\u4ee5\u5f00\u59cb\u641c\u7d22", "search.result.term.missing": "\u7f3a\u5c11", "select.version": "\u9009\u62e9\u5f53\u524d\u7248\u672c"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
