@@ -244,4 +244,20 @@ describe('buildCodexEnv', () => {
     expect(env.OPENAI_API_KEY).toBe('sk-bot-env');
     expect(env.PATH).toBe('/bin');
   });
+
+  it('inherits the deployment proxy contract into Codex child env', () => {
+    const env = buildCodexEnv(
+      {},
+      {
+        HTTP_PROXY: 'http://127.0.0.1:7890',
+        HTTPS_PROXY: 'http://127.0.0.1:7890',
+        NO_PROXY: 'localhost,127.0.0.1',
+      },
+    );
+    expect(env).toMatchObject({
+      HTTP_PROXY: 'http://127.0.0.1:7890',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      NO_PROXY: 'localhost,127.0.0.1',
+    });
+  });
 });

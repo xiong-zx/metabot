@@ -16,6 +16,7 @@ interface HandlerOpts {
 
 function buildHandler(opts: HandlerOpts = {}) {
   const notices: RecordedNotice[] = [];
+  const auditEntries: Array<Record<string, unknown>> = [];
   let stopTaskCalls = 0;
   let clearQueueCalls = 0;
   let resetSessionCalls = 0;
@@ -27,6 +28,7 @@ function buildHandler(opts: HandlerOpts = {}) {
     updateCard: async () => true,
     sendTextNotice: async (chatId: string, title: string, content: string, color?: string) => {
       notices.push({ chatId, title, content, color });
+      return `notice-${notices.length}`;
     },
     sendText: async () => {},
     sendImageFile: async () => true,
@@ -34,7 +36,7 @@ function buildHandler(opts: HandlerOpts = {}) {
     downloadImage: async () => true,
     downloadFile: async () => true,
   };
-  const audit = { log: () => {} } as any;
+  const audit = { log: (entry: Record<string, unknown>) => auditEntries.push(entry) } as any;
 
   const handler = new CommandHandler(
     { name: 'test-bot' } as any,
@@ -60,6 +62,7 @@ function buildHandler(opts: HandlerOpts = {}) {
   return {
     handler,
     notices,
+    auditEntries,
     counters: () => ({ stopTaskCalls, clearQueueCalls, resetSessionCalls, releaseExecutorCalls }),
   };
 }
@@ -78,7 +81,7 @@ function resetMessage(): IncomingMessage {
 
 describe('CommandHandler /reset', () => {
   it('aborts a running task, clears queued messages, resets session, and releases executor', async () => {
-    const { handler, notices, counters } = buildHandler({ hasRunningTask: true, queueDepth: 2 });
+    const { handler, notices, auditEntries, counters } = buildHandler({ hasRunningTask: true, queueDepth: 2 });
 
     await handler.handle(resetMessage());
 
@@ -91,6 +94,14 @@ describe('CommandHandler /reset', () => {
     expect(notices).toHaveLength(1);
     expect(notices[0].title).toContain('Session Reset');
     expect(notices[0].color).toBe('green');
+    expect(auditEntries).toContainEqual(expect.objectContaining({
+      event: 'command_confirmation',
+      meta: expect.objectContaining({
+        command: '/reset',
+        delivered: true,
+        confirmationMessageId: 'notice-1',
+      }),
+    }));
   });
 
   it('clears queued messages even when no task is currently running', async () => {

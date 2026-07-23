@@ -104,4 +104,24 @@ describe('createJsonlScanner', () => {
 
     scanner.stop();
   });
+
+  it('drainPending returns records already read into the iterator batch but not delivered', async () => {
+    fs.writeFileSync(file, [
+      line({ type: 'assistant', id: 'intermediate' }),
+      line({ type: 'assistant', id: 'final-answer' }),
+    ].join(''));
+    const scanner = createJsonlScanner({ jsonlPath: file, logger, pollMs: 5 });
+    const iterator = scanner[Symbol.asyncIterator]();
+
+    await expect(nextWithTimeout(iterator)).resolves.toEqual({
+      done: false,
+      value: { type: 'assistant', id: 'intermediate' },
+    });
+
+    // The second record was read in the same filesystem batch. Previously it
+    // lived only in the generator local array, so an end-of-turn drain at EOF
+    // returned [] and result could overtake it.
+    expect(scanner.drainPending()).toEqual([{ type: 'assistant', id: 'final-answer' }]);
+    scanner.stop();
+  });
 });

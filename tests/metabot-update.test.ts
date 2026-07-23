@@ -69,6 +69,8 @@ describe('metabot doctor command', () => {
     expect(source).toContain('metabot doctor     Agent-readable runtime diagnostics (--json)');
     expect(source).toContain('doctor)       shift; cmd_doctor "$@" ;;');
     expect(source).toContain('"schemaVersion": 1');
+    expect(source).toContain('metabot_core_memory');
+    expect(source).toContain('/api/memory/folders/tree');
   });
 
   it('checks Codex agent feature readiness', () => {
@@ -80,6 +82,23 @@ describe('metabot doctor command', () => {
     expect(source).toContain('"skillsDirExists"');
     expect(source).toContain('"mcpServerCount"');
   });
+
+  it('checks Codex sandbox namespace readiness', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('codex_sandbox_namespaces');
+    expect(source).toContain('bwrap_namespace_unavailable');
+    expect(source).toContain('kernelUnprivilegedUsernsClone');
+    expect(source).toContain('userMaxUserNamespaces');
+    expect(source).toContain('Seccomp');
+    expect(source).toContain('apparmor');
+    // bwrap file permission / setuid / capabilities fields
+    expect(source).toContain('bwrapFileMode');
+    expect(source).toContain('bwrapSetuid');
+    expect(source).toContain('bwrapCapabilities');
+    expect(source).toContain('getcap');
+    expect(source).toContain('st_mode');
+    expect(source).toContain('0o4000');
+  });
 });
 
 describe('Codex install defaults', () => {
@@ -90,5 +109,12 @@ describe('Codex install defaults', () => {
     expect(source).toContain('codex_config_set_feature_default "$config" "memories" "true"');
     expect(source).toContain('codex_config_set_feature_default "$config" "guardian_approval" "true"');
     expect(source).toContain('mkdir -p "$codex_home/skills" "$codex_home/memories" "$codex_home/agents"');
+  });
+
+  it('preserves metabot-core URL and token passed through the environment', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+    expect(source).toContain('DEFAULT_METABOT_CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"');
+    expect(source).toContain('prompt_input METABOT_CORE_URL "metabot-core URL" "${METABOT_CORE_URL:-$DEFAULT_METABOT_CORE_URL}"');
+    expect(source).toContain('Using METABOT_CORE_TOKEN from environment.');
   });
 });

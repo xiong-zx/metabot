@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { BotRegistry } from '../api/bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { CardState } from '../types.js';
@@ -8,10 +9,18 @@ import type { Logger } from '../utils/logger.js';
 import { recordCardLifecycle } from './card-lifecycle-store.js';
 import {
   getServiceRestartRequest,
+  markServiceRestartFailed,
+  markServiceRestartHealthy,
   markServiceRestartReportSent,
   summarizeServiceRestartReadiness,
 } from './restart-coordinator.js';
-import { getRestartBreadcrumb, isFreshRestart, restartSecondsAgo, shouldResumeAfterRestart } from './restart-notice.js';
+import {
+  clearRestartBreadcrumb,
+  getRestartBreadcrumb,
+  isFreshRestart,
+  restartSecondsAgo,
+  shouldResumeAfterRestart,
+} from './restart-notice.js';
 
 export interface ActiveTaskRecord {
   botName: string;
@@ -33,6 +42,138 @@ interface RestartRecoveryOutcome {
 
 const ACTIVE_TASKS_FILENAME = 'active-tasks.json';
 const ACTIVE_TASK_STALE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_STARTUP_HEALTH_TIMEOUT_MS = 15_000;
+
+export interface RestartStartupHealth {
+  ok: boolean;
+  proxyReachable: boolean;
+  error?: string;
+}
+
+export async function finalizeControlledRestartAfterStartup(input: {
+  logger: Logger;
+  healthCheck?: () => Promise<RestartStartupHealth>;
+  persistProcessList?: () => Promise<void>;
+  now?: number;
+}): Promise<void> {
+  if (!isFreshRestart()) return;
+  const breadcrumb = getRestartBreadcrumb();
+  if (!breadcrumb?.requestId) return;
+  const record = getServiceRestartRequest(breadcrumb.requestId);
+  if (!record || record.status === 'healthy' || record.status === 'failed') return;
+
+  const targetCwd = path.resolve(process.env.METABOT_HOME || process.cwd());
+  const targetScript = path.join(targetCwd, 'src', 'index.ts');
+  try {
+    const health = await (input.healthCheck || checkRestartStartupHealth)();
+    if (!health.ok) {
+      markServiceRestartFailed({
+        requestId: breadcrumb.requestId,
+        error: health.error || 'Restart startup health check failed',
+        runtimePid: process.pid,
+        targetCwd,
+        targetScript,
+        proxyReachable: health.proxyReachable,
+        now: input.now,
+      });
+      input.logger.error({ requestId: breadcrumb.requestId, health }, 'Controlled restart startup health failed');
+      return;
+    }
+
+    await (input.persistProcessList || persistPm2ProcessList)();
+    const savedAt = input.now ?? Date.now();
+    markServiceRestartHealthy({
+      requestId: breadcrumb.requestId,
+      runtimePid: process.pid,
+      targetCwd,
+      targetScript,
+      proxyReachable: health.proxyReachable,
+      processListSavedAt: savedAt,
+      now: input.now,
+    });
+    input.logger.info(
+      { requestId: breadcrumb.requestId, runtimePid: process.pid, targetCwd, proxyReachable: health.proxyReachable },
+      'Controlled restart reached healthy state and PM2 process list was saved',
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    markServiceRestartFailed({
+      requestId: breadcrumb.requestId,
+      error: message,
+      runtimePid: process.pid,
+      targetCwd,
+      targetScript,
+      now: input.now,
+    });
+    input.logger.error({ err, requestId: breadcrumb.requestId }, 'Controlled restart finalization failed');
+  }
+}
+
+async function checkRestartStartupHealth(): Promise<RestartStartupHealth> {
+  const timeoutMs = parsePositiveInt(process.env.METABOT_RESTART_HEALTH_TIMEOUT_MS, DEFAULT_STARTUP_HEALTH_TIMEOUT_MS);
+  const port = parsePositiveInt(process.env.API_PORT || process.env.METABOT_API_PORT, 9100);
+  const deadline = Date.now() + timeoutMs;
+  let localError = 'bridge health endpoint did not become ready';
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+        signal: AbortSignal.timeout(Math.min(2_000, Math.max(250, deadline - Date.now()))),
+      });
+      if (response.ok) {
+        localError = '';
+        break;
+      }
+      localError = `bridge health returned HTTP ${response.status}`;
+    } catch (err) {
+      localError = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (localError) return { ok: false, proxyReachable: false, error: localError };
+
+  const anthropic = await runProcess('curl', [
+    '-sS',
+    '-o', '/dev/null',
+    '-w', '%{http_code}',
+    '--connect-timeout', '5',
+    '--max-time', '10',
+    'https://api.anthropic.com/v1/models',
+  ]);
+  const status = anthropic.stdout.trim();
+  const proxyReachable = anthropic.code === 0 && /^\d{3}$/.test(status) && status !== '000';
+  if (!proxyReachable) {
+    return {
+      ok: false,
+      proxyReachable: false,
+      error: `Anthropic connectivity failed via deployment environment: ${anthropic.stderr.trim() || `HTTP ${status || '000'}`}`,
+    };
+  }
+  return { ok: true, proxyReachable: true };
+}
+
+async function persistPm2ProcessList(): Promise<void> {
+  const result = await runProcess('pm2', ['save', '--force']);
+  if (result.code !== 0) {
+    throw new Error(`pm2 save failed: ${result.stderr.trim() || `exit ${result.code}`}`);
+  }
+}
+
+function runProcess(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  });
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
 
 function dataDir(): string {
   return process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
@@ -264,6 +405,7 @@ export async function recoverInterruptedTasksAfterRestart(input: {
       now,
     });
   }
+  clearRestartBreadcrumb();
 }
 
 async function sendRestartCoordinationReport(input: {
@@ -294,6 +436,8 @@ async function sendRestartCoordinationReport(input: {
   const lines = [
     `Restart request \`${record.requestId}\` completed after service reconnect.`,
     `Status: ${record.status}${record.force ? ' (forced)' : ''}.`,
+    record.healthError ? `Health error: ${record.healthError}` : '',
+    record.targetCwd ? `Runtime: ${record.targetCwd}${record.runtimePid ? ` (pid ${record.runtimePid})` : ''}.` : '',
     record.reason ? `Reason: ${record.reason}` : '',
     `Readiness before restart: ready=${summary.ready}/${summary.total}${summary.pending > 0 ? `, pending=${summary.pending}` : ''}${summary.timedOut || record.status === 'timed_out' ? ', timed_out=true' : ''}.`,
     `Recovery continuations queued: ${continuationCount}.`,
@@ -314,7 +458,7 @@ async function sendRestartCoordinationReport(input: {
         target.chatId,
         target.role === 'requester' ? 'MetaBot Restart Report' : 'MetaBot Restart Recovery Report',
         lines.join('\n'),
-        record.status === 'forced' ? 'orange' : 'green',
+        record.status === 'failed' ? 'red' : record.force ? 'orange' : 'green',
       );
       sent += 1;
     } catch (err) {

@@ -12,6 +12,19 @@ MetaMemory 是基于 **SQLite 的文档存储**（使用 FTS5 全文搜索），
 - **REST API** 程序化访问
 - **CLI**（`mm`）终端访问
 
+## 和 Memory Core 的关系
+
+MetaMemory 是人类可读知识层，Memory Core 是 Agent / worker 的执行级记忆层。两者联动，但职责不同：
+
+| 系统 | 保存内容 | 主要读者 | 是否作为执行关键事实源 |
+|------|----------|----------|------------------------|
+| MetaMemory | Markdown 蓝图、周报、会议纪要、项目说明、人工整理结论 | 人类和 Agent | 否 |
+| Memory Core | 可追溯 events、memory units、负结果、决策、context pack evidence | Agent / worker | 是 |
+
+AutoResearchClaw run 结束后，可靠事实先进入 Memory Core；给人读的摘要、阶段性报告和架构说明再发布到 MetaMemory。不要把大量实验日志或未审查事实直接写成 MetaMemory 文档来驱动后续 worker。
+
+公开 MetaMemory API 的写入路径默认只允许 `/users`、`/shared`、`/metabot`。这防止 agent 把 Research Memory 的项目 root（例如系统路径或实验目录）伪装成 MetaMemory 文件夹。需要扩展公开写入命名空间时，显式配置 `METABOT_CORE_MEMORY_WRITE_ROOTS`。
+
 ## Agent 如何使用
 
 Claude 通过 `metamemory` skill 自主读写知识文档。当用户说"记住这个"或 Claude 需要持久化知识时，它会调用 memory API。
@@ -81,6 +94,7 @@ MetaMemory 支持文件夹级 ACL：
 | `MEMORY_ADMIN_TOKEN` | — | 管理员 Token（完整访问） |
 | `MEMORY_TOKEN` | — | 读者 Token（仅 shared） |
 | `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 地址（CLI 用） |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许创建/写入的顶层路径，逗号分隔 |
 
 ## 自动同步到知识库
 

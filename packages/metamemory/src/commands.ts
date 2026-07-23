@@ -267,6 +267,29 @@ export async function cmdMkdir(cfg: Config, args: ParsedArgs): Promise<void> {
   print(body);
 }
 
+export async function cmdMoveFolder(cfg: Config, args: ParsedArgs): Promise<void> {
+  const id = args.positional[0];
+  if (!id) throw new Error('move-folder: <folder_id_or_path> required');
+  const patch: Record<string, unknown> = {};
+  if (typeof args.flags.path === 'string') patch.path = args.flags.path;
+  if (typeof args.flags.name === 'string') patch.name = args.flags.name;
+  const parent = typeof args.flags.parent === 'string'
+    ? args.flags.parent
+    : typeof args.flags['parent-id'] === 'string'
+      ? args.flags['parent-id']
+      : undefined;
+  if (parent !== undefined) patch.parent_id = parent;
+  if (Object.keys(patch).length === 0) {
+    throw new Error('move-folder: --path, --name, or --parent required');
+  }
+  const body = await request(cfg, {
+    method: 'PATCH',
+    path: `/api/memory/folders/${encodeIdOrPath(id)}`,
+    body: patch,
+  });
+  print(body);
+}
+
 export async function cmdDelete(cfg: Config, args: ParsedArgs): Promise<void> {
   const id = args.positional[0];
   if (!id) throw new Error('delete: <doc_id> required');
@@ -365,6 +388,8 @@ Commands:
                               [--html | --content-type <mime>]
   share <doc_id> [on|off]     toggle a single doc's shared flag (default: on)
   mkdir <name> [parent_id]    [--path </abs/path>]
+  move-folder <id|path>       [--path </abs/path>] [--name <name>]
+                              [--parent <folder_id>]
   delete <doc_id>
   visibility [public|private] read or toggle this bot's DEFAULT share for new
                               docs (public → shared:true, private → shared:false)

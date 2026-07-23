@@ -34,8 +34,8 @@ export interface IMessageSender {
   /** Update an existing question card with new CardState (e.g., mark answered). */
   updateQuestionCard?(messageId: string, state: CardState): Promise<boolean>;
 
-  /** Send a simple notice message (for command responses: /help, /reset, /stop, etc.). */
-  sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void>;
+  /** Send a simple notice. Returns the platform message ID when available. */
+  sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<string | undefined>;
 
   /** Send a plain text message. */
   sendText(chatId: string, text: string): Promise<void>;

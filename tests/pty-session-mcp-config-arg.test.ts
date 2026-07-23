@@ -88,4 +88,18 @@ describe('pty-session --mcp-config argument', () => {
 
     expect(spawnArgs()).not.toContain('--strict-mcp-config');
   });
+
+  it('passes the configured Claude model unchanged to the interactive spawn', () => {
+    createPtyClaudeSession({
+      cwd: '/tmp',
+      settingsPath: '/tmp/fake-settings.json',
+      model: 'claude-fable-5',
+      logger,
+    });
+
+    const args = spawnArgs();
+    const at = args.indexOf('--model');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe('claude-fable-5');
+  });
 });

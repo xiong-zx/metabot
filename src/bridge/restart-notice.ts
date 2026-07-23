@@ -10,9 +10,9 @@ import * as path from 'node:path';
  * memory of having done so; when the next message arrives the session resumes
  * with "please restart" still in its history and the agent restarts again, in a
  * loop. To break it, `bin/metabot` writes a timestamp breadcrumb just before
- * `pm2 restart`; we read (and delete) it at boot, then inject a one-shot
- * `<system-reminder>` into the first turn of each chat telling the agent the
- * restart already happened and not to do it again.
+ * `pm2 restart`; we load it at boot, retain it until startup health and
+ * recovery complete, then inject a one-shot `<system-reminder>` into the first
+ * turn of each chat telling the agent the restart already happened.
  */
 
 const BREADCRUMB_FILENAME = 'last-restart.json';
@@ -60,9 +60,10 @@ export function writeRestartBreadcrumb(input: Omit<RestartBreadcrumb, 'restarted
 }
 
 /**
- * Read the restart breadcrumb at boot and stash the timestamp in memory, then
- * delete the file so a later cold start doesn't re-trigger. Call once during
- * bridge startup. Safe to call when no breadcrumb exists.
+ * Read the restart breadcrumb at boot and stash the timestamp in memory. The
+ * file is intentionally kept until startup health and recovery complete, so a
+ * crash during boot can retry the same request instead of losing its audit
+ * trail. Call once during bridge startup. Safe when no breadcrumb exists.
  */
 export function loadRestartBreadcrumb(): void {
   const file = breadcrumbPath();
@@ -84,7 +85,11 @@ export function loadRestartBreadcrumb(): void {
   } catch {
     /* missing/unreadable — nothing to do */
   }
-  // Delete regardless; the timestamp now lives in memory for this process.
+}
+
+/** Clear a breadcrumb only after startup health and recovery have completed. */
+export function clearRestartBreadcrumb(): void {
+  const file = breadcrumbPath();
   try {
     fs.unlinkSync(file);
   } catch {

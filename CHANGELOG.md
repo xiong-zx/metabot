@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file.
 - README badges (CI, license, stars)
 
 ### Fixed
-- Worker lifecycle records now carry output-contract metadata, terminal artifact reconciliation, detail refs, and an idempotent dry-run backfill helper for older records.
+- Worker lifecycle records now carry output-contract metadata, success/failure terminal artifact reconciliation, full detail refs (`/api/workers/:id`, artifact file refs, worker chat refs), and an idempotent dry-run backfill helper for older records.
 - Timeout error message now correctly shows "1 hour limit" instead of "10 min limit"
 - Memory client API response format handling (unwrapArray/unwrapSingle)
 

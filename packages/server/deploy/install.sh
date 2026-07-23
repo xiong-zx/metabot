@@ -103,6 +103,8 @@ METABOT_CORE_HOST=127.0.0.1
 METABOT_CORE_PORT=9200
 METABOT_CORE_DATA_DIR=$DATA_DIR
 METABOT_CORE_AUDIT_DIR=$DATA_DIR/audit
+# Optional top-level MetaMemory namespace for this server, e.g. /cargo1.
+# METABOT_CORE_MEMORY_SERVER_ROOT=/cargo1
 # Optional: restrict the Web UI to a specific host header. Leave unset to
 # serve the UI on any host (e.g. http://localhost:9200). Set this to your
 # public hostname if you front the server with a reverse proxy.

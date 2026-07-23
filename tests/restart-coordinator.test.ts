@@ -8,6 +8,8 @@ import {
   findReusableServiceRestartRequest,
   getServiceRestartRequest,
   listServiceRestartRequests,
+  markServiceRestartFailed,
+  markServiceRestartHealthy,
   markServiceRestartRequestTimedOut,
   recordServiceRestartReadiness,
   recordServiceRestartRequest,
@@ -141,6 +143,63 @@ describe('restart coordinator', () => {
         force: true,
         scheduledAt: 1_000 + 15 * 24 * 60 * 60 * 1000,
       });
+    } finally {
+      if (originalSessionStoreDir === undefined) delete process.env.SESSION_STORE_DIR;
+      else process.env.SESSION_STORE_DIR = originalSessionStoreDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists healthy and failed restart terminal states with runtime evidence', () => {
+    const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-coordinator-'));
+    process.env.SESSION_STORE_DIR = dir;
+    try {
+      recordServiceRestartRequest({
+        requestId: 'restart-healthy',
+        requesterBotName: 'admin',
+        request: { chatId: 'oc_requester', userId: 'u1' },
+        status: 'restarting',
+        targetCwd: '/srv/metabot',
+        targetScript: '/srv/metabot/src/index.ts',
+        now: 1_000,
+      });
+      const healthy = markServiceRestartHealthy({
+        requestId: 'restart-healthy',
+        runtimePid: 1234,
+        proxyReachable: true,
+        processListSavedAt: 2_000,
+        now: 2_000,
+      });
+      expect(healthy).toMatchObject({
+        status: 'healthy',
+        healthyAt: 2_000,
+        runtimePid: 1234,
+        targetCwd: '/srv/metabot',
+        proxyReachable: true,
+        processListSavedAt: 2_000,
+      });
+
+      recordServiceRestartRequest({
+        requestId: 'restart-failed',
+        requesterBotName: 'admin',
+        request: { chatId: 'oc_requester', userId: 'u1' },
+        status: 'restarting',
+        now: 3_000,
+      });
+      const failed = markServiceRestartFailed({
+        requestId: 'restart-failed',
+        error: 'proxy connect timeout',
+        proxyReachable: false,
+        now: 4_000,
+      });
+      expect(failed).toMatchObject({
+        status: 'failed',
+        failedAt: 4_000,
+        healthError: 'proxy connect timeout',
+        proxyReachable: false,
+      });
+      expect(listServiceRestartRequests()).toHaveLength(2);
     } finally {
       if (originalSessionStoreDir === undefined) delete process.env.SESSION_STORE_DIR;
       else process.env.SESSION_STORE_DIR = originalSessionStoreDir;

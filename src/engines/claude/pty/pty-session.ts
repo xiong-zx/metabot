@@ -20,37 +20,30 @@ import { applyClaudeChildEnvPolicy } from '../executor.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
+  PtyPromptSubmission,
 } from './contract.js';
+import {
+  classifyClaudeInputReadiness,
+  classifyClaudeSubmissionAcknowledgement,
+  isClaudeResumeSummaryDialog,
+} from './pty-readiness.js';
+
+export {
+  classifyClaudeInputReadiness,
+  classifyClaudeSubmissionAcknowledgement,
+  hasClaudePromptText,
+  hasClaudeRunningFooter,
+  isClaudeResumeSummaryDialog,
+} from './pty-readiness.js';
+export type { ClaudeInputReadiness } from './pty-readiness.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
-const PROMPT_MARKER_RE = /[❯⏵]/u;
-
-export interface ClaudeInputReadiness {
-  hasInputBox: boolean;
-  running: boolean;
-  menuUp: boolean;
-  idle: boolean;
-}
-
-export function classifyClaudeInputReadiness(tail: string): ClaudeInputReadiness {
-  const sq = tail.toLowerCase().replace(/\s+/g, '');
-  const running = sq.includes('esctointerrupt');
-  const menuUp =
-    sq.includes('entertoselect') ||
-    sq.includes('ctrl-gtoedit') ||
-    sq.includes('shift+tabtoapprove') ||
-    /[❯⏵]\d\./u.test(sq); // pointer on a numbered menu option
-  const hasInputBox = PROMPT_MARKER_RE.test(tail);
-  return {
-    hasInputBox,
-    running,
-    menuUp,
-    idle: hasInputBox && !running && !menuUp,
-  };
-}
+const INITIAL_READY_TIMEOUT_MS = 30_000;
+/** Bounded window for Claude's model-backed compaction after summary resume. */
+export const RESUME_SUMMARY_READY_TIMEOUT_MS = 10 * 60_000;
 
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
@@ -225,7 +218,10 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // Spawn with the SAME absolute cwd used to derive jsonlPath, so claude's
     // own jsonl-dir derivation matches ours regardless of metabot's process cwd.
     const spawnCwd = path.resolve(opts.cwd);
-    this.log.info({ sessionId: this.sessionId, args, cwd: spawnCwd }, 'pty-session: spawning claude');
+    this.log.info(
+      { sessionId: this.sessionId, executable: claudePath, args, cwd: spawnCwd },
+      'pty-session: spawning claude',
+    );
 
     this.term = pty.spawn(claudePath, args, {
       name: 'xterm-256color',
@@ -261,13 +257,29 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   }
 
   private async waitForReady(): Promise<void> {
-    const TIMEOUT = 30_000;
     const POLL = 150;
     const SETTLE = 2500;
-    const start = Date.now();
+    let activeTimeoutMs = INITIAL_READY_TIMEOUT_MS;
+    let deadline = Date.now() + activeTimeoutMs;
+    let resumeSummaryAccepted = false;
 
-    while (Date.now() - start < TIMEOUT) {
-      if (PROMPT_MARKER_RE.test(this.ring)) {
+    while (Date.now() < deadline) {
+      const screen = this.screen();
+      if (!resumeSummaryAccepted && isClaudeResumeSummaryDialog(screen)) {
+        if (!this.term || this.disposed) {
+          throw new Error('pty-session: cannot confirm resume summary — session disposed');
+        }
+        resumeSummaryAccepted = true;
+        this.log.info('pty-session: confirming recommended resume-from-summary option');
+        this.term.write('\r');
+        // Summary restoration runs a model-backed /compact. Large sessions can
+        // take minutes, so give that phase its own bounded readiness window.
+        activeTimeoutMs = RESUME_SUMMARY_READY_TIMEOUT_MS;
+        deadline = Date.now() + activeTimeoutMs;
+        await sleep(POLL);
+        continue;
+      }
+      if (classifyClaudeInputReadiness(screen).idle) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
         return;
@@ -276,12 +288,12 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     throw new Error(
-      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯/⏵). ` +
-        `Last 500 chars: ${this.ring.slice(-500)}`,
+      `pty-session: timeout (${activeTimeoutMs}ms) waiting for TUI input box (❯/⏵). ` +
+        `Current screen: ${this.screen().slice(-500)}`,
     );
   }
 
-  async typePrompt(text: string): Promise<void> {
+  async typePrompt(text: string): Promise<PtyPromptSubmission> {
     await this.ready(); // boot: wait for the TUI to first come up
     // Per-call readiness: ready() is memoized after boot, so on its own it would
     // let us type the INSTANT a turn is requested — even while claude is still
@@ -302,7 +314,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     if (!idle) {
       throw new Error(
         `pty-session: cannot type prompt — Claude TUI did not return to idle input. ` +
-          `Last 500 chars: ${this.snapshot().slice(-500)}`,
+          `Current screen: ${this.screen().slice(-500)}`,
       );
     }
     if (!this.term || this.disposed) {
@@ -311,24 +323,63 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
     this.log.info({ len: text.length }, 'pty-session: typing prompt');
 
+    const idleScreen = this.screen();
     // Type char-by-char into the PTY (interactive input).
     for (const ch of text) {
       this.term.write(ch);
     }
 
-    await sleep(800);
+    const echoObserved = await this.waitForScreenChange(idleScreen, 3_000);
+    if (!echoObserved) {
+      throw new Error('pty-session: prompt input was not echoed by the Claude TUI');
+    }
+
     this.term.write('\r');
-    await sleep(1500);
-    // Double-Enter safeguard: the TUI sometimes needs a second Enter to submit.
-    this.term.write('\r');
+    let acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
+    if (!acknowledgement) {
+      // The TUI occasionally accepts the text but leaves it in the input box
+      // until a second Enter. Retry only when the first submit had no observable
+      // effect, then require the same screen-based acknowledgement.
+      this.log.warn('pty-session: first Enter had no observable effect — retrying submit');
+      this.term.write('\r');
+      acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
+    }
+    if (!acknowledgement) {
+      throw new Error('pty-session: prompt submit was not acknowledged by the Claude TUI');
+    }
+    return { submittedAt: Date.now(), acknowledgement };
+  }
+
+  private async waitForScreenChange(before: string, timeoutMs: number): Promise<string | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = this.screen();
+      if (current && current !== before) return current;
+      await sleep(50);
+    }
+    return null;
+  }
+
+  private async waitForSubmissionAcknowledgement(
+    submittedScreen: string,
+    timeoutMs: number,
+  ): Promise<PtyPromptSubmission['acknowledgement'] | null> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const current = this.screen();
+      const acknowledgement = classifyClaudeSubmissionAcknowledgement(submittedScreen, current);
+      if (acknowledgement) return acknowledgement;
+      await sleep(50);
+    }
+    return null;
   }
 
   /**
    * Wait until the TUI is at an IDLE input box, ready to accept a new prompt.
    *
-   * The snapshot is an append-log of PTY output (not a screen buffer), so we
-   * read only the most-recent slice — the latest redraw — and key off what
-   * claude actively rewrites there:
+   * Readiness is classified from the current cursor-resolved terminal screen.
+   * Historical append-log output must never satisfy this check: old prompt or
+   * running markers can remain in the ring after the live TUI has changed.
    *   - "esc to interrupt" in the live footer ⟶ the model is generating.
    *   - a menu footer ("enter to select", "ctrl-g to edit", "shift+tab to
    *     approve") or a `❯` pointing at a numbered option ⟶ a blocking menu is up
@@ -349,8 +400,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
-      const tail = this.snapshot().slice(-700);
-      const readiness = classifyClaudeInputReadiness(tail);
+      const readiness = classifyClaudeInputReadiness(this.screen());
       if (readiness.idle) {
         if (!idleSince) idleSince = Date.now();
         if (Date.now() - idleSince >= STABLE_MS) return true;

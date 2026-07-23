@@ -1,12 +1,15 @@
 import type { MemoryStore } from './memory-store.js';
 import type { AgentStore } from '../agents/agent-store.js';
 import type { Credential } from '../auth/credentials.js';
+import { joinPath, normalizePath } from './acl.js';
 import { isHiddenFromMemoryView } from './hidden-paths.js';
 
 export interface RouteResult {
   status: number;
   body: unknown;
 }
+
+const DEFAULT_WRITABLE_API_ROOTS = ['/users', '/shared', '/metabot'];
 
 function err(status: number, error: string): RouteResult {
   return { status, body: { error } };
@@ -63,6 +66,8 @@ export function createFolder(store: MemoryStore, body: Record<string, unknown>, 
   const pathHint = body.path as string | undefined;
   if (!name && !pathHint) return err(400, 'name_or_path_required');
   if (pathHint && isHiddenFromMemoryView(pathHint)) return err(403, 'hidden_namespace');
+  const targetPath = resolveFolderCreatePath(store, name, pathHint, body.parent_id);
+  if (targetPath && !isAllowedApiWritePath(targetPath)) return err(403, 'memory_namespace_not_allowed');
   try {
     const folder = store.createFolder({
       name: name ?? '',
@@ -80,6 +85,35 @@ export function deleteFolder(store: MemoryStore, idOrPath: string, cred: Credent
   try {
     store.deleteFolder(idOrPath, cred);
     return { status: 200, body: { ok: true } };
+  } catch (e: unknown) {
+    return err(statusFromException(e), (e as Error).message || 'error');
+  }
+}
+
+export function updateFolder(store: MemoryStore, idOrPath: string, body: Record<string, unknown>, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'folder')) return err(404, 'folder_not_found');
+  if (
+    typeof body.path !== 'string'
+    && typeof body.name !== 'string'
+    && typeof body.parent_id !== 'string'
+  ) {
+    return err(400, 'path_name_or_parent_required');
+  }
+  const targetPath = resolveFolderUpdatePath(store, idOrPath, body);
+  if (targetPath && isHiddenFromMemoryView(targetPath)) return err(403, 'hidden_namespace');
+  if (targetPath && !isAllowedApiWritePath(targetPath)) return err(403, 'memory_namespace_not_allowed');
+  const targetFolder = typeof body.parent_id === 'string' ? (body.parent_id as string) : undefined;
+  if (targetFolder && isHiddenIdOrPath(store, targetFolder, 'folder')) {
+    return err(403, 'hidden_namespace');
+  }
+  try {
+    const folder = store.updateFolder(idOrPath, {
+      name: typeof body.name === 'string' ? (body.name as string) : undefined,
+      parent_id: targetFolder,
+      path: typeof body.path === 'string' ? (body.path as string) : undefined,
+    }, cred);
+    if (!folder) return err(404, 'folder_not_found');
+    return { status: 200, body: folder };
   } catch (e: unknown) {
     return err(statusFromException(e), (e as Error).message || 'error');
   }
@@ -115,8 +149,10 @@ export function createDocument(store: MemoryStore, agents: AgentStore, body: Rec
   const pathHint = body.path as string | undefined;
   if (!title && !pathHint) return err(400, 'title_or_path_required');
   if (pathHint && isHiddenFromMemoryView(pathHint)) return err(403, 'hidden_namespace');
+  if (pathHint && !isAllowedApiWritePath(pathHint)) return err(403, 'memory_namespace_not_allowed');
   const folderId = typeof body.folder_id === 'string' ? (body.folder_id as string) : undefined;
   if (folderId && isHiddenIdOrPath(store, folderId, 'folder')) return err(403, 'hidden_namespace');
+  if (!pathHint && !isAllowedDocumentFolder(store, folderId)) return err(403, 'memory_namespace_not_allowed');
   try {
     const doc = store.createDocument({
       title,
@@ -151,6 +187,7 @@ export function updateDocument(store: MemoryStore, idOrPath: string, body: Recor
   if (targetFolder && isHiddenIdOrPath(store, targetFolder, 'folder')) {
     return err(403, 'hidden_namespace');
   }
+  if (targetFolder && !isAllowedDocumentFolder(store, targetFolder)) return err(403, 'memory_namespace_not_allowed');
   try {
     const doc = store.updateDocument(idOrPath, {
       title: typeof body.title === 'string' ? (body.title as string) : undefined,
@@ -191,4 +228,60 @@ function canReadFolder(store: MemoryStore, folder: { path: string }, cred: Crede
     if (root === '/') return true;
     return folder.path === root || folder.path.startsWith(root + '/');
   }) || folder.path.startsWith('/shared');
+}
+
+function resolveFolderCreatePath(
+  store: MemoryStore,
+  name: string | undefined,
+  pathHint: string | undefined,
+  parentIdValue: unknown,
+): string | undefined {
+  if (pathHint) return pathHint;
+  if (!name) return undefined;
+  const parentId = typeof parentIdValue === 'string' && parentIdValue.trim() ? parentIdValue : 'root';
+  const parent = store.findFolderById(parentId);
+  if (!parent) return undefined;
+  return joinPath(parent.path, name);
+}
+
+function resolveFolderUpdatePath(
+  store: MemoryStore,
+  idOrPath: string,
+  body: Record<string, unknown>,
+): string | undefined {
+  if (typeof body.path === 'string') return body.path;
+  const folder = idOrPath.startsWith('/')
+    ? store.findFolderByPath(idOrPath)
+    : store.findFolderById(idOrPath);
+  if (!folder) return undefined;
+  const name = typeof body.name === 'string' ? body.name : folder.name;
+  const parentId = typeof body.parent_id === 'string'
+    ? body.parent_id
+    : folder.parent_id ?? 'root';
+  const parent = store.findFolderById(parentId);
+  if (!parent) return undefined;
+  return joinPath(parent.path, name);
+}
+
+function isAllowedDocumentFolder(store: MemoryStore, folderId: string | undefined): boolean {
+  if (!folderId) return false;
+  const folder = store.findFolderById(folderId);
+  return folder !== null && isAllowedApiWritePath(folder.path);
+}
+
+function isAllowedApiWritePath(path: string): boolean {
+  const normalized = normalizePath(path);
+  return apiWritableRoots().some((root) => {
+    if (root === '/') return true;
+    return normalized === root || normalized.startsWith(root + '/');
+  });
+}
+
+function apiWritableRoots(): string[] {
+  const raw = process.env.METABOT_CORE_MEMORY_WRITE_ROOTS;
+  const configured = raw?.split(',').map((item) => item.trim()).filter(Boolean);
+  const serverRoot = process.env.METABOT_CORE_MEMORY_SERVER_ROOT?.trim();
+  const roots = [...(configured && configured.length > 0 ? configured : DEFAULT_WRITABLE_API_ROOTS)];
+  if (serverRoot) roots.push(serverRoot);
+  return [...new Set(roots.map(normalizePath))];
 }

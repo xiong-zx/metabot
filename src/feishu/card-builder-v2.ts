@@ -23,6 +23,7 @@ import {
   STATUS_CONFIG,
   BG_ICON,
   LIFECYCLE_STAGE_LABELS,
+  formatModelTelemetry,
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
@@ -229,10 +230,15 @@ export function buildCardV2(state: CardState): string {
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
-    if (state.status === 'complete' || state.status === 'error') {
+    if (state.status === 'complete' || state.status === 'error' || state.status === 'agent_activity') {
       if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
-      if (state.model) parts.push(state.model.replace(/^claude-/, ''));
+      const modelLabel = formatModelTelemetry(state.modelTelemetry, state.model);
+      if (modelLabel) parts.push(modelLabel);
       if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
+    }
+    if (state.status === 'thinking' || state.status === 'running') {
+      const modelLabel = formatModelTelemetry(state.modelTelemetry, undefined);
+      if (modelLabel) parts.push(modelLabel);
     }
     if (parts.length > 0) {
       elements.push({

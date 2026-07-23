@@ -45,6 +45,10 @@ export interface DocSyncConfig {
   wikiSpaceId?: string;
   /** Throttle delay between API calls (ms). Default 300. */
   throttleMs?: number;
+  /** Optional MetaMemory path prefix to sync, e.g. /savio. */
+  memoryRootPath?: string;
+  /** Delete mapped Feishu wiki nodes when their MetaMemory document disappears. Default true. */
+  deleteStaleDocuments?: boolean;
 }
 
 const DEFAULT_THROTTLE_MS = 300;
@@ -55,6 +59,8 @@ export class DocSync {
   private store: SyncStore;
   private throttleMs: number;
   private wikiSpaceName: string;
+  private memoryRootPath: string;
+  private deleteStaleDocuments: boolean;
   private syncing = false;
 
   constructor(
@@ -70,6 +76,8 @@ export class DocSync {
     this.store = new SyncStore(config.databaseDir, logger);
     this.throttleMs = config.throttleMs ?? DEFAULT_THROTTLE_MS;
     this.wikiSpaceName = config.wikiSpaceName ?? WIKI_SPACE_NAME;
+    this.memoryRootPath = normalizeMemoryRootPath(config.memoryRootPath ?? process.env.METABOT_CORE_MEMORY_SERVER_ROOT);
+    this.deleteStaleDocuments = config.deleteStaleDocuments ?? true;
   }
 
   /** Check if a sync is currently running. */
@@ -109,7 +117,11 @@ export class DocSync {
       }
 
       // Step 2: Fetch MetaMemory folder tree
-      const folderTree = await this.memoryClient.listFolderTree();
+      const folderTree = this.scopeFolderTree(await this.memoryClient.listFolderTree());
+      if (!folderTree) {
+        result.errors.push(`Configured MetaMemory root not found: ${this.memoryRootPath}`);
+        return result;
+      }
 
       // Step 3: Sync folder structure (create wiki nodes for folders)
       await this.syncFolders(spaceId, folderTree, '', result);
@@ -118,7 +130,7 @@ export class DocSync {
       await this.syncDocumentsInTree(spaceId, folderTree, result);
 
       // Step 5: Clean up deleted documents
-      await this.cleanupDeleted(result);
+      await this.cleanupDeleted(spaceId, result);
 
       this.store.setConfig('last_full_sync_at', new Date().toISOString());
     } catch (err: any) {
@@ -147,9 +159,15 @@ export class DocSync {
       if (!doc) {
         return { success: false, error: 'Document not found in MetaMemory' };
       }
+      if (!this.isPathInScope(doc.path)) {
+        return { success: false, error: `Document is outside configured MetaMemory root: ${this.memoryRootPath}` };
+      }
 
       // Ensure parent folder is synced
-      const folderTree = await this.memoryClient.listFolderTree();
+      const folderTree = this.scopeFolderTree(await this.memoryClient.listFolderTree());
+      if (!folderTree) {
+        return { success: false, error: `Configured MetaMemory root not found: ${this.memoryRootPath}` };
+      }
       const parentNodeToken = await this.resolveParentNodeToken(spaceId, doc.folder_id, folderTree);
 
       await this.syncSingleDocument(spaceId, doc, parentNodeToken);
@@ -253,6 +271,14 @@ export class DocSync {
 
     // Check if folder already has a mapping
     let folderMapping = this.store.getFolderMapping(node.id);
+    if (folderMapping && folderMapping.memoryPath !== node.path) {
+      this.logger.info({
+        folderId: node.id,
+        oldPath: folderMapping.memoryPath,
+        newPath: node.path,
+      }, 'Folder path changed; creating a new wiki folder mapping');
+      folderMapping = undefined;
+    }
 
     if (!folderMapping) {
       // Create wiki node for this folder (as a shortcut page)
@@ -321,35 +347,38 @@ export class DocSync {
     result: SyncResult,
   ): Promise<void> {
     const isRoot = node.id === 'root' || node.path === '/';
+    const shouldListCurrentFolder = !(isRoot && this.memoryRootPath !== '/');
     // For root: listDocuments(undefined) returns ALL docs globally.
     // Filter to only root-folder docs to avoid double-traversal with child folders.
     const folderId = isRoot ? undefined : node.id;
-    try {
-      const docs = await this.memoryClient.listDocuments(folderId, 200);
-      const parentNodeToken = this.resolveFolderNodeToken(node.id);
+    if (shouldListCurrentFolder) {
+      try {
+        const docs = await this.memoryClient.listDocuments(folderId, 200);
+        const parentNodeToken = this.resolveFolderNodeToken(node.id);
 
-      for (const docSummary of docs) {
-        // When listing from root, skip docs that belong to subfolders
-        // (they'll be synced when we recurse into that folder)
-        if (isRoot && docSummary.folder_id && docSummary.folder_id !== 'root') {
-          continue;
-        }
-
-        try {
-          const doc = await this.fetchDocument(docSummary.id);
-          if (!doc) {
-            result.errors.push(`Document "${docSummary.title}": not found`);
+        for (const docSummary of docs) {
+          // When listing from root, skip docs that belong to subfolders
+          // (they'll be synced when we recurse into that folder)
+          if (isRoot && docSummary.folder_id && docSummary.folder_id !== 'root') {
             continue;
           }
-          await this.syncSingleDocument(spaceId, doc, parentNodeToken, result);
-        } catch (err: any) {
-          this.logger.error({ err: err.message, doc: docSummary.title }, 'Failed to sync document');
-          result.errors.push(`Document "${docSummary.title}": ${err.message}`);
+
+          try {
+            const doc = await this.fetchDocument(docSummary.id);
+            if (!doc) {
+              result.errors.push(`Document "${docSummary.title}": not found`);
+              continue;
+            }
+            await this.syncSingleDocument(spaceId, doc, parentNodeToken, result);
+          } catch (err: any) {
+            this.logger.error({ err: err.message, doc: docSummary.title }, 'Failed to sync document');
+            result.errors.push(`Document "${docSummary.title}": ${err.message}`);
+          }
         }
+      } catch (err: any) {
+        this.logger.error({ err: err.message, folder: node.name }, 'Failed to list folder documents');
+        result.errors.push(`Folder "${node.name}" listing: ${err.message}`);
       }
-    } catch (err: any) {
-      this.logger.error({ err: err.message, folder: node.name }, 'Failed to list folder documents');
-      result.errors.push(`Folder "${node.name}" listing: ${err.message}`);
     }
 
     // Recurse into child folders
@@ -364,8 +393,18 @@ export class DocSync {
     parentNodeToken: string,
     result?: SyncResult,
   ): Promise<void> {
-    const hash = contentHash(doc.content + doc.title);
-    const existing = this.store.getDocMapping(doc.id);
+    const hash = contentHash(this.buildDocumentMarkdown(doc));
+    let existing = this.store.getDocMapping(doc.id);
+    let staleExisting: typeof existing;
+    if (existing && existing.memoryPath !== doc.path) {
+      this.logger.info({
+        docId: doc.id,
+        oldPath: existing.memoryPath,
+        newPath: doc.path,
+      }, 'Document path changed; creating a new wiki document mapping');
+      staleExisting = existing;
+      existing = undefined;
+    }
 
     // Skip if content hasn't changed
     if (existing && existing.contentHash === hash) {
@@ -419,6 +458,17 @@ export class DocSync {
           });
           if (result) result.created++;
           this.logger.info({ doc: doc.title, nodeToken, docId }, 'Created wiki document');
+          if (staleExisting) {
+            const deleted = await this.deleteStaleWikiNode(spaceId, staleExisting, result);
+            if (deleted) {
+              if (result) result.deleted++;
+              this.logger.info({
+                doc: doc.title,
+                oldPath: staleExisting.memoryPath,
+                oldNodeToken: staleExisting.feishuNodeToken,
+              }, 'Deleted stale wiki document node after path change');
+            }
+          }
         }
         await this.throttle();
       } catch (err: any) {
@@ -511,26 +561,78 @@ export class DocSync {
 
   // --- Cleanup ---
 
-  private async cleanupDeleted(result: SyncResult): Promise<void> {
+  private async cleanupDeleted(spaceId: string, result: SyncResult): Promise<void> {
     const allMappings = this.store.getAllDocMappings();
 
     for (const mapping of allMappings) {
+      let doc: FullDocument | null;
       try {
-        const doc = await this.fetchDocument(mapping.memoryDocId);
-        if (!doc) {
-          // Document deleted from MetaMemory, remove from wiki
-          this.store.deleteDocMapping(mapping.memoryDocId);
-          if (result) result.deleted++;
-          this.logger.info({ doc: mapping.memoryPath }, 'Removed mapping for deleted document');
-          // Note: We don't delete the wiki page itself to avoid data loss.
-          // The orphaned page can be manually cleaned up.
-        }
+        doc = await this.fetchDocument(mapping.memoryDocId);
       } catch {
-        // If we can't fetch, assume it's deleted
+        // If we can't fetch, keep the previous behavior and treat the mapping
+        // as stale so a permanently deleted MetaMemory doc can be cleaned up.
+        doc = null;
+      }
+
+      if (!doc || !this.isPathInScope(doc.path)) {
+        const deleted = await this.deleteStaleWikiNode(spaceId, mapping, result);
+        if (!deleted) {
+          continue;
+        }
+
         this.store.deleteDocMapping(mapping.memoryDocId);
-        if (result) result.deleted++;
+        result.deleted++;
+        this.logger.info({
+          doc: mapping.memoryPath,
+          deletedFromWiki: this.deleteStaleDocuments,
+        }, 'Removed mapping for deleted document');
       }
     }
+  }
+
+  private async deleteStaleWikiNode(
+    spaceId: string,
+    mapping: { memoryDocId?: string; feishuNodeToken: string; memoryPath: string },
+    result?: SyncResult,
+  ): Promise<boolean> {
+    if (!this.deleteStaleDocuments) {
+      return true;
+    }
+
+    try {
+      await this.deleteWikiNode(spaceId, mapping);
+      return true;
+    } catch (err: any) {
+      const detail = err.response?.data || err.data || err.msg || err.message || err;
+      this.logger.error({
+        err: detail,
+        memoryDocId: mapping.memoryDocId,
+        memoryPath: mapping.memoryPath,
+        nodeToken: mapping.feishuNodeToken,
+      }, 'Failed to delete stale wiki document node');
+      if (result) {
+        result.errors.push(`Delete stale "${mapping.memoryPath}": ${typeof detail === 'object' ? JSON.stringify(detail) : detail}`);
+      }
+      return false;
+    }
+  }
+
+  private async deleteWikiNode(spaceId: string, mapping: { feishuNodeToken: string; memoryPath: string }): Promise<void> {
+    const resp = await (this.client as any).request({
+      method: 'DELETE',
+      url: `/open-apis/wiki/v2/spaces/${spaceId}/nodes/${mapping.feishuNodeToken}`,
+      data: {
+        include_children: true,
+        obj_type: 'wiki',
+      },
+    });
+    const taskId = resp?.data?.task_id;
+    this.logger.info({
+      memoryPath: mapping.memoryPath,
+      nodeToken: mapping.feishuNodeToken,
+      taskId,
+    }, 'Requested deletion for stale wiki document node');
+    await this.throttle();
   }
 
   // --- Helpers ---
@@ -571,6 +673,31 @@ export class DocSync {
     return undefined;
   }
 
+  private scopeFolderTree(tree: FolderTreeNode): FolderTreeNode | undefined {
+    if (this.memoryRootPath === '/') return tree;
+    const scopedRoot = this.findFolderByPath(tree, this.memoryRootPath);
+    if (!scopedRoot) return undefined;
+    return {
+      ...tree,
+      children: [scopedRoot],
+      document_count: 0,
+    };
+  }
+
+  private findFolderByPath(node: FolderTreeNode, folderPath: string): FolderTreeNode | undefined {
+    if (normalizeMemoryRootPath(node.path) === folderPath) return node;
+    for (const child of node.children || []) {
+      const found = this.findFolderByPath(child, folderPath);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private isPathInScope(memoryPath: string): boolean {
+    const normalized = normalizeMemoryRootPath(memoryPath);
+    return this.memoryRootPath === '/' || normalized === this.memoryRootPath || normalized.startsWith(`${this.memoryRootPath}/`);
+  }
+
   /** Fetch full document content from the central metabot-core service. */
   private async fetchDocument(docId: string): Promise<FullDocument | null> {
     return this.memoryClient.getDocument(docId);
@@ -586,4 +713,11 @@ export class DocSync {
   destroy(): void {
     this.store.close();
   }
+}
+
+function normalizeMemoryRootPath(value?: string): string {
+  const raw = (value || '/').trim();
+  if (!raw || raw === '/') return '/';
+  const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLeadingSlash.replace(/\/+$/, '') || '/';
 }

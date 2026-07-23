@@ -15,8 +15,8 @@
   "scripts": {
     "build": "tsc -b",
     "pack:standalone": "bash scripts/pack.sh",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --config ./vitest.config.ts",
+    "test:watch": "vitest --config ./vitest.config.ts"
   },
   "dependencies": {
     "@xvirobotics/cli-core": "*",

@@ -361,6 +361,74 @@ describe('buildCardV2', () => {
     expect(inner).toContain('ctx:');
   });
 
+  it('shows configured to runtime fallback provenance on complete and agent activity', () => {
+    for (const status of ['complete', 'agent_activity'] as const) {
+      const state: CardState = {
+        status,
+        userPrompt: 'task',
+        responseText: 'done',
+        toolCalls: [],
+        model: 'claude-sonnet-5',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          spawnModel: 'claude-fable-5',
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
+      };
+      const elements = findElements(JSON.parse(buildCardV2(state)));
+      const footer = elements.find((e) => e.tag === 'column_set');
+      const text = JSON.stringify(footer);
+      expect(text).toContain('model: fable-5');
+      expect(text).toContain('sonnet-5');
+      expect(text).toContain('fallback');
+    }
+  });
+
+  /**
+   * The `a → b` arrow means the model actually changed. The `[1m]` suffix is a
+   * Claude Code local flag that the API strips from the id it echoes back, so
+   * configured `claude-opus-4-8[1m]` vs runtime `claude-opus-4-8` is the SAME
+   * model — rendering an arrow there falsely reports a fallback.
+   */
+  it('does not report a fallback when only the [1m] suffix differs', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'done',
+      toolCalls: [],
+      model: 'claude-opus-4-8',
+      modelTelemetry: {
+        configuredModel: 'claude-opus-4-8[1m]',
+        spawnModel: 'claude-opus-4-8[1m]',
+        runtimeModel: 'claude-opus-4-8',
+        runtimeModelSource: 'assistant_jsonl',
+      },
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
+    expect(text).not.toContain('→');
+    expect(text).not.toContain('fallback');
+    expect(text).toContain('opus-4-8[1m]');            // keeps the 1M marker visible
+  });
+
+  it('reports the full context window for a 1M session', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'done',
+      toolCalls: [],
+      model: 'claude-opus-4-8',
+      totalTokens: 37_800,
+      contextWindow: 1_000_000,
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
+    expect(text).toContain('ctx: 37.8k/1000k (4%)');
+  });
+
   it('truncates long content', () => {
     const state: CardState = {
       status:       'complete',

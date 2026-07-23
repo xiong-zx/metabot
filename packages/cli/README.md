@@ -28,3 +28,23 @@ metabot help
 
 - `METABOT_CORE_URL` — default `http://localhost:9200` (locally self-hosted metabot-core); set your own remote host if you run it elsewhere
 - `METABOT_CORE_TOKEN` — bearer token (falls back to first line of `~/.metabot-core/token`)
+
+## Worktree deployments
+
+The bridge may run from a Git worktree that has source files but no
+`packages/cli/dist/index.js`. The host `bin/metabot` launcher checks both the
+feature CLI entry and its build artifact before delegation. If the active
+worktree is unbuilt, it can use a ready CLI from the checkout that owns
+`METABOT_DEFAULT_ENV_FILE`, then from `~/metabot`, without changing the selected
+MetaMemory backend. Explicit `METABOT_CORE_URL` / `METABOT_CORE_TOKEN` values
+still win; otherwise the shared default env is loaded before the worktree env.
+
+Use `metabot doctor --json` before deployment to inspect `core_cli_artifact`,
+the selected CLI entry, build readiness, and the configured/resolved env roots.
+An explicit but unbuilt `METABOT_CORE_CLI` fails closed instead of silently
+falling back. Build a worktree CLI with:
+
+```bash
+npm ci
+npm run build -w @xvirobotics/cli
+```

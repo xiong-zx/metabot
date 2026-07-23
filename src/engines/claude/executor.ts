@@ -1,4 +1,4 @@
-import { execSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,19 +10,8 @@ import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
-
-const isWindows = process.platform === 'win32';
-
-/** Resolve the Claude Code binary path at module load time. */
-function resolveClaudePath(): string {
-  if (process.env.CLAUDE_EXECUTABLE_PATH) return process.env.CLAUDE_EXECUTABLE_PATH;
-  try {
-    const cmd = isWindows ? 'where claude' : 'which claude';
-    return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
-  } catch {
-    return isWindows ? 'claude' : '/usr/local/bin/claude';
-  }
-}
+import { resolveClaudePath } from './resolve-executable.js';
+import { CONTEXT_WINDOW_200K, FABLE_5_MODEL_RE } from '../../utils/model-id.js';
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
 
@@ -314,8 +303,7 @@ function apiContextEnv(apiContext: ApiContext | undefined): Record<string, strin
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.
  */
-export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
-const FABLE_5_MODEL_RE = /^claude-fable-5(?:$|\[)/;
+export const DEFAULT_AUTO_COMPACT_WINDOW = String(CONTEXT_WINDOW_200K);
 
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;
@@ -512,6 +500,10 @@ export type SDKMessage = {
     };
   };
   parent_tool_use_id?: string | null;
+  /** Runtime model from an assistant record, when the backend exposes it. */
+  model?: string;
+  /** Structured per-turn model provenance; PTY backend populates every turn. */
+  modelTelemetry?: import('../../types.js').ModelTelemetry;
 };
 
 export interface ExecutionHandle {

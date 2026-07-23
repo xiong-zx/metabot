@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { makeKit, type TestKit } from './helpers.js';
 import type { Credential } from '../src/auth/credentials.js';
+import * as memoryRoutes from '../src/memory/memory-routes.js';
 
 let kit: TestKit | undefined;
 
@@ -119,6 +120,48 @@ describe('MemoryStore + ACL', () => {
     // gone
     expect(kit.memory.findFolderByPath('/users/bot-a/projects/x')).toBeNull();
     expect(kit.memory.listDocuments({ prefix: '/users/bot-a/projects/x' }, admin).length).toBe(0);
+  });
+
+  it('updateFolder moves a subtree while preserving folder and document ids', () => {
+    kit = makeKit('mem-move-folder');
+    const admin = issue(kit, 'admin', 'admin');
+
+    const root = kit.memory.createFolder({ path: '/metabot' }, admin);
+    const dev = kit.memory.createFolder({ path: '/metabot/dev' }, admin);
+    const doc = kit.memory.createDocument({
+      title: 'Git Workflow',
+      path: '/metabot/dev/git-workflow',
+      content: '# workflow',
+      tags: ['git'],
+    }, admin);
+
+    const moved = kit.memory.updateFolder('/metabot', { path: '/cargo1' }, admin);
+
+    expect(moved?.id).toBe(root.id);
+    expect(moved?.name).toBe('cargo1');
+    expect(moved?.path).toBe('/cargo1');
+    expect(kit.memory.findFolderByPath('/metabot')).toBeNull();
+    expect(kit.memory.findFolderById(dev.id)?.path).toBe('/cargo1/dev');
+    const movedDoc = kit.memory.getDocument(doc.id, admin);
+    expect(movedDoc?.id).toBe(doc.id);
+    expect(movedDoc?.path).toBe('/cargo1/dev/git-workflow');
+    expect(movedDoc?.content).toBe('# workflow');
+  });
+
+  it('folder route allows the configured server root namespace', () => {
+    kit = makeKit('mem-route-server-root');
+    const admin = issue(kit, 'admin', 'admin');
+    kit.memory.createFolder({ path: '/metabot' }, admin);
+    const previous = process.env.METABOT_CORE_MEMORY_SERVER_ROOT;
+    process.env.METABOT_CORE_MEMORY_SERVER_ROOT = '/cargo1';
+    try {
+      const res = memoryRoutes.updateFolder(kit.memory, '/metabot', { path: '/cargo1' }, admin);
+      expect(res.status).toBe(200);
+      expect((res.body as { path: string }).path).toBe('/cargo1');
+    } finally {
+      if (previous === undefined) delete process.env.METABOT_CORE_MEMORY_SERVER_ROOT;
+      else process.env.METABOT_CORE_MEMORY_SERVER_ROOT = previous;
+    }
   });
 
   it('listFolders applies prefix + ACL', () => {

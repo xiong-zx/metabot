@@ -83,6 +83,33 @@ export interface TeamState {
   tasks: TeamTask[];
 }
 
+/** Per-turn model provenance. Never populated from assistant natural-language claims. */
+export interface ModelTelemetry {
+  configuredModel?: string;
+  spawnModel?: string;
+  runtimeModel?: string;
+  runtimeModelSource?: 'assistant_jsonl' | 'result_model_usage';
+  sessionId?: string;
+  sessionMode?: 'fresh' | 'resume' | 'continue';
+  fallbackOriginalModel?: string;
+  fallbackModel?: string;
+  fallbackReason?: string;
+  /** Whether the observed CLI session may be resumed for a later user turn. */
+  sessionDisposition?: 'active' | 'retired';
+  /** Machine-readable reason for retiring a session from resume mappings. */
+  sessionRetireReason?: 'turn_start_timeout';
+  /** Whether the PTY accepted this turn's prompt, for bounded bridge recovery. */
+  promptSubmission?: 'accepted' | 'not_submitted' | 'ambiguous';
+  /** Machine-readable PTY input failure classification. */
+  promptFailureReason?:
+    | 'tui_not_ready'
+    | 'tui_not_idle'
+    | 'session_disposed'
+    | 'input_not_echoed'
+    | 'submit_unacknowledged'
+    | 'unknown';
+}
+
 export interface CardState {
   status: CardStatus;
   userPrompt: string;
@@ -98,6 +125,8 @@ export interface CardState {
   pendingQuestion?: PendingQuestion;
   /** Primary model used (e.g. "claude-fable-5") */
   model?: string;
+  /** Auditable configured/spawn/runtime model provenance for this turn. */
+  modelTelemetry?: ModelTelemetry;
   /** Total input+output tokens consumed */
   totalTokens?: number;
   /** Context window size of the primary model */
@@ -124,6 +153,13 @@ export interface IncomingMessage {
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
+  /** Message explicitly referenced by a user reply. Added to the model prompt, not the card title. */
+  replyContext?: {
+    messageId: string;
+    messageType: string;
+    text?: string;
+    truncated?: boolean;
+  };
   /** Additional media from batched messages (smart debounce). */
   extraMedia?: Array<{
     messageId: string;

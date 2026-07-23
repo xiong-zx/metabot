@@ -19,9 +19,12 @@
     "build:packages": "npm run build --workspaces --if-present",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "typecheck": "tsx scripts/typecheck-root.ts",
     "test": "vitest run && npm run test --workspaces --if-present",
     "test:bridge": "vitest run",
+    "test:cli": "vitest run --config packages/cli/vitest.config.ts",
     "test:packages": "npm run test --workspaces --if-present",
+    "check:merge-hygiene:memory-core": "tsx scripts/check-memory-core-merge-hygiene.ts",
     "lint": "eslint src/ tests/ && npm run lint --workspaces --if-present",
     "lint:fix": "eslint src/ tests/ --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
@@ -29,7 +32,7 @@
     "update-cli": "cp bin/metabot ~/.local/bin/metabot && chmod +x ~/.local/bin/metabot && echo \"Updated: metabot\" && rm -f ~/.local/bin/mb ~/.local/bin/mm ~/.local/bin/mh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.154",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.215",
     "@anthropic-ai/sdk": "^0.100.0",
     "@larksuiteoapi/node-sdk": "^1.58.0",
     "@moonshot-ai/kimi-agent-sdk": "^0.1.8",
@@ -48,6 +51,7 @@
     "openai": "^6.29.0",
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
+    "tsx": "^4.21.0",
     "undici": "^7.24.5",
     "ws": "^8.19.0",
     "xlsx": "^0.18.5"
@@ -58,7 +62,6 @@
     "@types/node": "^22.0.0",
     "eslint": "^10.0.2",
     "prettier": "^3.8.1",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "vitest": "^3.2.4"

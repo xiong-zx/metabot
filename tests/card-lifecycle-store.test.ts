@@ -28,6 +28,11 @@ describe('card lifecycle store', () => {
       lifecycleStage: 'received',
       userPrompt: 'Run worker',
       responseText: '',
+      modelTelemetry: {
+        configuredModel: 'claude-fable-5',
+        spawnModel: 'claude-fable-5',
+        sessionMode: 'fresh',
+      },
       now: 1000,
     });
     store.recordCardLifecycle({
@@ -49,6 +54,11 @@ describe('card lifecycle store', () => {
       status: 'error',
       lifecycleStage: 'blocked',
       responsePreview: 'failed',
+      modelTelemetry: {
+        configuredModel: 'claude-fable-5',
+        spawnModel: 'claude-fable-5',
+        sessionMode: 'fresh',
+      },
       createdAt: 1000,
       updatedAt: 2000,
       closedAt: 2000,

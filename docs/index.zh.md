@@ -30,6 +30,8 @@ MetaBot 把它们都解放出来。给每个 Agent 一个 **Claude Code 或 Kimi
 | **双引擎内核** | 每个 Bot 独立选 Claude Code 或 Kimi Code — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行。 |
 | **MetaSkill** | Agent 工厂。`/metaskill ios app` 调研最佳实践后生成完整的 `.claude/` Agent 团队。 |
 | **MetaMemory** | 内嵌 SQLite 知识库，全文搜索，Web UI。Agent 跨会话读写 Markdown 文档。 |
+| **自动科研系统** | 通过飞书启动 AutoResearchClaw research loop，自动生成 context pack、派发 worker、沉淀结构化科研记忆。 |
+| **Memory Core** | 执行级记忆核心。保存可追溯 facts、decisions、negative results 和 open questions，为 Agent 生成低 token context pack。 |
 | **IM Bridge** | 飞书或 Telegram（含手机端）与任意 Agent 对话。带颜色状态的流式卡片。 |
 | **Web UI** | 浏览器端聊天 `/web/`，WebSocket 流式输出、电话语音模式（VAD）、MetaMemory 浏览器、明暗主题。[了解更多](features/web-ui.md) |
 | **语音助手** | 通过 iOS 快捷指令（Jarvis 模式）或 Web UI 电话模式免手语音控制。服务端 STT + TTS。[了解更多](features/voice-jarvis.md) |

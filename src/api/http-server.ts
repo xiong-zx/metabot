@@ -40,6 +40,8 @@ import {
   handleExecutorRoutes,
   handleAgentTeamRoutes,
   handleWorkerRoutes,
+  handleResearchMemoryRoutes,
+  handleMetaMemoryProxyRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
@@ -256,6 +258,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleExecutorRoutes,
     handleAgentTeamRoutes,
     handleWorkerRoutes,
+    handleResearchMemoryRoutes,
+    handleMetaMemoryProxyRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {

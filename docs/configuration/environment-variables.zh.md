@@ -36,6 +36,13 @@
 | `CODEX_SANDBOX` | `danger-full-access` | 沙箱模式（`read-only`、`workspace-write`、`danger-full-access`） |
 | `CODEX_EXECUTABLE_PATH` | 自动检测 | `codex` 二进制路径 |
 
+`read-only` 和 `workspace-write` 依赖 Codex CLI 的 Bubblewrap namespace
+sandbox。在 Docker/Kubernetes 运行环境中，如果 user namespace、seccomp 或
+AppArmor 受限，工具调用可能报 `bwrap: No permissions to create new namespace`。
+给 Codex worker/agent 分配沙箱模式前，先运行 `metabot doctor --json` 并查看
+`codex_sandbox_namespaces`。受限宿主机上应使用 `danger-full-access` / Bot 级
+bypass，或调整容器/宿主机策略以允许 user namespace。
+
 ## MetaMemory
 
 | 变量 | 默认 | 说明 |
@@ -46,6 +53,9 @@
 | `MEMORY_ADMIN_TOKEN` | — | 管理员 Token（完整访问） |
 | `MEMORY_TOKEN` | — | 读者 Token（仅 shared 文件夹） |
 | `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 地址（CLI 远程访问） |
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许写入的顶层路径，逗号分隔 |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | 本服务器的 MetaMemory 顶层命名空间，例如 `/cargo1`；设置后会加入 Memory API 可写根 |
+| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | `/api/talk?async=true` 任务超过该时长仍未完成时标记为 `task_expired` |
 
 ## 飞书服务应用
 
@@ -64,6 +74,8 @@
 | `WIKI_SPACE_ID` | — | 飞书知识库空间 ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | 知识库空间名称 |
 | `WIKI_AUTO_SYNC` | `true` | 变更时自动同步 |
+| `WIKI_AUTO_SYNC_ON_START` | `true` | 启动时捕获基线后执行一次同步 |
+| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | 快照轮询间隔 |
 | `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | 防抖延迟 |
 | `WIKI_SYNC_THROTTLE_MS` | `300` | API 调用间隔 |
 

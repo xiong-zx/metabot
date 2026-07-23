@@ -352,14 +352,10 @@ cmd_update() {
     fi
   fi
 
-  info "Restarting MetaBot..."
-  _write_restart_breadcrumb
-  pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
-  pm2 save --force 2>/dev/null || true
-
-  success "MetaBot updated and restarted!"
-
   _update_core_workspace || true
+
+  info "Restarting MetaBot..."
+  cmd_restart --source update --reason "metabot update" --resume
 }
 
 # Optimization: if a sibling metabot-core checkout exists, pull + build it so
@@ -391,14 +387,58 @@ _update_core_workspace() {
   ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
 }
 
+_restart_state_dir() {
+  if [[ -n "${SESSION_STORE_DIR:-}" ]]; then
+    printf '%s\n' "$SESSION_STORE_DIR"
+    return
+  fi
+  local configured=""
+  if [[ -f "$METABOT_HOME/.env" ]]; then
+    configured="$(sed -n 's/^SESSION_STORE_DIR=//p' "$METABOT_HOME/.env" 2>/dev/null | tail -1)"
+    configured="${configured%\"}"; configured="${configured#\"}"
+    configured="${configured%\'}"; configured="${configured#\'}"
+  fi
+  if [[ -n "$configured" ]]; then
+    configured="${configured/#\~/$HOME}"
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' "$HOME/.metabot"
+  fi
+}
+
+# The bridge is launched as `node --import tsx src/index.ts`, so tsx must be
+# resolvable from METABOT_HOME at spawn time. Agent shells spawned by the
+# bridge inherit NODE_ENV=production (ecosystem.config.cjs), and a bare
+# `npm install` run in such a shell prunes devDependencies — which used to
+# remove tsx and send the next restart into a 10x crash-loop until PM2 gave
+# up ("errored"). tsx now lives in dependencies, but verify before every
+# (re)start anyway and self-heal if some other pruning path removed it.
+_ensure_runtime_deps() {
+  if (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1); then
+    return 0
+  fi
+  warn "tsx is not resolvable from $METABOT_HOME — repairing before touching PM2."
+  (cd "$METABOT_HOME" && NODE_ENV=development npm install --include=dev --no-audit --no-fund) || {
+    error "npm install failed; refusing to restart into a guaranteed crash-loop."
+    echo "  Fix dependencies first: cd $METABOT_HOME && npm install --include=dev"
+    return 1
+  }
+  (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1) || {
+    error "tsx is still missing after npm install; refusing to restart."
+    return 1
+  }
+  success "Runtime dependencies repaired."
+}
+
 # Drop a breadcrumb so the bridge knows it was just restarted. After
 # `pm2 restart` the node process (and every Claude session) is killed and
 # respawned, so the agent that issued the restart loses all memory of having
 # done so — without this it sees "please restart" in resumed history and
-# restarts again in a loop. The bridge reads + deletes this file at boot and
-# injects a one-shot "you just restarted, don't restart again" system-reminder.
+# restarts again in a loop. The bridge reads this file at boot, injects a
+# one-shot reminder, and deletes it only after startup health and recovery.
 _write_restart_breadcrumb() {
-  local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
+  local dir
+  dir="$(_restart_state_dir)"
   mkdir -p "$dir" 2>/dev/null || return 0
   python3 - "$dir/last-restart.json" <<'PY' 2>/dev/null || true
 import json
@@ -431,6 +471,162 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 PY
 }
 
+_new_restart_request_id() {
+  python3 - <<'PY'
+import time
+import uuid
+print(f"restart-{int(time.time() * 1000)}-{str(uuid.uuid4())[:8]}")
+PY
+}
+
+# Atomically claim one restart attempt for a requestId. This small standalone
+# state update must run before contacting PM2 because the current process tree
+# can disappear as soon as the daemon accepts the restart.
+_claim_restart_request() {
+  local request_id="$1"
+  local dir
+  dir="$(_restart_state_dir)"
+  mkdir -p "$dir"
+  python3 - "$dir/restart-requests.json" "$request_id" "${METABOT_BOT_NAME:-cli}" "${METABOT_CHAT_ID:-cli}" "${METABOT_RESTART_REASON:-cli restart}" "${METABOT_RESTART_SOURCE:-cli}" "$METABOT_HOME" "$METABOT_HOME/src/index.ts" <<'PY'
+import fcntl
+import json
+import os
+import sys
+import time
+
+path, request_id, bot, chat, reason, source, cwd, script = sys.argv[1:]
+lock_path = f"{path}.lock"
+now = int(time.time() * 1000)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(lock_path, "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(path, "r", encoding="utf-8") as src:
+            rows = json.load(src)
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+    record = next((row for row in rows if row.get("requestId") == request_id), None)
+    if record and (int(record.get("attemptCount") or 0) >= 1 or record.get("status") in ("restarting", "healthy", "failed")):
+        print("duplicate")
+        raise SystemExit(0)
+    if record is None:
+        record = {
+            "requestId": request_id,
+            "requesterBotName": bot,
+            "requesterChatId": chat,
+            "userId": os.environ.get("METABOT_RESTART_USER_ID", "cli"),
+            "reason": reason,
+            "force": False,
+            "status": "scheduled",
+            "blockers": [],
+            "readiness": [],
+            "createdAt": now,
+            "updatedAt": now,
+            "scheduledAt": now,
+        }
+        rows.append(record)
+    record.update({
+        "status": "restarting",
+        "attemptCount": int(record.get("attemptCount") or 0) + 1,
+        "attemptedAt": record.get("attemptedAt") or now,
+        "updatedAt": now,
+        "targetCwd": os.path.realpath(cwd),
+        "targetScript": os.path.realpath(script),
+        "source": source,
+    })
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as dst:
+        json.dump(rows, dst, ensure_ascii=False, indent=2)
+        dst.write("\n")
+    os.replace(tmp, path)
+    print("claimed")
+PY
+}
+
+_mark_restart_request_failed() {
+  local request_id="$1"
+  local failure="$2"
+  local dir
+  dir="$(_restart_state_dir)"
+  python3 - "$dir/restart-requests.json" "$request_id" "$failure" <<'PY' 2>/dev/null || true
+import fcntl
+import json
+import os
+import sys
+import time
+
+path, request_id, failure = sys.argv[1:]
+with open(f"{path}.lock", "a+", encoding="utf-8") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        with open(path, "r", encoding="utf-8") as src:
+            rows = json.load(src)
+    except Exception:
+        rows = []
+    now = int(time.time() * 1000)
+    for row in rows:
+        if row.get("requestId") == request_id:
+            row.update({"status": "failed", "failedAt": row.get("failedAt") or now, "updatedAt": now, "healthError": failure[:1000]})
+            break
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as dst:
+        json.dump(rows, dst, ensure_ascii=False, indent=2)
+        dst.write("\n")
+    os.replace(tmp, path)
+PY
+}
+
+_pm2_metabot_runtime() {
+  pm2 jlist 2>/dev/null | python3 -c '
+import json, sys
+try: rows=json.load(sys.stdin)
+except Exception: rows=[]
+app=next((row for row in rows if row.get("name") == "metabot"), None)
+if app:
+    env=app.get("pm2_env") or {}
+    print("\t".join([str(env.get("pm_cwd") or ""), str(env.get("pm_exec_path") or ""), str(app.get("pid") or "")]))
+'
+}
+
+_is_metabot_descendant() {
+  local runtime pid metabot_pid
+  runtime="$(_pm2_metabot_runtime || true)"
+  metabot_pid="$(printf '%s' "$runtime" | awk -F '\t' '{print $3}')"
+  [[ "$metabot_pid" =~ ^[0-9]+$ ]] || return 1
+  pid="$$"
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
+    [[ "$pid" == "$metabot_pid" ]] && return 0
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  done
+  return 1
+}
+
+_wait_restart_terminal_state() {
+  local request_id="$1"
+  local timeout="${2:-60}"
+  local dir
+  dir="$(_restart_state_dir)"
+  local i state
+  for ((i=0; i<timeout; i++)); do
+    state="$(python3 - "$dir/restart-requests.json" "$request_id" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    rows=json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    rows=[]
+row=next((row for row in rows if row.get("requestId") == sys.argv[2]), {})
+print(row.get("status", ""))
+PY
+)"
+    [[ "$state" == "healthy" ]] && return 0
+    [[ "$state" == "failed" ]] && return 1
+    sleep 1
+  done
+  return 1
+}
+
 _wait_bridge_health() {
   local timeout="${1:-60}"
   _load_bridge_api_config
@@ -445,7 +641,16 @@ _wait_bridge_health() {
   return 1
 }
 
-cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
+cmd_start() {
+  _ensure_runtime_deps || return 1
+  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env
+  if _wait_bridge_health 60; then
+    pm2 save --force
+  else
+    error "MetaBot did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+}
 cmd_stop()    { pm2 stop metabot; }
 cmd_restart() {
   local wait=false
@@ -507,33 +712,134 @@ cmd_restart() {
   [[ -n "$chat_id" ]] && export METABOT_CHAT_ID="$chat_id"
   [[ -n "$reason" ]] && export METABOT_RESTART_REASON="$reason"
   [[ -n "$source" ]] && export METABOT_RESTART_SOURCE="$source"
-  [[ -n "$request_id" ]] && export METABOT_RESTART_REQUEST_ID="$request_id"
+  request_id="${request_id:-$(_new_restart_request_id)}"
+  export METABOT_RESTART_REQUEST_ID="$request_id"
   [[ -n "$resume" ]] && export METABOT_RESTART_RESUME="$resume"
+
+  local runtime current_cwd current_script
+  runtime="$(_pm2_metabot_runtime || true)"
+  current_cwd="$(printf '%s' "$runtime" | awk -F '\t' '{print $1}')"
+  current_script="$(printf '%s' "$runtime" | awk -F '\t' '{print $2}')"
+  if [[ -n "$current_cwd" && "$(readlink -f "$current_cwd")" != "$(readlink -f "$METABOT_HOME")" ]]; then
+    error "Refusing to switch the live runtime from inside 'metabot restart'."
+    echo "  Current cwd: $current_cwd"
+    echo "  Requested cwd: $METABOT_HOME"
+    echo "  Use 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree."
+    return 2
+  fi
+
+  local claim
+  claim="$(_claim_restart_request "$request_id")"
+  if [[ "$claim" == "duplicate" ]]; then
+    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s"}\n' "$request_id"
+    info "Restart request $request_id was already attempted; no second restart was issued."
+    return 0
+  fi
+
+  if ! _ensure_runtime_deps; then
+    _mark_restart_request_failed "$request_id" "Runtime dependencies missing (tsx unresolvable) and repair failed"
+    [[ "$json" == true ]] && printf '{"ok":false,"reason":"runtime-deps-missing","requestId":"%s"}\n' "$request_id"
+    return 1
+  fi
 
   _write_restart_breadcrumb
   local restart_ok=true
-  if ! pm2 restart metabot; then
-    restart_ok=false
-    if pm2 start "$METABOT_HOME/ecosystem.config.cjs"; then
-      restart_ok=true
-    fi
+  if [[ -n "$current_cwd" ]]; then
+    pm2 restart metabot --update-env || restart_ok=false
+  else
+    pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env || restart_ok=false
   fi
-  pm2 save --force 2>/dev/null || true
 
   local health_ok=true
   if [[ "$wait" == true ]]; then
     _wait_bridge_health "$wait_timeout" || health_ok=false
+    [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$request_id" "$wait_timeout" || health_ok=false
+  fi
+
+  if [[ "$restart_ok" != true ]]; then
+    _mark_restart_request_failed "$request_id" "PM2 rejected the atomic restart request"
+  elif [[ "$wait" == true && "$health_ok" != true ]]; then
+    _mark_restart_request_failed "$request_id" "Restart did not reach healthy state within ${wait_timeout}s"
   fi
 
   if [[ "$json" == true ]]; then
-    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s}\n' \
+    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s,"requestId":"%s"}\n' \
       "$([[ "$restart_ok" == true ]] && echo true || echo false)" \
       "$([[ "$health_ok" == true ]] && echo true || echo false)" \
       "$wait" \
-      "$wait_timeout"
+      "$wait_timeout" \
+      "$request_id"
   fi
 
   [[ "$restart_ok" == true && "$health_ok" == true ]]
+}
+
+cmd_deploy_runtime() {
+  local target=""
+  local wait_timeout=90
+  local reason="runtime deployment"
+  local json=false
+  local request_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --runtime) target="${2:-}"; shift 2 ;;
+      --timeout) wait_timeout="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --request-id) request_id="${2:-}"; shift 2 ;;
+      --json) json=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot deploy-runtime --runtime DIR [--timeout SEC] [--reason TEXT] [--request-id ID] [--json]"
+        echo "This command must run outside the MetaBot process tree (for example from SSH)."
+        return 0
+        ;;
+      *) error "Unknown deploy-runtime option: $1"; return 2 ;;
+    esac
+  done
+  [[ -n "$target" ]] || { error "--runtime DIR is required"; return 2; }
+  target="$(readlink -f "$target")"
+  [[ -f "$target/ecosystem.config.cjs" ]] || { error "No ecosystem.config.cjs at $target"; return 2; }
+  if _is_metabot_descendant; then
+    error "Runtime switching is refused inside the MetaBot process tree."
+    echo "Run this command from SSH or an independent deployment controller so a failed switch cannot kill its own recovery command."
+    return 3
+  fi
+
+  METABOT_HOME="$target"
+  export METABOT_HOME METABOT_RESTART_REASON="$reason" METABOT_RESTART_SOURCE="external-deploy" METABOT_RESTART_RESUME="1"
+  export METABOT_RESTART_REQUEST_ID="${request_id:-$(_new_restart_request_id)}"
+  local claim
+  claim="$(_claim_restart_request "$METABOT_RESTART_REQUEST_ID")"
+  if [[ "$claim" == "duplicate" ]]; then
+    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s","runtime":"%s"}\n' \
+      "$METABOT_RESTART_REQUEST_ID" "$target"
+    info "Deployment request $METABOT_RESTART_REQUEST_ID was already attempted; no second runtime switch was issued."
+    return 0
+  fi
+  [[ "$claim" == "claimed" ]] || { error "Could not claim deployment request"; return 1; }
+  _write_restart_breadcrumb
+
+  local switch_helper="$target/scripts/pm2-atomic-runtime-switch.cjs"
+  if [[ ! -f "$switch_helper" ]]; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Atomic runtime switch helper is missing at $switch_helper"
+    return 1
+  fi
+  if ! node "$switch_helper" "$target" metabot; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "PM2 rejected atomic runtime switch for $target"
+    return 1
+  fi
+  local health_ok=true
+  _wait_bridge_health "$wait_timeout" || health_ok=false
+  [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$METABOT_RESTART_REQUEST_ID" "$wait_timeout" || health_ok=false
+  if [[ "$health_ok" != true ]]; then
+    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Deployment did not reach healthy state within ${wait_timeout}s"
+  fi
+  if [[ "$json" == true ]]; then
+    printf '{"ok":%s,"healthOk":%s,"requestId":"%s","runtime":"%s"}\n' \
+      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
+      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
+      "$METABOT_RESTART_REQUEST_ID" "$target"
+  fi
+  [[ "$health_ok" == true ]]
 }
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
@@ -583,11 +889,27 @@ def load_env(path: Path):
         env[k.strip()] = v
     return env
 
-file_env = load_env(home / ".env")
+default_env_raw = os.environ.get("METABOT_DEFAULT_ENV_FILE")
+default_env_path = Path(default_env_raw).expanduser() if default_env_raw else None
+default_env_resolved_path = default_env_path.resolve() if default_env_path is not None and default_env_path.exists() else default_env_path
+home_env_path = home / ".env"
+file_env = {}
+if default_env_path is not None:
+    file_env.update(load_env(default_env_path))
+file_env.update(load_env(home_env_path))
 
 def env(name, default=None):
     return os.environ.get(name) or file_env.get(name) or default
 
+def read_first_line(path: Path):
+    try:
+        for raw in path.read_text(errors="ignore").splitlines():
+            line = raw.strip()
+            if line:
+                return line
+    except Exception:
+        return None
+    return None
 
 def run(cmd, timeout=4):
     try:
@@ -595,6 +917,20 @@ def run(cmd, timeout=4):
         return {"ok": p.returncode == 0, "code": p.returncode, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
     except Exception as e:
         return {"ok": False, "code": None, "stdout": "", "stderr": str(e)}
+
+def read_text(path):
+    try:
+        return Path(path).read_text(errors="ignore").strip()
+    except Exception:
+        return None
+
+def proc_status_value(key):
+    status = read_text("/proc/self/status") or ""
+    prefix = f"{key}:"
+    for raw in status.splitlines():
+        if raw.startswith(prefix):
+            return raw[len(prefix):].strip()
+    return None
 
 def http_json(url, token=None, timeout=4):
     req = urllib.request.Request(url)
@@ -634,6 +970,11 @@ report = {
     "schemaVersion": 1,
     "generatedAt": int(time.time()),
     "metabotHome": str(home),
+    "configFiles": {
+        "defaultEnv": str(default_env_path) if default_env_path is not None else None,
+        "defaultEnvResolved": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
+        "worktreeEnv": str(home_env_path),
+    },
     "checks": checks,
 }
 
@@ -654,6 +995,76 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       "Package builds should include .metabot-package/manifest.json; package default env may include .metabot-package/default.env.",
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
+
+def core_cli_probe(source, entry):
+    entry = Path(entry).expanduser()
+    resolved_entry = entry.resolve() if entry.exists() else entry
+    artifact = None
+    if resolved_entry.as_posix().endswith("/packages/cli/bin/metabot"):
+        artifact = resolved_entry.parent.parent / "dist" / "index.js"
+    ready = entry.is_file() and (artifact is None or artifact.is_file())
+    return {
+        "source": source,
+        "entry": str(entry),
+        "resolvedEntry": str(resolved_entry),
+        "entryExists": entry.is_file(),
+        "artifact": str(artifact) if artifact is not None else None,
+        "artifactExists": artifact.is_file() if artifact is not None else None,
+        "ready": ready,
+    }
+
+def append_core_cli_candidate(candidates, seen_entries, source, entry):
+    probe = core_cli_probe(source, entry)
+    dedupe_entry = probe["resolvedEntry"]
+    if dedupe_entry in seen_entries:
+        return
+    seen_entries.add(dedupe_entry)
+    candidates.append(probe)
+
+explicit_core_cli = os.environ.get("METABOT_CORE_CLI")
+core_cli_candidates = []
+seen_core_cli_entries = set()
+if explicit_core_cli:
+    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "explicit", explicit_core_cli)
+else:
+    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "worktree", home / "packages/cli/bin/metabot")
+    if default_env_resolved_path is not None:
+        append_core_cli_candidate(
+            core_cli_candidates,
+            seen_core_cli_entries,
+            "default_config_root",
+            default_env_resolved_path.parent / "packages/cli/bin/metabot",
+        )
+    append_core_cli_candidate(
+        core_cli_candidates,
+        seen_core_cli_entries,
+        "stable_checkout",
+        Path.home() / "metabot/packages/cli/bin/metabot",
+    )
+    append_core_cli_candidate(
+        core_cli_candidates,
+        seen_core_cli_entries,
+        "sibling_workspace",
+        home / "../metabot-workspace/metabot-core/packages/cli/bin/metabot",
+    )
+    global_core_cli = shutil.which("metabot-core")
+    if global_core_cli:
+        append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "path", global_core_cli)
+
+selected_core_cli = next((candidate for candidate in core_cli_candidates if candidate["ready"]), None)
+check("core_cli_artifact", selected_core_cli is not None,
+      "core_cli_unbuilt" if selected_core_cli is None else "ok",
+      f"Feature CLI is ready at {selected_core_cli['entry']}." if selected_core_cli else "No runnable feature CLI with its required dist artifact was found.",
+      f"Build the worktree CLI with: cd {home} && npm ci && npm run build -w @xvirobotics/cli; or set METABOT_DEFAULT_ENV_FILE to a ready checkout's .env.",
+      False,
+      {
+          "selected": selected_core_cli,
+          "candidates": core_cli_candidates,
+          "configRoot": str(default_env_resolved_path.parent) if default_env_resolved_path is not None else str(home),
+          "configuredDefaultEnv": str(default_env_path) if default_env_path is not None else None,
+          "resolvedDefaultEnv": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
+          "explicitOverride": bool(explicit_core_cli),
+      })
 
 pm2 = shutil.which("pm2")
 pm2_data = {"installed": bool(pm2)}
@@ -679,7 +1090,7 @@ if pm2:
             pm2_data["parseError"] = str(e)
 check("pm2_runtime", pm2_ok, "pm2_wrong_cwd_or_offline" if not pm2_ok else "ok",
       "PM2 metabot is online and running from METABOT_HOME." if pm2_ok else "PM2 metabot is missing, offline, or running from a different cwd.",
-      "Run from the desired runtime: pm2 delete metabot; cd $METABOT_HOME; pm2 start ecosystem.config.cjs --update-env.",
+      "For the same runtime use 'metabot restart --wait'. To switch runtimes, run 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree. Never use delete+start from a Bot/Agent/Worker.",
       True,
       pm2_data)
 
@@ -694,7 +1105,9 @@ check("bridge_health", bridge_health["ok"], "bridge_health_failed" if not bridge
       {"url": metabot_url, "status": bridge_health["status"], "response": bridge_health["json"] or bridge_health["bodyPreview"]})
 
 core_url = env("METABOT_CORE_URL", "http://localhost:9200").rstrip("/")
-core_token_present = bool(env("METABOT_CORE_TOKEN") or (Path.home() / ".metabot-core" / "token").exists())
+core_token_file = Path.home() / ".metabot-core" / "token"
+core_token = env("METABOT_CORE_TOKEN") or read_first_line(core_token_file)
+core_token_present = bool(core_token)
 core_health = http_json(f"{core_url}/health")
 check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["ok"] else "ok",
       "metabot-core health endpoint is reachable." if core_health["ok"] else "metabot-core health endpoint is not reachable.",
@@ -702,6 +1115,21 @@ check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["
       False,
       {"url": core_url, "status": core_health["status"], "tokenPresent": core_token_present, "response": core_health["json"] or core_health["bodyPreview"]})
 
+if core_token:
+    core_memory = http_json(f"{core_url}/api/memory/folders/tree", core_token)
+    core_memory_ok = core_memory["ok"]
+    core_memory_code = "ok" if core_memory_ok else ("core_memory_auth_failed" if core_memory["status"] in (401, 403) else "core_memory_unreachable")
+    check("metabot_core_memory", core_memory_ok, core_memory_code,
+          "MetaMemory API is reachable with the configured metabot-core token." if core_memory_ok else "MetaMemory API is not reachable with the configured metabot-core token.",
+          "Check METABOT_CORE_TOKEN, token ACL, and METABOT_CORE_URL.",
+          False,
+          {"url": f"{core_url}/api/memory/folders/tree", "status": core_memory["status"], "response": core_memory["json"] or core_memory["bodyPreview"]})
+else:
+    check("metabot_core_memory", False, "core_token_missing",
+          "No metabot-core token is configured, so MetaMemory cannot be used.",
+          f"Set METABOT_CORE_TOKEN in {home / '.env'} or write the token to {core_token_file}.",
+          False,
+          {"url": f"{core_url}/api/memory/folders/tree", "tokenFile": str(core_token_file)})
 
 bots_data = []
 bots_path = home / "bots.json"
@@ -836,6 +1264,67 @@ check("codex_agent_features", codex_agent_features_ok,
           "mcpServerCount": codex_data["mcpServerCount"],
       })
 
+bwrap_path = shutil.which("bwrap")
+bwrap_version = run([bwrap_path, "--version"], timeout=3) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+unshare_path = shutil.which("unshare")
+unshare_user = run([unshare_path, "-Ur", "true"], timeout=3) if unshare_path else {"ok": False, "stdout": "", "stderr": "unshare not found"}
+bwrap_smoke = run([
+    bwrap_path,
+    "--unshare-user",
+    "--uid", "0",
+    "--gid", "0",
+    "--ro-bind", "/", "/",
+    "--proc", "/proc",
+    "--dev", "/dev",
+    "--tmpfs", "/tmp",
+    "/bin/sh", "-lc", "true",
+], timeout=5) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
+cap_eff = proc_status_value("CapEff")
+try:
+    has_cap_sys_admin = bool(int(cap_eff or "0", 16) & (1 << 21))
+except Exception:
+    has_cap_sys_admin = None
+# bwrap file permissions: mode octal string, setuid bit, and Linux capabilities via getcap
+bwrap_filemode = None
+bwrap_setuid = None
+if bwrap_path:
+    try:
+        st = os.stat(bwrap_path)
+        bwrap_filemode = oct(st.st_mode)
+        bwrap_setuid = bool(st.st_mode & 0o4000)
+    except Exception:
+        pass
+getcap_path = shutil.which("getcap")
+bwrap_capabilities = None
+if bwrap_path and getcap_path:
+    _gc = run([getcap_path, bwrap_path], timeout=3)
+    bwrap_capabilities = (_gc["stdout"] or _gc["stderr"] or "").strip() or None
+codex_sandbox_data = {
+    "bwrap": bwrap_path,
+    "bwrapVersion": bwrap_version["stdout"] or bwrap_version["stderr"],
+    "bwrapSmokeOk": bwrap_smoke["ok"],
+    "bwrapSmokeStderr": bwrap_smoke["stderr"][:500],
+    "bwrapFileMode": bwrap_filemode,
+    "bwrapSetuid": bwrap_setuid,
+    "bwrapCapabilities": bwrap_capabilities,
+    "unshare": unshare_path,
+    "unshareUserOk": unshare_user["ok"],
+    "unshareUserStderr": unshare_user["stderr"][:500],
+    "kernelUnprivilegedUsernsClone": read_text("/proc/sys/kernel/unprivileged_userns_clone"),
+    "userMaxUserNamespaces": read_text("/proc/sys/user/max_user_namespaces"),
+    "seccomp": proc_status_value("Seccomp"),
+    "apparmor": read_text("/proc/self/attr/current"),
+    "cgroup": read_text("/proc/1/cgroup"),
+    "capEff": cap_eff,
+    "hasCapSysAdmin": has_cap_sys_admin,
+}
+check("codex_sandbox_namespaces", bwrap_smoke["ok"],
+      "ok" if bwrap_smoke["ok"] else ("bwrap_missing" if not bwrap_path else "bwrap_namespace_unavailable"),
+      "Codex read-only/workspace-write sandbox namespaces are available." if bwrap_smoke["ok"] else "Codex read-only/workspace-write sandbox namespaces are not available on this host/container.",
+      "Use Codex danger-full-access/bypass for this runtime, or run the container/host with user namespaces allowed by seccomp/AppArmor and kernel policy, then re-run metabot doctor --json.",
+      False,
+      codex_sandbox_data)
+
 team_base = None
 for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
     if candidate and "teamclaude" in candidate:
@@ -877,52 +1366,141 @@ PY
 }
 
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
-# Order: explicit override > in-tree monorepo > sibling workspace > npm-global on PATH.
+# A source-tree launcher is usable only when its dist entry exists. This matters
+# when the bridge runs from a Git worktree that intentionally has not been built.
+_expand_user_path() {
+  local value="$1"
+  case "$value" in
+    "~"|"~/"*) printf '%s\n' "${HOME}${value#\~}" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+_canonical_existing_path() {
+  local path_value
+  path_value="$(_expand_user_path "$1")"
+  if [[ -e "$path_value" || -L "$path_value" ]]; then
+    if command -v readlink &>/dev/null; then
+      readlink -f "$path_value" 2>/dev/null || printf '%s\n' "$path_value"
+    else
+      printf '%s\n' "$path_value"
+    fi
+  else
+    printf '%s\n' "$path_value"
+  fi
+}
+
+_core_cli_is_ready() {
+  local candidate="$1"
+  local expanded
+  expanded="$(_expand_user_path "$candidate")"
+  [[ -f "$expanded" ]] || return 1
+  local resolved
+  resolved="$(_canonical_existing_path "$expanded")"
+  case "$resolved" in
+    */packages/cli/bin/metabot)
+      local package_root="${resolved%/bin/metabot}"
+      [[ -f "$package_root/dist/index.js" ]] || return 1
+      ;;
+  esac
+  return 0
+}
+
+_core_cli_default_config_root() {
+  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
+  if [[ -n "$default_env" ]]; then
+    default_env="$(_canonical_existing_path "$default_env")"
+    dirname "$default_env"
+  fi
+  return 0
+}
+
+# Order: explicit override > ready in-tree CLI > ready default-config checkout
+# > ready stable checkout > sibling workspace > npm-global on PATH.
 _resolve_core_cli() {
-  if [[ -n "${METABOT_CORE_CLI:-}" && -x "$METABOT_CORE_CLI" ]]; then
-    echo "$METABOT_CORE_CLI"; return 0
+  local core_cli_candidates=()
+  local candidate
+  _append_core_cli_candidate() {
+    candidate="$1"
+    [[ -n "$candidate" ]] || return 0
+    candidate="$(_canonical_existing_path "$candidate")"
+    local existing
+    for existing in "${core_cli_candidates[@]}"; do
+      [[ "$existing" == "$candidate" ]] && return 0
+    done
+    core_cli_candidates+=("$candidate")
+  }
+  if [[ -n "${METABOT_CORE_CLI:-}" ]]; then
+    local explicit_core_cli
+    explicit_core_cli="$(_canonical_existing_path "$METABOT_CORE_CLI")"
+    if _core_cli_is_ready "$explicit_core_cli"; then
+      echo "$explicit_core_cli"; return 0
+    fi
+    echo "Explicit METABOT_CORE_CLI is not runnable or does not have a built dist entry: $METABOT_CORE_CLI (resolved: $explicit_core_cli)" >&2
+    return 2
   fi
   # In-tree (monorepo): packages/cli is shipped alongside this script.
   local intree="$METABOT_HOME/packages/cli/bin/metabot"
-  if [[ -f "$intree" ]]; then
-    echo "$intree"; return 0
-  fi
+  _append_core_cli_candidate "$intree"
+  # Worktree deployments commonly share an env/config file with a stable,
+  # already-built checkout. Use its CLI code without deriving backend config
+  # from that code path.
+  local config_root
+  config_root="$(_core_cli_default_config_root)"
+  local config_cli="${config_root:+$config_root/packages/cli/bin/metabot}"
+  _append_core_cli_candidate "$config_cli"
+  local stable="$HOME/metabot/packages/cli/bin/metabot"
+  _append_core_cli_candidate "$stable"
   # Sibling workspace (legacy two-repo layout — kept during migration).
   local ws="$METABOT_HOME/../metabot-workspace/metabot-core/packages/cli/bin/metabot"
-  if [[ -f "$ws" ]]; then
-    echo "$ws"; return 0
-  fi
+  _append_core_cli_candidate "$ws"
   # npm-linked global: a `metabot-core` bin on PATH (NOT this script).
   local g
   g="$(command -v metabot-core 2>/dev/null || true)"
-  if [[ -n "$g" ]]; then echo "$g"; return 0; fi
+  _append_core_cli_candidate "$g"
+  for candidate in "${core_cli_candidates[@]}"; do
+    if _core_cli_is_ready "$candidate"; then
+      echo "$candidate"; return 0
+    fi
+  done
   return 1
+}
+
+_load_core_cli_config() {
+  # Keep code resolution separate from backend selection. Explicit process env
+  # wins; otherwise worktree .env overrides the shared default env file.
+  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
+  default_env="$(_expand_user_path "$default_env")"
+  local worktree_env="$METABOT_HOME/.env"
+  local k
+  for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
+    [[ -n "${!k:-}" ]] && continue
+    local value=""
+    local envf
+    for envf in "$default_env" "$worktree_env"; do
+      [[ -n "$envf" && -f "$envf" ]] || continue
+      local line
+      line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
+      if [[ -n "$line" ]]; then
+        value="$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+      fi
+    done
+    [[ -n "$value" ]] && export "${k}=$value"
+  done
+  return 0
 }
 
 cmd_delegate() {
   local core_cli
   if ! core_cli="$(_resolve_core_cli)"; then
-    error "'metabot $1' needs the metabot-core CLI, which isn't installed here."
+    error "'metabot $1' needs the metabot-core CLI, which isn't installed here." >&2
     echo "  Fix one of:" >&2
-    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npx tsc -b" >&2
+    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npm run build -w @xvirobotics/cli" >&2
+    echo "    - Or set METABOT_DEFAULT_ENV_FILE to the .env of a ready checkout." >&2
     echo "    - Or point at it:        export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot" >&2
     exit 1
   fi
-  # Feed METABOT_CORE_URL / METABOT_CORE_TOKEN from the bridge .env WITHOUT
-  # clobbering values already set in the environment.
-  local envf="$METABOT_HOME/.env"
-  if [[ -f "$envf" ]]; then
-    local k
-    for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
-      if [[ -z "${!k:-}" ]]; then
-        local line
-        line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
-        if [[ -n "$line" ]]; then
-          export "${k}=$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
-        fi
-      fi
-    done
-  fi
+  _load_core_cli_config
   exec node "$core_cli" "$@"
 }
 
@@ -1890,6 +2468,7 @@ print_help() {
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
   echo "    metabot restart    Restart MetaBot"
+  echo "    metabot deploy-runtime --runtime DIR  Atomically switch runtime from an external controller"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
@@ -1916,6 +2495,7 @@ case "${1:-}" in
   start)        cmd_start ;;
   stop)         cmd_stop ;;
   restart|rs)   shift; cmd_restart "$@" ;;
+  deploy-runtime) shift; cmd_deploy_runtime "$@" ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;

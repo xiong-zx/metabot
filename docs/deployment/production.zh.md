@@ -5,6 +5,8 @@
 ```bash
 metabot start                       # 用 PM2 启动
 metabot update                      # 内网包更新 + 构建 + 更新 skills + 重启
+metabot restart --wait              # 重启当前 runtime
+metabot deploy-runtime --runtime /path/to/metabot # 从 SSH 切换 runtime
 ```
 
 ## PM2 开机自启
@@ -17,13 +19,25 @@ pm2 startup && pm2 save
 
 ## 手动 PM2 命令
 
+优先使用 MetaBot CLI：它会持久化 restart request、保留代理环境、验证健康，
+且只在成功后保存 PM2 process list。禁止从 MetaBot 子进程中先执行
+`pm2 delete metabot` 再执行 `pm2 start`；delete 会先杀死本应执行第二条
+命令的进程树。
+
 ```bash
 pm2 start ecosystem.config.cjs      # 启动
-pm2 restart metabot                  # 重启
+pm2 restart metabot --update-env     # 同 runtime 紧急重启
 pm2 stop metabot                     # 停止
 pm2 logs metabot                     # 查看日志
 pm2 status                           # 进程状态
 ```
+
+切换 worktree/runtime 时，通过 `metabot deploy-runtime` 向 PM2 daemon
+只提交一次 restart RPC；命令会解析并核对目标 `cwd` 和 script，不删除 PM2
+应用条目。必须从 SSH 或 MetaBot 进程树之外的 supervisor 执行，并会拒绝
+进程内 runtime 切换。原子切换会从当前进程继承共享 bot 配置、凭证引用、
+会话存储、Wiki/MetaMemory 状态目录和网络设置；`METABOT_HOME` 等运行时专属
+配置仍由目标 ecosystem 决定。
 
 ## 生产构建
 

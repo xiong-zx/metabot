@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { CardLifecycleStage, CardStatus } from '../types.js';
+import type { CardLifecycleStage, CardStatus, ModelTelemetry } from '../types.js';
 
 export interface CardLifecycleRecord {
   lifecycleKey: string;
@@ -18,6 +18,7 @@ export interface CardLifecycleRecord {
   lifecycleStage?: CardLifecycleStage;
   userPrompt?: string;
   responsePreview?: string;
+  modelTelemetry?: ModelTelemetry;
   leaseOwner?: string;
   leaseExpiresAt?: number;
   checkpointNote?: string;
@@ -75,6 +76,7 @@ function isCardLifecycleRecord(value: unknown): value is CardLifecycleRecord {
     && (row.agentName === undefined || typeof row.agentName === 'string')
     && (row.runId === undefined || typeof row.runId === 'string')
     && (row.taskIds === undefined || Array.isArray(row.taskIds))
+    && (row.modelTelemetry === undefined || (typeof row.modelTelemetry === 'object' && row.modelTelemetry !== null))
     && typeof row.status === 'string'
     && (row.leaseOwner === undefined || typeof row.leaseOwner === 'string')
     && (row.leaseExpiresAt === undefined || typeof row.leaseExpiresAt === 'number')
@@ -108,6 +110,7 @@ export function recordCardLifecycle(input: {
   lifecycleStage?: CardLifecycleStage;
   userPrompt?: string;
   responseText?: string;
+  modelTelemetry?: ModelTelemetry;
   leaseOwner?: string;
   leaseExpiresAt?: number;
   leaseTtlMs?: number;
@@ -154,6 +157,9 @@ export function recordCardLifecycle(input: {
     ...(input.lifecycleStage ? { lifecycleStage: input.lifecycleStage } : {}),
     ...(input.userPrompt ? { userPrompt: input.userPrompt.slice(0, 500) } : {}),
     ...(input.responseText ? { responsePreview: input.responseText.slice(0, 1000) } : {}),
+    ...(input.modelTelemetry
+      ? { modelTelemetry: { ...input.modelTelemetry } }
+      : existing?.modelTelemetry ? { modelTelemetry: existing.modelTelemetry } : {}),
     ...(leaseOwner ? { leaseOwner } : {}),
     ...(leaseExpiresAt ? { leaseExpiresAt } : {}),
     ...(checkpointNote ? { checkpointNote: checkpointNote.slice(0, 500) } : existing?.checkpointNote ? { checkpointNote: existing.checkpointNote } : {}),
@@ -206,6 +212,7 @@ export function checkpointCardLifecycle(input: {
     lifecycleStage: 'checkpointing',
     userPrompt: existing.userPrompt,
     responseText: existing.responsePreview,
+    modelTelemetry: existing.modelTelemetry,
     checkpointNote: input.note,
     checkpointBy: input.by,
     restartRequestId: input.restartRequestId,

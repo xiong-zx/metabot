@@ -102,6 +102,28 @@ export class CommandHandler {
     this.docSync = docSync;
   }
 
+  private auditCommandConfirmation(
+    command: '/reset' | '/stop',
+    chatId: string,
+    userId: string,
+    messageId: string | undefined,
+  ): void {
+    this.audit.log({
+      event: 'command_confirmation',
+      botName: this.config.name,
+      chatId,
+      userId,
+      meta: {
+        command,
+        delivered: Boolean(messageId),
+        confirmationMessageId: messageId,
+      },
+    });
+    if (!messageId) {
+      this.logger.warn({ command, chatId }, 'Command confirmation returned no auditable message ID');
+    }
+  }
+
   /** Returns true if the message was handled as a command, false otherwise. */
   async handle(msg: IncomingMessage): Promise<boolean> {
     const { text } = msg;
@@ -189,7 +211,15 @@ export class CommandHandler {
         } catch (err) {
           this.logger.warn({ err, chatId }, 'Failed to release persistent executor on /reset');
         }
-        await this.sender.sendTextNotice(chatId, '✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
+        {
+          const confirmationMessageId = await this.sender.sendTextNotice(
+            chatId,
+            '✅ Session Reset',
+            'Conversation cleared. Working directory preserved.',
+            'green',
+          );
+          this.auditCommandConfirmation('/reset', chatId, userId, confirmationMessageId);
+        }
         return true;
 
       case '/restart':
@@ -205,25 +235,27 @@ export class CommandHandler {
         // finally block immediately picks the next queued message via
         // processQueue and the user's "stop" intent silently fails.
         const cleared = this.clearQueue(chatId);
+        let confirmationMessageId: string | undefined;
         if (task) {
           this.audit.log({ event: 'task_stopped', botName: this.config.name, chatId, userId, durationMs: Date.now() - task.startTime, meta: { clearedQueue: cleared } });
           this.stopTask(chatId);
           const body = cleared > 0
             ? `Current task aborted. Discarded **${cleared}** queued message${cleared === 1 ? '' : 's'}.`
             : 'Current task has been aborted.';
-          await this.sender.sendTextNotice(chatId, '🛑 Stopped', body, 'orange');
+          confirmationMessageId = await this.sender.sendTextNotice(chatId, '🛑 Stopped', body, 'orange');
         } else if (cleared > 0) {
           // No running task but queued messages existed — clear them too.
           this.audit.log({ event: 'queue_cleared', botName: this.config.name, chatId, userId, meta: { clearedQueue: cleared } });
-          await this.sender.sendTextNotice(
+          confirmationMessageId = await this.sender.sendTextNotice(
             chatId,
             '🛑 Queue Cleared',
             `No task was running. Discarded **${cleared}** queued message${cleared === 1 ? '' : 's'}.`,
             'orange',
           );
         } else {
-          await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
+          confirmationMessageId = await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
         }
+        this.auditCommandConfirmation('/stop', chatId, userId, confirmationMessageId);
         return true;
       }
 
@@ -1082,6 +1114,14 @@ function formatReadinessProgress(request: ReturnType<typeof listServiceRestartRe
   if (blockedCount > 0) suffixes.push(`blocker-acks=${blockedCount}`);
   if (request.status === 'timed_out') {
     suffixes.push(request.timedOutAt ? `timed_out=${formatDuration(now - request.timedOutAt)} ago` : 'timed_out');
+  } else if (request.status === 'restarting') {
+    suffixes.push(`attempt=${request.attemptCount || 1}`);
+  } else if (request.status === 'healthy') {
+    suffixes.push(request.healthyAt ? `healthy=${formatDuration(now - request.healthyAt)} ago` : 'healthy');
+    if (request.proxyReachable !== undefined) suffixes.push(`proxy=${request.proxyReachable ? 'reachable' : 'failed'}`);
+  } else if (request.status === 'failed') {
+    suffixes.push(request.failedAt ? `failed=${formatDuration(now - request.failedAt)} ago` : 'failed');
+    if (request.healthError) suffixes.push(`error="${truncateOneLine(request.healthError, 80)}"`);
   } else if (request.status === 'blocked' && typeof request.deadlineAt === 'number') {
     suffixes.push(request.deadlineAt > now
       ? `timeout_in=${formatDuration(request.deadlineAt - now)}`

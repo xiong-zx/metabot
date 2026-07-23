@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MessageBridge,
+  buildPromptWithReplyContext,
   isStaleSessionError,
   normalizePromptForEngine,
   extractSpontaneousSnippet,
@@ -150,6 +151,31 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('hello /metaskill', 'codex')).toBe('hello /metaskill');
     expect(normalizePromptForEngine('/bad/path', 'codex')).toBe('/bad/path');
+  });
+});
+
+describe('buildPromptWithReplyContext', () => {
+  it('keeps the current instruction separate from the replied text', () => {
+    expect(buildPromptWithReplyContext('分析这个结论', {
+      messageId: 'om-parent',
+      messageType: 'text',
+      text: '这是未 @ 机器人的原消息',
+    })).toBe([
+      '<replied_message message_id="om-parent" type="text">',
+      '这是未 @ 机器人的原消息',
+      '</replied_message>',
+      '',
+      '<current_user_message>',
+      '分析这个结论',
+      '</current_user_message>',
+    ].join('\n'));
+  });
+
+  it('marks a referenced attachment when it has no text body', () => {
+    expect(buildPromptWithReplyContext('读取文件', {
+      messageId: 'om-file',
+      messageType: 'file',
+    })).toContain('[Referenced file attachment; see the attached file paths below.]');
   });
 });
 
@@ -475,8 +501,10 @@ describe('MessageBridge between-turn questions', () => {
       expect(spawned).toHaveLength(1);
       expect(spawned[0]).toMatchObject({
         command: '/bin/sh',
-        args: ['-lc', expect.stringContaining('pm2 restart metabot')],
+        args: ['-lc', expect.stringContaining("bin/metabot' restart --request-id")],
       });
+      expect(spawned[0].args[1]).not.toContain('pm2 delete');
+      expect(spawned[0].args[1]).not.toContain('pm2 save');
       expect(spawned[0].options.env.METABOT_RESTART_REQUEST_ID).toBe(blocked.requestId);
       expect(unref).toHaveBeenCalledTimes(1);
     } finally {
@@ -655,6 +683,39 @@ describe('MessageBridge runtime rules context', () => {
 });
 
 describe('MessageBridge card lifecycle', () => {
+  it('invalidates retired Claude session mappings without resetting chat configuration', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const clearClaudeSessionId = vi.fn(() => true);
+    bridge.setSessionRegistry({ clearClaudeSessionId } as any);
+    const manager = bridge.getSessionManager();
+    manager.setSessionId('chat-retired', 'sess-unsafe', 'claude');
+    manager.setSessionModel('chat-retired', 'claude-fable-5', 'claude');
+
+    try {
+      const retired = bridge.updateSessionMappingFromStream(
+        'chat-retired',
+        'claude',
+        {
+          type: 'result',
+          session_id: 'sess-unsafe',
+          modelTelemetry: {
+            sessionDisposition: 'retired',
+            sessionRetireReason: 'turn_start_timeout',
+          },
+        },
+        { getSessionId: () => 'sess-unsafe' },
+      );
+
+      expect(retired).toBe(true);
+      expect(manager.getSession('chat-retired').sessionId).toBeUndefined();
+      expect(manager.getSession('chat-retired').model).toBe('claude-fable-5');
+      expect(clearClaudeSessionId).toHaveBeenCalledWith('chat-retired', 'test-bot');
+    } finally {
+      bridge.destroy();
+    }
+  });
+
   it('persists cardless API lifecycle records by lifecycleKey', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-message-bridge-lifecycle-'));
     const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
@@ -821,6 +882,16 @@ describe('MessageBridge card lifecycle', () => {
     try {
       bridge.handleSpontaneousMessage('chat-spontaneous', {
         type: 'assistant',
+        session_id: 'sess-spontaneous',
+        model: 'claude-sonnet-5',
+        modelTelemetry: {
+          configuredModel: 'claude-fable-5',
+          spawnModel: 'claude-fable-5',
+          runtimeModel: 'claude-sonnet-5',
+          runtimeModelSource: 'assistant_jsonl',
+          fallbackOriginalModel: 'claude-fable-5',
+          fallbackModel: 'claude-sonnet-5',
+        },
         message: { content: [{ type: 'text', text: 'Background result ready.' }] },
       });
       await vi.runOnlyPendingTimersAsync();
@@ -829,6 +900,11 @@ describe('MessageBridge card lifecycle', () => {
       expect(sender.sent).toHaveLength(1);
       expect(sender.sent[0].state.lifecycleStage).toBe('closed');
       expect(sender.sent[0].state.lifecycleKey).toMatch(/^spontaneous:chat-spontaneous:\d+$/);
+      expect(sender.sent[0].state.model).toBe('claude-sonnet-5');
+      expect(sender.sent[0].state.modelTelemetry).toMatchObject({
+        configuredModel: 'claude-fable-5',
+        runtimeModel: 'claude-sonnet-5',
+      });
     } finally {
       bridge.destroy();
     }
