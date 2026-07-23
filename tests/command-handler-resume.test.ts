@@ -5,8 +5,8 @@ import type { SessionSummary } from '../src/engines/claude/session-lister.js';
 
 /**
  * Direct `/resume <id-prefix>` form. The bare `/resume` picker lives in the
- * bridge; here we cover the command-handler path: engine gate, running-turn
- * guard, prefix matching (unique / ambiguous / none), and the swap callback.
+ * bridge; here we cover the command-handler path: engine-aware resume, the
+ * running-turn guard, prefix matching (unique / ambiguous / none), and swap.
  */
 
 interface RecordedNotice {
@@ -101,12 +101,10 @@ describe('CommandHandler /resume', () => {
     expect(notices.at(-1)?.color).toBe('red');
   });
 
-  it('is gated to the claude engine (red) on a kimi chat', async () => {
-    const { handler, notices, resumed } = buildHandler({ engine: 'kimi' });
+  it('resumes a Kimi session on a Kimi chat', async () => {
+    const { handler, resumed } = buildHandler({ engine: 'kimi' });
     await handler.handle(msg('/resume abc12345'));
-    expect(resumed).toEqual([]);
-    expect(notices.at(-1)?.color).toBe('red');
-    expect(notices.at(-1)?.title).toContain('Claude-only');
+    expect(resumed).toEqual(['abc12345-1111-1111-1111-111111111111']);
   });
 
   it('refuses while a turn is running (orange)', async () => {

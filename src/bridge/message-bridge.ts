@@ -24,6 +24,8 @@ import {
   SessionManager,
 } from '../engines/index.js';
 import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
+import { listCodexSessions } from '../engines/codex/session-lister.js';
+import { listKimiSessions } from '../engines/kimi/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
@@ -1821,8 +1823,24 @@ export class MessageBridge {
    * first. Read-only — does not touch session state. Used by the `/resume`
    * picker and the direct `/resume <id>` form.
    */
-  listSessionsForChat(chatId: string): SessionSummary[] {
+  async listSessionsForChat(chatId: string): Promise<SessionSummary[]> {
     const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    if (activeEngine === 'codex') {
+      return listCodexSessions({
+        workingDirectory: session.workingDirectory,
+        currentSessionId: session.sessionId,
+      });
+    }
+    if (activeEngine === 'kimi') {
+      return listKimiSessions({
+        workingDirectory: session.workingDirectory,
+        currentSessionId: session.sessionId,
+        executable: this.config.kimi?.executable,
+        serverUrl: this.config.kimi?.serverUrl,
+        apiKey: this.config.kimi?.apiKey,
+      });
+    }
     return listClaudeSessions({
       workingDirectory: session.workingDirectory,
       currentSessionId: session.sessionId,
@@ -1839,14 +1857,15 @@ export class MessageBridge {
    * The actual `--resume` happens lazily on the user's next message.
    */
   async applyResume(chatId: string, sessionId: string): Promise<void> {
-    this.sessionManager.setSessionId(chatId, sessionId, 'claude');
+    const activeEngine = this.sessionManager.getSession(chatId).engine ?? resolveEngineName(this.config);
+    this.sessionManager.setSessionId(chatId, sessionId, activeEngine);
     this.sessionManager.resetUsage(chatId);
     try {
       await this.releaseChatExecutor(chatId, 'resume-command');
     } catch (err) {
       this.logger.warn({ err, chatId }, 'applyResume: failed to release persistent executor');
     }
-    this.logger.info({ chatId, sessionId: sessionId.slice(0, 8) }, 'MessageBridge: resumed session');
+    this.logger.info({ chatId, sessionId: sessionId.slice(0, 8), engine: activeEngine }, 'MessageBridge: resumed session');
   }
 
   /**
