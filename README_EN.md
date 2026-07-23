@@ -350,24 +350,31 @@ checks service health, reviews overnight error logs, and posts a summary.
 |----------|----------|-------|
 | **Direct message** | Not needed | All messages go to the bot |
 | **1-on-1 group** (you + bot, 2 members) | Not needed | Auto-detected as DM-like |
-| **Multi-member group** | @Bot required | Only @mentioned messages trigger a response |
+| **Multi-member group** | @Bot by default | The group owner can select `mention` or `all` per bot and group |
 
 > **Tip**: Create a 2-person group with just you and the bot. No @mention needed, plus you get group features like pinning.
+
+Group owners can use `@Bot /group-reply mention`, `@Bot /group-reply all`, and
+`@Bot /group-reply status`. Commands must @ the exact bot; bare commands and
+commands addressed to another bot are ignored. Settings persist per bot and
+group. See [Chat Commands](docs/usage/chat-commands.md).
 
 </details>
 
 <details>
 <summary><strong>Sending Files & Images</strong></summary>
 
-**DM / 2-person group**: Send files or images directly — auto-processed. Multiple files within 2 seconds are batched.
+**DM / 2-person group**: Send files or images directly — auto-processed by default. Multiple files within 2 seconds are batched. An explicit `mention` setting makes a 2-person group require @Bot.
 
-**Multi-member group**: Feishu doesn't allow @mentioning while uploading. Workaround: **upload first, @mention later**
+**Multi-member group in `mention` mode**: Feishu doesn't allow @mentioning while uploading. Workaround: **upload first, @mention later**
 
 1. Upload files in the group
 2. Within 5 minutes, @Bot with your instruction
 3. Bot auto-attaches your previously uploaded files
 
 Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (Post format), batch upload.
+
+In `all` mode, unmentioned files and images are processed immediately.
 
 </details>
 
