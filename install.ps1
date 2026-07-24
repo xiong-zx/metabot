@@ -739,6 +739,45 @@ if ($DeployWorkDir) {
     Write-Warn "Could not determine working directory, skipping workspace deployment"
 }
 
+# --- Assert $MetabotHome\CLAUDE.md + AGENTS.md exist ------------------------
+# These two files are MetaBot's only cross-host channel for project rules
+# (MetaMemory is per-server), and the bridge injects CLAUDE.md into every bot's
+# system prompt. Both ship in the repo, but git on Windows checks the tracked
+# AGENTS.md symlink out as a plain text file unless core.symlinks is on, so
+# repair rather than assume. Windows uses a copy, not a symlink: creating one
+# needs Developer Mode or admin rights.
+$HomeClaude = Join-Path $MetabotHome "CLAUDE.md"
+$HomeAgents = Join-Path $MetabotHome "AGENTS.md"
+$HomeInstructionsOk = $true
+
+if (-not (Test-Path $HomeClaude)) {
+    # Land the bundled workspace template so the injection channel is never
+    # empty. Erroring out here would abort an otherwise-complete install over a
+    # docs file, and a partial rule set beats no rules at all.
+    $workspaceTemplate = Join-Path $MetabotHome "src\workspace\CLAUDE.md"
+    if (Test-Path $workspaceTemplate) {
+        Copy-Item $workspaceTemplate $HomeClaude -Force
+        Write-Warn "$HomeClaude was missing - seeded it from src\workspace\CLAUDE.md."
+        Write-Warn "Your checkout may be stale: cd $MetabotHome; git fetch origin; git status"
+    } else {
+        Write-Err "$HomeClaude is missing and no template was found at $workspaceTemplate."
+        Write-Err "Your $MetabotHome checkout is incomplete - bots on this host will get no project rules."
+        Write-Err "Try: cd $MetabotHome; git fetch origin; git checkout -- CLAUDE.md AGENTS.md"
+        $HomeInstructionsOk = $false
+    }
+}
+
+if ($HomeInstructionsOk -and -not (Test-Path $HomeAgents)) {
+    Copy-Item $HomeClaude $HomeAgents -Force
+    Write-Success "Derived AGENTS.md from CLAUDE.md -> $HomeAgents"
+}
+
+if ($HomeInstructionsOk) {
+    Write-Success "Host instructions present: $HomeClaude + $HomeAgents"
+} else {
+    Write-Warn "Host instruction files are incomplete - see the errors above."
+}
+
 # Kimi Code 0.27+ can be installed via:
 #   npm install -g @moonshot-ai/kimi-code@latest
 # Minimum supported Kimi Code version: 0.27.0
