@@ -6,6 +6,7 @@
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
+| `METABOT_HOME` | `process.cwd()` | MetaBot 运行时目录。安装器会写入 `.env` 并导出到 shell profile。`$METABOT_HOME/CLAUDE.md`（旁边还有 `AGENTS.md`）是本机全局项目规则，bridge 会把它注入**每个** bot 的 system prompt —— 见[本机项目规则](#本机项目规则) |
 | `BOTS_CONFIG` | — | `bots.json` 路径（多 Bot 模式） |
 | `FEISHU_APP_ID` | — | 飞书 App ID（单 Bot 模式） |
 | `FEISHU_APP_SECRET` | — | 飞书 App Secret（单 Bot 模式） |
@@ -13,6 +14,21 @@
 | `API_SECRET` | — | Bearer Token 认证 |
 | `LOG_LEVEL` | `info` | 日志级别（debug, info, warn, error） |
 | `METABOT_LOCAL_ADDRESS` | — | 所有飞书 socket（REST + wss 长连接）绑定到该本机源 IP，触发 source-based routing 绕过 VPN 智能分流（如某些企业 VPN 把 `*.feishu.cn` 劫持进失效隧道）。不设则走默认路由 |
+
+### 本机项目规则
+
+`$METABOT_HOME/CLAUDE.md` 是 MetaBot **唯一的跨服务器规则传播通道** —— MetaMemory
+每台服务器独立、不共享，因此签入运行时目录的这份文件才是该机器上所有 bot 都要遵守的规则。
+`AGENTS.md` 与它并列存在（POSIX 上是符号链接，Windows 上是副本），供 Codex / Kimi 引擎读取。
+
+各引擎只会从会话工作目录**向上**逐级查找并自动加载 `CLAUDE.md` / `AGENTS.md`。
+工作目录在 `METABOT_HOME` 之外的 bot 因此永远读不到这些规则，所以 bridge 改为在会话
+启动时读取该文件并追加到 system prompt。这条通路与引擎无关（Claude / Codex / Kimi 通用），
+且对**所有** bot 生效，不限于 `pmPrompt: true` 的 PM bot。
+
+当 bot 工作目录位于 `METABOT_HOME` **之内**时会**跳过**注入 —— 引擎自身的自动加载已经覆盖，
+再注入只会重复。文件超过 128 KiB 会截断并加标记；文件缺失或不可读只打 debug 日志并跳过，
+绝不会导致会话起不来。
 
 ## Claude Code
 
