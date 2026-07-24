@@ -143,11 +143,13 @@ feature 初步可用即可 PR 进 `main` 发布给用户试用，反馈回来再
 > `$METABOT_HOME` 是**每台机器各自的** metabot 运行目录，**不是**跨机器通用的固定路径——本仓库在不同服务器上的落点不同。解析顺序与 `bin/metabot` 的实现一致：环境变量 `METABOT_HOME` → `bin/metabot` 脚本所在目录的父目录（跟随符号链接）→ `$HOME/metabot`。要确认本机取值，跑 `metabot doctor --json` 读 `metabotHome` 字段。**下文所有 `$METABOT_HOME` 一律按本机实际取值理解，不要照抄其他机器的路径。**
 >
 > 本节只约束**跑 metabot 服务的机器**。仅把本仓库作为参考/开发 checkout、不跑服务的机器不受「停在 `dev`」约束，停在 `main` 或任何分支都可以。
+>
+> 该变量由 pm2 注入（`ecosystem.config.cjs` 的 `env` 中 `METABOT_HOME: __dirname`），bridge 及其 spawn 出的 bot 会话都继承它，因此在 bot 会话里通常已就绪。但**普通 SSH shell 里它可能是空的**（`.env`、`~/.bashrc`、`/etc/environment` 都不设置它），而 `cd ""` 会**静默成功并留在当前目录**——那正是本节要防的漂移。所以下面一律写成 `cd "${METABOT_HOME:?...}"`：变量为空时立即报错中止，绝不在错误的目录上继续 merge 和重启。
 
 要 live 测某个 feature：
 
 ```bash
-cd "$METABOT_HOME"          # 唯一 runtime，永远是这里
+cd "${METABOT_HOME:?未设置：先 export METABOT_HOME=<本机 metabot 运行目录>}"   # 唯一 runtime，永远是这里
 git merge feat/A            # 把要测的合进来
 metabot restart --wait --json --resume --reason "live test feat/A" --source pm --bot <botName> --chat <chatId>
 ```
@@ -155,7 +157,7 @@ metabot restart --wait --json --resume --reason "live test feat/A" --source pm -
 `dev` 乱了或要换一组测：
 
 ```bash
-cd "$METABOT_HOME"
+cd "${METABOT_HOME:?未设置：先 export METABOT_HOME=<本机 metabot 运行目录>}"
 git reset --hard main       # dev 是一次性的，随时重建
 git merge feat/B
 metabot restart --wait --json --resume --reason "live test feat/B" --source pm --bot <botName> --chat <chatId>
