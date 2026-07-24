@@ -6,6 +6,7 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `METABOT_HOME` | `process.cwd()` | MetaBot runtime directory. Written to `.env` and exported to your shell profile by the installer. `$METABOT_HOME/CLAUDE.md` (with `AGENTS.md` alongside it) holds the host-wide project rules, which the bridge injects into **every** bot's system prompt — see [Host instructions](#host-instructions) |
 | `BOTS_CONFIG` | — | Path to `bots.json` for multi-bot mode |
 | `FEISHU_APP_ID` | — | Feishu app ID (single-bot mode) |
 | `FEISHU_APP_SECRET` | — | Feishu app secret (single-bot mode) |
@@ -14,6 +15,26 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `METABOT_LOCAL_ADDRESS` | — | Bind all Feishu sockets (REST + wss long-connection) to this local source IP, forcing source-based routing past VPN smart split-tunneling (e.g. a corporate VPN hijacking `*.feishu.cn` into a dead tunnel). Unset = default route |
 | `METABOT_PUBLIC_DISTRIBUTION` | — | metabot-core server flag. The `/cli/*` and `/install/*` install endpoints are token-gated by default; set to `1` (or `true`) to serve them anonymously. Only enable when you intentionally self-distribute and your build embeds no secrets |
+
+### Host instructions
+
+`$METABOT_HOME/CLAUDE.md` is MetaBot's only cross-host channel for project
+rules — MetaMemory is per-server and not shared, so what is checked into the
+runtime directory is what every bot on that machine obeys. `AGENTS.md` sits
+next to it (a symlink on POSIX, a copy on Windows) so the Codex and Kimi
+engines find it too.
+
+The agent engines only auto-load `CLAUDE.md` / `AGENTS.md` by walking *up*
+from the session working directory. Bots whose working directory lives outside
+`METABOT_HOME` would therefore never see these rules, so the bridge reads the
+file at session spawn and appends it to the system prompt instead. That path is
+engine-independent (Claude, Codex and Kimi alike) and applies to every bot, not
+just ones with `pmPrompt: true`.
+
+Injection is **skipped** when the bot's working directory is inside
+`METABOT_HOME` — the engine's own auto-load already covers it, and injecting
+would duplicate the content. Files over 128 KiB are truncated with a marker;
+a missing or unreadable file is logged at debug level and skipped, never fatal.
 
 ## Claude Code
 
