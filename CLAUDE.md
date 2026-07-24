@@ -138,12 +138,16 @@ feature 初步可用即可 PR 进 `main` 发布给用户试用，反馈回来再
 
 ### live 验证与重启位置（固定，不要漂移）
 
-**服务永远只从 `/root/metabot` 运行，该 checkout 永远停在 `dev`。绝不在 `feat/*` 的 worktree 里重启服务。**
+**服务永远只从本机的 runtime checkout `$METABOT_HOME` 运行，该 checkout 永远停在 `dev`。绝不在 `feat/*` 的 worktree 里重启服务。**
+
+> `$METABOT_HOME` 是**每台机器各自的** metabot 运行目录，**不是**跨机器通用的固定路径——本仓库在不同服务器上的落点不同。解析顺序与 `bin/metabot` 的实现一致：环境变量 `METABOT_HOME` → `bin/metabot` 脚本所在目录的父目录（跟随符号链接）→ `$HOME/metabot`。要确认本机取值，跑 `metabot doctor --json` 读 `metabotHome` 字段。**下文所有 `$METABOT_HOME` 一律按本机实际取值理解，不要照抄其他机器的路径。**
+>
+> 本节只约束**跑 metabot 服务的机器**。仅把本仓库作为参考/开发 checkout、不跑服务的机器不受「停在 `dev`」约束，停在 `main` 或任何分支都可以。
 
 要 live 测某个 feature：
 
 ```bash
-cd /root/metabot            # 唯一 runtime，永远是这里
+cd "$METABOT_HOME"          # 唯一 runtime，永远是这里
 git merge feat/A            # 把要测的合进来
 metabot restart --wait --json --resume --reason "live test feat/A" --source pm --bot <botName> --chat <chatId>
 ```
@@ -151,7 +155,7 @@ metabot restart --wait --json --resume --reason "live test feat/A" --source pm -
 `dev` 乱了或要换一组测：
 
 ```bash
-cd /root/metabot
+cd "$METABOT_HOME"
 git reset --hard main       # dev 是一次性的，随时重建
 git merge feat/B
 metabot restart --wait --json --resume --reason "live test feat/B" --source pm --bot <botName> --chat <chatId>
@@ -202,7 +206,7 @@ metabot restart --wait --json --resume \
 - 2026-07-22 MEM-011 merge-hygiene detector 不能用 raw source substring 扫描自身覆盖到的 test/gate files，否则 adversarial fixtures 会 self-poison；forbidden AutoResearchClaw legacy candidate aliases 应按 TS AST identifier / semantic property name 检测，Git conflict markers 应先 mask comments 与 string/template literals 后再查 raw marker line。该设计保留真实 source-level 检测，同时允许测试中放字符串/注释 fixture。
 - 2026-07-22 MEM-011 merge-hygiene lifecycle：GitHub Actions `pull_request` checkout 的 `refs/pull/*/merge` 是 synthetic CI merge，不是发布集成 merge；CI workflow 用 step-level `if: github.event_name != 'pull_request'` 跳过 production parent-vs-merge scan，CLI 本身不做 env-based skip，避免 spoofed PR env 抑制真实 merge commit 扫描。`push` 到真实 merge commit、以及手动/本地 `--merge <ref>` 仍会执行 parent-vs-merge semantic-loss scan；PR 上仍靠 `npm test` 跑 gate 单测/对抗测试。
 - 2026-07-22 MEM-011 CLI 测试隔离：`packages/cli/vitest.config.ts` 必须显式 `fileParallelism:false` + `pool:'forks'` + `poolOptions.forks.isolate:true`，且不能启用 `singleFork:true`；Vitest 3 的 `singleFork` 会让多个测试文件共享同一个 child process/global context，CLI 测试替换/修改 `process.env` 和 `vi.stubGlobal` 时会泄漏到后续文件。用 `packages/cli/tests/isolation-env-{a,b}.test.ts` 的双文件行为回归证明 per-file isolation 生效；发布前 canonical `npm test` 需要连续多次稳定通过，不能只用 isolated CLI run 代替。
-- 2026-07-23 **worktree 门禁结果可能失真**：worktree 位于 `/root/metabot/worktrees/<name>`，若其中没有自己的 `node_modules`，Node 与 TypeScript 会**向上**查找并命中 `/root/metabot/node_modules`，其 `@xvirobotics/*` 是指向 `/root/metabot/packages/*` 的符号链接——也就是 **`dev` 分支的、已构建的**那一份。结果是你以为在验证 worktree 里的代码，实际部分解析到了 `dev` 的产物，`npm test` / `npm run typecheck` 会假绿。在 worktree 里跑发布门禁前必须先 `npm_config_nodedir=/usr npm_config_strict_ssl=false npm ci`（该 flag 组合规避 node-pty/node-gyp 的 `SELF_SIGNED_CERT_IN_CHAIN`），确认 `ls node_modules/@xvirobotics` 存在且指向本 worktree 的 `packages/*` 后再采信结果。
+- 2026-07-23 **worktree 门禁结果可能失真**：worktree 位于 `$METABOT_HOME/worktrees/<name>`，若其中没有自己的 `node_modules`，Node 与 TypeScript 会**向上**查找并命中 `$METABOT_HOME/node_modules`，其 `@xvirobotics/*` 是指向 `$METABOT_HOME/packages/*` 的符号链接——也就是 **`dev` 分支的、已构建的**那一份。结果是你以为在验证 worktree 里的代码，实际部分解析到了 `dev` 的产物，`npm test` / `npm run typecheck` 会假绿。在 worktree 里跑发布门禁前必须先 `npm_config_nodedir=/usr npm_config_strict_ssl=false npm ci`（该 flag 组合规避 node-pty/node-gyp 的 `SELF_SIGNED_CERT_IN_CHAIN`），确认 `ls node_modules/@xvirobotics` 存在且指向本 worktree 的 `packages/*` 后再采信结果。
 - 2026-07-23 CI `check` job 的步骤顺序有硬约束：`Build workspace libraries`（构建 `@xvirobotics/cli-core` / `metamemory` / `skill-hub`）**必须早于** `npm run typecheck`。根 typecheck 覆盖 7 个 project，其中 `packages/cli` / `metamemory` / `skill-hub` 经 `exports -> dist/` 导入 cli-core，未构建时报 `TS2307 Cannot find module '@xvirobotics/cli-core/...'`。MEM-011 把该步从 `npx tsc --noEmit`（只查根 bridge project，容忍先于构建）换成 `npm run typecheck` 时未同步调整顺序，且因 CI 只在 push/PR 到 `main`/`dev` 时触发、相关分支从未推送，该顺序一直未被执行到。注意此故障**在本地复现不出来**（本地 TypeScript 的 project-reference source redirect 会绕开缺失的 dist），只能靠 CI 暴露。
 
 <!-- METABOT-WORKER -->
