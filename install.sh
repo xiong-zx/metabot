@@ -1211,6 +1211,50 @@ else
   warn "Could not determine working directory, skipping workspace deployment"
 fi
 
+# --- Assert $METABOT_HOME/CLAUDE.md + AGENTS.md exist -----------------------
+# These two files are MetaBot's only cross-host channel for project rules
+# (MetaMemory is per-server), and the bridge injects CLAUDE.md into every bot's
+# system prompt. Both ship in the repo — CLAUDE.md as a regular file, AGENTS.md
+# as a symlink to it — but a tarball install, an export that flattened symlinks,
+# or a filesystem without symlink support can leave either one missing. Repair
+# rather than assume.
+ensure_home_instructions() {
+  local claude_md="$METABOT_HOME/CLAUDE.md"
+  local agents_md="$METABOT_HOME/AGENTS.md"
+
+  if [[ ! -f "$claude_md" ]]; then
+    # Land the bundled workspace template so the injection channel is never
+    # empty. Erroring out here would abort an otherwise-complete install over a
+    # docs file, and a partial rule set beats no rules at all.
+    if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
+      cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$claude_md"
+      warn "$claude_md was missing — seeded it from src/workspace/CLAUDE.md."
+      warn "Your checkout may be stale: cd $METABOT_HOME && git fetch origin && git status"
+    else
+      error "$claude_md is missing and no template was found at $METABOT_HOME/src/workspace/CLAUDE.md."
+      error "Your $METABOT_HOME checkout is incomplete — bots on this host will get no project rules."
+      error "Try: cd $METABOT_HOME && git fetch origin && git checkout -- CLAUDE.md AGENTS.md"
+      return 1
+    fi
+  fi
+
+  if [[ ! -e "$agents_md" ]]; then
+    # Symlink is preferred (one file, two engine entrypoints); fall back to a
+    # copy on filesystems that reject symlinks.
+    if (cd "$METABOT_HOME" && ln -s CLAUDE.md AGENTS.md 2>/dev/null); then
+      success "Linked $agents_md → CLAUDE.md"
+    elif cp "$claude_md" "$agents_md" 2>/dev/null; then
+      warn "Symlinks unavailable — copied CLAUDE.md to $agents_md (re-run install.sh after editing CLAUDE.md)"
+    else
+      error "Could not create $agents_md — Codex/Kimi engines will not see the host project rules."
+      return 1
+    fi
+  fi
+
+  success "Host instructions present: $claude_md + $agents_md"
+}
+ensure_home_instructions || warn "Host instruction files are incomplete — see the errors above."
+
 # ============================================================================
 # Phase 7: Legacy MetaMemory cleanup (embedded MetaMemory removed in Phase 4)
 # ============================================================================
