@@ -2,6 +2,7 @@ import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
+import { buildHomeInstructionsSection } from '../home-instructions.js';
 import {
   KimiDaemonClient,
   type KimiPendingQuestion,
@@ -172,6 +173,7 @@ export class KimiExecutor {
 
         const fullPrompt = buildPromptWithContext(
           goal.kind === 'start' ? goal.objective : prompt,
+          cwd,
           outputsDir,
           apiContext,
         );
@@ -310,10 +312,16 @@ export class KimiExecutor {
 
   private buildPromptWithContext(
     prompt: string,
+    cwd: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
   ): string {
     const sections: string[] = [];
+
+    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
+    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
+    const homeInstructions = buildHomeInstructionsSection({ cwd, logger: this.logger });
+    if (homeInstructions) sections.push(homeInstructions);
 
     if (outputsDir) {
       sections.push(
