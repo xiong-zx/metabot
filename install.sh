@@ -1031,6 +1031,23 @@ if [[ ! -f "$SKILL_SENTINEL" ]]; then
   exit 1
 fi
 
+# Clean up legacy metaskill skill if present — no longer installed by default.
+# Users who still want the agent-team generator can copy it back from
+# $METABOT_HOME/src/skills/metaskill/ (the source files remain bundled in the repo).
+if [[ -d "$SKILLS_DIR/metaskill" ]]; then
+  rm -rf "$SKILLS_DIR/metaskill"
+  info "Removed legacy metaskill skill from $SKILLS_DIR (now opt-in — see src/skills/metaskill/)"
+fi
+
+# Clean up legacy skill bundles (Phase 4 consolidation: subsumed by unified
+# `metabot` skill that delegates memory/skills/agents/t5t to metabot-core).
+for legacy in metamemory skill-hub memory; do
+  if [[ -d "$SKILLS_DIR/$legacy" ]]; then
+    rm -rf "$SKILLS_DIR/$legacy"
+    info "Removed legacy $legacy skill (use \`metabot ${legacy/skill-hub/skills}\` instead)"
+  fi
+done
+
 META_SKILL_SOURCES=(
   "metabot:$METABOT_HOME/packages/skills/metabot"
   "metabot-team:$METABOT_HOME/packages/skills/metabot-team"
