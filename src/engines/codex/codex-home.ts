@@ -24,12 +24,20 @@ export function workdirHomeSlug(cwd: string): string {
 }
 
 /**
+ * Where a workdir's isolated CODEX_HOME lives. Pure path math — read-only
+ * callers (session listing) need the location without creating or seeding it.
+ */
+export function workdirCodexHomePath(cwd: string): string {
+  return path.join(codexHomesBaseDir(), workdirHomeSlug(cwd));
+}
+
+/**
  * Ensure a per-workdir Codex home exists and is seeded from the global home.
  * The bot defaults to Codex's global home; this helper is used only when
  * `codex.homeScope` is set to `workdir`.
  */
 export function prepareWorkdirCodexHome(cwd: string, logger: Logger): string {
-  const home = path.join(codexHomesBaseDir(), workdirHomeSlug(cwd));
+  const home = workdirCodexHomePath(cwd);
   const fresh = !existsSync(home);
   mkdirSync(home, { recursive: true });
 
