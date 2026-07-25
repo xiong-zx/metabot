@@ -119,6 +119,134 @@ function truncateReferencedText(text: string): { text: string; truncated: boolea
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+const METABOT_CARD_CHROME_PREFIXES = [
+  '\u{1F3AF} **Goal:**',
+  '**State:**',
+  '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team**',
+  '\u{1F4E1} **Background**',
+];
+const METABOT_TOOL_STATUS_PATTERN =
+  /^(?:\u{23F3}|\u{2705})\s+\*\*.+\*\*\s+\u{00B7}\s+\d+\s+tools?$/u;
+
+function isMetaBotCardChrome(node: unknown): boolean {
+  if (!isRecord(node) || node.tag !== 'markdown' || typeof node.content !== 'string') {
+    return false;
+  }
+  const content = node.content.trim();
+  return METABOT_CARD_CHROME_PREFIXES.some(prefix => content.startsWith(prefix))
+    || METABOT_TOOL_STATUS_PATTERN.test(content);
+}
+
+function stripLeadingMetaBotCardChrome(elements: unknown): unknown {
+  if (!Array.isArray(elements)) return elements;
+
+  let index = 0;
+  while (index < elements.length && isMetaBotCardChrome(elements[index])) {
+    index += 1;
+    const separator = elements[index];
+    if (isRecord(separator) && separator.tag === 'hr') index += 1;
+  }
+  return index > 0 ? elements.slice(index) : elements;
+}
+
+function isMetaBotStatsFooter(node: Record<string, unknown>): boolean {
+  if (node.tag !== 'column_set' || node.background_style !== 'grey' || !Array.isArray(node.columns)) {
+    return false;
+  }
+  return node.columns.some(column => {
+    if (!isRecord(column) || !Array.isArray(column.elements)) return false;
+    return column.elements.some(element => (
+      isRecord(element)
+      && element.tag === 'markdown'
+      && typeof element.content === 'string'
+      && element.content.startsWith('<font color="grey"')
+    ));
+  });
+}
+
+function collectInteractiveCardText(node: unknown, output: string[]): void {
+  if (Array.isArray(node)) {
+    for (const item of node) collectInteractiveCardText(item, output);
+    return;
+  }
+  if (!isRecord(node)) return;
+
+  const tag = typeof node.tag === 'string' ? node.tag : '';
+  if (tag === 'markdown' || tag === 'plain_text' || tag === 'lark_md') {
+    if (typeof node.content === 'string' && node.content.trim()) {
+      output.push(node.content.trim());
+    }
+    return;
+  }
+
+  // Known footer panels and controls are visible UI metadata, not the
+  // conversational answer the user intended to quote.
+  if (
+    tag === 'note'
+    || tag === 'button'
+    || tag === 'select_static'
+    || tag === 'overflow'
+  ) {
+    return;
+  }
+
+  if (tag === 'table') {
+    const columns = Array.isArray(node.columns) ? node.columns.filter(isRecord) : [];
+    const columnNames = columns
+      .map(column => typeof column.name === 'string' ? column.name : '')
+      .filter(Boolean);
+    const header = columns
+      .map(column => typeof column.display_name === 'string' ? column.display_name.trim() : '')
+      .filter(Boolean);
+    if (header.length > 0) output.push(header.join(' | '));
+
+    if (Array.isArray(node.rows)) {
+      for (const row of node.rows) {
+        if (!isRecord(row)) continue;
+        const values = (columnNames.length > 0 ? columnNames.map(name => row[name]) : Object.values(row))
+          .map(value => typeof value === 'string' ? value.trim() : '')
+          .filter(Boolean);
+        if (values.length > 0) output.push(values.join(' | '));
+      }
+    }
+    return;
+  }
+
+  if (tag === 'div') {
+    collectInteractiveCardText(node.text, output);
+    if (Array.isArray(node.fields)) {
+      for (const field of node.fields) {
+        if (isRecord(field)) collectInteractiveCardText(field.text, output);
+      }
+    }
+    return;
+  }
+
+  if (tag === 'column_set') {
+    if (!isMetaBotStatsFooter(node)) collectInteractiveCardText(node.columns, output);
+    return;
+  }
+
+  collectInteractiveCardText(node.elements, output);
+}
+
+function extractInteractiveCardText(card: unknown): string {
+  if (!isRecord(card)) return '';
+  const body = isRecord(card.body) ? card.body : undefined;
+  const elements = body?.elements ?? card.elements;
+  const output: string[] = [];
+  collectInteractiveCardText(stripLeadingMetaBotCardChrome(elements), output);
+  if (output.length > 0) return cleanMessageText(output.join('\n\n'));
+
+  const config = isRecord(card.config) ? card.config : undefined;
+  const summary = isRecord(config?.summary) ? config.summary : undefined;
+  return typeof summary?.content === 'string' ? cleanMessageText(summary.content) : '';
+}
+
 function parseReferencedMessage(
   snapshot: FeishuMessageSnapshot,
   logger: Logger,
@@ -152,8 +280,16 @@ function parseReferencedMessage(
         fileName: parsed.file_name,
         ts: Date.now(),
       }];
+    } else if (messageType === 'interactive') {
+      text = extractInteractiveCardText(parsed);
+      if (!text) {
+        logger.info(
+          { messageId: snapshot.messageId, messageType },
+          'Referenced interactive card contained no extractable text',
+        );
+      }
     } else {
-      logger.debug({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
+      logger.info({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
       return { media: [] };
     }
 
@@ -183,6 +319,7 @@ async function resolveReferencedMessage(
 ): Promise<{
   replyContext?: IncomingMessage['replyContext'];
   media: CachedMedia[];
+  messageType?: string;
 }> {
   const cachedMedia = consumeCachedMedia(cache, chatId, userId, messageId);
   if (!messageSender || typeof messageSender.getMessage !== 'function') {
@@ -193,13 +330,14 @@ async function resolveReferencedMessage(
   if (!snapshot) return { media: cachedMedia };
   if (snapshot.chatId && snapshot.chatId !== chatId) {
     logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
-    return { media: [] };
+    return { media: [], messageType: snapshot.messageType };
   }
 
   const parsed = parseReferencedMessage(snapshot, logger);
   return {
     replyContext: parsed.replyContext,
     media: parsed.media.length > 0 ? parsed.media : cachedMedia,
+    messageType: snapshot.messageType,
   };
 }
 
@@ -619,7 +757,8 @@ export function createEventDispatcher(
             chatId,
             userId,
             replyToMessageId,
-            messageType: replyContext?.messageType,
+            referencedMessageType: resolved.messageType,
+            parsedMessageType: replyContext?.messageType,
             mediaCount: referencedMedia.length,
           }, 'Resolved replied message context');
         }

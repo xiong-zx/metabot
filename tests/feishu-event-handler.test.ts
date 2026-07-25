@@ -6,6 +6,8 @@ import {
   parseGroupReplyModeCommand,
   shouldProcessGroupMessage,
 } from '../src/feishu/event-handler.js';
+import { buildCard } from '../src/feishu/card-builder.js';
+import { buildCardV2 } from '../src/feishu/card-builder-v2.js';
 import type { IncomingMessage } from '../src/types.js';
 
 function config(groupNoMention = false): BotConfig {
@@ -60,16 +62,17 @@ function messageHandler(
   messageSender?: any,
 ) {
   const received: IncomingMessage[] = [];
+  const testLogger = logger();
   const dispatcher = createEventDispatcher(
     config(groupNoMention),
-    logger(),
+    testLogger,
     msg => received.push(msg),
     botOpenId,
     messageSender,
   );
   const handle = dispatcher.handles.get('im.message.receive_v1');
   if (!handle) throw new Error('message handler was not registered');
-  return { received, handle: (data: unknown) => handle(data) };
+  return { received, logger: testLogger, handle: (data: unknown) => handle(data) };
 }
 
 describe('Feishu inbound message routing', () => {
@@ -157,6 +160,231 @@ describe('Feishu inbound message routing', () => {
       messageType: 'text',
       text: 'original message without a mention',
     });
+  });
+
+  it('loads a referenced schema-v2 interactive card into explicit reply context', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'bot-card-v2',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        content: JSON.stringify({
+          schema: '2.0',
+          config: { summary: { content: 'short fallback' } },
+          body: {
+            elements: [
+              { tag: 'markdown', content: '**Main answer**' },
+              {
+                tag: 'div',
+                text: { tag: 'lark_md', content: 'Detailed explanation' },
+                fields: [{
+                  is_short: true,
+                  text: { tag: 'lark_md', content: 'Field detail' },
+                }],
+              },
+              {
+                tag: 'table',
+                columns: [
+                  { name: 'name', display_name: 'Name' },
+                  { name: 'value', display_name: 'Value' },
+                ],
+                rows: [{ name: 'alpha', value: '42' }],
+              },
+              {
+                tag: 'column_set',
+                columns: [{
+                  tag: 'column',
+                  elements: [{ tag: 'markdown', content: 'Column answer' }],
+                }],
+              },
+              {
+                tag: 'column_set',
+                background_style: 'grey',
+                columns: [{
+                  tag: 'column',
+                  elements: [{
+                    tag: 'markdown',
+                    content: '<font color="grey" size="2">_ctx: 1k/1m | $0.01_</font>',
+                  }],
+                }],
+              },
+            ],
+          },
+        }),
+      })),
+    };
+    const { received, logger: testLogger, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-card-v2',
+      text: 'continue from this answer',
+      parentId: 'bot-card-v2',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'bot-card-v2',
+      messageType: 'interactive',
+      text: '**Main answer**\n\nDetailed explanation\n\nField detail\n\nName | Value\n\nalpha | 42\n\nColumn answer',
+    });
+    expect(testLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyToMessageId: 'bot-card-v2',
+        referencedMessageType: 'interactive',
+        parsedMessageType: 'interactive',
+      }),
+      'Resolved replied message context',
+    );
+  });
+
+  it('loads a referenced schema-v1 interactive card into explicit reply context', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'bot-card-v1',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        content: JSON.stringify({
+          elements: [
+            { tag: 'markdown', content: 'Original answer' },
+            {
+              tag: 'note',
+              elements: [{ tag: 'plain_text', content: 'model and token footer' }],
+            },
+          ],
+        }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-card-v1',
+      text: 'use this',
+      parentId: 'bot-card-v1',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'bot-card-v1',
+      messageType: 'interactive',
+      text: 'Original answer',
+    });
+  });
+
+  it.each([
+    ['schema-v1', buildCard],
+    ['schema-v2', buildCardV2],
+  ])('strips MetaBot status chrome from a referenced %s card', async (_schema, cardBuilder) => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'full-metabot-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        content: cardBuilder({
+          status: 'complete',
+          userPrompt: 'question',
+          responseText: '**Actual answer**',
+          toolCalls: [],
+          lifecycleStage: 'responding',
+          lifecycleKey: 'turn-123',
+          goalCondition: 'finish the investigation',
+          teamState: {
+            name: 'review-team@chat:chat-1',
+            agents: [{ name: 'reviewer', status: 'working', lastSubject: 'audit parser' }],
+            tasks: [{ taskId: 'task-1', subject: 'audit parser', status: 'in_progress', agent: 'reviewer' }],
+          },
+          backgroundEvents: [{
+            taskId: 'background-123',
+            description: 'watch tests',
+            status: 'running',
+            lastEvent: 'still running',
+          }],
+          totalTokens: 1_000,
+          contextWindow: 1_000_000,
+          model: 'test-model',
+        }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-full-card',
+      text: 'continue from the answer',
+      parentId: 'full-metabot-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'full-metabot-card',
+      messageType: 'interactive',
+      text: '**Actual answer**',
+    });
+  });
+
+  it('records an empty referenced interactive card without warning noise', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'empty-bot-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        content: JSON.stringify({
+          elements: [
+            {
+              tag: 'note',
+              elements: [{ tag: 'plain_text', content: 'footer only' }],
+            },
+          ],
+        }),
+      })),
+    };
+    const { received, logger: testLogger, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-empty-card',
+      text: 'continue',
+      parentId: 'empty-bot-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'empty-bot-card',
+      messageType: 'interactive',
+    });
+    expect(testLogger.info).toHaveBeenCalledWith(
+      { messageId: 'empty-bot-card', messageType: 'interactive' },
+      'Referenced interactive card contained no extractable text',
+    );
+  });
+
+  it('records an unsupported referenced message type without warning noise', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'unsupported-audio',
+        chatId: 'chat-1',
+        messageType: 'audio',
+        content: JSON.stringify({ file_key: 'audio-key' }),
+      })),
+    };
+    const { received, logger: testLogger, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-audio',
+      text: 'what was that',
+      parentId: 'unsupported-audio',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toBeUndefined();
+    expect(testLogger.info).toHaveBeenCalledWith(
+      { messageId: 'unsupported-audio', messageType: 'audio' },
+      'Referenced message type is unsupported',
+    );
+    expect(testLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        referencedMessageType: 'audio',
+        parsedMessageType: undefined,
+      }),
+      'Resolved replied message context',
+    );
   });
 
   it('loads a referenced file through message lookup after the cache is unavailable', async () => {
