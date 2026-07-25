@@ -39,6 +39,7 @@ import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { apply1MContextSettings, applyClaudeChildEnvPolicy, loadMcpServersWithApiContext, resolveClaudePermissionOptions } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
+import { buildHomeInstructionsSection } from '../home-instructions.js';
 import { ptyQuery } from './pty/pty-query.js';
 import { resolveClaudePath } from './resolve-executable.js';
 import type {
@@ -463,6 +464,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // guidance. Stable for the lifetime of this executor (this differs from
     // the legacy executor which rebuilds per turn).
     const appendSections: string[] = [];
+    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
+    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
+    const homeInstructions = buildHomeInstructionsSection({ cwd: this.options.cwd, logger: this.options.logger });
+    if (homeInstructions) appendSections.push(homeInstructions);
     if (this.options.outputsDir) {
       appendSections.push(
         `## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${this.options.outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`,

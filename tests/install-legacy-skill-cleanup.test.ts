@@ -25,7 +25,7 @@ function extractBlock(startMarker: string, endMarker: string): string {
   return INSTALL_SOURCE.slice(start, end);
 }
 
-const CLEANUP_BLOCK = extractBlock('# Clean up legacy metaskill skill', 'META_SKILL_SOURCES=(');
+const CLEANUP_BLOCK = extractBlock('# Clean up legacy metaskill skill', '# Deploy the bundled skills');
 
 const tempDirs: string[] = [];
 

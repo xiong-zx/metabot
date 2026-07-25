@@ -99,6 +99,42 @@ describe('metabot doctor command', () => {
     expect(source).toContain('st_mode');
     expect(source).toContain('0o4000');
   });
+
+  it('diagnoses bundled skill deployment and points at repair-skills (MEM-014 pillar 1)', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('check("bundled_skills"');
+    expect(source).toContain('bundled_skill_missing');
+    expect(source).toContain('metabot repair-skills');
+    expect(source).toContain('"requiredSkill"');
+    // Reports all three skill roots.
+    expect(source).toContain('".claude" / "skills"');
+    expect(source).toContain('codex_home / "skills"');
+    expect(source).toContain('".agents" / "skills"');
+  });
+
+  it('diagnoses global home-instruction rule files + precedence model (MEM-014 pillar 5)', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('check("home_instructions"');
+    expect(source).toContain('home_instructions_missing');
+    expect(source).toContain('instructionModel');
+    expect(source).toContain('local (working directory) wins over global');
+    expect(source).toContain('report["cwd"]');
+  });
+});
+
+describe('metabot repair-skills command', () => {
+  it('is wired as a self-heal subcommand reusing the bundled skill list', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('cmd_repair_skills()');
+    expect(source).toContain('repair-skills) shift; cmd_repair_skills "$@" ;;');
+    expect(source).toContain('metabot repair-skills  Redeploy bundled skills');
+    // Same three sources + roots as install.sh deploy_bundled_skills.
+    expect(source).toContain('"metabot:$METABOT_HOME/packages/skills/metabot"');
+    expect(source).toContain('"metabot-team:$METABOT_HOME/packages/skills/metabot-team"');
+    expect(source).toContain('"voice:$METABOT_HOME/src/skills/voice"');
+    // No installer side effects: never restarts services or edits .env.
+    expect(source).toContain('NEVER restarts services or edits .env');
+  });
 });
 
 describe('Codex install defaults', () => {

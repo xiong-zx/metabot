@@ -20,6 +20,7 @@ import {
 import { prepareWorkdirCodexHome } from './codex-home.js';
 import { resolveDefaultCodexSandbox } from './sandbox-support.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
+import { buildHomeInstructionsSection } from '../home-instructions.js';
 
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
@@ -492,7 +493,7 @@ export class CodexExecutor {
         }
       }
     }
-    const developerInstructions = this.buildDeveloperInstructions(outputsDir, apiContext, !!this.config.pmPrompt);
+    const developerInstructions = this.buildDeveloperInstructions(cwd, outputsDir, apiContext, !!this.config.pmPrompt);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
@@ -664,11 +665,17 @@ export class CodexExecutor {
   }
 
   private buildDeveloperInstructions(
+    cwd: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
     includePmPrompt: boolean,
   ): string | undefined {
     const sections: string[] = [];
+
+    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
+    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
+    const homeInstructions = buildHomeInstructionsSection({ cwd, logger: this.logger });
+    if (homeInstructions) sections.push(homeInstructions);
 
     if (outputsDir) {
       sections.push(

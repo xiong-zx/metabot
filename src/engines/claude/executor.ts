@@ -10,6 +10,7 @@ import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
+import { buildHomeInstructionsSection } from '../home-instructions.js';
 import { resolveClaudePath } from './resolve-executable.js';
 import { CONTEXT_WINDOW_200K, FABLE_5_MODEL_RE } from '../../utils/model-id.js';
 
@@ -554,6 +555,11 @@ export class ClaudeExecutor {
 
     // Build system prompt appendix from sections
     const appendSections: string[] = [];
+
+    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
+    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
+    const homeInstructions = buildHomeInstructionsSection({ cwd, logger: this.logger });
+    if (homeInstructions) appendSections.push(homeInstructions);
 
     if (outputsDir) {
       appendSections.push(`## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`);
