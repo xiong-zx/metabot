@@ -1344,6 +1344,89 @@ check("teamclaude", team_ok, "teamclaude_not_configured_or_invalid" if not team_
       False,
       team_data)
 
+# --- Bundled skill deployment (MEM-014 pillar 1) ---------------------------
+# The installer deploys three bundled skills (metabot, metabot-team, voice) into
+# three skill roots. A host that never ran install.sh — or whose $HOME was reset
+# — may be missing them, which silently strips the `metabot` skill from a bot.
+# `metabot repair-skills` redeploys them; flag the gap here so agents can heal it.
+try:
+    home_dir = Path.home()
+except Exception:
+    home_dir = Path(os.path.expanduser("~"))
+bundled_skill_names = ["metabot", "metabot-team", "voice"]
+required_skill = "metabot"
+skill_roots = {
+    "claude": home_dir / ".claude" / "skills",
+    "codex": codex_home / "skills",
+    "agents": home_dir / ".agents" / "skills",
+}
+skill_root_report = {}
+for label, root in skill_roots.items():
+    present = {}
+    for name in bundled_skill_names:
+        # A skill is "in place" when its SKILL.md exists under the root.
+        present[name] = (root / name / "SKILL.md").is_file()
+    skill_root_report[label] = {
+        "path": str(root),
+        "exists": root.is_dir(),
+        "skills": present,
+    }
+missing_required_roots = [
+    label for label, r in skill_root_report.items()
+    if not r["skills"].get(required_skill)
+]
+bundled_skills_ok = not missing_required_roots
+check("bundled_skills", bundled_skills_ok,
+      "ok" if bundled_skills_ok else "bundled_skill_missing",
+      ("Required skill '" + required_skill + "' is present in all skill roots (claude, codex, agents).")
+      if bundled_skills_ok else
+      ("Required skill '" + required_skill + "' is missing from skill root(s): " + ", ".join(missing_required_roots) + "."),
+      "Run `metabot repair-skills` to redeploy bundled skills (metabot, metabot-team, voice) into ~/.claude/skills, $CODEX_HOME/skills, and ~/.agents/skills.",
+      True,
+      {"requiredSkill": required_skill, "bundledSkills": bundled_skill_names, "roots": skill_root_report})
+
+# --- Global rule files / instruction-loading model (MEM-014 pillar 5) ------
+# $METABOT_HOME/CLAUDE.md is the global rule baseline injected into every bot's
+# system prompt (see src/engines/home-instructions.ts). Report whether it — and
+# its AGENTS.md twin — exist and are readable, and describe the precedence model.
+def _readable(p):
+    try:
+        return p.is_file() and os.access(str(p), os.R_OK)
+    except Exception:
+        return False
+home_claude = home / "CLAUDE.md"
+home_agents = home / "AGENTS.md"
+home_claude_ok = _readable(home_claude)
+home_agents_ok = _readable(home_agents)
+home_instructions_ok = home_claude_ok and home_agents_ok
+_missing_home = []
+if not home_claude_ok:
+    _missing_home.append("CLAUDE.md")
+if not home_agents_ok:
+    _missing_home.append("AGENTS.md")
+check("home_instructions", home_instructions_ok,
+      "ok" if home_instructions_ok else "home_instructions_missing",
+      "Global rule files exist and are readable at $METABOT_HOME (CLAUDE.md + AGENTS.md)."
+      if home_instructions_ok else
+      ("Global rule file(s) missing or unreadable at " + str(home) + ": " + ", ".join(_missing_home) + "."),
+      "Ensure $METABOT_HOME/CLAUDE.md and AGENTS.md exist (install.sh runs ensure_home_instructions); global rules are injected into every bot from here.",
+      False,
+      {
+          "metabotHome": str(home),
+          "claudeMd": {"path": str(home_claude), "readable": home_claude_ok},
+          "agentsMd": {"path": str(home_agents), "readable": home_agents_ok},
+          "instructionModel": (
+              "Global baseline = $METABOT_HOME/CLAUDE.md (+AGENTS.md), injected into every bot's "
+              "system prompt. Local = the bot workDir's CLAUDE.md/AGENTS.md, auto-loaded by the "
+              "engine from the session cwd upward. On conflict, local (working directory) wins over global."
+          ),
+      })
+
+try:
+    report["cwd"] = os.getcwd()
+except Exception:
+    report["cwd"] = None
+
 report["ok"] = all(c.get("ok") for c in checks if c["name"] in ("metabot_home", "pm2_runtime", "bridge_health"))
 report["summary"] = {
     "ok": sum(1 for c in checks if c["ok"]),
@@ -1356,6 +1439,7 @@ if want_json:
 else:
     print(f"MetaBot doctor: {'OK' if report['ok'] else 'WARN'}")
     print(f"  METABOT_HOME: {home}")
+    print(f"  cwd: {report.get('cwd')}")
     for c in checks:
         mark = "✓" if c["ok"] else "!"
         print(f"  {mark} {c['name']}: {c['code']}")
@@ -1363,6 +1447,84 @@ else:
             print(f"    next: {c['recommendedAction']}")
     print("\nUse `metabot doctor --json` for agent-readable diagnostics.")
 PY
+}
+
+# metabot repair-skills — self-heal entry point for hosts that never ran
+# install.sh (or whose $HOME skill roots were reset). Redeploys the three bundled
+# skills (metabot, metabot-team, voice) into ~/.claude/skills, $CODEX_HOME/skills,
+# and ~/.agents/skills. Idempotent. This intentionally reimplements install.sh's
+# deploy_bundled_skills (same three sources + roots + idempotent cp) so it stays
+# free of installer side effects — it NEVER restarts services or edits .env.
+# Keep the source list in sync with deploy_bundled_skills in install.sh.
+cmd_repair_skills() {
+  local dry_run=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run|-n) dry_run=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot repair-skills [--dry-run]"
+        echo "  Redeploy bundled skills (metabot, metabot-team, voice) into"
+        echo "  ~/.claude/skills, \$CODEX_HOME/skills, and ~/.agents/skills."
+        echo "  Idempotent; does not restart services or edit .env."
+        return 0
+        ;;
+      *)
+        error "Unknown repair-skills option: $1"
+        echo "  Usage: metabot repair-skills [--dry-run]"
+        return 1
+        ;;
+    esac
+  done
+
+  local skills_dir="$HOME/.claude/skills"
+  local codex_home_dir="${CODEX_HOME:-$HOME/.codex}"
+  local codex_skills_dir="$codex_home_dir/skills"
+  local agents_skills_dir="$HOME/.agents/skills"
+
+  # Sentinel: bail loudly on a stale/incomplete checkout, never a false success.
+  local sentinel="$METABOT_HOME/packages/skills/metabot/SKILL.md"
+  if [[ ! -f "$sentinel" ]]; then
+    error "Bundled skill source not found at: $sentinel"
+    error "Your $METABOT_HOME checkout appears to be stale or incomplete."
+    error "Try: cd $METABOT_HOME && git fetch origin && git reset --hard origin/main"
+    return 1
+  fi
+
+  # Keep this list in sync with deploy_bundled_skills() in install.sh.
+  local sources=(
+    "metabot:$METABOT_HOME/packages/skills/metabot"
+    "metabot-team:$METABOT_HOME/packages/skills/metabot-team"
+    "voice:$METABOT_HOME/src/skills/voice"
+  )
+
+  local root spec skill src
+  for root in "$skills_dir" "$codex_skills_dir" "$agents_skills_dir"; do
+    for spec in "${sources[@]}"; do
+      skill="${spec%%:*}"
+      src="${spec#*:}"
+      if [[ ! -d "$src" ]]; then
+        error "Bundled skill source missing: $src"
+        return 1
+      fi
+      if [[ "$dry_run" == true ]]; then
+        info "[dry-run] would install $skill → $root/$skill"
+        continue
+      fi
+      mkdir -p "$root/$skill"
+      if ! cp -r "$src/." "$root/$skill/"; then
+        error "Failed to copy $skill into $root/$skill"
+        return 1
+      fi
+      success "$skill installed → $root/$skill"
+    done
+  done
+
+  if [[ "$dry_run" == true ]]; then
+    info "Dry run complete — no files written. Re-run without --dry-run to apply."
+  else
+    success "Bundled skills repaired in ~/.claude/skills, \$CODEX_HOME/skills, ~/.agents/skills."
+  fi
+  return 0
 }
 
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
@@ -2472,6 +2634,7 @@ print_help() {
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
+  echo "    metabot repair-skills  Redeploy bundled skills into ~/.claude, \$CODEX_HOME, ~/.agents (idempotent)"
   echo ""
   echo "  Bridge daemon API (localhost:9100):"
   echo "    metabot bots                       List all bots (local + peer)"
@@ -2499,6 +2662,7 @@ case "${1:-}" in
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;
+  repair-skills) shift; cmd_repair_skills "$@" ;;
   bots|b|bot|talk|t|talk-status|ts|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
