@@ -184,6 +184,56 @@ sed_i() {
   fi
 }
 
+# Deploy the bundled skills (metabot, metabot-team, voice) into one or more skill
+# roots. Idempotent: re-running overwrites the copies in place. Shared by Phase 6
+# below and `metabot repair-skills` (bin/metabot reimplements the same three
+# sources + roots so a host that never ran install.sh can self-heal — keep the
+# two in sync). Fails loudly on a stale/incomplete checkout, never claiming
+# success when a bundled source is missing.
+# Usage: deploy_bundled_skills <metabot_home> <root> [<root> ...]
+deploy_bundled_skills() {
+  local home="$1"; shift
+  local roots=("$@")
+
+  # Sentinel: the bundled skill tree must exist in the checkout. A missing
+  # sentinel means a stale/incomplete checkout — bail with a clear message
+  # instead of cryptic cp errors (or, worse, a false success).
+  local sentinel="$home/packages/skills/metabot/SKILL.md"
+  if [[ ! -f "$sentinel" ]]; then
+    error "Bundled skill source not found at: $sentinel"
+    error "Your $home checkout appears to be stale or incomplete."
+    error "Try: cd $home && git fetch origin && git reset --hard origin/main"
+    error "(WARNING: 'git reset --hard' discards uncommitted local changes.)"
+    return 1
+  fi
+
+  local sources=(
+    "metabot:$home/packages/skills/metabot"
+    "metabot-team:$home/packages/skills/metabot-team"
+    "voice:$home/src/skills/voice"
+  )
+
+  local root spec skill src
+  for root in "${roots[@]}"; do
+    mkdir -p "$root"
+    for spec in "${sources[@]}"; do
+      skill="${spec%%:*}"
+      src="${spec#*:}"
+      if [[ ! -d "$src" ]]; then
+        error "Bundled skill source missing: $src"
+        return 1
+      fi
+      mkdir -p "$root/$skill"
+      if ! cp -r "$src/." "$root/$skill/"; then
+        error "Failed to copy $skill into $root/$skill"
+        return 1
+      fi
+      success "$skill installed → $root/$skill"
+    done
+  done
+  return 0
+}
+
 # ============================================================================
 # Phase 0.5: Resolve install directory
 # Priority: --dir CLI arg > METABOT_HOME env var > interactive prompt > default.
@@ -1040,37 +1090,12 @@ SKILLS_DIR="$HOME/.claude/skills"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_SKILLS_DIR="$CODEX_HOME_DIR/skills"
 AGENTS_SKILLS_DIR="$HOME/.agents/skills"
-mkdir -p "$SKILLS_DIR"
-mkdir -p "$CODEX_SKILLS_DIR"
-mkdir -p "$AGENTS_SKILLS_DIR"
 
-# Sanity check: bundled skill tree must exist in the checked-out repo.
-# If it's missing, the user's checkout is stale (predates the skill bundling
-# commits) — fail with a clear message instead of cryptic cp errors.
-SKILL_SENTINEL="$METABOT_HOME/packages/skills/metabot/SKILL.md"
-if [[ ! -f "$SKILL_SENTINEL" ]]; then
-  error "Bundled skill source not found at: $SKILL_SENTINEL"
-  error "Your $METABOT_HOME checkout appears to be stale or incomplete."
-  error "Try: cd $METABOT_HOME && git fetch origin && git reset --hard origin/main"
-  error "(WARNING: 'git reset --hard' discards uncommitted local changes.)"
-  exit 1
-fi
-
-META_SKILL_SOURCES=(
-  "metabot:$METABOT_HOME/packages/skills/metabot"
-  "metabot-team:$METABOT_HOME/packages/skills/metabot-team"
-  "voice:$METABOT_HOME/src/skills/voice"
-)
-
-for root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
-  for spec in "${META_SKILL_SOURCES[@]}"; do
-    skill="${spec%%:*}"
-    src="${spec#*:}"
-    mkdir -p "$root/$skill"
-    cp -r "$src/." "$root/$skill/"
-    success "$skill installed → $root/$skill"
-  done
-done
+# Deploy the bundled skills (metabot, metabot-team, voice) into the three skill
+# roots via the shared, idempotent helper (also used by `metabot repair-skills`).
+# It creates each root, verifies the bundled sources exist, and fails loudly on a
+# stale/incomplete checkout instead of claiming success.
+deploy_bundled_skills "$METABOT_HOME" "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR" || exit 1
 
 # Detect Feishu bots
 HAS_FEISHU=false
@@ -1366,6 +1391,13 @@ done
 echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.bashrc"
 if [[ -f "$HOME/.zshrc" ]]; then
   echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.zshrc"
+fi
+# LOW-1: .profile is in the delete loop above, so re-add it here too (when it
+# exists) — otherwise its export is stripped on every re-run and never restored.
+# Login shells (bash without .bash_profile, or plain /bin/sh) source .profile,
+# not .bashrc, so SSH login sessions need the export here as well.
+if [[ -f "$HOME/.profile" ]]; then
+  echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.profile"
 fi
 info "Persisted METABOT_HOME=$METABOT_HOME to shell rc files"
 
