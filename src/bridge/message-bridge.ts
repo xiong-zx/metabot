@@ -25,6 +25,7 @@ import {
 } from '../engines/index.js';
 import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
 import { listCodexSessions } from '../engines/codex/session-lister.js';
+import { workdirCodexHomePath } from '../engines/codex/codex-home.js';
 import { listKimiSessions } from '../engines/kimi/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -1830,6 +1831,9 @@ export class MessageBridge {
       return listCodexSessions({
         workingDirectory: session.workingDirectory,
         currentSessionId: session.sessionId,
+        // Must match the home CodexExecutor runs with, or `/resume` lists
+        // threads from the global home the bot never writes to.
+        codexHome: this.resolveCodexHomeForListing(session.workingDirectory),
       });
     }
     if (activeEngine === 'kimi') {
@@ -1845,6 +1849,18 @@ export class MessageBridge {
       workingDirectory: session.workingDirectory,
       currentSessionId: session.sessionId,
     });
+  }
+
+  /**
+   * The CODEX_HOME this bot's Codex runs would use for `workingDirectory`.
+   * Mirrors `effectiveCodexHome` in CodexExecutor.startExecution, minus the
+   * seeding: listing sessions must not create a home as a side effect.
+   * Returns undefined when the bot uses Codex's global home.
+   */
+  private resolveCodexHomeForListing(workingDirectory: string): string | undefined {
+    const codexConfig = this.config.codex;
+    return codexConfig?.env?.CODEX_HOME
+      ?? (codexConfig?.homeScope === 'workdir' ? workdirCodexHomePath(workingDirectory) : undefined);
   }
 
   /**

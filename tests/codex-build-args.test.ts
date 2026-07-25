@@ -1,9 +1,23 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyCodexRuntimeOverrides, buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
+import {
+  resetCodexSandboxSupportForTests,
+  setCodexSandboxSupportForTests,
+} from '../src/engines/codex/sandbox-support.js';
 import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/config.js';
+
+// The default sandbox is probed at runtime (see codex-sandbox-support.test.ts).
+// Pin a namespace-capable host so these argv assertions describe the code, not
+// the machine the suite happens to run on.
+beforeEach(() => {
+  setCodexSandboxSupportForTests({ available: true, probe: 'bwrap' });
+});
+afterEach(() => {
+  resetCodexSandboxSupportForTests();
+});
 
 describe('buildCodexArgs', () => {
   const cwd = '/work/proj';

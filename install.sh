@@ -1091,6 +1091,23 @@ CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 CODEX_SKILLS_DIR="$CODEX_HOME_DIR/skills"
 AGENTS_SKILLS_DIR="$HOME/.agents/skills"
 
+# Clean up legacy metaskill skill if present — no longer installed by default.
+# Users who still want the agent-team generator can copy it back from
+# $METABOT_HOME/src/skills/metaskill/ (the source files remain bundled in the repo).
+if [[ -d "$SKILLS_DIR/metaskill" ]]; then
+  rm -rf "$SKILLS_DIR/metaskill"
+  info "Removed legacy metaskill skill from $SKILLS_DIR (now opt-in — see src/skills/metaskill/)"
+fi
+
+# Clean up legacy skill bundles (Phase 4 consolidation: subsumed by unified
+# `metabot` skill that delegates memory/skills/agents/t5t to metabot-core).
+for legacy in metamemory skill-hub memory; do
+  if [[ -d "$SKILLS_DIR/$legacy" ]]; then
+    rm -rf "$SKILLS_DIR/$legacy"
+    info "Removed legacy $legacy skill (use \`metabot ${legacy/skill-hub/skills}\` instead)"
+  fi
+done
+
 # Deploy the bundled skills (metabot, metabot-team, voice) into the three skill
 # roots via the shared, idempotent helper (also used by `metabot repair-skills`).
 # It creates each root, verifies the bundled sources exist, and fails loudly on a

@@ -32,11 +32,17 @@ export function listCodexSessions(opts: {
   currentSessionId?: string;
   limit?: number;
   homeDir?: string;
+  /**
+   * The CODEX_HOME the bot actually runs Codex with. Set it whenever the bot
+   * overrides the home (`codex.env.CODEX_HOME`, or `codex.homeScope: workdir`)
+   * — otherwise the listing reads the global home and shows no threads at all.
+   */
+  codexHome?: string;
   previewMaxLen?: number;
 }): SessionSummary[] {
   const { workingDirectory, currentSessionId, limit = 10, homeDir = os.homedir(), previewMaxLen = 80 } = opts;
 
-  const codexHome = codexHomeDir(homeDir);
+  const codexHome = opts.codexHome || codexHomeDir(homeDir);
   const indexed = listCodexSessionsFromStateDb({
     codexHome,
     workingDirectory,
