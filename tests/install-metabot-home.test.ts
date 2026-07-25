@@ -97,6 +97,7 @@ ensure_env_metabot_home
     fs.mkdirSync(fakeHome);
     fs.writeFileSync(path.join(fakeHome, '.bashrc'), '# existing bashrc\n');
     fs.writeFileSync(path.join(fakeHome, '.zshrc'), '# existing zshrc\n');
+    fs.writeFileSync(path.join(fakeHome, '.profile'), '# existing profile\n');
 
     const script = `${LOG_STUBS}
 OS="Linux"
@@ -109,11 +110,36 @@ ${region}
 `;
     runBash(script);
 
-    for (const rc of ['.bashrc', '.zshrc']) {
+    // .profile is included: the delete loop strips it, so the append must
+    // restore it too (LOW-1) — and never stack duplicates across re-runs.
+    for (const rc of ['.bashrc', '.zshrc', '.profile']) {
       const contents = fs.readFileSync(path.join(fakeHome, rc), 'utf-8');
       const exports = contents.split('\n').filter((l) => l.startsWith('export METABOT_HOME='));
       expect(exports).toEqual([`export METABOT_HOME="${tmp}/metabot"`]);
     }
+  });
+
+  it('re-adds METABOT_HOME to .profile after stripping the stale export (LOW-1)', () => {
+    // Regression for LOW-1: .profile was in the delete loop but not the append,
+    // so its export was removed on every re-run and never restored.
+    const sedI = extractBashFunction('sed_i');
+    const region = extractBashRegion(RC_REGION_START, RC_REGION_END);
+    const fakeHome = path.join(tmp, 'home');
+    fs.mkdirSync(fakeHome);
+    fs.writeFileSync(path.join(fakeHome, '.profile'), 'export METABOT_HOME="/old/path"\n');
+
+    // Two passes prove idempotency: stale removed, fresh present exactly once.
+    runBash(`${LOG_STUBS}\nOS="Linux"\nHOME="${fakeHome}"\nMETABOT_HOME="${tmp}/metabot"\n${sedI}\n${region}\n${region}\n`);
+
+    const contents = fs.readFileSync(path.join(fakeHome, '.profile'), 'utf-8');
+    const exports = contents.split('\n').filter((l) => l.startsWith('export METABOT_HOME='));
+    expect(exports).toEqual([`export METABOT_HOME="${tmp}/metabot"`]);
+    expect(contents).not.toContain('/old/path');
+  });
+
+  it('appends METABOT_HOME to .profile in the rc-export region (source guard)', () => {
+    const region = extractBashRegion(RC_REGION_START, RC_REGION_END);
+    expect(region).toContain('>> "$HOME/.profile"');
   });
 
   it('replaces a stale export instead of appending next to it', () => {
