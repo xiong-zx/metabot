@@ -18,6 +18,7 @@ import {
   type CodexJsonEvent,
 } from './jsonl-translator.js';
 import { prepareWorkdirCodexHome } from './codex-home.js';
+import { resolveDefaultCodexSandbox } from './sandbox-support.js';
 import { buildPmSystemPrompt } from '../pm-prompt.js';
 
 const isWindows = process.platform === 'win32';
@@ -428,7 +429,7 @@ export function buildCodexArgs(
     args.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
     args.push('-a', codexConfig.approvalPolicy ?? 'never');
-    args.push('--sandbox', codexConfig.sandbox ?? 'workspace-write');
+    args.push('--sandbox', codexConfig.sandbox ?? resolveDefaultCodexSandbox());
   }
 
   args.push('-C', cwd);
@@ -497,8 +498,11 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
+    // Resolve the sandbox here rather than leaving it to buildCodexArgs' own
+    // fallback, so the degrade warning is emitted through this bot's logger.
+    const sandbox = codexConfig.sandbox ?? resolveDefaultCodexSandbox(this.logger);
     const args = buildCodexArgs(
-      codexConfig,
+      { ...codexConfig, sandbox },
       cwd,
       fullPrompt,
       effectiveSessionId,

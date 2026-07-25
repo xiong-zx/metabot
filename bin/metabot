@@ -1174,7 +1174,35 @@ check("voice_defaults", voice_ok, "voice_defaults_missing" if not voice_ok else 
       False,
       voice_default)
 
-codex_path = env("CODEX_EXECUTABLE_PATH") or shutil.which("codex")
+# Mirror of resolveCodexPath() in src/engines/codex/executor.ts. doctor used to
+# consult only PATH, so a Codex the bridge runs happily from ~/.local/bin was
+# reported as `codex_missing` whenever doctor ran from a shell without that
+# directory on PATH — a false alarm that also dragged codex_agent_features down.
+CODEX_FALLBACK_CANDIDATES = (
+    "~/.local/bin/codex",
+    "/usr/local/bin/codex",
+    "/usr/bin/codex",
+    "/opt/homebrew/bin/codex",
+    "~/.npm-global/bin/codex",
+)
+
+def resolve_codex_executable(explicit=None, which=None, exists=None):
+    which = which or shutil.which
+    exists = exists or (lambda p: Path(p).exists())
+    if explicit and exists(explicit):
+        return explicit
+    found = which("codex")
+    if found:
+        return found
+    if os.name == "nt":
+        return None
+    for candidate in CODEX_FALLBACK_CANDIDATES:
+        expanded = str(Path(candidate).expanduser())
+        if exists(expanded):
+            return expanded
+    return None
+
+codex_path = resolve_codex_executable(env("CODEX_EXECUTABLE_PATH"))
 codex_home = Path(env("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 codex_config = codex_home / "config.toml"
 
