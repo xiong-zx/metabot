@@ -8,14 +8,19 @@ import {
 } from '../src/feishu/event-handler.js';
 import { buildCard } from '../src/feishu/card-builder.js';
 import { buildCardV2 } from '../src/feishu/card-builder-v2.js';
+import { buildPromptWithReplyContext } from '../src/bridge/message-bridge.js';
 import type { IncomingMessage } from '../src/types.js';
 
 function config(groupNoMention = false): BotConfig {
   return {
     name: 'test-bot',
     groupNoMention,
+    feishu: { appId: 'cli_self_app', appSecret: 'secret' },
   } as BotConfig;
 }
+
+/** Feishu reports this bot's own cards with `sender.id` = app_id or open_id. */
+const SELF_CARD_SENDER = { id: 'cli_self_app', idType: 'app_id', senderType: 'app' };
 
 function logger() {
   return {
@@ -168,6 +173,7 @@ describe('Feishu inbound message routing', () => {
         messageId: 'bot-card-v2',
         chatId: 'chat-1',
         messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
         content: JSON.stringify({
           schema: '2.0',
           config: { summary: { content: 'short fallback' } },
@@ -243,6 +249,7 @@ describe('Feishu inbound message routing', () => {
         messageId: 'bot-card-v1',
         chatId: 'chat-1',
         messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
         content: JSON.stringify({
           elements: [
             { tag: 'markdown', content: 'Original answer' },
@@ -279,6 +286,7 @@ describe('Feishu inbound message routing', () => {
         messageId: 'full-metabot-card',
         chatId: 'chat-1',
         messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
         content: cardBuilder({
           status: 'complete',
           userPrompt: 'question',
@@ -320,17 +328,253 @@ describe('Feishu inbound message routing', () => {
     });
   });
 
+  // F-4: the tool-status line is only emitted while a turn is in flight, so the
+  // chrome test above (status: 'complete') never exercises it. Drive the REAL
+  // builders with a running tool call to keep METABOT_TOOL_STATUS_PATTERN
+  // coupled to the format the builders actually emit.
+  it.each([
+    ['schema-v1', buildCard],
+    ['schema-v2', buildCardV2],
+  ])('strips in-flight tool status chrome from a referenced %s card', async (_schema, cardBuilder) => {
+    const content = cardBuilder({
+      status: 'running',
+      userPrompt: 'question',
+      responseText: 'partial answer so far',
+      toolCalls: [
+        { name: 'Read', status: 'done' },
+        { name: 'Bash', status: 'running' },
+      ],
+      totalTokens: 1_000,
+      contextWindow: 1_000_000,
+      model: 'test-model',
+    } as any);
+    // Guard the coupling itself: if the builder stops emitting the line, this
+    // test would pass vacuously.
+    expect(content).toContain('**Bash**');
+
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'in-flight-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
+        content,
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-in-flight-card',
+      text: 'what are you doing',
+      parentId: 'in-flight-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'in-flight-card',
+      messageType: 'interactive',
+      text: 'partial answer so far',
+    });
+  });
+
+  // F-1: Feishu does not contractually guarantee the read-back envelope for an
+  // interactive message, so extraction must recover text from every plausible
+  // shape rather than only the one our card builders emit.
+  it.each([
+    [
+      'bare elements wrapper',
+      { elements: [{ tag: 'markdown', content: 'wrapped answer' }] },
+      'wrapped answer',
+    ],
+    [
+      'card.elements wrapper',
+      { card: { elements: [{ tag: 'markdown', content: 'wrapped answer' }] } },
+      'wrapped answer',
+    ],
+    [
+      'card.body.elements wrapper',
+      { card: { body: { elements: [{ tag: 'markdown', content: 'wrapped answer' }] } } },
+      'wrapped answer',
+    ],
+    [
+      'i18n_elements variant',
+      {
+        header: { title: { tag: 'plain_text', content: 'Header chrome' } },
+        i18n_elements: {
+          zh_cn: [{ tag: 'markdown', content: '中文答案' }],
+          en_us: [{ tag: 'markdown', content: 'english answer' }],
+        },
+      },
+      '中文答案',
+    ],
+    [
+      'legacy nested-array rows of columns',
+      {
+        title: 'legacy card',
+        elements: [
+          [{ tag: 'text', text: 'legacy row one' }],
+          [{ tag: 'text', text: 'legacy row two' }, { tag: 'a', text: 'legacy link' }],
+        ],
+      },
+      'legacy row one\n\nlegacy row two\n\nlegacy link',
+    ],
+    [
+      'div with a plain string text field',
+      { elements: [{ tag: 'div', text: 'string div answer' }] },
+      'string div answer',
+    ],
+    [
+      'summary-only card',
+      { schema: '2.0', config: { summary: { content: 'summary fallback' } }, body: { elements: [] } },
+      'summary fallback',
+    ],
+    [
+      'unknown envelope recovered by the generic walk',
+      {
+        schema: '2.0',
+        unknown_container: { rows: [{ blocks: [{ tag: 'plain_text', content: 'deep answer' }] }] },
+      },
+      'deep answer',
+    ],
+    [
+      'button-only card recovered by the fallback passes',
+      { elements: [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: 'Approve' } }] }] },
+      'Approve',
+    ],
+  ])('recovers referenced card text from the %s read-back shape', async (_shape, card, expected) => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'shape-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
+        content: JSON.stringify(card),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-shape-card',
+      text: 'continue',
+      parentId: 'shape-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'shape-card',
+      messageType: 'interactive',
+      text: expected,
+    });
+  });
+
+  it('keeps numeric and boolean table cells in the quoted row', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'table-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
+        content: JSON.stringify({
+          body: {
+            elements: [{
+              tag: 'table',
+              columns: [
+                { name: 'metric', display_name: 'Metric' },
+                { name: 'count', display_name: 'Count' },
+                { name: 'passed', display_name: 'Passed' },
+              ],
+              rows: [{ metric: 'tests', count: 42, passed: true }],
+            }],
+          },
+        }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-table-card',
+      text: 'read the table',
+      parentId: 'table-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext?.text).toBe('Metric | Count | Passed\n\ntests | 42 | true');
+  });
+
+  it('accepts a replied card authored by this bot under its open_id', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'own-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        sender: { id: 'bot-open-id', idType: 'open_id', senderType: 'app' },
+        content: JSON.stringify({ elements: [{ tag: 'markdown', content: 'my own answer' }] }),
+      })),
+    };
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-own-card',
+      text: 'continue',
+      parentId: 'own-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toEqual({
+      messageId: 'own-card',
+      messageType: 'interactive',
+      text: 'my own answer',
+    });
+  });
+
+  // F-3: bot-to-bot content belongs on the agent bus, not scraped out of
+  // another app's card. Fails closed when the author cannot be confirmed.
+  it.each([
+    ['another bot in the same group', { id: 'cli_other_app', idType: 'app_id', senderType: 'app' }],
+    ['an unidentified author', undefined],
+  ])('does not preserve a replied card authored by %s', async (_case, cardSender) => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'foreign-card',
+        chatId: 'chat-1',
+        messageType: 'interactive',
+        sender: cardSender,
+        content: JSON.stringify({ elements: [{ tag: 'markdown', content: 'SECRET from other-bot session' }] }),
+      })),
+    };
+    const { received, logger: testLogger, handle } = messageHandler(false, 'bot-open-id', messageSender);
+
+    await handle(event({
+      messageId: 'reply-foreign-card',
+      text: 'continue',
+      parentId: 'foreign-card',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received).toHaveLength(1);
+    expect(received[0].replyContext).toBeUndefined();
+    expect(received[0].extraMedia).toBeUndefined();
+    expect(testLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: 'foreign-card', messageType: 'interactive' }),
+      'Referenced interactive card was not authored by this bot; skipping context preservation',
+    );
+  });
+
   it('records an empty referenced interactive card without warning noise', async () => {
     const messageSender = {
       getMessage: vi.fn(async () => ({
         messageId: 'empty-bot-card',
         chatId: 'chat-1',
         messageType: 'interactive',
+        sender: SELF_CARD_SENDER,
         content: JSON.stringify({
           elements: [
+            { tag: 'hr' },
             {
+              // MetaBot's own telemetry footer — the realistic "nothing to
+              // quote" card. Must not be mistaken for the answer.
               tag: 'note',
-              elements: [{ tag: 'plain_text', content: 'footer only' }],
+              elements: [{ tag: 'plain_text', content: 'ctx: 1.0k/1000k (0%) | $0.01' }],
             },
           ],
         }),
@@ -353,6 +597,9 @@ describe('Feishu inbound message routing', () => {
       { messageId: 'empty-bot-card', messageType: 'interactive' },
       'Referenced interactive card contained no extractable text',
     );
+    // F-2: the empty case must never claim there are attached file paths.
+    expect(buildPromptWithReplyContext('continue', received[0].replyContext))
+      .not.toContain('see the attached file paths below');
   });
 
   it('records an unsupported referenced message type without warning noise', async () => {
