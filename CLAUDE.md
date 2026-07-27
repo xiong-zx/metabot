@@ -217,6 +217,7 @@ metabot restart --wait --json --resume \
 - 2026-07-24 在**全新 `npm ci` 的 worktree** 里跑 `npm test` 会红，但不是你的改动坏了：根 `vitest run` 全绿，随后 workspace 阶段的 `packages/cli` / `metamemory` / `skill-hub` 报 `Failed to resolve entry for package "@xvirobotics/cli-core"`。原因与上一条同源——这些包经 `exports -> dist/` 导入 cli-core，而 `npm ci` 不会构建它。先 `npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub` 再 `npm test`。注意 `npm run typecheck` 在未构建时**照样通过**（project-reference source redirect 绕开缺失的 dist），所以 typecheck 绿不代表 `npm test` 会绿，两个门禁都要跑。
 - 2026-07-24 `$METABOT_HOME/CLAUDE.md` 是唯一的跨服务器规则传播通道（MetaMemory 每台机器独立）。引擎只从会话 cwd **向上**查找自动加载 CLAUDE.md/AGENTS.md，工作目录在 METABOT_HOME 之外的 bot 永远读不到，因此 `src/engines/home-instructions.ts` 在会话 spawn 时把该文件注入 system prompt，四个执行器（claude/claude-persistent/codex/kimi）全部接入。它**不能**放进 `buildPmSystemPrompt`——那条路径被 `pmPrompt: true` 门控，只覆盖 PM bot。cwd 位于 METABOT_HOME 之内时跳过注入（引擎自动加载已覆盖，避免重复），判定用 canonical 绝对路径 + `path.sep` 边界，`/root/metabot-foo` 不会被误判成在 `/root/metabot` 内。
 - 2026-07-27 MEM-013：MetaMemory ToDo 的规范读取与展示逻辑位于 bundled Skill `packages/skills/metabot-todos/`。调用其只读解析器，不要在 prompt、shell 或 bot 回复中重新拼装 Markdown 解析；解析器会忽略 fenced code、只读取每个任务的首张核心字段表，并对状态、章节顺序、重复 ID 和 `blocked_by` 做严格校验。
+- 2026-07-28 Skill Hub 多文件发布：`metabot skills publish <name> --from <dir>` 必须把 `SKILL.md` 之外的 UTF-8 脚本和 Agent 元数据打入 references bundle；`metabot skills install` 必须恢复这些文件并拒绝目录穿越、绝对路径、重复路径和符号链接目标。只上传 `SKILL.md` 会让依赖 bundled parser/helper 的 Skill 安装后不可用。
 
 <!-- METABOT-WORKER -->
 

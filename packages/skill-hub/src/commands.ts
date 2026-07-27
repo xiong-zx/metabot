@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as zlib from 'node:zlib';
 import { request } from './client.js';
 import type { Config } from './config.js';
 import { print } from '@xvirobotics/cli-core/print';
@@ -38,6 +39,122 @@ interface SkillRecordSnippet {
   name?: string;
   version?: number;
   skillMd?: string;
+  hasReferences?: boolean;
+}
+
+interface SkillReferenceFile {
+  path: string;
+  content: string;
+}
+
+interface SkillReferencesResponse {
+  files?: unknown;
+}
+
+const MAX_REFERENCES_DECOMPRESSED_BYTES = 10 * 1024 * 1024;
+
+function collectReferenceFiles(root: string): SkillReferenceFile[] {
+  const resolvedRoot = path.resolve(root);
+  const rootStat = fs.lstatSync(resolvedRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`publish: skill source must be a regular directory: ${root}`);
+  }
+  const files: SkillReferenceFile[] = [];
+
+  function visit(directory: string): void {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = path.relative(resolvedRoot, absolutePath).split(path.sep).join('/');
+      if (entry.isSymbolicLink()) {
+        throw new Error(`publish: symlinks are not supported in skill bundles: ${relativePath}`);
+      }
+      if (entry.isDirectory()) {
+        visit(absolutePath);
+        continue;
+      }
+      if (!entry.isFile() || relativePath === 'SKILL.md') continue;
+
+      const bytes = fs.readFileSync(absolutePath);
+      const content = bytes.toString('utf8');
+      if (!Buffer.from(content, 'utf8').equals(bytes)) {
+        throw new Error(`publish: skill bundle file must be UTF-8 text: ${relativePath}`);
+      }
+      files.push({ path: relativePath, content });
+    }
+  }
+
+  visit(resolvedRoot);
+  return files;
+}
+
+function packReferenceFiles(root: string): string | null {
+  const files = collectReferenceFiles(root);
+  if (files.length === 0) return null;
+  const payload = Buffer.from(JSON.stringify({ files }), 'utf8');
+  if (payload.byteLength > MAX_REFERENCES_DECOMPRESSED_BYTES) {
+    throw new Error('publish: skill reference files exceed the 10 MiB unpacked limit');
+  }
+  return zlib.gzipSync(payload).toString('base64');
+}
+
+function validateReferenceFiles(value: unknown): SkillReferenceFile[] {
+  if (!Array.isArray(value)) throw new Error('install: skill references response has no files array');
+  const seen = new Set<string>();
+  return value.map((candidate) => {
+    if (!candidate || typeof candidate !== 'object') {
+      throw new Error('install: skill reference entry must be an object');
+    }
+    const reference = candidate as { path?: unknown; content?: unknown };
+    if (typeof reference.path !== 'string' || typeof reference.content !== 'string') {
+      throw new Error('install: skill reference entry requires string path and content');
+    }
+    const filePath = reference.path;
+    const normalized = path.posix.normalize(filePath);
+    if (
+      !filePath
+      || filePath === 'SKILL.md'
+      || filePath.includes('\\')
+      || path.posix.isAbsolute(filePath)
+      || path.win32.isAbsolute(filePath)
+      || normalized !== filePath
+      || normalized === '..'
+      || normalized.startsWith('../')
+    ) {
+      throw new Error(`install: unsafe skill reference path: ${filePath}`);
+    }
+    if (seen.has(filePath)) throw new Error(`install: duplicate skill reference path: ${filePath}`);
+    seen.add(filePath);
+    return { path: filePath, content: reference.content };
+  });
+}
+
+function ensureSafeInstallPath(root: string, relativePath: string): string {
+  const parts = relativePath.split('/');
+  let current = root;
+  for (const part of parts.slice(0, -1)) {
+    current = path.join(current, part);
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`install: destination contains a symlink: ${current}`);
+    }
+    fs.mkdirSync(current, { recursive: true });
+  }
+  const destination = path.join(root, ...parts);
+  if (fs.existsSync(destination) && fs.lstatSync(destination).isSymbolicLink()) {
+    throw new Error(`install: destination is a symlink: ${destination}`);
+  }
+  return destination;
+}
+
+function assertNoSymlinkAncestors(destination: string): void {
+  const absolutePath = path.resolve(destination);
+  const parsed = path.parse(absolutePath);
+  let current = parsed.root;
+  for (const part of absolutePath.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`install: destination contains a symlink: ${current}`);
+    }
+  }
 }
 
 export async function cmdPublish(cfg: Config, args: ParsedArgs): Promise<void> {
@@ -68,12 +185,14 @@ export async function cmdPublish(cfg: Config, args: ParsedArgs): Promise<void> {
   const visibility =
     typeof args.flags.visibility === 'string' ? args.flags.visibility : undefined;
 
-  const body = await request<SkillRecordSnippet>(cfg, {
+  const publishBody: Record<string, unknown> = { skillMd, visibility };
+  if (from) publishBody.referencesTar = packReferenceFiles(from);
+  const result = await request<SkillRecordSnippet>(cfg, {
     method: 'POST',
     path: `/api/skills/${encodeURIComponent(name)}/publish`,
-    body: { skillMd, visibility },
+    body: publishBody,
   });
-  print(body);
+  print(result);
 }
 
 export async function cmdInstall(cfg: Config, args: ParsedArgs): Promise<void> {
@@ -87,10 +206,24 @@ export async function cmdInstall(cfg: Config, args: ParsedArgs): Promise<void> {
   if (!record.skillMd) {
     throw new Error(`install: ${name} returned no skillMd content`);
   }
-  fs.mkdirSync(to, { recursive: true });
-  const dst = path.join(to, 'SKILL.md');
+  let references: SkillReferenceFile[] = [];
+  if (record.hasReferences) {
+    const response = await request<SkillReferencesResponse>(cfg, {
+      path: `/api/skills/${encodeURIComponent(name)}/references`,
+    });
+    references = validateReferenceFiles(response.files);
+  }
+
+  const installRoot = path.resolve(to);
+  assertNoSymlinkAncestors(installRoot);
+  fs.mkdirSync(installRoot, { recursive: true });
+  const dst = ensureSafeInstallPath(installRoot, 'SKILL.md');
   fs.writeFileSync(dst, record.skillMd);
-  print({ name, installedTo: dst, version: record.version });
+  for (const reference of references) {
+    const referencePath = ensureSafeInstallPath(installRoot, reference.path);
+    fs.writeFileSync(referencePath, reference.content);
+  }
+  print({ name, installedTo: dst, version: record.version, referencesInstalled: references.length });
 }
 
 export async function cmdRemove(cfg: Config, args: ParsedArgs): Promise<void> {
@@ -119,11 +252,11 @@ Commands:
   search <query>                    FTS search over published skills
   get <name>                        Get one skill (includes SKILL.md)
   publish <name>                    Publish a skill. Source order:
-                                      --from <dir>   reads <dir>/SKILL.md
+                                      --from <dir>   bundles SKILL.md + text files
                                       --md <file>    reads file
                                       else           reads stdin
                                     Optional: --visibility published|private|shared
-  install <name>                    Download SKILL.md to a local skill dir
+  install <name>                    Download the complete skill bundle
                                       [--to <dir>]   default: .claude/skills/<name>
   remove <name>                     Unpublish a skill
   health

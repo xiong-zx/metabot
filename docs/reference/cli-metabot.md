@@ -202,7 +202,13 @@ metabot t5t board                   # team standup board
 metabot agents list                 # peer-bot directory
 metabot memory search "<query>"     # shared-memory full-text search
 metabot skills list                 # central Skill Hub
+metabot skills publish my-skill --from ./my-skill
+metabot skills install my-skill --to ~/.codex/skills/my-skill
 ```
+
+`skills publish --from` uploads the complete UTF-8 skill bundle, including
+scripts and agent metadata alongside `SKILL.md`. `skills install` restores the
+same validated relative paths and rejects traversal or symlink destinations.
 
 `METABOT_CORE_URL` / `METABOT_CORE_TOKEN` are fed from the bridge `.env` when
 not already exported. Override the CLI path with

@@ -655,6 +655,8 @@ metabot memory search "部署指南"     # 共享记忆全文搜索
 metabot memory visibility           # 查看当前 bot 默认写 public 还是 private
 metabot memory visibility private   # 切到 private（默认写 /users/<bot>，仅自己可读）
 metabot skills list                 # 技能仓库（中心 Skill Hub）
+metabot skills publish my-skill --from ./my-skill  # 发布完整 Skill bundle
+metabot skills install my-skill --to ~/.codex/skills/my-skill
 # 覆盖 metabot-core CLI 路径：export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 
 # 定时任务 — 推荐 CC 原生：直接在 Claude Code 里用 CronCreate / /loop。

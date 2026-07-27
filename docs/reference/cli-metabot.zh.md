@@ -199,7 +199,13 @@ metabot t5t board                   # 团队日报看板
 metabot agents list                 # 对端 Bot 通讯录
 metabot memory search "<query>"     # 共享记忆全文搜索
 metabot skills list                 # 中心 Skill Hub
+metabot skills publish my-skill --from ./my-skill
+metabot skills install my-skill --to ~/.codex/skills/my-skill
 ```
+
+`skills publish --from` 会上传完整的 UTF-8 Skill bundle，包括 `SKILL.md`
+之外的脚本和 Agent 元数据。`skills install` 会按经过校验的相对路径恢复完整
+bundle，并拒绝目录穿越和符号链接目标。
 
 未在环境中导出时，`METABOT_CORE_URL` / `METABOT_CORE_TOKEN` 从 bridge `.env`
 读取。用 `export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot` 覆盖
