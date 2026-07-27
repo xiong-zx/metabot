@@ -593,6 +593,7 @@ MetaBot 默认以 root-aware 模式运行 Claude Code：root 进程使用 `auto`
 | `/memory search 关键词` | 搜索知识库 |
 | `/sync` | 同步 MetaMemory 到飞书知识库 |
 | `/metaskill ...` | 生成团队脚手架、Claude 项目 subagent 或 Skill（可选 skill，默认不装） |
+| `/metabot-todos` | 使用规范解析器展示 MetaMemory 中的活跃 ToDo；支持 `--id <ID>`、`--all` 和 `--json` |
 | `/help` | 帮助 |
 
 > **模型切换**：每个会话可独立设置模型，默认 `claude-fable-5`。Fable 5 使用 Claude Code 原生 1M 上下文、128k max output 和 adaptive thinking；Opus/Sonnet 仍默认保持 200k 上下文，可在模型名后加 `[1m]` 启用 1M，例如 `/model claude-opus-4-8[1m]`。

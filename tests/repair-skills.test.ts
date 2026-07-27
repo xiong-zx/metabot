@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const METABOT_BIN = path.join(REPO_ROOT, 'bin', 'metabot');
-const BUNDLED = ['metabot', 'metabot-team', 'voice'];
+const BUNDLED = ['metabot', 'metabot-team', 'metabot-todos', 'voice'];
 
 let tmp: string;
 let metabotHome: string; // acts as METABOT_HOME (holds bundled skill sources)
@@ -20,7 +20,12 @@ beforeEach(() => {
   userHome = path.join(tmp, 'user-home');
   codexHome = path.join(userHome, '.codex');
   fs.mkdirSync(userHome, { recursive: true });
-  for (const rel of ['packages/skills/metabot', 'packages/skills/metabot-team', 'src/skills/voice']) {
+  for (const rel of [
+    'packages/skills/metabot',
+    'packages/skills/metabot-team',
+    'packages/skills/metabot-todos',
+    'src/skills/voice',
+  ]) {
     fs.mkdirSync(path.join(metabotHome, rel), { recursive: true });
     fs.writeFileSync(path.join(metabotHome, rel, 'SKILL.md'), `# ${rel}\n`);
   }
@@ -52,7 +57,7 @@ function skillRoots(): string[] {
 }
 
 describe('metabot repair-skills (end-to-end)', () => {
-  it('deploys the three bundled skills into all three skill roots, idempotently', () => {
+  it('deploys the four bundled skills into all three skill roots, idempotently', () => {
     expect(runMetabot(['repair-skills']).code).toBe(0);
     expect(runMetabot(['repair-skills']).code).toBe(0); // idempotent second pass
 

@@ -39,6 +39,8 @@ describe('skills installer', () => {
       // must land in both Claude and Codex project directories.
       expect(readFileSync(join(workDir, '.claude/skills/metabot/SKILL.md'), 'utf-8')).toContain('metabot');
       expect(readFileSync(join(workDir, '.codex/skills/metabot/SKILL.md'), 'utf-8')).toContain('metabot');
+      expect(readFileSync(join(workDir, '.claude/skills/metabot-todos/SKILL.md'), 'utf-8')).toContain('metabot-todos');
+      expect(readFileSync(join(workDir, '.codex/skills/metabot-todos/SKILL.md'), 'utf-8')).toContain('metabot-todos');
       expect(readFileSync(join(workDir, 'AGENTS.md'), 'utf-8')).toContain('MetaBot Workspace');
 
       // `metaskill` and `metaschedule` are opt-in: not deployed unless the

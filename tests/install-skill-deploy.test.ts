@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SH_SOURCE = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+const POWERSHELL_SOURCE = fs.readFileSync(path.join(REPO_ROOT, 'install.ps1'), 'utf-8');
 
 /** Same extraction helper style as tests/install-metabot-home.test.ts. */
 function extractBashFunction(name: string): string {
@@ -26,7 +27,7 @@ success() { echo "OK: $*"; }
 step() { :; }
 `;
 
-const BUNDLED = ['metabot', 'metabot-team', 'voice'];
+const BUNDLED = ['metabot', 'metabot-team', 'metabot-todos', 'voice'];
 
 let tmp: string;
 
@@ -43,6 +44,7 @@ function makeSkillSources(home: string) {
   for (const rel of [
     'packages/skills/metabot',
     'packages/skills/metabot-team',
+    'packages/skills/metabot-todos',
     'src/skills/voice',
   ]) {
     fs.mkdirSync(path.join(home, rel), { recursive: true });
@@ -65,7 +67,7 @@ function run(script: string): { code: number; out: string } {
 describe('deploy_bundled_skills (install.sh)', () => {
   const fn = () => extractBashFunction('deploy_bundled_skills');
 
-  it('deploys all three bundled skills into every target root', () => {
+  it('deploys all four bundled skills into every target root', () => {
     const home = path.join(tmp, 'home');
     makeSkillSources(home);
     const r1 = path.join(tmp, 'root1', 'skills');
@@ -81,7 +83,7 @@ describe('deploy_bundled_skills (install.sh)', () => {
     }
   });
 
-  it('is idempotent — three runs converge to exactly the three skills', () => {
+  it('is idempotent — three runs converge to exactly the four skills', () => {
     const home = path.join(tmp, 'home');
     makeSkillSources(home);
     const root = path.join(tmp, 'root', 'skills');
@@ -109,8 +111,8 @@ describe('deploy_bundled_skills (install.sh)', () => {
 
   it('fails when a non-sentinel bundled source (voice) is missing', () => {
     const home = path.join(tmp, 'partial-home');
-    // Sentinel + metabot-team present, but voice source absent.
-    for (const rel of ['packages/skills/metabot', 'packages/skills/metabot-team']) {
+    // Sentinel + packaged skills present, but voice source absent.
+    for (const rel of ['packages/skills/metabot', 'packages/skills/metabot-team', 'packages/skills/metabot-todos']) {
       fs.mkdirSync(path.join(home, rel), { recursive: true });
       fs.writeFileSync(path.join(home, rel, 'SKILL.md'), `# ${rel}\n`);
     }
@@ -119,5 +121,15 @@ describe('deploy_bundled_skills (install.sh)', () => {
     const { code, out } = run(`${LOG_STUBS}\n${fn()}\ndeploy_bundled_skills "${home}" "${root}"\n`);
     expect(code).not.toBe(0);
     expect(out).toContain('Bundled skill source missing');
+  });
+});
+
+describe('install.ps1 bundled skills', () => {
+  it('uses the packaged sentinel and deploys metabot-todos', () => {
+    expect(POWERSHELL_SOURCE).toContain(
+      '$SkillSentinel = Join-Path $MetabotHome "packages\\skills\\metabot\\SKILL.md"',
+    );
+    expect(POWERSHELL_SOURCE).toContain('"metabot-todos" = (Join-Path $MetabotHome "packages\\skills\\metabot-todos")');
+    expect(POWERSHELL_SOURCE).toContain('$deploySkills = @("metabot", "metabot-team", "metabot-todos", "voice")');
   });
 });

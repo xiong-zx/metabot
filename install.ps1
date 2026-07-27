@@ -629,7 +629,7 @@ New-Item -ItemType Directory -Path $AgentsSkillsDir -Force | Out-Null
 # Sanity check: the bundled skill tree must exist in the checked-out repo.
 # If it's missing, the user's checkout is stale (predates the skill bundling
 # commits) — fail with a clear message instead of cryptic Copy-Item errors.
-$SkillSentinel = Join-Path $MetabotHome "src\skills\metabot\SKILL.md"
+$SkillSentinel = Join-Path $MetabotHome "packages\skills\metabot\SKILL.md"
 if (-not (Test-Path $SkillSentinel)) {
     Write-Err "Bundled skill source not found at: $SkillSentinel"
     Write-Err "Your $MetabotHome checkout appears to be stale or incomplete."
@@ -651,6 +651,7 @@ if (Test-Path $LegacyMetaskillDir) {
 $MetaBotSkillSources = [ordered]@{
     "metabot" = (Join-Path $MetabotHome "packages\skills\metabot")
     "metabot-team" = (Join-Path $MetabotHome "packages\skills\metabot-team")
+    "metabot-todos" = (Join-Path $MetabotHome "packages\skills\metabot-todos")
     "voice" = (Join-Path $MetabotHome "src\skills\voice")
 }
 foreach ($skillRoot in @($SkillsDir, $CodexSkillsDir, $AgentsSkillsDir)) {
@@ -704,7 +705,7 @@ if ($DeployWorkDir) {
     # scheduler) are no longer deployed by default -- copy them from
     # $MetabotHome\src\skills\ if needed. CC native CronCreate / /loop already
     # cover ad-hoc, session-scoped scheduling.
-    $deploySkills = @("metabot", "metabot-team", "voice")
+    $deploySkills = @("metabot", "metabot-team", "metabot-todos", "voice")
     if ($HasFeishu) { $deploySkills += "feishu-doc" }
 
     foreach ($skill in $deploySkills) {

@@ -72,9 +72,9 @@ describe('install.sh legacy skill cleanup', () => {
   });
 
   it('leaves currently-shipped skills alone', () => {
-    const { skillsDir } = runCleanup(['metabot', 'metabot-team', 'voice', 'metaskill']);
+    const { skillsDir } = runCleanup(['metabot', 'metabot-team', 'metabot-todos', 'voice', 'metaskill']);
 
-    for (const kept of ['metabot', 'metabot-team', 'voice']) {
+    for (const kept of ['metabot', 'metabot-team', 'metabot-todos', 'voice']) {
       expect(fs.existsSync(path.join(skillsDir, kept, 'SKILL.md'))).toBe(true);
     }
   });

@@ -120,6 +120,8 @@ describe('pack-metabot.sh', () => {
   it('tarball includes the packaged skill bundles', () => {
     expect(tarListing).toContain('packages/skills/metabot/SKILL.md');
     expect(tarListing).toContain('packages/skills/metabot-team/SKILL.md');
+    expect(tarListing).toContain('packages/skills/metabot-todos/SKILL.md');
+    expect(tarListing).toContain('packages/skills/metabot-todos/scripts/todo-display.mjs');
   });
 
   it('tarball includes engine sources and workspace skills', () => {

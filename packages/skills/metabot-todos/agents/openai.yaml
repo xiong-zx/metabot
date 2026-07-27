@@ -1,0 +1,4 @@
+interface:
+  display_name: 'MetaBot ToDos'
+  short_description: 'Retrieve and display canonical MetaMemory ToDos'
+  default_prompt: 'Use $metabot-todos to show my current active ToDos.'
