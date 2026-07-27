@@ -182,11 +182,12 @@ cmd_update() {
   # agents/t5t to the metabot-core feature CLI). metabot-team is the compact
   # Agent Teams coordination skill. metaskill / metaschedule remain opt-in;
   # sources still ship in src/skills/* for manual copy.
-  for skill in metabot voice metabot-team; do
+  for skill in metabot voice metabot-team metabot-todos; do
     case "$skill" in
       metabot)      src="$METABOT_HOME/packages/skills/metabot" ;;
       voice)        src="$METABOT_HOME/src/skills/voice" ;;
       metabot-team) src="$METABOT_HOME/src/skills/metabot-team" ;;
+      metabot-todos) src="$METABOT_HOME/packages/skills/metabot-todos" ;;
       *)            src="" ;;
     esac
     if [[ -n "$src" && -d "$src" ]]; then
@@ -1373,7 +1374,8 @@ check("teamclaude", team_ok, "teamclaude_not_configured_or_invalid" if not team_
       team_data)
 
 # --- Bundled skill deployment (MEM-014 pillar 1) ---------------------------
-# The installer deploys three bundled skills (metabot, metabot-team, voice) into
+# The installer deploys four bundled skills (metabot, metabot-team,
+# metabot-todos, voice) into
 # three skill roots. A host that never ran install.sh — or whose $HOME was reset
 # — may be missing them, which silently strips the `metabot` skill from a bot.
 # `metabot repair-skills` redeploys them; flag the gap here so agents can heal it.
@@ -1381,8 +1383,9 @@ try:
     home_dir = Path.home()
 except Exception:
     home_dir = Path(os.path.expanduser("~"))
-bundled_skill_names = ["metabot", "metabot-team", "voice"]
+bundled_skill_names = ["metabot", "metabot-team", "metabot-todos", "voice"]
 required_skill = "metabot"
+required_skill_names = ["metabot", "metabot-todos"]
 skill_roots = {
     "claude": home_dir / ".claude" / "skills",
     "codex": codex_home / "skills",
@@ -1401,17 +1404,17 @@ for label, root in skill_roots.items():
     }
 missing_required_roots = [
     label for label, r in skill_root_report.items()
-    if not r["skills"].get(required_skill)
+    if any(not r["skills"].get(name) for name in required_skill_names)
 ]
 bundled_skills_ok = not missing_required_roots
 check("bundled_skills", bundled_skills_ok,
       "ok" if bundled_skills_ok else "bundled_skill_missing",
-      ("Required skill '" + required_skill + "' is present in all skill roots (claude, codex, agents).")
+      ("Required skills " + ", ".join(required_skill_names) + " are present in all skill roots (claude, codex, agents).")
       if bundled_skills_ok else
-      ("Required skill '" + required_skill + "' is missing from skill root(s): " + ", ".join(missing_required_roots) + "."),
-      "Run `metabot repair-skills` to redeploy bundled skills (metabot, metabot-team, voice) into ~/.claude/skills, $CODEX_HOME/skills, and ~/.agents/skills.",
+      ("One or more required skills (" + ", ".join(required_skill_names) + ") are missing from skill root(s): " + ", ".join(missing_required_roots) + "."),
+      "Run `metabot repair-skills` to redeploy bundled skills (metabot, metabot-team, metabot-todos, voice) into ~/.claude/skills, $CODEX_HOME/skills, and ~/.agents/skills.",
       True,
-      {"requiredSkill": required_skill, "bundledSkills": bundled_skill_names, "roots": skill_root_report})
+      {"requiredSkill": required_skill, "requiredSkills": required_skill_names, "bundledSkills": bundled_skill_names, "roots": skill_root_report})
 
 # --- Global rule files / instruction-loading model (MEM-014 pillar 5) ------
 # $METABOT_HOME/CLAUDE.md is the global rule baseline injected into every bot's
@@ -1478,10 +1481,10 @@ PY
 }
 
 # metabot repair-skills — self-heal entry point for hosts that never ran
-# install.sh (or whose $HOME skill roots were reset). Redeploys the three bundled
-# skills (metabot, metabot-team, voice) into ~/.claude/skills, $CODEX_HOME/skills,
+# install.sh (or whose $HOME skill roots were reset). Redeploys the four bundled
+# skills (metabot, metabot-team, metabot-todos, voice) into ~/.claude/skills, $CODEX_HOME/skills,
 # and ~/.agents/skills. Idempotent. This intentionally reimplements install.sh's
-# deploy_bundled_skills (same three sources + roots + idempotent cp) so it stays
+# deploy_bundled_skills (same four sources + roots + idempotent cp) so it stays
 # free of installer side effects — it NEVER restarts services or edits .env.
 # Keep the source list in sync with deploy_bundled_skills in install.sh.
 cmd_repair_skills() {
@@ -1491,7 +1494,7 @@ cmd_repair_skills() {
       --dry-run|-n) dry_run=true; shift ;;
       --help|-h)
         echo "Usage: metabot repair-skills [--dry-run]"
-        echo "  Redeploy bundled skills (metabot, metabot-team, voice) into"
+        echo "  Redeploy bundled skills (metabot, metabot-team, metabot-todos, voice) into"
         echo "  ~/.claude/skills, \$CODEX_HOME/skills, and ~/.agents/skills."
         echo "  Idempotent; does not restart services or edit .env."
         return 0
@@ -1522,6 +1525,7 @@ cmd_repair_skills() {
   local sources=(
     "metabot:$METABOT_HOME/packages/skills/metabot"
     "metabot-team:$METABOT_HOME/packages/skills/metabot-team"
+    "metabot-todos:$METABOT_HOME/packages/skills/metabot-todos"
     "voice:$METABOT_HOME/src/skills/voice"
   )
 

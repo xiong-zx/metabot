@@ -184,9 +184,9 @@ sed_i() {
   fi
 }
 
-# Deploy the bundled skills (metabot, metabot-team, voice) into one or more skill
+# Deploy the bundled skills (metabot, metabot-team, metabot-todos, voice) into one or more skill
 # roots. Idempotent: re-running overwrites the copies in place. Shared by Phase 6
-# below and `metabot repair-skills` (bin/metabot reimplements the same three
+# below and `metabot repair-skills` (bin/metabot reimplements the same four
 # sources + roots so a host that never ran install.sh can self-heal — keep the
 # two in sync). Fails loudly on a stale/incomplete checkout, never claiming
 # success when a bundled source is missing.
@@ -210,6 +210,7 @@ deploy_bundled_skills() {
   local sources=(
     "metabot:$home/packages/skills/metabot"
     "metabot-team:$home/packages/skills/metabot-team"
+    "metabot-todos:$home/packages/skills/metabot-todos"
     "voice:$home/src/skills/voice"
   )
 
@@ -1108,7 +1109,7 @@ for legacy in metamemory skill-hub memory; do
   fi
 done
 
-# Deploy the bundled skills (metabot, metabot-team, voice) into the three skill
+# Deploy the bundled skills (metabot, metabot-team, metabot-todos, voice) into the three skill
 # roots via the shared, idempotent helper (also used by `metabot repair-skills`).
 # It creates each root, verifies the bundled sources exist, and fails loudly on a
 # stale/incomplete checkout instead of claiming success.
@@ -1219,7 +1220,7 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   # scheduler) are no longer installed by default — copy them from
   # $METABOT_HOME/src/skills/ if you want them. CC native CronCreate / /loop
   # already cover ad-hoc, session-scoped scheduling.
-  DEPLOY_SKILLS="metabot metabot-team voice"
+  DEPLOY_SKILLS="metabot metabot-team metabot-todos voice"
   if [[ "$SETUP_LARK_CLI" == "true" ]]; then
     for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
       [[ -d "$SKILLS_DIR/$lark_skill" ]] && DEPLOY_SKILLS="$DEPLOY_SKILLS $lark_skill"

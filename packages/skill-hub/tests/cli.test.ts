@@ -2,9 +2,20 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as zlib from 'node:zlib';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
 import { parseArgs, cmdInstall, cmdPublish } from '../src/commands.js';
+
+async function withoutStdout(action: () => Promise<void>): Promise<void> {
+  const origWrite = process.stdout.write.bind(process.stdout);
+  (process.stdout as { write: (s: string) => boolean }).write = () => true;
+  try {
+    await action();
+  } finally {
+    process.stdout.write = origWrite;
+  }
+}
 
 describe('parseArgs', () => {
   it('handles --to flag value', () => {
@@ -100,6 +111,57 @@ describe('cmdInstall', () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it('installs validated reference files from a published bundle', async () => {
+    const skillMd = '---\nname: foo\n---\n# hi\n';
+    const cfg = { url: 'http://ex', token: 't' };
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => {
+      if (url.endsWith('/references')) {
+        return new Response(JSON.stringify({
+          files: [
+            { path: 'agents/openai.yaml', content: 'interface:\n  display_name: Foo\n' },
+            { path: 'scripts/run.mjs', content: 'console.log("ok");\n' },
+          ],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        name: 'foo', version: 2, skillMd, hasReferences: true,
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await withoutStdout(() => cmdInstall(cfg, { positional: ['foo'], flags: { to: tmp } }));
+      expect(fs.readFileSync(path.join(tmp, 'SKILL.md'), 'utf8')).toBe(skillMd);
+      expect(fs.readFileSync(path.join(tmp, 'agents', 'openai.yaml'), 'utf8')).toContain('display_name: Foo');
+      expect(fs.readFileSync(path.join(tmp, 'scripts', 'run.mjs'), 'utf8')).toBe('console.log("ok");\n');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('rejects unsafe reference paths before writing the skill', async () => {
+    const installDir = path.join(tmp, 'skill');
+    const cfg = { url: 'http://ex', token: 't' };
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => {
+      if (url.endsWith('/references')) {
+        return new Response(JSON.stringify({
+          files: [{ path: '../escape.txt', content: 'unsafe' }],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        name: 'foo', version: 1, skillMd: '# foo\n', hasReferences: true,
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await expect(cmdInstall(cfg, { positional: ['foo'], flags: { to: installDir } }))
+        .rejects.toThrow('unsafe skill reference path');
+      expect(fs.existsSync(path.join(tmp, 'escape.txt'))).toBe(false);
+      expect(fs.existsSync(path.join(installDir, 'SKILL.md'))).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
 
 describe('cmdPublish', () => {
@@ -136,6 +198,37 @@ describe('cmdPublish', () => {
       }
       const parsed = JSON.parse(captured.body!);
       expect(parsed.skillMd).toBe('# hello\n');
+      expect(parsed.referencesTar).toBeNull();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('bundles UTF-8 reference files recursively from --from <dir>', async () => {
+    fs.writeFileSync(path.join(tmp, 'SKILL.md'), '# hello\n');
+    fs.mkdirSync(path.join(tmp, 'agents'));
+    fs.mkdirSync(path.join(tmp, 'scripts'));
+    fs.writeFileSync(path.join(tmp, 'agents', 'openai.yaml'), 'display: Test\n');
+    fs.writeFileSync(path.join(tmp, 'scripts', 'run.mjs'), 'console.log("ok");\n');
+    let captured: { body?: string } = {};
+    const cfg = { url: 'http://ex', token: 't' };
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (_u: string, init: RequestInit) => {
+      captured.body = init.body as string;
+      return new Response(JSON.stringify({ name: 'x', version: 1, published: true }), {
+        status: 201,
+      });
+    }) as unknown as typeof fetch;
+    try {
+      await withoutStdout(() => cmdPublish(cfg, { positional: ['x'], flags: { from: tmp } }));
+      const parsed = JSON.parse(captured.body!);
+      const unpacked = JSON.parse(
+        zlib.gunzipSync(Buffer.from(parsed.referencesTar, 'base64')).toString('utf8'),
+      );
+      expect(unpacked.files).toEqual([
+        { path: 'agents/openai.yaml', content: 'display: Test\n' },
+        { path: 'scripts/run.mjs', content: 'console.log("ok");\n' },
+      ]);
     } finally {
       globalThis.fetch = origFetch;
     }

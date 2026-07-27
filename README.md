@@ -593,6 +593,7 @@ MetaBot 默认以 root-aware 模式运行 Claude Code：root 进程使用 `auto`
 | `/memory search 关键词` | 搜索知识库 |
 | `/sync` | 同步 MetaMemory 到飞书知识库 |
 | `/metaskill ...` | 生成团队脚手架、Claude 项目 subagent 或 Skill（可选 skill，默认不装） |
+| `/metabot-todos` | 使用规范解析器展示 MetaMemory 中的活跃 ToDo；支持 `--id <ID>`、`--all` 和 `--json` |
 | `/help` | 帮助 |
 
 > **模型切换**：每个会话可独立设置模型，默认 `claude-fable-5`。Fable 5 使用 Claude Code 原生 1M 上下文、128k max output 和 adaptive thinking；Opus/Sonnet 仍默认保持 200k 上下文，可在模型名后加 `[1m]` 启用 1M，例如 `/model claude-opus-4-8[1m]`。
@@ -654,6 +655,8 @@ metabot memory search "部署指南"     # 共享记忆全文搜索
 metabot memory visibility           # 查看当前 bot 默认写 public 还是 private
 metabot memory visibility private   # 切到 private（默认写 /users/<bot>，仅自己可读）
 metabot skills list                 # 技能仓库（中心 Skill Hub）
+metabot skills publish my-skill --from ./my-skill  # 发布完整 Skill bundle
+metabot skills install my-skill --to ~/.codex/skills/my-skill
 # 覆盖 metabot-core CLI 路径：export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot
 
 # 定时任务 — 推荐 CC 原生：直接在 Claude Code 里用 CronCreate / /loop。

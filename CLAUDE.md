@@ -33,6 +33,10 @@ For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/r
 
 Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或你自托管的地址）— 用本地 API token 访问，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
+### /metabot-todos — Canonical ToDo display
+
+`metabot-todos` is a bundled, read-only Skill for retrieving and rendering the canonical MetaMemory ToDo registry. It uses a deterministic parser instead of ad hoc Markdown parsing: default output shows active items, `--id <ID>` shows one complete item, `--all` includes terminal items, and `--json` returns structured data. Use this Skill whenever a user asks to show, list, inspect, or count ToDos.
+
 ### Scheduling
 
 > **引擎差异**：本节前半部分（`CronCreate` / `/loop`）是 **Claude engine 专有**的 Claude Code 内建工具。Codex / Kimi engine 没有这些工具，直接用后半部分的 `/metaschedule`，或 `remind_me` MCP 工具。
@@ -212,6 +216,8 @@ metabot restart --wait --json --resume \
 - 2026-07-23 CI `check` job 的步骤顺序有硬约束：`Build workspace libraries`（构建 `@xvirobotics/cli-core` / `metamemory` / `skill-hub`）**必须早于** `npm run typecheck`。根 typecheck 覆盖 7 个 project，其中 `packages/cli` / `metamemory` / `skill-hub` 经 `exports -> dist/` 导入 cli-core，未构建时报 `TS2307 Cannot find module '@xvirobotics/cli-core/...'`。MEM-011 把该步从 `npx tsc --noEmit`（只查根 bridge project，容忍先于构建）换成 `npm run typecheck` 时未同步调整顺序，且因 CI 只在 push/PR 到 `main`/`dev` 时触发、相关分支从未推送，该顺序一直未被执行到。注意此故障**在本地复现不出来**（本地 TypeScript 的 project-reference source redirect 会绕开缺失的 dist），只能靠 CI 暴露。
 - 2026-07-24 在**全新 `npm ci` 的 worktree** 里跑 `npm test` 会红，但不是你的改动坏了：根 `vitest run` 全绿，随后 workspace 阶段的 `packages/cli` / `metamemory` / `skill-hub` 报 `Failed to resolve entry for package "@xvirobotics/cli-core"`。原因与上一条同源——这些包经 `exports -> dist/` 导入 cli-core，而 `npm ci` 不会构建它。先 `npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub` 再 `npm test`。注意 `npm run typecheck` 在未构建时**照样通过**（project-reference source redirect 绕开缺失的 dist），所以 typecheck 绿不代表 `npm test` 会绿，两个门禁都要跑。
 - 2026-07-24 `$METABOT_HOME/CLAUDE.md` 是唯一的跨服务器规则传播通道（MetaMemory 每台机器独立）。引擎只从会话 cwd **向上**查找自动加载 CLAUDE.md/AGENTS.md，工作目录在 METABOT_HOME 之外的 bot 永远读不到，因此 `src/engines/home-instructions.ts` 在会话 spawn 时把该文件注入 system prompt，四个执行器（claude/claude-persistent/codex/kimi）全部接入。它**不能**放进 `buildPmSystemPrompt`——那条路径被 `pmPrompt: true` 门控，只覆盖 PM bot。cwd 位于 METABOT_HOME 之内时跳过注入（引擎自动加载已覆盖，避免重复），判定用 canonical 绝对路径 + `path.sep` 边界，`/root/metabot-foo` 不会被误判成在 `/root/metabot` 内。
+- 2026-07-27 MEM-013：MetaMemory ToDo 的规范读取与展示逻辑位于 bundled Skill `packages/skills/metabot-todos/`。调用其只读解析器，不要在 prompt、shell 或 bot 回复中重新拼装 Markdown 解析；解析器会忽略 fenced code、只读取每个任务的首张核心字段表，并对状态、章节顺序、重复 ID 和 `blocked_by` 做严格校验。
+- 2026-07-28 Skill Hub 多文件发布：`metabot skills publish <name> --from <dir>` 必须把 `SKILL.md` 之外的 UTF-8 脚本和 Agent 元数据打入 references bundle；`metabot skills install` 必须恢复这些文件并拒绝目录穿越、绝对路径、重复路径和符号链接目标。只上传 `SKILL.md` 会让依赖 bundled parser/helper 的 Skill 安装后不可用。
 
 <!-- METABOT-WORKER -->
 

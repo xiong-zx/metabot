@@ -34,6 +34,10 @@ For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/r
 
 Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或你自托管的地址）— 用本地 API token 访问，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
+### /metabot-todos — Canonical ToDo display
+
+`metabot-todos` is a bundled, read-only Skill for retrieving and rendering the canonical MetaMemory ToDo registry. It uses a deterministic parser instead of ad hoc Markdown parsing: default output shows active items, `--id <ID>` shows one complete item, `--all` includes terminal items, and `--json` returns structured data. Use this Skill whenever a user asks to show, list, inspect, or count ToDos.
+
 ### Scheduling (Claude Code native)
 
 Prefer Claude Code's built-in scheduling tools for ad-hoc, session-scoped tasks — no MetaBot server hop, runs in-process, stops when the session ends:

@@ -18,13 +18,14 @@
 | `/help` | 显示可用命令 |
 | `/metaskill ...` | 生成 Agent 团队、Agent 或 Skill |
 | `/metabot` | 加载 Agent 总线文档（调度、Bot 管理、跨实例对话） |
+| `/metabot-todos` | 使用规范解析器展示 MetaMemory 中的活跃 ToDo；可用 `--id <ID>` 或 `--all` 切换视图 |
 | `/任意命令` | 非内置命令自动转发给 Claude Code 作为 skill |
 
 ## 说明
 
 - **私聊**中，Bot 回复所有消息
 - `/memory` 和 `/sync` 等命令直接快速响应，无需启动 Claude
-- `/metaskill` 和 `/metabot` 是按需加载到 Claude 上下文的 skill
+- `/metaskill`、`/metabot` 和 `/metabot-todos` 是按需加载到 Agent 上下文的 skill
 
 ## 飞书群聊行为
 

@@ -17,7 +17,7 @@ import type { Logger } from '../utils/logger.js';
  *  Default ad-hoc scheduling is handled by Claude Code's native `CronCreate`
  *  and `/loop` tools, so the persistent scheduler skill is now opt-in.
  */
-const COMMON_SKILLS = ['metabot', 'phone-call'];
+const COMMON_SKILLS = ['metabot', 'metabot-todos', 'phone-call'];
 
 /** Lark CLI AI Agent skills — installed via `npx skills add larksuite/cli` and
  *  symlinked into ~/.claude/skills/ automatically. We copy them to the bot
@@ -140,6 +140,10 @@ function bundledSkillSource(skill: string): string | undefined {
       path.join(thisDir, '..', 'skills', 'metabot'),
       path.join(thisDir, '..', '..', 'packages', 'skills', 'metabot'),
       path.join(thisDir, '..', '..', 'src', 'skills', 'metabot'),
+    ],
+    'metabot-todos': [
+      path.join(thisDir, '..', 'skills', 'metabot-todos'),
+      path.join(thisDir, '..', '..', 'packages', 'skills', 'metabot-todos'),
     ],
     voice: [
       path.join(thisDir, '..', 'skills', 'voice'),

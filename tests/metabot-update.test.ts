@@ -106,6 +106,8 @@ describe('metabot doctor command', () => {
     expect(source).toContain('bundled_skill_missing');
     expect(source).toContain('metabot repair-skills');
     expect(source).toContain('"requiredSkill"');
+    expect(source).toContain('"requiredSkills"');
+    expect(source).toContain('"metabot-todos"');
     // Reports all three skill roots.
     expect(source).toContain('".claude" / "skills"');
     expect(source).toContain('codex_home / "skills"');
@@ -128,9 +130,10 @@ describe('metabot repair-skills command', () => {
     expect(source).toContain('cmd_repair_skills()');
     expect(source).toContain('repair-skills) shift; cmd_repair_skills "$@" ;;');
     expect(source).toContain('metabot repair-skills  Redeploy bundled skills');
-    // Same three sources + roots as install.sh deploy_bundled_skills.
+    // Same four sources + roots as install.sh deploy_bundled_skills.
     expect(source).toContain('"metabot:$METABOT_HOME/packages/skills/metabot"');
     expect(source).toContain('"metabot-team:$METABOT_HOME/packages/skills/metabot-team"');
+    expect(source).toContain('"metabot-todos:$METABOT_HOME/packages/skills/metabot-todos"');
     expect(source).toContain('"voice:$METABOT_HOME/src/skills/voice"');
     // No installer side effects: never restarts services or edits .env.
     expect(source).toContain('NEVER restarts services or edits .env');
