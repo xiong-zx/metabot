@@ -177,6 +177,17 @@ describe('buildPromptWithReplyContext', () => {
       messageType: 'file',
     })).toContain('[Referenced file attachment; see the attached file paths below.]');
   });
+
+  // F-2: interactive cards never yield media, so the attachment hint would
+  // point the model at file paths that do not exist.
+  it('does not promise attached file paths for a text-less interactive card', () => {
+    const prompt = buildPromptWithReplyContext('继续', {
+      messageId: 'om-card',
+      messageType: 'interactive',
+    });
+    expect(prompt).not.toContain('see the attached file paths below');
+    expect(prompt).toContain('[Referenced interactive message had no extractable text.]');
+  });
 });
 
 describe('MessageBridge between-turn questions', () => {

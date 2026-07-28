@@ -119,6 +119,296 @@ function truncateReferencedText(text: string): { text: string; truncated: boolea
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+const METABOT_CARD_CHROME_PREFIXES = [
+  '\u{1F3AF} **Goal:**',
+  '**State:**',
+  '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team**',
+  '\u{1F4E1} **Background**',
+];
+const METABOT_TOOL_STATUS_PATTERN =
+  /^(?:\u{23F3}|\u{2705})\s+\*\*.+\*\*\s+\u{00B7}\s+\d+\s+tools?$/u;
+
+function isMetaBotCardChrome(node: unknown): boolean {
+  if (!isRecord(node) || node.tag !== 'markdown' || typeof node.content !== 'string') {
+    return false;
+  }
+  const content = node.content.trim();
+  return METABOT_CARD_CHROME_PREFIXES.some(prefix => content.startsWith(prefix))
+    || METABOT_TOOL_STATUS_PATTERN.test(content);
+}
+
+function stripLeadingMetaBotCardChrome(elements: unknown): unknown {
+  if (!Array.isArray(elements)) return elements;
+
+  let index = 0;
+  while (index < elements.length && isMetaBotCardChrome(elements[index])) {
+    index += 1;
+    const separator = elements[index];
+    if (isRecord(separator) && separator.tag === 'hr') index += 1;
+  }
+  return index > 0 ? elements.slice(index) : elements;
+}
+
+function isMetaBotStatsFooter(node: Record<string, unknown>): boolean {
+  if (node.tag !== 'column_set' || node.background_style !== 'grey' || !Array.isArray(node.columns)) {
+    return false;
+  }
+  return node.columns.some(column => {
+    if (!isRecord(column) || !Array.isArray(column.elements)) return false;
+    return column.elements.some(element => (
+      isRecord(element)
+      && element.tag === 'markdown'
+      && typeof element.content === 'string'
+      && element.content.startsWith('<font color="grey"')
+    ));
+  });
+}
+
+/**
+ * MetaBot's own telemetry footer (`ctx: 1.2k/200k (1%) | $0.03 | model | 4.2s`)
+ * as emitted by `card-builder.ts` (a `note`) and `card-builder-v2.ts` (a grey
+ * `column_set`). Only consulted by the permissive pass below, where `note`
+ * elements are otherwise fair game.
+ */
+const METABOT_STATS_FOOTER_PATTERN = /^(?:ctx: \d|\$\d)/;
+
+// Bounds for card traversal. `body.content` is `JSON.parse` output so it cannot
+// contain real cycles, but the walker is shared-reference safe anyway and both
+// depth and node count are capped so a pathological (or hostile) card can never
+// turn one reply into unbounded work.
+const MAX_CARD_TRAVERSAL_DEPTH = 40;
+const MAX_CARD_TEXT_NODES = 4_000;
+
+const TEXT_LEAF_TAGS = new Set(['markdown', 'plain_text', 'lark_md', 'md', 'text', 'a', 'at']);
+const TEXT_CONTENT_KEYS = ['content', 'text', 'plain_text', 'lark_md'];
+const UI_CONTROL_TAGS = new Set(['note', 'button', 'select_static', 'overflow']);
+/** Card metadata that never carries the conversational answer. */
+const DEEP_SCAN_SKIP_KEYS = new Set([
+  'config', 'header', 'i18n_header', 'card_link', 'style', 'styles',
+  'behaviors', 'action', 'value', 'confirm',
+]);
+/** Preferred locales when a card is delivered in the `i18n_elements` form. */
+const I18N_LOCALE_ORDER = ['zh_cn', 'zh_hk', 'zh_tw', 'en_us', 'ja_jp'];
+
+interface CardTextContext {
+  output: string[];
+  seen: Set<object>;
+  /** Also read `note` / `button` / control labels (fallback pass only). */
+  permissive: boolean;
+  /** Descend every property, not just known element containers. */
+  deep: boolean;
+}
+
+/** First non-empty of the conventional text-bearing keys on a leaf node. */
+function readLeafText(node: Record<string, unknown>): string {
+  for (const key of TEXT_CONTENT_KEYS) {
+    const value = node[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function collectInteractiveCardText(node: unknown, ctx: CardTextContext, depth = 0): void {
+  if (ctx.output.length >= MAX_CARD_TEXT_NODES || depth > MAX_CARD_TRAVERSAL_DEPTH) return;
+
+  if (typeof node === 'string') {
+    // Bare strings only count inside a known element tree (e.g. `div.text` on
+    // some dialects). The deep scan must not scoop up styling scalars.
+    if (!ctx.deep && node.trim()) ctx.output.push(node.trim());
+    return;
+  }
+  if (Array.isArray(node)) {
+    if (ctx.seen.has(node)) return;
+    ctx.seen.add(node);
+    for (const item of node) collectInteractiveCardText(item, ctx, depth + 1);
+    return;
+  }
+  if (!isRecord(node) || ctx.seen.has(node)) return;
+  ctx.seen.add(node);
+
+  const tag = typeof node.tag === 'string' ? node.tag : '';
+  if (TEXT_LEAF_TAGS.has(tag)) {
+    const text = readLeafText(node);
+    if (text) ctx.output.push(text);
+    return;
+  }
+
+  // Footer panels and controls are visible UI metadata, not the conversational
+  // answer the user intended to quote — unless nothing else in the card yielded
+  // text, in which case a foreign card's only content may well live here.
+  if (UI_CONTROL_TAGS.has(tag)) {
+    if (!ctx.permissive) return;
+    const nested: string[] = [];
+    const probe: CardTextContext = { ...ctx, output: nested, permissive: false };
+    collectInteractiveCardText(node.elements ?? node.text ?? node.content, probe, depth + 1);
+    for (const text of nested) {
+      if (!METABOT_STATS_FOOTER_PATTERN.test(text)) ctx.output.push(text);
+    }
+    return;
+  }
+
+  if (tag === 'table') {
+    collectInteractiveTableText(node, ctx);
+    return;
+  }
+
+  if (tag === 'div') {
+    collectInteractiveCardText(node.text, ctx, depth + 1);
+    if (Array.isArray(node.fields)) {
+      for (const field of node.fields) {
+        if (isRecord(field)) collectInteractiveCardText(field.text, ctx, depth + 1);
+      }
+    }
+    return;
+  }
+
+  if (tag === 'column_set') {
+    if (!isMetaBotStatsFooter(node)) collectInteractiveCardText(node.columns, ctx, depth + 1);
+    return;
+  }
+
+  if (ctx.deep) {
+    for (const [key, value] of Object.entries(node)) {
+      if (DEEP_SCAN_SKIP_KEYS.has(key)) continue;
+      if (isRecord(value) || Array.isArray(value)) {
+        collectInteractiveCardText(value, ctx, depth + 1);
+      }
+    }
+    return;
+  }
+
+  collectInteractiveCardText(node.elements, ctx, depth + 1);
+}
+
+function collectInteractiveTableText(node: Record<string, unknown>, ctx: CardTextContext): void {
+  const columns = Array.isArray(node.columns) ? node.columns.filter(isRecord) : [];
+  const columnNames = columns
+    .map(column => typeof column.name === 'string' ? column.name : '')
+    .filter(Boolean);
+  const header = columns
+    .map(column => typeof column.display_name === 'string' ? column.display_name.trim() : '')
+    .filter(Boolean);
+  if (header.length > 0) ctx.output.push(header.join(' | '));
+
+  if (!Array.isArray(node.rows)) return;
+  for (const row of node.rows) {
+    if (!isRecord(row)) continue;
+    const values = (columnNames.length > 0 ? columnNames.map(name => row[name]) : Object.values(row))
+      .map(formatTableCell)
+      .filter(Boolean);
+    if (values.length > 0) ctx.output.push(values.join(' | '));
+  }
+}
+
+/** Numeric/boolean cells still belong in the row — dropping them misaligns it. */
+function formatTableCell(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function pushI18nElementRoots(value: unknown, roots: unknown[]): void {
+  if (!isRecord(value)) return;
+  for (const locale of I18N_LOCALE_ORDER) {
+    if (value[locale] !== undefined) roots.push(value[locale]);
+  }
+  for (const [locale, elements] of Object.entries(value)) {
+    if (!I18N_LOCALE_ORDER.includes(locale)) roots.push(elements);
+  }
+}
+
+/**
+ * Every plausible element container in a read-back card, most specific first.
+ *
+ * Feishu does NOT contractually guarantee that `im.v1.message.get` returns an
+ * `interactive` message's `body.content` in the same shape MetaBot sent. In
+ * practice it echoes the sent JSON, but card payloads reach this code through
+ * several other routes too — forwarded cards, cards sent by other apps on older
+ * schemas, and i18n cards — which are documented in alternate envelopes such as
+ * `{ card: { elements } }`, `{ card: { body: { elements } } }`,
+ * `{ i18n_elements: { zh_cn: [...] } }`, and the legacy row-of-columns form
+ * `{ title, elements: [[{ tag: 'text', text: '...' }]] }`. Probing every
+ * container (and, as a last resort, walking the card generically) is deliberate:
+ * an unrecognized envelope must degrade to "less precise text", never to the
+ * silent "no text at all" that a single hardcoded shape would produce.
+ */
+function cardElementRoots(card: Record<string, unknown>): unknown[] {
+  const roots: unknown[] = [];
+  const seen = new Set<Record<string, unknown>>();
+
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 3 || !isRecord(node) || seen.has(node)) return;
+    seen.add(node);
+    const body = isRecord(node.body) ? node.body : undefined;
+    if (body?.elements !== undefined) roots.push(body.elements);
+    if (node.elements !== undefined) roots.push(node.elements);
+    pushI18nElementRoots(body?.i18n_elements, roots);
+    pushI18nElementRoots(node.i18n_elements, roots);
+    // Wrapper envelopes: `{ card: {...} }`, `{ data: { card: {...} } }`.
+    visit(node.card, depth + 1);
+    visit(node.data, depth + 1);
+  };
+
+  visit(card, 0);
+  return roots;
+}
+
+function extractCardSummaryText(card: Record<string, unknown>): string {
+  const containers = [card, isRecord(card.card) ? card.card : undefined];
+  for (const container of containers) {
+    if (!container) continue;
+    const config = isRecord(container.config) ? container.config : undefined;
+    const summary = isRecord(config?.summary) ? config.summary : container.summary;
+    if (isRecord(summary) && typeof summary.content === 'string' && summary.content.trim()) {
+      return summary.content.trim();
+    }
+  }
+  return '';
+}
+
+function runCardTextPass(roots: unknown[], options: { permissive: boolean; deep: boolean }): string {
+  for (const root of roots) {
+    const ctx: CardTextContext = {
+      output: [],
+      seen: new Set<object>(),
+      permissive: options.permissive,
+      deep: options.deep,
+    };
+    collectInteractiveCardText(stripLeadingMetaBotCardChrome(root), ctx);
+    if (ctx.output.length > 0) return cleanMessageText(ctx.output.join('\n\n'));
+  }
+  return '';
+}
+
+function extractInteractiveCardText(card: unknown): string {
+  if (!isRecord(card)) return '';
+  const roots = cardElementRoots(card);
+
+  // 1. Strict pass over every known element container: content elements only.
+  const strict = runCardTextPass(roots, { permissive: false, deep: false });
+  if (strict) return strict;
+
+  // 2. Same containers, but control/footer labels now count — a foreign card's
+  //    only text may live in a note or a button.
+  const permissive = runCardTextPass(roots, { permissive: true, deep: false });
+  if (permissive) return permissive;
+
+  // 3. Card-level fallbacks, then a bounded generic walk for envelopes we have
+  //    never seen. Better an imprecise quote than a silent no-op.
+  const summary = extractCardSummaryText(card);
+  if (summary) return cleanMessageText(summary);
+
+  // The card header is deliberately NOT consulted: on MetaBot cards it is the
+  // status chrome (`✅ Complete`) this extractor exists to strip. See F-6 in
+  // remediation-report.md.
+  return runCardTextPass([card], { permissive: true, deep: true });
+}
+
 function parseReferencedMessage(
   snapshot: FeishuMessageSnapshot,
   logger: Logger,
@@ -152,8 +442,16 @@ function parseReferencedMessage(
         fileName: parsed.file_name,
         ts: Date.now(),
       }];
+    } else if (messageType === 'interactive') {
+      text = extractInteractiveCardText(parsed);
+      if (!text) {
+        logger.info(
+          { messageId: snapshot.messageId, messageType },
+          'Referenced interactive card contained no extractable text',
+        );
+      }
     } else {
-      logger.debug({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
+      logger.info({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
       return { media: [] };
     }
 
@@ -183,6 +481,7 @@ async function resolveReferencedMessage(
 ): Promise<{
   replyContext?: IncomingMessage['replyContext'];
   media: CachedMedia[];
+  messageType?: string;
 }> {
   const cachedMedia = consumeCachedMedia(cache, chatId, userId, messageId);
   if (!messageSender || typeof messageSender.getMessage !== 'function') {
@@ -193,13 +492,14 @@ async function resolveReferencedMessage(
   if (!snapshot) return { media: cachedMedia };
   if (snapshot.chatId && snapshot.chatId !== chatId) {
     logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
-    return { media: [] };
+    return { media: [], messageType: snapshot.messageType };
   }
 
   const parsed = parseReferencedMessage(snapshot, logger);
   return {
     replyContext: parsed.replyContext,
     media: parsed.media.length > 0 ? parsed.media : cachedMedia,
+    messageType: snapshot.messageType,
   };
 }
 
@@ -619,7 +919,8 @@ export function createEventDispatcher(
             chatId,
             userId,
             replyToMessageId,
-            messageType: replyContext?.messageType,
+            referencedMessageType: resolved.messageType,
+            parsedMessageType: replyContext?.messageType,
             mediaCount: referencedMedia.length,
           }, 'Resolved replied message context');
         }

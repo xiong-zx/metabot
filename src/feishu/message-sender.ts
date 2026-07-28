@@ -7,6 +7,17 @@ export interface FeishuMessageSnapshot {
   chatId?: string;
   messageType?: string;
   content?: string;
+  /**
+   * Author of the referenced message. Feishu reports bot-authored messages as
+   * `{ id: <app_id>, id_type: 'app_id', sender_type: 'app' }`, but some
+   * tenants/endpoints report the bot's `open_id` instead, so callers must be
+   * prepared to match either identifier.
+   */
+  sender?: {
+    id?: string;
+    idType?: string;
+    senderType?: string;
+  };
 }
 
 export class MessageSender {
@@ -226,11 +237,19 @@ export class MessageSender {
         this.logger.warn({ messageId }, 'Referenced message lookup returned no message');
         return undefined;
       }
+      const sender: any = (item as any).sender;
       return {
         messageId: item.message_id,
         chatId: item.chat_id,
         messageType: item.msg_type,
         content: item.body?.content,
+        sender: sender
+          ? {
+            id: typeof sender.id === 'string' ? sender.id : undefined,
+            idType: typeof sender.id_type === 'string' ? sender.id_type : undefined,
+            senderType: typeof sender.sender_type === 'string' ? sender.sender_type : undefined,
+          }
+          : undefined,
       };
     } catch (err) {
       this.logger.error({ err, messageId }, 'Failed to get referenced message');

@@ -91,13 +91,26 @@ export { isContextOverflowError, isStaleSessionError } from './error-classifiers
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
+/**
+ * Reference types that actually produce downloadable media. Only these may be
+ * described with the "see the attached file paths below" hint — an interactive
+ * card never yields media, so pointing the model at file paths that do not
+ * exist just invites hallucinated attachments.
+ */
+const MEDIA_BEARING_REFERENCE_TYPES = new Set(['image', 'file', 'post']);
+
+function describeTextlessReference(messageType: string): string {
+  return MEDIA_BEARING_REFERENCE_TYPES.has(messageType)
+    ? `[Referenced ${messageType} attachment; see the attached file paths below.]`
+    : `[Referenced ${messageType} message had no extractable text.]`;
+}
+
 export function buildPromptWithReplyContext(
   currentText: string,
   replyContext?: IncomingMessage['replyContext'],
 ): string {
   if (!replyContext) return currentText;
-  const quotedText = replyContext.text
-    || `[Referenced ${replyContext.messageType} attachment; see the attached file paths below.]`;
+  const quotedText = replyContext.text || describeTextlessReference(replyContext.messageType);
   return [
     `<replied_message message_id="${replyContext.messageId}" type="${replyContext.messageType}">`,
     quotedText,
