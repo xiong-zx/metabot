@@ -527,22 +527,24 @@ describe('Feishu inbound message routing', () => {
     });
   });
 
-  // F-3: bot-to-bot content belongs on the agent bus, not scraped out of
-  // another app's card. Fails closed when the author cannot be confirmed.
+  // Product requirement: replying to ANY card in the same chat injects its
+  // visible text as context regardless of author — another bot's card, or a
+  // card the user is simply looking at. Author is deliberately not gated; only
+  // cross-chat references (covered separately) are rejected.
   it.each([
     ['another bot in the same group', { id: 'cli_other_app', idType: 'app_id', senderType: 'app' }],
-    ['an unidentified author', undefined],
-  ])('does not preserve a replied card authored by %s', async (_case, cardSender) => {
+    ['a card the user is looking at (unidentified author)', undefined],
+  ])('preserves a replied card authored by %s', async (_case, cardSender) => {
     const messageSender = {
       getMessage: vi.fn(async () => ({
         messageId: 'foreign-card',
         chatId: 'chat-1',
         messageType: 'interactive',
         sender: cardSender,
-        content: JSON.stringify({ elements: [{ tag: 'markdown', content: 'SECRET from other-bot session' }] }),
+        content: JSON.stringify({ elements: [{ tag: 'markdown', content: 'answer from another card' }] }),
       })),
     };
-    const { received, logger: testLogger, handle } = messageHandler(false, 'bot-open-id', messageSender);
+    const { received, handle } = messageHandler(false, 'bot-open-id', messageSender);
 
     await handle(event({
       messageId: 'reply-foreign-card',
@@ -552,12 +554,11 @@ describe('Feishu inbound message routing', () => {
     }));
 
     expect(received).toHaveLength(1);
-    expect(received[0].replyContext).toBeUndefined();
-    expect(received[0].extraMedia).toBeUndefined();
-    expect(testLogger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ messageId: 'foreign-card', messageType: 'interactive' }),
-      'Referenced interactive card was not authored by this bot; skipping context preservation',
-    );
+    expect(received[0].replyContext).toEqual({
+      messageId: 'foreign-card',
+      messageType: 'interactive',
+      text: 'answer from another card',
+    });
   });
 
   it('records an empty referenced interactive card without warning noise', async () => {

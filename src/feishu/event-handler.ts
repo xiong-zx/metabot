@@ -409,30 +409,9 @@ function extractInteractiveCardText(card: unknown): string {
   return runCardTextPass([card], { permissive: true, deep: true });
 }
 
-/** Identifiers that mark a referenced message as authored by this bot. */
-interface SelfIdentity {
-  botOpenId?: string;
-  appId?: string;
-}
-
-/**
- * Feishu reports a bot-authored message as `sender.id = <app_id>` with
- * `id_type: 'app_id'`, but the open_id form shows up on some tenants, so both
- * identifiers are accepted. Fails closed: an unconfirmable author is treated as
- * foreign, because scraping another bot's card into this bot's session is the
- * bot-to-bot path `CLAUDE.md` reserves for the agent bus.
- */
-function isSelfAuthoredCard(snapshot: FeishuMessageSnapshot, self: SelfIdentity): boolean {
-  const senderId = snapshot.sender?.id;
-  if (typeof senderId !== 'string' || !senderId) return false;
-  return (!!self.botOpenId && senderId === self.botOpenId)
-    || (!!self.appId && senderId === self.appId);
-}
-
 function parseReferencedMessage(
   snapshot: FeishuMessageSnapshot,
   logger: Logger,
-  self: SelfIdentity,
 ): {
   replyContext?: IncomingMessage['replyContext'];
   media: CachedMedia[];
@@ -464,18 +443,6 @@ function parseReferencedMessage(
         ts: Date.now(),
       }];
     } else if (messageType === 'interactive') {
-      if (!isSelfAuthoredCard(snapshot, self)) {
-        logger.info(
-          {
-            messageId: snapshot.messageId,
-            messageType,
-            senderId: snapshot.sender?.id,
-            senderType: snapshot.sender?.senderType,
-          },
-          'Referenced interactive card was not authored by this bot; skipping context preservation',
-        );
-        return { media: [] };
-      }
       text = extractInteractiveCardText(parsed);
       if (!text) {
         logger.info(
@@ -511,7 +478,6 @@ async function resolveReferencedMessage(
   userId: string,
   messageId: string,
   logger: Logger,
-  self: SelfIdentity,
 ): Promise<{
   replyContext?: IncomingMessage['replyContext'];
   media: CachedMedia[];
@@ -529,7 +495,7 @@ async function resolveReferencedMessage(
     return { media: [], messageType: snapshot.messageType };
   }
 
-  const parsed = parseReferencedMessage(snapshot, logger, self);
+  const parsed = parseReferencedMessage(snapshot, logger);
   return {
     replyContext: parsed.replyContext,
     media: parsed.media.length > 0 ? parsed.media : cachedMedia,
@@ -946,7 +912,6 @@ export function createEventDispatcher(
             userId,
             replyToMessageId,
             logger,
-            { botOpenId, appId: config.feishu?.appId },
           );
           replyContext = resolved.replyContext;
           referencedMedia = resolved.media;
