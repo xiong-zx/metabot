@@ -35,7 +35,7 @@ Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或
 
 ### /metabot-todos — Canonical ToDo display
 
-`metabot-todos` is a bundled, read-only Skill for retrieving and rendering the canonical MetaMemory ToDo registry. It uses a deterministic parser instead of ad hoc Markdown parsing: default output shows active items, `--id <ID>` shows one complete item, `--all` includes terminal items, and `--json` returns structured data. Use this Skill whenever a user asks to show, list, inspect, or count ToDos.
+`metabot-todos` is a bundled, read-only Skill for retrieving and rendering the canonical MetaMemory ToDo registry. It uses a deterministic parser instead of ad hoc Markdown parsing: default and `--all` output show every non-`done` item, `--id <ID>` shows one complete item, `--status done` explicitly lists completed history, `--include-done` explicitly includes completed history, and `--json` returns structured data. Use this Skill whenever a user asks to show, list, inspect, or count ToDos.
 
 ### Scheduling
 

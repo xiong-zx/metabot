@@ -13,14 +13,17 @@ regular-expression parsing code.
 Resolve `scripts/todo-display.mjs` relative to this `SKILL.md`, then run:
 
 ```bash
-# Preferred active view
+# Preferred view: every non-done item
 node scripts/todo-display.mjs
 
 # One complete canonical item
 node scripts/todo-display.mjs --id MEM-013
 
-# Include completed and cancelled history
-node scripts/todo-display.mjs --all
+# Explicitly inspect completed history
+node scripts/todo-display.mjs --status done
+
+# Include completed history with the current list
+node scripts/todo-display.mjs --include-done
 
 # Structured output for further processing
 node scripts/todo-display.mjs --json
@@ -31,10 +34,13 @@ absolute path to the same script.
 
 ## Workflow
 
-1. Use the default command for general requests such as "show my ToDos".
+1. Use the default command for general requests such as "show my ToDos",
+   "show all ToDos", or "完整 ToDo 清单". It includes `in_progress`,
+   `waiting`, `blocked`, and `cancelled`, but never `done`.
 2. Use `--id <ID>` when the user requests one item's full record.
-3. Use `--all` only when the user explicitly requests terminal history or a
-   complete inventory.
+3. Use `--status done` only when the user explicitly requests completed
+   history. Use `--include-done` only when the user explicitly requests a
+   complete inventory that includes completed history.
 4. Return the rendered output with minimal commentary. Preserve canonical IDs,
    priorities, and statuses.
 5. If the parser reports an invalid document, report the document and error.
@@ -49,4 +55,6 @@ absolute path to the same script.
 - Do not interpolate document content into shell commands, template literals,
   or dynamically generated regular expressions.
 - Do not write, normalize, or repair documents during a display request.
-- Keep `done` and `cancelled` items out of the default active view.
+- Keep `done` items out of every general or "all ToDos" view. A `done` item may
+  appear only through `--id`, `--status done`, or an explicit
+  `--include-done` request.
