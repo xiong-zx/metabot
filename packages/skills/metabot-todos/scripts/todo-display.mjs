@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 const DEFAULT_FOLDER_PATH = '/cargo1/todo';
 const ACTIVE_STATUSES = new Set(['in_progress', 'waiting', 'blocked']);
 const TERMINAL_STATUSES = new Set(['done', 'cancelled']);
+const DISPLAY_STATUSES = new Set(['in_progress', 'waiting', 'blocked', 'cancelled']);
+const TODO_STATUSES = new Set([...DISPLAY_STATUSES, 'done']);
 const REQUIRED_FIELDS = [
   'id',
   'status',
@@ -306,25 +308,32 @@ function shorten(value, maxLength) {
   return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
-function selectedItems(category, includeTerminal) {
-  return category.items.filter((item) => includeTerminal || ACTIVE_STATUSES.has(item.status)).sort(compareItems);
+function selectedItems(category, options = {}) {
+  const includeDone = options.includeDone ?? false;
+  const status = options.status ?? null;
+  return category.items
+    .filter((item) => (status ? item.status === status : includeDone || DISPLAY_STATUSES.has(item.status)))
+    .sort(compareItems);
 }
 
 export function renderSnapshot(snapshot, options = {}) {
-  const includeTerminal = options.includeTerminal ?? false;
+  const includeDone = options.includeDone ?? false;
+  const status = options.status ?? null;
   const maxNext = options.maxNext ?? 180;
-  const statusOrder = includeTerminal
-    ? ['in_progress', 'waiting', 'blocked', 'done', 'cancelled']
-    : ['in_progress', 'waiting', 'blocked'];
+  const statusOrder = status
+    ? [status]
+    : includeDone
+      ? ['in_progress', 'waiting', 'blocked', 'cancelled', 'done']
+      : ['in_progress', 'waiting', 'blocked', 'cancelled'];
   const categories = snapshot.categories.map((category) => ({
     ...category,
-    selected: selectedItems(category, includeTerminal),
+    selected: selectedItems(category, { includeDone, status }),
   }));
   const items = categories.flatMap((category) => category.selected);
   const counts = Object.fromEntries(
     statusOrder.map((status) => [status, items.filter((item) => item.status === status).length]),
   );
-  const scope = includeTerminal ? 'ToDo' : '有效 ToDo';
+  const scope = status ? `${status} ToDo` : includeDone ? 'ToDo' : '非 done ToDo';
   const summary = statusOrder.map((status) => `\`${status}\` ${counts[status]}`).join('，');
   const lines = [`当前共有 **${items.length} 个${scope}**：${summary}`];
 
@@ -344,10 +353,10 @@ export function renderSnapshot(snapshot, options = {}) {
     }
   }
 
-  if (!includeTerminal) {
+  if (!includeDone && !status) {
     const empty = categories.filter((entry) => entry.selected.length === 0).map((entry) => entry.category);
     if (empty.length > 0) {
-      lines.push('', `当前没有有效任务的类别：**${empty.join('、')}**。`);
+      lines.push('', `当前没有非 done 任务的类别：**${empty.join('、')}**。`);
     }
   }
   return `${lines.join('\n')}\n`;
@@ -361,12 +370,12 @@ export function findItem(snapshot, id) {
   return null;
 }
 
-export function selectSnapshot(snapshot, includeTerminal = false) {
+export function selectSnapshot(snapshot, options = {}) {
   return {
     ...snapshot,
     categories: snapshot.categories.map((category) => ({
       ...category,
-      items: selectedItems(category, includeTerminal),
+      items: selectedItems(category, options),
     })),
   };
 }
@@ -375,7 +384,9 @@ function usage() {
   return [
     'Usage: node todo-display.mjs [options]',
     '',
-    '  --all                 Include completed and cancelled items',
+    '  --all                 Show all non-done items (same as default)',
+    '  --include-done        Include completed items',
+    '  --status <status>     Show only one status',
     '  --id <TODO-ID>        Print one complete canonical item',
     '  --json                Emit structured JSON',
     '  --folder-path <path>  Override /cargo1/todo',
@@ -386,7 +397,8 @@ function usage() {
 
 function parseArgs(argv) {
   const options = {
-    includeTerminal: false,
+    includeDone: false,
+    status: null,
     json: false,
     id: null,
     folderPath: DEFAULT_FOLDER_PATH,
@@ -395,22 +407,28 @@ function parseArgs(argv) {
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--all') options.includeTerminal = true;
+    if (arg === '--all') {
+      // Compatibility alias for the default all-non-done view.
+    } else if (arg === '--include-done') options.includeDone = true;
     else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
-    else if (arg === '--id' || arg === '--folder-path' || arg === '--max-next') {
+    else if (arg === '--id' || arg === '--status' || arg === '--folder-path' || arg === '--max-next') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) {
         throw new TodoParseError(`${arg} requires a value`);
       }
       index += 1;
       if (arg === '--id') options.id = value;
+      else if (arg === '--status') options.status = value;
       else if (arg === '--folder-path') options.folderPath = value;
       else options.maxNext = Number(value);
     } else throw new TodoParseError(`unknown option: ${arg}`);
   }
   if (!Number.isInteger(options.maxNext) || options.maxNext < 20) {
     throw new TodoParseError('--max-next must be an integer of at least 20');
+  }
+  if (options.status && !TODO_STATUSES.has(options.status)) {
+    throw new TodoParseError(`--status must be one of: ${Array.from(TODO_STATUSES).join(', ')}`);
   }
   return options;
 }
@@ -433,11 +451,14 @@ export function main(argv = process.argv.slice(2)) {
     return;
   }
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(selectSnapshot(snapshot, options.includeTerminal), null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(selectSnapshot(snapshot, { includeDone: options.includeDone, status: options.status }), null, 2)}\n`,
+    );
   } else {
     process.stdout.write(
       renderSnapshot(snapshot, {
-        includeTerminal: options.includeTerminal,
+        includeDone: options.includeDone,
+        status: options.status,
         maxNext: options.maxNext,
       }),
     );

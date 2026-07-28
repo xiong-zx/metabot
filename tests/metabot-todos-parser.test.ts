@@ -143,7 +143,7 @@ describe('metabot-todos parser', () => {
     expect(() => buildSnapshot([first, second])).toThrow('duplicate ToDo ID TEST-001');
   });
 
-  it('sorts by priority and ID, summarizes statuses, and names empty categories', () => {
+  it('sorts by priority and ID, summarizes non-done statuses, and names empty categories', () => {
     const active = [
       item({ id: 'TEST-010', priority: 2 }),
       item({ id: 'TEST-002', priority: 1, status: 'blocked', blockedBy: 'TEST-001' }),
@@ -158,11 +158,11 @@ describe('metabot-todos parser', () => {
     const snapshot = buildSnapshot([document(active), empty]);
     const rendered = renderSnapshot(snapshot);
 
-    expect(rendered).toContain('**3 个有效 ToDo**');
-    expect(rendered).toContain('`in_progress` 1，`waiting` 1，`blocked` 1');
+    expect(rendered).toContain('**3 个非 done ToDo**');
+    expect(rendered).toContain('`in_progress` 1，`waiting` 1，`blocked` 1，`cancelled` 0');
     expect(rendered.indexOf('`TEST-001`')).toBeLessThan(rendered.indexOf('`TEST-002`'));
     expect(rendered.indexOf('`TEST-002`')).toBeLessThan(rendered.indexOf('`TEST-010`'));
-    expect(rendered).toContain('当前没有有效任务的类别：**Empty**');
+    expect(rendered).toContain('当前没有非 done 任务的类别：**Empty**');
     expect(findItem(snapshot, 'TEST-002')?.item.blockedBy).toBe('TEST-001');
   });
 });
@@ -175,11 +175,15 @@ describe('metabot-todos CLI', () => {
     expect(result.stderr).toContain('--id requires a value');
   });
 
-  it('loads JSON through execFile arguments and renders the preferred active view', () => {
+  it('loads JSON through execFile arguments and hides done unless explicitly requested', () => {
     const dir = mkdtempSync(join(tmpdir(), 'metabot-todos-cli-'));
     cleanup.push(dir);
     const fake = join(dir, 'metabot');
-    const todoDoc = document(item({ id: 'TEST-001', status: 'in_progress' }), item({ id: 'TEST-002', status: 'done' }));
+    const todoDoc = document(
+      item({ id: 'TEST-001', status: 'in_progress' }),
+      item({ id: 'TEST-002', status: 'done' }),
+      item({ id: 'TEST-003', status: 'cancelled' }),
+    );
     const responses = {
       folders: {
         id: 'root',
@@ -216,10 +220,12 @@ describe('metabot-todos CLI', () => {
       env: { ...process.env, METABOT_BIN: fake },
     });
 
-    expect(output).toContain('**1 个有效 ToDo**');
+    expect(output).toContain('**2 个非 done ToDo**');
     expect(output).toContain('`TEST-001`｜P1｜`in_progress`');
+    expect(output).toContain('`TEST-003`｜P1｜`cancelled`');
+    expect(output).not.toContain('TEST-002');
 
-    const activeJson = JSON.parse(
+    const defaultJson = JSON.parse(
       execFileSync(process.execPath, [SCRIPT, '--json'], {
         encoding: 'utf8',
         env: { ...process.env, METABOT_BIN: fake },
@@ -231,7 +237,32 @@ describe('metabot-todos CLI', () => {
         env: { ...process.env, METABOT_BIN: fake },
       }),
     );
-    expect(activeJson.categories[0].items.map((entry: any) => entry.id)).toEqual(['TEST-001']);
-    expect(allJson.categories[0].items.map((entry: any) => entry.id)).toEqual(['TEST-001', 'TEST-002']);
+    const doneJson = JSON.parse(
+      execFileSync(process.execPath, [SCRIPT, '--status', 'done', '--json'], {
+        encoding: 'utf8',
+        env: { ...process.env, METABOT_BIN: fake },
+      }),
+    );
+    const includeDoneJson = JSON.parse(
+      execFileSync(process.execPath, [SCRIPT, '--include-done', '--json'], {
+        encoding: 'utf8',
+        env: { ...process.env, METABOT_BIN: fake },
+      }),
+    );
+    expect(defaultJson.categories[0].items.map((entry: any) => entry.id)).toEqual(['TEST-001', 'TEST-003']);
+    expect(allJson.categories[0].items.map((entry: any) => entry.id)).toEqual(['TEST-001', 'TEST-003']);
+    expect(doneJson.categories[0].items.map((entry: any) => entry.id)).toEqual(['TEST-002']);
+    expect(includeDoneJson.categories[0].items.map((entry: any) => entry.id)).toEqual([
+      'TEST-001',
+      'TEST-002',
+      'TEST-003',
+    ]);
+  });
+
+  it('rejects an unknown status filter', () => {
+    const result = spawnSync(process.execPath, [SCRIPT, '--status', 'open'], { encoding: 'utf8' });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--status must be one of');
   });
 });
