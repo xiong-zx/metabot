@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type {
@@ -253,7 +254,7 @@ export function buildCodexEnv(
     env.OPENAI_API_KEY = explicitApiKey;
   }
 
-  return env;
+  return stripBridgeLocalAdminCredentials(env);
 }
 
 /**
@@ -394,7 +395,7 @@ export class CodexExecutor {
     try {
       child = spawn(executable, args, {
         cwd,
-        env: buildCodexEnv(codexConfig),
+        env: buildCodexEnv(codexConfig, { ...process.env, ...(options.env ?? {}) }),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: any) {

@@ -68,11 +68,34 @@ _load_bridge_api_config() {
     _api_url=$(sed -n 's/^METABOT_URL=//p' "$envf" 2>/dev/null || true)
   fi
   METABOT_URL="${METABOT_URL:-${_api_url:-http://localhost:${_api_port:-9100}}}"
-  _api_secret="${API_SECRET:-${_api_secret:-changeme}}"
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    # Engine sessions authenticate Agent Team calls with their signed scoped
+    # capability. Never hand the bridge-wide local-admin secret to the child
+    # CLI, even when it is present in the parent process or .env file.
+    _api_secret="execution-capability"
+  else
+    _api_secret="${API_SECRET:-${_api_secret:-changeme}}"
+  fi
   METABOT_AUTH="Authorization: Bearer $_api_secret"
 }
 
 _json() { python3 -m json.tool 2>/dev/null || cat; }
+
+# Issue one of the four Bridge reads allowed to an Agent Team engine session.
+# Capability mode deliberately sends only the signed scoped token plus its
+# runtime bot/chat binding; bridge-wide administrator secrets are never used.
+_bridge_scoped_read() {
+  local path="$1"
+  local -a headers=(-H "$METABOT_AUTH")
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    headers+=(
+      -H "X-MetaBot-Team-Capability: $METABOT_TEAM_CAPABILITY"
+      -H "X-MetaBot-Bot-Name: ${METABOT_BOT_NAME:-}"
+      -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    )
+  fi
+  curl -s "${headers[@]}" "$METABOT_URL$path"
+}
 
 cmd_update() {
   local update_source="${METABOT_UPDATE_SOURCE:-auto}"
@@ -909,7 +932,7 @@ cmd_bridge_api() {
   local cmd="$1"; shift 2>/dev/null || true
   case "$cmd" in
     bots|b)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots" | _json
+      _bridge_scoped_read "/api/bots" | _json
       ;;
     bot)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
@@ -996,7 +1019,7 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys
       local subcmd="${1:-list}"; shift 2>/dev/null || true
       case "$subcmd" in
         list|ls)
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+          _bridge_scoped_read "/api/peers" | _json
           ;;
         add|a)
           local pname="$1" purl="$2" psecret="${3:-}"
@@ -1033,10 +1056,10 @@ print(json.dumps(body))
       esac
       ;;
     stats)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/stats" | _json
+      _bridge_scoped_read "/api/stats" | _json
       ;;
     metrics|m)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/metrics"
+      _bridge_scoped_read "/api/metrics"
       ;;
     voice|v)
       local subcmd="${1:-help}"; shift 2>/dev/null || true
@@ -1163,6 +1186,7 @@ print(json.dumps(body))
     teams|team)
       python3 - "$METABOT_URL" "${_api_secret:-changeme}" "$@" <<'PY'
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -1201,7 +1225,15 @@ def usage():
   metabot teams runs list <team> [--summary|--plain]
   metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
   metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
-  metabot teams runs output|stop <team> <runId>""")
+  metabot teams runs output|stop <team> <runId>
+  metabot teams templates list [name]
+  metabot teams templates publish <name> --body <json>
+  metabot teams rules list [name]
+  metabot teams rules publish <name> --scope <scope> --rules <json>
+  metabot teams instances list
+  metabot teams instances resolve <template> [--version n] [--scope chat|project|global] [--scope-key key] [--global] [--pm-bot bot]
+  metabot teams instances start|stop|delete <instanceId>
+  metabot teams audit [--instance instanceId] [--limit n]""")
 
 def parse(args):
     pos, flags, i = [], {}, 0
@@ -1233,6 +1265,12 @@ def req_data(method, path, body=None):
         body = {k: v for k, v in body.items() if v is not None or k in keep_null}
     data = None if body is None else json.dumps(body).encode()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    capability_headers = {
+        "X-MetaBot-Team-Capability": os.environ.get("METABOT_TEAM_CAPABILITY"),
+        "X-MetaBot-Bot-Name": os.environ.get("METABOT_BOT_NAME"),
+        "X-MetaBot-Chat-Id": os.environ.get("METABOT_CHAT_ID") or os.environ.get("METABOT_CHAT"),
+    }
+    headers.update({k: v for k, v in capability_headers.items() if v})
     if body is not None:
         headers["Content-Type"] = "application/json"
     r = urllib.request.Request(base + path, data=data, headers=headers, method=method)
@@ -1604,6 +1642,70 @@ elif cmd == "runs":
             req("POST", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/stop", {})
     else:
         raise SystemExit("Usage: metabot teams runs list|create|update|output|stop ...")
+elif cmd == "templates":
+    if not rest: raise SystemExit("Usage: metabot teams templates list|publish ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        path = "/api/agent-team-governance/templates"
+        if pos: path += "?name=" + enc(pos[0])
+        req("GET", path)
+    elif sub == "publish":
+        if not pos or not flags.get("body"): raise SystemExit("Usage: metabot teams templates publish <name> --body <json>")
+        try: body = json.loads(flags["body"])
+        except Exception: raise SystemExit("--body must be valid JSON")
+        req("POST", "/api/agent-team-governance/templates", {"name": pos[0], "body": body})
+    else:
+        raise SystemExit("Usage: metabot teams templates list|publish ...")
+elif cmd == "rules":
+    if not rest: raise SystemExit("Usage: metabot teams rules list|publish ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        path = "/api/agent-team-governance/rules"
+        if pos: path += "?name=" + enc(pos[0])
+        req("GET", path)
+    elif sub == "publish":
+        if not pos or not flags.get("scope") or not flags.get("rules"):
+            raise SystemExit("Usage: metabot teams rules publish <name> --scope <scope> --rules <json>")
+        try: rules = json.loads(flags["rules"])
+        except Exception: raise SystemExit("--rules must be valid JSON")
+        req("POST", "/api/agent-team-governance/rules", {
+            "name": pos[0], "scope": flags["scope"], "rules": rules,
+        })
+    else:
+        raise SystemExit("Usage: metabot teams rules list|publish ...")
+elif cmd == "instances":
+    if not rest: raise SystemExit("Usage: metabot teams instances list|resolve|start|stop|delete ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        req("GET", "/api/agent-team-governance/instances")
+    elif sub == "resolve":
+        if not pos: raise SystemExit("Usage: metabot teams instances resolve <template> ...")
+        version = None
+        try: version = int(flags["version"]) if flags.get("version") else None
+        except Exception: raise SystemExit("--version must be an integer")
+        scope = flags.get("scope") or ("global" if bool_flag(flags, "global") else "chat")
+        req("POST", "/api/agent-team-governance/instances", {
+            "templateName": pos[0], "templateVersion": version, "scopeType": scope,
+            "scopeKey": flags.get("scope-key"),
+            "chatId": flags.get("chat") or os.environ.get("METABOT_CHAT_ID") or os.environ.get("METABOT_CHAT"),
+            "projectId": flags.get("project"), "allowGlobal": bool_flag(flags, "global"),
+            "pmBot": flags.get("pm-bot"),
+        })
+    elif sub in ("start", "stop", "delete"):
+        if not pos: raise SystemExit(f"Usage: metabot teams instances {sub} <instanceId>")
+        suffix = "" if sub == "delete" else f"/{sub}"
+        req("DELETE" if sub == "delete" else "POST", f"/api/agent-team-governance/instances/{enc(pos[0])}{suffix}", {} if sub != "delete" else None)
+    else:
+        raise SystemExit("Usage: metabot teams instances list|resolve|start|stop|delete ...")
+elif cmd == "audit":
+    _, flags = parse(rest)
+    query = []
+    if flags.get("instance"): query.append("instanceId=" + enc(flags["instance"]))
+    if flags.get("limit"): query.append("limit=" + enc(flags["limit"]))
+    req("GET", "/api/agent-team-governance/audit" + (("?" + "&".join(query)) if query else ""))
 else:
     raise SystemExit(f"Unknown metabot teams command: {cmd}")
 PY

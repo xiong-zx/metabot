@@ -16,6 +16,7 @@ import xterm from '@xterm/headless';
 const { Terminal } = xterm;
 type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
+import { stripBridgeLocalAdminCredentials } from '../../execution-env.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
@@ -172,7 +173,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       cols,
       rows,
       cwd: spawnCwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
     });
 
     this.term.onData((data: string) => {

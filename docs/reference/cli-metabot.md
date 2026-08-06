@@ -53,6 +53,13 @@ cannot be combined with `--git`.
 
 These commands curl the local bridge daemon at `localhost:9100`, reading
 `API_PORT` / `API_SECRET` (and optional `METABOT_URL`) from the bridge `.env`.
+Human or local management mutations require `API_SECRET`, including on
+loopback; the Bridge does not restore unauthenticated local mutation access.
+An Agent Team engine session instead forwards its short-lived scoped
+credential for only `metabot bots`, `metabot peers`, `metabot stats`, and
+`metabot metrics` outside the Team coordination API. It never forwards
+`API_SECRET` or `METABOT_API_SECRET`, and the scoped credential cannot read bot
+details/profiles or call other Bridge routes.
 
 ### Bot management
 
@@ -81,6 +88,25 @@ metabot peers                       # list peers and status
 ### Agent Teams
 
 `metabot teams` talks to the local bridge `/api/agent-teams/*` API. It is the coordination surface for MetaBot Agent Teams: agents, mailbox messages, shared tasks, and background runs.
+
+Governed Teams add separate versioned resources without changing legacy or
+`bots.json` Teams:
+
+```bash
+metabot teams templates list
+metabot teams templates publish implementation --body '{"agents":[{"name":"coder","engine":"codex"}]}'
+metabot teams rules publish implementation-policy --scope team-template --rules '[{"text":"Keep changes focused."}]'
+metabot teams instances resolve implementation --scope project --scope-key project-a --pm-bot metabot
+metabot teams instances stop atg_0123456789abcdef
+metabot teams audit --instance atg_0123456789abcdef
+```
+
+Chat scope is the default. Global scope requires the explicit `--global`
+option. Engine sessions automatically forward a short-lived bridge-issued
+credential and do not inherit the bridge administrator secret. Persistent
+executor retirement begins before that credential expires, waits for an active
+turn to finish, and provides a fresh credential on the next turn. Callers
+cannot gain authority with body or CLI role fields.
 
 ```bash
 metabot teams list

@@ -265,6 +265,7 @@ export class MessageBridge {
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
   private agentTeamStore?: AgentTeamStore;
+  private agentTeamExecutionEnvProvider?: (input: { botName: string; chatId: string }) => Record<string, string>;
   /**
    * Periodic sweep that evicts stale per-chat between-turn bookkeeping as a
    * safety net behind the event-driven `executor-removed` cleanup. Cleared in
@@ -451,6 +452,13 @@ export class MessageBridge {
   /** Inject MetaBot Agent Teams store so cards can show team and run state. */
   setAgentTeamStore(store: AgentTeamStore): void {
     this.agentTeamStore = store;
+  }
+
+  /** Inject bridge-owned, per-session credentials without exposing their signing key. */
+  setAgentTeamExecutionEnvProvider(
+    provider: (input: { botName: string; chatId: string }) => Record<string, string>,
+  ): void {
+    this.agentTeamExecutionEnvProvider = provider;
   }
 
   /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
@@ -1307,6 +1315,12 @@ export class MessageBridge {
     await this.persistentRegistry.release(chatId, reason);
   }
 
+  /** Retire a persistent executor only between turns. */
+  async releaseChatExecutorIfIdle(chatId: string, reason: string): Promise<boolean> {
+    if (!this.persistentRegistry) return true;
+    return this.persistentRegistry.releaseIfIdle(chatId, reason);
+  }
+
   /**
    * List recent sessions for the chat's active engine and working directory.
    * Read-only — does not touch session state.
@@ -1400,6 +1414,7 @@ export class MessageBridge {
     },
   ): Promise<ExecutionHandle> {
     const session = this.sessionManager.getSession(chatId);
+    const executionEnv = this.agentTeamExecutionEnvProvider?.({ botName: this.config.name, chatId });
     // Persistent only applies to Claude. Options that need per-turn binding
     // (maxTurns / allowedTools) aren't plumbed through the persistent path yet,
     // so fall back to legacy spawn when they're present — matches the gating
@@ -1425,6 +1440,7 @@ export class MessageBridge {
         model: opts.model,
         apiContext: opts.apiContext,
         outputsDir: opts.outputsDir,
+        env: executionEnv,
       });
       // TurnHandle is structurally compatible with ExecutionHandle (stream,
       // sendAnswer, resolveQuestion, finish) — see persistent-executor.ts.
@@ -1443,6 +1459,7 @@ export class MessageBridge {
       onTeamEvent: opts.onTeamEvent,
       maxTurns: opts.maxTurns,
       allowedTools: opts.allowedTools,
+      env: executionEnv,
     });
   }
 

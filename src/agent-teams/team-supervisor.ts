@@ -3,10 +3,12 @@ import type { MessageBridge } from '../bridge/message-bridge.js';
 import type { Logger } from '../utils/logger.js';
 import { buildAgentTeamPromptContext } from './prompt-context.js';
 import type { AgentTeamStore, TeamAgent, TeamMessage, TeamRun, TeamTask } from './team-store.js';
+import type { AgentTeamGovernanceExtension } from './governance-extension.js';
 
 export interface AgentTeamSupervisorOptions {
   registry: BotRegistry;
   store: AgentTeamStore;
+  governance?: AgentTeamGovernanceExtension;
   logger: Logger;
   intervalMs?: number;
 }
@@ -87,6 +89,14 @@ export class AgentTeamSupervisor {
           });
         }
       }
+    } else if (run.taskId != null) {
+      const task = this.options.store.getTask(teamName, run.taskId);
+      if (task?.status === 'in_progress') {
+        this.options.store.updateTask(teamName, run.taskId, {
+          status: 'pending',
+          result: `Stopped run ${runId}; task requeued.`,
+        });
+      }
     }
     return run;
   }
@@ -95,8 +105,8 @@ export class AgentTeamSupervisor {
     if (this.stopped || this.tickInProgress) return;
     this.tickInProgress = true;
     try {
-      const bot = this.selectExecutionBot();
-      if (!bot) return;
+      this.reapExpiredGovernedAgents();
+      if (!this.selectExecutionBot()) return;
       for (const team of this.options.store.listTeams()) {
         if (team.status !== 'active') continue;
         this.markOpenWorkForIdleDigest(team.name);
@@ -110,10 +120,14 @@ export class AgentTeamSupervisor {
             const key = `${team.name}:${agent.name}:${runnable.key}`;
             if (this.inFlight.has(key)) continue;
             this.inFlight.add(key);
-            void this.runAgent(bot, team.name, runnable).finally(() => {
-              this.inFlight.delete(key);
-              this.maybeEmitIdleDigest(team.name);
-            });
+            void this.runAgent(team.name, runnable)
+              .catch((err) =>
+                this.logger.error({ err, teamName: team.name, agentName: agent.name }, 'Agent team run rejected'),
+              )
+              .finally(() => {
+                this.inFlight.delete(key);
+                if (!this.stopped) this.maybeEmitIdleDigest(team.name);
+              });
           }
         }
         this.maybeEmitIdleDigest(team.name);
@@ -146,7 +160,13 @@ export class AgentTeamSupervisor {
           }
         }
         if (run.agentName) {
-          this.options.store.setAgentStatus(team.name, run.agentName, 'idle');
+          const agent = this.options.store.getAgent(team.name, run.agentName);
+          // A temporary Agent may have been reaped immediately before a
+          // process crash. Preserve its stopped state while repairing the
+          // stale Run/task; reviving it would bypass the recycled lease.
+          if (agent && agent.status !== 'stopped') {
+            this.options.store.setAgentStatus(team.name, run.agentName, 'idle');
+          }
           if (run.agentName !== 'lead') {
             this.options.store.sendMessage(team.name, {
               fromName: run.agentName,
@@ -188,7 +208,11 @@ export class AgentTeamSupervisor {
     }
 
     const unmatchedMessages = messages.filter((message) => !usedMessageIds.has(message.id));
-    if (unmatchedMessages.length > 0 && runnables.length < capacity) {
+    // An unrelated inbox message must not open a parallel message-only lane
+    // while this Agent has task work running or ready to start. Leave it
+    // unread; the next tick after task Runs drain will pick it up. Messages
+    // associated with a newly runnable task remain attached to that task lane.
+    if (runningCount === 0 && runnables.length === 0 && unmatchedMessages.length > 0) {
       runnables.push({
         agent,
         messages: unmatchedMessages,
@@ -205,15 +229,30 @@ export class AgentTeamSupervisor {
     }));
   }
 
-  private async runAgent(bot: RegisteredBot, teamName: string, runnable: RunnableAgent): Promise<void> {
+  private async runAgent(teamName: string, runnable: RunnableAgent): Promise<void> {
     const { agent, messages, tasks, isolatedSession } = runnable;
+    const preparation = this.options.governance?.prepareRun(teamName, agent.name);
+    const bot = preparation?.executionBot
+      ? this.options.registry.get(preparation.executionBot)
+      : this.selectExecutionBot();
+    if (!bot) {
+      this.logger.error(
+        { teamName, agentName: agent.name, executionBot: preparation?.executionBot },
+        'Agent team execution bot unavailable',
+      );
+      return;
+    }
+    if (preparation) this.options.governance!.assertCanStartRun(preparation.instanceId, agent.name);
     const run = this.options.store.createRun(teamName, {
       agentName: agent.name,
       taskId: tasks[0]?.id,
     });
-    const chatId = isolatedSession
-      ? `team:${teamName}:${agent.name}:${run.id}`
-      : `team:${teamName}:${agent.name}`;
+    const chatId =
+      preparation?.chatId ??
+      (isolatedSession ? `team:${teamName}:${agent.name}:${run.id}` : `team:${teamName}:${agent.name}`);
+    const rulesContext = preparation
+      ? this.options.governance!.buildRulesContext(preparation.instanceId).text
+      : undefined;
     this.inFlightRuns.set(run.id, {
       teamName,
       agentName: agent.name,
@@ -235,13 +274,14 @@ export class AgentTeamSupervisor {
     );
 
     try {
-      this.applyAgentSession(bot.bridge, chatId, agent, !isolatedSession);
+      this.applyAgentSession(bot.bridge, chatId, agent, !!preparation || !isolatedSession);
       const result = await bot.bridge.executeApiTask({
         chatId,
         userId: 'agent-team-supervisor',
         sendCards: false,
-        prompt: this.buildPrompt(teamName, agent, messages, tasks),
+        prompt: this.buildPrompt(teamName, agent, messages, tasks, rulesContext),
         onUpdate: (state) => {
+          if (preparation) this.options.governance!.touchAgent(preparation.instanceId, agent.name);
           const current = this.options.store.getRun(teamName, run.id);
           if (!current || current.status !== 'running') return;
           const output = state.responseText?.trim();
@@ -257,7 +297,7 @@ export class AgentTeamSupervisor {
         this.requeueInProgressTasks(teamName, tasks, `Stopped run ${run.id}; task requeued.`);
         return;
       }
-      if (result.sessionId && !isolatedSession) {
+      if (result.sessionId && (preparation || !isolatedSession)) {
         this.options.store.setAgentSessionId(teamName, agent.name, result.sessionId, agent.engine);
       }
       this.options.store.updateRun(teamName, run.id, {
@@ -327,9 +367,37 @@ export class AgentTeamSupervisor {
       }
       this.logger.error({ err, teamName, agentName: agent.name, runId: run.id }, 'Agent team member run failed');
     } finally {
+      if (preparation) this.options.governance!.touchAgent(preparation.instanceId, agent.name);
       this.setAgentIdleIfNoRunningRuns(teamName, agent.name);
       this.inFlightRuns.delete(run.id);
       this.maybeEmitIdleDigest(teamName);
+    }
+  }
+
+  private reapExpiredGovernedAgents(): void {
+    const actions = this.options.governance?.reapExpired() ?? [];
+    for (const action of actions) {
+      for (const run of action.runningRuns) {
+        this.stopRun(action.lease.teamName, run.runId);
+        if (run.taskId != null) {
+          const task = this.options.store.getTask(action.lease.teamName, run.taskId);
+          if (task && (task.status === 'in_progress' || task.status === 'pending')) {
+            this.options.store.updateTask(action.lease.teamName, run.taskId, {
+              status: 'pending',
+              result: `Temporary agent ${action.lease.agentName} recycled (${action.reason}); task requeued.`,
+            });
+          }
+        }
+      }
+      this.logger.info(
+        {
+          teamName: action.lease.teamName,
+          agentName: action.lease.agentName,
+          reason: action.reason,
+          stoppedRuns: action.runningRuns.map((run) => run.runId),
+        },
+        'Reaped governed temporary Agent',
+      );
     }
   }
 
@@ -445,10 +513,17 @@ export class AgentTeamSupervisor {
     }
   }
 
-  private buildPrompt(teamName: string, agent: TeamAgent, messages: TeamMessage[], tasks: TeamTask[]): string {
+  private buildPrompt(
+    teamName: string,
+    agent: TeamAgent,
+    messages: TeamMessage[],
+    tasks: TeamTask[],
+    governedRules?: string,
+  ): string {
     const teamContext = buildAgentTeamPromptContext(this.options.store, teamName) ?? '';
     const role = agent.role ? `Role: ${agent.role}` : 'Role: team member';
     const customPrompt = agent.prompt ? `\nMember instructions:\n${agent.prompt}\n` : '';
+    const rulesContext = governedRules ? `\nPinned governance rules:\n${governedRules}\n` : '';
     const messageBlock = messages.length
       ? messages.map((message) => `- #${message.id} from ${message.fromName ?? 'system'}: ${message.summary ? `${message.summary}\n  ` : ''}${message.body}`).join('\n')
       : '- none';
@@ -464,6 +539,7 @@ export class AgentTeamSupervisor {
         `You are MetaBot Agent Team lead in team "${teamName}".`,
         role,
         customPrompt,
+        rulesContext,
         teamContext,
         '',
         'You were woken in the background by Agent Team messages between user turns.',
@@ -484,6 +560,7 @@ export class AgentTeamSupervisor {
       `You are MetaBot Agent Team member "${agent.name}" in team "${teamName}".`,
       role,
       customPrompt,
+      rulesContext,
       teamContext,
       '',
       'You run in an independent persistent chat session. Coordinate through the MetaBot teams CLI, not through user chat.',

@@ -6,6 +6,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
 import type { CodexReasoningEffort } from '../../config.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
@@ -153,7 +154,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
 
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
       signal: options.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -263,6 +264,8 @@ export interface ExecutorOptions {
   allowedTools?: string[];
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
+  /** Short-lived bridge-issued environment values scoped to this engine session. */
+  env?: Record<string, string>;
 }
 
 export type SDKMessage = {
@@ -326,7 +329,14 @@ export class ClaudeExecutor {
     private logger: Logger,
   ) {}
 
-  private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
+  private buildQueryOptions(
+    cwd: string,
+    sessionId: string | undefined,
+    abortController: AbortController,
+    outputsDir?: string,
+    apiContext?: ApiContext,
+    env?: Record<string, string>,
+  ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
       permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
@@ -352,6 +362,7 @@ export class ClaudeExecutor {
       // forwards task events into the card's "Background" panel, so enabling
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
+      ...(env ? { env } : {}),
     };
 
     // Build system prompt appendix from sections
@@ -445,7 +456,7 @@ export class ClaudeExecutor {
     };
     inputQueue.enqueue(initialMessage);
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext);
+    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext, options.env);
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }
@@ -659,7 +670,14 @@ export class ClaudeExecutor {
 
     this.logger.info({ cwd, hasSession: !!sessionId }, 'Starting Claude execution');
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      options.apiContext,
+      options.env,
+    );
 
     const stream = query({
       prompt,

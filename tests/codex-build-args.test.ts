@@ -186,4 +186,23 @@ describe('buildCodexEnv', () => {
     expect(env.OPENAI_API_KEY).toBe('sk-bot-env');
     expect(env.PATH).toBe('/bin');
   });
+
+  it('strips bridge local-admin credentials but preserves the scoped Team capability', () => {
+    const env = buildCodexEnv(
+      { env: { METABOT_API_SECRET: 'config-spoof' } },
+      {
+        API_SECRET: 'bridge-admin',
+        METABOT_API_SECRET: 'bridge-admin-alias',
+        METABOT_AUTH: 'Authorization: Bearer bridge-admin',
+        METABOT_TEAM_CAPABILITY: 'signed-scoped-token',
+        METABOT_BOT_NAME: 'pm-codex',
+        METABOT_CHAT_ID: 'teaminst:one:coder',
+      },
+    );
+    expect(env.API_SECRET).toBeUndefined();
+    expect(env.METABOT_API_SECRET).toBeUndefined();
+    expect(env.METABOT_AUTH).toBeUndefined();
+    expect(env.METABOT_TEAM_CAPABILITY).toBe('signed-scoped-token');
+    expect(env.METABOT_BOT_NAME).toBe('pm-codex');
+  });
 });

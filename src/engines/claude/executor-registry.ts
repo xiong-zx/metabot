@@ -80,6 +80,8 @@ export interface AcquireOptions {
   apiContext?: ApiContext;
   /** Stable per-chat outputs directory. */
   outputsDir?: string;
+  /** Short-lived bridge-issued environment values scoped to this chat executor. */
+  env?: Record<string, string>;
 }
 
 interface PoolEntry {
@@ -171,7 +173,8 @@ export class ExecutorRegistry extends EventEmitter {
     if (existing) {
       const state = existing.executor.getState();
       const healthy = state === 'ready' || state === 'restarting' || state === 'starting';
-      if (healthy && existing.model === effectiveModel) {
+      const sameExecutionEnv = equalStringRecords(existing.acquireOpts.env, opts.env);
+      if (healthy && existing.model === effectiveModel && sameExecutionEnv) {
         // Healthy + same model — bump LRU position
         this.executors.delete(chatId);
         this.executors.set(chatId, existing);
@@ -182,11 +185,12 @@ export class ExecutorRegistry extends EventEmitter {
         // reusing this executor would keep the OLD model. Release + respawn —
         // the new executor RESUMES the same session (opts.resumeSessionId), so
         // the conversation is preserved, just continued on the new model.
+        const reason = existing.model !== effectiveModel ? 'model-change' : 'execution-credential-rotation';
         this.opts.logger.info(
-          { chatId, from: existing.model, to: effectiveModel },
-          'ExecutorRegistry: model changed — respawning executor',
+          { chatId, from: existing.model, to: effectiveModel, executionEnvChanged: !sameExecutionEnv },
+          `ExecutorRegistry: ${reason} — respawning executor`,
         );
-        await this.release(chatId, 'model-change');
+        await this.release(chatId, reason);
       } else if (existing.crashed && existing.model === effectiveModel) {
         // Crashed slot — respawn in place (resuming the captured session) so
         // teammates / in-progress work survive. Honors backoff + respawn cap;
@@ -459,6 +463,15 @@ export class ExecutorRegistry extends EventEmitter {
     }
   }
 
+  /** Retire a credential-bound executor without interrupting an active turn. */
+  async releaseIfIdle(chatId: string, reason: string): Promise<boolean> {
+    const entry = this.executors.get(chatId);
+    if (!entry) return true;
+    if (entry.executor.hasActiveTurn()) return false;
+    await this.release(chatId, reason);
+    return true;
+  }
+
   /** Shut down all executors (call on bot shutdown). */
   async shutdownAll(reason: string = 'registry-shutdown'): Promise<void> {
     if (this.shuttingDown) return;
@@ -487,4 +500,14 @@ export class ExecutorRegistry extends EventEmitter {
   }
 
   size(): number { return this.executors.size; }
+}
+
+function equalStringRecords(left?: Record<string, string>, right?: Record<string, string>): boolean {
+  if (left === right) return true;
+  const leftEntries = Object.entries(left ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(([key, value], index) => key === rightEntries[index]?.[0] && value === rightEntries[index]?.[1])
+  );
 }

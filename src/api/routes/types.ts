@@ -19,6 +19,8 @@ import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
 import type { AgentTeamStore } from '../../agent-teams/team-store.js';
 import type { AgentTeamSupervisor } from '../../agent-teams/team-supervisor.js';
+import type { AgentTeamGovernanceExtension } from '../../agent-teams/governance-extension.js';
+import type { AgentTeamExecutionPrincipal } from '../../agent-teams/governance-capability.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -41,6 +43,8 @@ export interface RouteContext {
   activityStore?: ActivityStore;
   agentTeamStore?: AgentTeamStore;
   agentTeamSupervisor?: AgentTeamSupervisor;
+  agentTeamGovernance?: AgentTeamGovernanceExtension;
+  resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
 }
 
 /**
