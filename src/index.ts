@@ -8,6 +8,7 @@ import { FeishuGroupReplyModeStore } from './feishu/group-reply-mode-store.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
 import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
+import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-factory.js';
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
@@ -78,7 +79,7 @@ async function startFeishuBot(
   botLogger.info('Starting Feishu bot...');
 
   // Create Feishu API client
-  const client = new lark.Client({
+  const client = createFeishuRestClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     disableTokenCache: false,
@@ -125,7 +126,7 @@ async function startFeishuBot(
 
   // Create WebSocket client with bounded liveness/reconnect controls.
   const wsRecovery = resolveFeishuWsRecoveryOptions();
-  const wsClient = new lark.WSClient({
+  const wsClient = createFeishuWsClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     loggerLevel: lark.LoggerLevel.info,
@@ -341,7 +342,7 @@ async function main() {
   // Create a dedicated Feishu service client for wiki sync & doc reader
   let feishuServiceClient: lark.Client | undefined;
   if (appConfig.feishuService) {
-    feishuServiceClient = new lark.Client({
+    feishuServiceClient = createFeishuRestClient(appConfig.feishuService.domain, {
       appId: appConfig.feishuService.appId,
       appSecret: appConfig.feishuService.appSecret,
       disableTokenCache: false,
@@ -360,6 +361,7 @@ async function main() {
       {
         feishuAppId: appConfig.feishuService.appId,
         feishuAppSecret: appConfig.feishuService.appSecret,
+        feishuDomain: appConfig.feishuService.domain,
         databaseDir: syncStateDir,
         wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
         wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,

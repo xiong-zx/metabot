@@ -53,6 +53,7 @@ settings in `bots.json`. See [Multi-Bot and Engines](multi-bot.md).
 |---|---|---|
 | `FEISHU_APP_ID` | — | Single-bot Feishu/Lark App ID |
 | `FEISHU_APP_SECRET` | — | Single-bot Feishu/Lark App Secret |
+| `FEISHU_DOMAIN` | `feishu` | API tenant: `feishu` or `lark`; other values are rejected |
 | `TELEGRAM_BOT_TOKEN` | — | Single-bot Telegram token |
 | `METABOT_FEISHU_WS_PING_TIMEOUT_SEC` | `20` | Feishu WebSocket pong timeout |
 | `METABOT_FEISHU_WS_HANDSHAKE_TIMEOUT_MS` | `15000` | Feishu connect/reconnect timeout |
@@ -72,6 +73,7 @@ Multi-bot deployments should store channel credentials in the protected
 | `METABOT_ALLOWED_PEER_CIDRS` | — | Optional IPv4 CIDR forwarding allowlist |
 | `FEISHU_SERVICE_APP_ID` | first Feishu bot | Optional Wiki/doc-reader service app |
 | `FEISHU_SERVICE_APP_SECRET` | first Feishu bot | Service app secret |
+| `FEISHU_SERVICE_DOMAIN` | `feishu` | Dedicated service app tenant: `feishu` or `lark` |
 | `WIKI_SYNC_ENABLED` | `true` | Enable optional Memory-to-Wiki sync |
 | `WIKI_SPACE_ID` | — | Existing Wiki space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name |
@@ -82,6 +84,10 @@ Multi-bot deployments should store channel credentials in the protected
 
 The complete provider and RTC variable list remains documented inline in
 `.env.example`, which is the source of truth for source deployments.
+
+When moving an app between Feishu and Lark, follow the
+[Lark domain migration guide](lark-domain-migration.md). Tenant-scoped app,
+chat, user, Wiki, node, and document IDs cannot be copied between them.
 
 ## Proxy
 

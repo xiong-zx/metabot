@@ -18,6 +18,7 @@
       "specialties": ["backend", "api", "database"],
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "secret2",
+      "feishuDomain": "lark",
       "defaultWorkingDirectory": "/home/user/project-beta",
       "maxTurns": 30,
       "maxBudgetUsd": 0.5

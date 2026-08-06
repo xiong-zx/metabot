@@ -26,6 +26,7 @@ Set `BOTS_CONFIG=./bots.json` in `.env`:
       "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
+      "feishuDomain": "lark",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": {
         "thinking": true
@@ -60,9 +61,13 @@ Channel-specific credentials:
 
 | Channel | Fields |
 |---|---|
-| Feishu/Lark | `feishuAppId`, `feishuAppSecret`, optional `groupNoMention` |
+| Feishu/Lark | `feishuAppId`, `feishuAppSecret`; optional `feishuDomain` (`feishu` by default, or `lark`) and `groupNoMention` |
 | Telegram | `telegramBotToken` |
 | WeChat | optional `wechatBotToken`; omit it for QR login |
+
+`feishuDomain` is strict: only `feishu` and `lark` are accepted. Existing
+entries that omit it continue to use Feishu. See [Lark domain migration](lark-domain-migration.md)
+before changing an existing bot because identifiers and Wiki mappings are tenant-scoped.
 
 ## Codex Options
 
