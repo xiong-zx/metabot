@@ -56,6 +56,29 @@ prompt_yn() {
   [[ "$lower" == "y" || "$lower" == "yes" ]]
 }
 
+pm2_app_owned_by_runtime() {
+  local app_name="$1" runtime_root="$2" expected_script="$3"
+  command -v node &>/dev/null || return 1
+  local identity cwd script
+  identity="$(pm2 jlist 2>/dev/null | node -e '
+    let input="";
+    process.stdin.on("data",c=>input+=c).on("end",()=>{
+      try {
+        const row=JSON.parse(input).find(entry=>entry.name===process.argv[1]);
+        const env=row?.pm2_env||{};
+        if (env.pm_cwd && env.pm_exec_path) {
+          process.stdout.write(JSON.stringify({cwd:env.pm_cwd,script:env.pm_exec_path}));
+        }
+      } catch { process.exitCode=2; }
+    });
+  ' "$app_name")" || return 1
+  [[ -n "$identity" ]] || return 1
+  cwd="$(printf '%s' "$identity" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).cwd))')"
+  script="$(printf '%s' "$identity" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).script))')"
+  [[ "$(readlink -f "$cwd")" == "$(readlink -f "$runtime_root")" \
+    && "$(readlink -f "$script")" == "$(readlink -f "$runtime_root/$expected_script")" ]]
+}
+
 # ============================================================================
 # Banner
 # ============================================================================
@@ -89,6 +112,17 @@ if command -v pm2 &>/dev/null; then
       info "No $app PM2 process found"
     fi
   done
+  if pm2 describe metabot-core &>/dev/null 2>&1; then
+    if pm2_app_owned_by_runtime metabot-core "$METABOT_HOME" packages/server/dist/index.js; then
+      info "Stopping checkout-owned metabot-core PM2 process..."
+      pm2 delete metabot-core 2>/dev/null || true
+      success "metabot-core PM2 process removed"
+    else
+      warn "Leaving metabot-core untouched because its PM2 cwd/script is not owned by $METABOT_HOME."
+    fi
+  else
+    info "No metabot-core PM2 process found"
+  fi
   if pm2 describe metamemory &>/dev/null 2>&1; then
     info "Stopping MetaMemory PM2 process..."
     pm2 delete metamemory 2>/dev/null || true

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'packages/worker-runner-mcp/dist',
     'packages/arc-mcp/dist',
     'packages/arc-worker-runner-adapter/dist',
+    'packages/server/dist',
     'node_modules',
   ]) mkdirSync(join(runtime, path), { recursive: true });
   mkdirSync(fakeBin, { recursive: true });
@@ -29,11 +30,13 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'src/index.ts',
     'src/runtime/restart-state-cli.ts',
     'scripts/pm2-protected-runtime-switch.cjs',
+    'packages/server/dist/index.js',
     'src/services/local-daemon-health.ts',
     'packages/worker-runner-mcp/dist/daemon-cli.js',
     'packages/arc-mcp/dist/daemon-cli.js',
     'packages/arc-worker-runner-adapter/dist/factory.js',
     'ecosystem.config.cjs',
+    'ecosystem.core.config.cjs',
   ]) writeFileSync(join(runtime, path), '// fixture\n');
   symlinkSync(join(REPO_ROOT, 'node_modules/tsx'), join(runtime, 'node_modules/tsx'));
   symlinkSync(join(REPO_ROOT, 'node_modules/better-sqlite3'), join(runtime, 'node_modules/better-sqlite3'));
@@ -47,7 +50,9 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     '#!/usr/bin/env bash',
     'printf "%s\\n" "$*" >> "$PM2_LOG"',
     'if [[ "${1:-}" == "jlist" ]]; then',
-    '  printf \'[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}},{"name":"metabot-worker-runnerd","pid":102,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/worker-runner-mcp/dist/daemon-cli.js"}},{"name":"metabot-arcd","pid":103,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/arc-mcp/dist/daemon-cli.js"}}]\\n\' "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME"',
+    '  core=""',
+    '  if [[ -n "${FAKE_CORE_RUNTIME:-}" ]]; then core=",{\\"name\\":\\"metabot-core\\",\\"pid\\":104,\\"pm2_env\\":{\\"status\\":\\"online\\",\\"pm_cwd\\":\\"$FAKE_CORE_RUNTIME\\",\\"pm_exec_path\\":\\"$FAKE_CORE_RUNTIME/packages/server/dist/index.js\\"}}"; fi',
+    '  printf \'[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}},{"name":"metabot-worker-runnerd","pid":102,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/worker-runner-mcp/dist/daemon-cli.js"}},{"name":"metabot-arcd","pid":103,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/arc-mcp/dist/daemon-cli.js"}}%s]\\n\' "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$core"',
     'fi',
   ]);
   writeExecutable(join(fakeBin, 'node'), [
@@ -115,6 +120,19 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(switches).toHaveLength(1);
   });
 
+  it('refuses a wrong live runtime or missing artifact before the protected switch', () => {
+    const wrongRuntime = fixture();
+    expect(() => run(wrongRuntime, ['restart'], { FAKE_RUNTIME: '/srv/other-metabot' })).toThrow(
+      /Same-runtime restart refused/,
+    );
+    expect(readFileSync(wrongRuntime.log, 'utf8')).not.toContain('protected-switch');
+
+    const missingArtifact = fixture();
+    rmSync(join(missingArtifact.runtime, 'src', 'index.ts'));
+    expect(() => run(missingArtifact, ['restart'])).toThrow(/Missing built runtime artifact/);
+    expect(() => readFileSync(missingArtifact.log, 'utf8')).toThrow();
+  });
+
   it('refuses a busy daemon restart and allows an explicit forced recovery transition', () => {
     const kit = fixture();
     expect(() => run(kit, ['restart', '--daemon', 'worker'], { FAKE_BUSY_DAEMON: 'worker' })).toThrow();
@@ -149,6 +167,27 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(log).not.toContain('save --force');
   });
 
+  it('includes only a checkout-owned Core in a protected runtime cutover', () => {
+    const owned = fixture();
+    const ownedTarget = fixture();
+    run(owned, ['deploy-runtime', '--runtime', ownedTarget.runtime, '--no-wait'], {
+      FAKE_CORE_RUNTIME: owned.runtime,
+    });
+    expect(readFileSync(owned.log, 'utf8')).toContain(
+      `--apps metabot-worker-runnerd,metabot-arcd,metabot-core,metabot`,
+    );
+
+    const external = fixture();
+    const externalTarget = fixture();
+    run(external, ['deploy-runtime', '--runtime', externalTarget.runtime, '--no-wait'], {
+      FAKE_CORE_RUNTIME: '/srv/external-core',
+    });
+    expect(readFileSync(external.log, 'utf8')).toContain(
+      `--apps metabot-worker-runnerd,metabot-arcd,metabot`,
+    );
+    expect(readFileSync(external.log, 'utf8')).not.toContain(',metabot-core,');
+  }, 15_000);
+
   it('uses wire-only health code and builds every daemon workspace on update', () => {
     const health = readFileSync(join(REPO_ROOT, 'src/services/local-daemon-health.ts'), 'utf8');
     const cli = readFileSync(join(REPO_ROOT, 'bin/metabot'), 'utf8');
@@ -162,6 +201,8 @@ describe('metabot execution-daemon lifecycle', () => {
       expect(cli).toContain(`npm run build -w @xvirobotics/${workspace}`);
     }
     expect(uninstall).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstall).toContain('pm2_app_owned_by_runtime metabot-core');
+    expect(uninstall).toContain('Leaving metabot-core untouched');
     expect(production).toContain('pm2 delete metabot-worker-runnerd metabot-arcd');
   });
 });

@@ -122,6 +122,12 @@ Runner、ARC、Bridge 顺序就地切换，不产生 `pm2 delete` 的空档；�
 已经接受的所有变更。旧控制器不会保存 PM2，只有健康的新 Bridge 才会保存。自动化
 重试应使用稳定的 `--request-id`，并用 `--wait --json` 取得持久终态。
 
+个人版 Core 仍然使用独立的 PM2 ecosystem。只有当前 Core 的 PM2 cwd 和脚本都精确
+属于当前 Bridge checkout，而且目标目录也包含独立 Core ecosystem 与已构建服务时，
+切换流程才会把 Core 放在 ARC 与 Bridge 之间。远程或单独管理的 Core 不会被重启或
+切换。`uninstall.sh` 也只会删除通过此所有权检查的 Core，因此卸载 Bridge 不会误删
+外部 Core。
+
 ## 源码部署
 
 源码 checkout 使用显式路径：

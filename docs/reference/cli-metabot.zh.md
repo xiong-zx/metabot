@@ -67,9 +67,11 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 
 守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
 `recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
-它会先校验三个应用的目标配置和回退配置，再按 Worker Runner、ARC、Bridge 的顺序
-就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。只有健康的新
-Bridge 会保存 PM2 进程列表。
+它会先校验目标配置和回退配置，再按 Worker Runner、ARC、可选的本地 Core、Bridge
+顺序就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。Core 仍使用
+独立 ecosystem，只有当前 PM2 cwd 和脚本都精确属于 Bridge 运行目录时才会加入切换；
+外部 Core 完全不动。`uninstall.sh` 使用相同的所有权检查。只有健康的新 Bridge 会保存
+PM2 进程列表。
 
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。

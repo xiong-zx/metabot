@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,7 +22,7 @@ function logger(): Logger {
   } as unknown as Logger;
 }
 
-function recoveryFixture(chatId = 'chat-user-1') {
+function recoveryFixture(chatId = 'chat-user-1', resume = true) {
   const dbPath = join(mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-db-')), 'state.sqlite');
   const store = new RestartStore({ dbPath });
   const sendTextNotice = vi.fn().mockResolvedValue(undefined);
@@ -38,7 +38,7 @@ function recoveryFixture(chatId = 'chat-user-1') {
     requesterChat: chatId,
     source: 'test',
     reason: 'continue work',
-    resume: true,
+    resume,
     targetRoot: '/srv/metabot',
     targetApps: ['metabot'],
     targetScripts: { metabot: '/srv/metabot/src/index.ts' },
@@ -52,7 +52,7 @@ function recoveryFixture(chatId = 'chat-user-1') {
     chatId,
     source: 'test',
     reason: 'continue work',
-    resume: true,
+    resume,
     targetRoot: '/srv/metabot',
   });
   loadRestartBreadcrumb();
@@ -92,6 +92,7 @@ describe('controlled restart startup finalization', () => {
       dedupeKey: 'restart-resume:restart-recovery',
       prompt: expect.stringContaining('Continue the interrupted task now'),
     }));
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(false);
 
     await finalizeControlledRestartAfterStartup({
       registry: kit.registry,
@@ -124,6 +125,45 @@ describe('controlled restart startup finalization', () => {
       reportOutcome: 'delivered',
       recoveryOwner: 'none:restart-failed',
     });
+    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    kit.store.close();
+  });
+
+  it('marks the request failed and does not continue when PM2 save fails', async () => {
+    const kit = recoveryFixture();
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => { throw new Error('injected pm2 save failure'); },
+    });
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      status: 'failed',
+      healthError: 'injected pm2 save failure',
+      recoveryOwner: 'none:restart-failed',
+    });
+    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    kit.store.close();
+  });
+
+  it('reports but does not continue when resume is disabled', async () => {
+    const kit = recoveryFixture('chat-user-1', false);
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      status: 'healthy',
+      reportOutcome: 'delivered',
+      recoveryOwner: 'none:resume-disabled',
+    });
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
     expect(kit.scheduleTask).not.toHaveBeenCalled();
     kit.store.close();
   });

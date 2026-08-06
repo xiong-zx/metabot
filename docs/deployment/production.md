@@ -138,6 +138,13 @@ save PM2 state; the new Bridge saves it only after full startup health. Use a
 stable `--request-id` for retryable automation and `--wait --json` for a
 durable terminal result.
 
+Personal Edition Core remains a separate PM2 ecosystem. A runtime cutover adds
+it between ARC and Bridge only when the current Core PM2 cwd and script exactly
+match the current Bridge checkout; the target must also contain the separate
+Core ecosystem and built server. A remote or separately managed Core is never
+restarted or switched. `uninstall.sh` likewise removes Core only when that
+ownership check passes, so uninstalling Bridge cannot delete an external Core.
+
 ## Source deployments
 
 Source checkouts use an explicit path:

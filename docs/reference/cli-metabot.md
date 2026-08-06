@@ -73,10 +73,13 @@ or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).
 Daemon restarts refuse while work is active. `--force` explicitly accepts that
 ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
 the same guard and must run outside the MetaBot process tree. It prevalidates
-all three target/rollback configurations, restarts Worker Runner, ARC, then
-Bridge without deleting their PM2 registrations, and rolls back every changed
-app if PM2 rejects or cannot verify a switch. Only the healthy new Bridge saves
-the process list.
+the target/rollback configurations, restarts Worker Runner, ARC, an optional
+checkout-owned local Core, then Bridge without deleting their PM2
+registrations, and rolls back every changed app if PM2 rejects or cannot verify
+a switch. Core stays in its separate ecosystem. It is included only when its
+current PM2 cwd/script exactly match the Bridge runtime; an external Core is
+left untouched. `uninstall.sh` uses the same ownership check. Only the healthy
+new Bridge saves the process list.
 
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and

@@ -111,6 +111,8 @@ describe('pack-metabot.sh', () => {
     expect(installSh).toContain('package replacement may leave it recovery_required');
     expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
     expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstallSh).toContain('pm2_app_owned_by_runtime metabot-core');
+    expect(uninstallSh).toContain('Leaving metabot-core untouched');
     expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
-const ALLOWED_APPS = new Set(['metabot', 'metabot-worker-runnerd', 'metabot-arcd']);
+const ALLOWED_APPS = new Set(['metabot', 'metabot-worker-runnerd', 'metabot-arcd', 'metabot-core']);
 const PROXY_KEYS = new Set([
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
 ]);
@@ -102,7 +102,13 @@ function targetEnvironment(Common, target, current, fileEnv, declaredEnv, target
 }
 
 function resolveConfiguration({ Common, pm2, dotenv, root, appName, current, preferCurrent }) {
-  const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
+  // Core intentionally remains a separate ecosystem/service. It participates
+  // in a cutover only when the CLI has already proved the current checkout
+  // owns that PM2 registration.
+  const ecosystemPath = path.join(
+    root,
+    appName === 'metabot-core' ? 'ecosystem.core.config.cjs' : 'ecosystem.config.cjs',
+  );
   if (!fs.existsSync(ecosystemPath)) throw new Error(`Missing ecosystem config: ${ecosystemPath}`);
   delete require.cache[require.resolve(ecosystemPath)];
   const ecosystem = require(ecosystemPath);
@@ -176,13 +182,13 @@ async function main() {
     throw new Error('Usage: pm2-protected-runtime-switch.cjs --runtime DIR --apps app[,app]');
   }
   if (apps.some((app) => !ALLOWED_APPS.has(app)) || new Set(apps).size !== apps.length) {
-    throw new Error('Apps must be a unique subset of metabot, metabot-worker-runnerd, metabot-arcd');
+    throw new Error('Apps must be a unique subset of metabot, metabot-worker-runnerd, metabot-arcd, metabot-core');
   }
 
   const pm2Root = resolvePm2Root();
   const pkg = require(path.join(pm2Root, 'package.json'));
   const major = Number.parseInt(String(pkg.version || '').split('.')[0], 10);
-  if (![5, 6].includes(major)) throw new Error(`Unsupported PM2 version ${pkg.version || 'unknown'}`);
+  if (![5, 6, 7].includes(major)) throw new Error(`Unsupported PM2 version ${pkg.version || 'unknown'}`);
   const pm2 = require(pm2Root);
   const Common = require(path.join(pm2Root, 'lib', 'Common.js'));
   const dotenv = require(require.resolve('dotenv', { paths: [targetRoot, __dirname] }));

@@ -24,8 +24,11 @@ Bridge-only and changes its registered PM2 process in place. A stable request
 ID deduplicates retries. The new Bridge saves PM2 only after startup health and
 queues one continuation for normal user/PM chats when `--resume` is enabled;
 Team and Worker/ARC internal recovery stays with their durable owners.
-`deploy-runtime` prevalidates and switches the three apps without deleting PM2
-registrations, rolling back changed apps on failure. Daemon restart and runtime deployment refuse active work unless
+`deploy-runtime` prevalidates and switches the three Bridge-runtime apps
+without deleting PM2 registrations, rolling back changed apps on failure. It
+also switches a separate local Core only when PM2 proves the current checkout
+owns it; external Core stays untouched. Uninstall uses the same ownership
+guard. Daemon restart and runtime deployment refuse active work unless
 the operator passes `--force`; forced interruption can leave durable records
 in `recovery_required`. Run `deploy-runtime` only from outside the MetaBot
 process tree. Rolling back to a pre-daemon release also requires

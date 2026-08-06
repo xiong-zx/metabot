@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const HELPER = join(REPO_ROOT, 'scripts', 'pm2-protected-runtime-switch.cjs');
 const APPS = ['metabot-worker-runnerd', 'metabot-arcd', 'metabot'];
+const CORE_APP = 'metabot-core';
 
 function makeHarness() {
   const root = mkdtempSync(join(tmpdir(), 'metabot-pm2-switch-fake-'));
@@ -73,6 +74,7 @@ exports.mergeEnvironmentVariables = (target) => ({
 function makeRuntime(root: string, label: string): void {
   mkdirSync(root, { recursive: true });
   for (const app of APPS) writeFileSync(join(root, `${app}.cjs`), 'setInterval(() => {}, 1000);\n');
+  writeFileSync(join(root, `${CORE_APP}.cjs`), 'setInterval(() => {}, 1000);\n');
   const apps = APPS.map((app) => ({
     name: app,
     script: `${app}.cjs`,
@@ -90,6 +92,14 @@ function makeRuntime(root: string, label: string): void {
     },
   }));
   writeFileSync(join(root, 'ecosystem.config.cjs'), `module.exports=${JSON.stringify({ apps })};\n`);
+  writeFileSync(join(root, 'ecosystem.core.config.cjs'), `module.exports=${JSON.stringify({
+    apps: [{
+      name: CORE_APP,
+      script: `${CORE_APP}.cjs`,
+      cwd: root,
+      env: { RUNTIME_LABEL: label, METABOT_CORE_DATA_DIR: '/var/lib/metabot-core' },
+    }],
+  })};\n`);
 }
 
 function writeState(file: string, runtime: string): void {
@@ -163,5 +173,38 @@ describe('protected PM2 runtime switch helper', () => {
       expect(row.pm2_env.pm_exec_path).toBe(join(kit.source, `${row.name}.cjs`));
       expect(row.pm2_env.RUNTIME_LABEL).toBe('source');
     }
+  });
+
+  it('uses the separate Core ecosystem when an ownership-checked caller includes local Core', () => {
+    const kit = makeHarness();
+    const rows = JSON.parse(readFileSync(kit.stateFile, 'utf8'));
+    rows.push({
+      name: CORE_APP,
+      pm_id: 3,
+      pid: 1003,
+      pm2_env: {
+        status: 'online',
+        pm_cwd: kit.source,
+        pm_exec_path: join(kit.source, `${CORE_APP}.cjs`),
+        RUNTIME_LABEL: 'source',
+        METABOT_CORE_DATA_DIR: '/var/lib/metabot-core',
+      },
+    });
+    writeFileSync(kit.stateFile, JSON.stringify(rows));
+
+    execFileSync(process.execPath, [
+      HELPER, '--runtime', kit.target, '--apps', `${CORE_APP},metabot`,
+    ], { env: kit.env, encoding: 'utf8' });
+    const switched = JSON.parse(readFileSync(kit.stateFile, 'utf8'));
+    const core = switched.find((row: { name: string }) => row.name === CORE_APP);
+    expect(core).toMatchObject({ name: CORE_APP, pm_id: 3 });
+    expect(core.pm2_env).toMatchObject({
+      status: 'online',
+      pm_cwd: kit.target,
+      pm_exec_path: join(kit.target, `${CORE_APP}.cjs`),
+      RUNTIME_LABEL: 'target',
+      METABOT_CORE_DATA_DIR: '/var/lib/metabot-core',
+      METABOT_HOME: kit.target,
+    });
   });
 });

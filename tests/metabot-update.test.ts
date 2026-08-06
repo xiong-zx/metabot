@@ -186,7 +186,10 @@ describe('metabot update source selection', () => {
     expect(source).toContain("require('./package.json').metabotEdition");
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-server');
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-web-ui');
-    expect(source).toContain('pm2 restart metabot-core --update-env');
+    expect(source).toContain('_local_core_owned_by_root "$METABOT_HOME"');
+    expect(source).toContain('protected_restart_args+=(--include-owned-core)');
+    expect(source).not.toContain('pm2 restart metabot-core --update-env');
+    expect(source).not.toContain('_update_core_workspace');
   });
 });
 

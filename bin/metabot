@@ -100,6 +100,7 @@ _bridge_scoped_read() {
 cmd_update() {
   local update_source="${METABOT_UPDATE_SOURCE:-auto}"
   local update_version="${METABOT_UPDATE_VERSION:-}"
+  local include_owned_core=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --git)
@@ -220,15 +221,17 @@ cmd_update() {
   npm run build -w @xvirobotics/arc-mcp
   npm run build -w @xvirobotics/arc-worker-runner-adapter
 
-  # A personal-edition git checkout owns a local Core/Web UI when that PM2
-  # process was created by install.sh. Keep it on the same exact checkout;
-  # remote-Core users (no local process) remain untouched.
+  # A personal-edition git checkout updates Core only when PM2 proves that the
+  # same exact checkout owns its cwd and script. A sibling/external Core is not
+  # pulled, built, restarted, or otherwise modified.
   if [[ "$(node -p "require('./package.json').metabotEdition || ''")" == "personal" ]] \
-    && pm2 describe metabot-core &>/dev/null 2>&1; then
+    && _local_core_owned_by_root "$METABOT_HOME"; then
     info "Building local metabot-core and Web UI..."
     npm run build -w @xvirobotics/metabot-core-server
     npm run build -w @xvirobotics/metabot-core-web-ui
-    pm2 restart metabot-core --update-env
+    include_owned_core=true
+  elif pm2 describe metabot-core &>/dev/null 2>&1; then
+    warn "Leaving metabot-core untouched because this runtime does not own its PM2 cwd/script."
   fi
 
   # Update CLI tools in ~/.local/bin.
@@ -462,44 +465,16 @@ cmd_update() {
   _prepare_execution_daemons
   _restart_execution_daemons_for_update
 
-  _update_core_workspace || true
-
   info "Submitting protected MetaBot Bridge restart..."
-  cmd_restart \
-    --source update \
-    --reason "metabot update" \
-    --bot "${METABOT_BOT_NAME:-}" \
-    --chat "${METABOT_CHAT_ID:-${METABOT_CHAT:-}}" \
+  local -a protected_restart_args=(
+    --source update
+    --reason "metabot update"
+    --bot "${METABOT_BOT_NAME:-}"
+    --chat "${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
     --resume
-}
-
-# Optimization: if a sibling metabot-core checkout exists, pull + build it so
-# the delegated feature CLI (`metabot t5t/agents/memory/skills`) stays in sync
-# with the central server. Best-effort — failures don't break the bridge update.
-_update_core_workspace() {
-  local core_dir="$METABOT_HOME/../metabot-workspace/metabot-core"
-  if [[ ! -d "$core_dir/.git" || ! -f "$core_dir/package.json" ]]; then
-    return 0
-  fi
-  echo ""
-  info "Updating sibling metabot-core workspace at $core_dir ..."
-  (
-    cd "$core_dir"
-    if ! git pull --ff-only; then
-      warn "metabot-core: git pull --ff-only failed (uncommitted changes?). Skipping build."
-      exit 1
-    fi
-    info "metabot-core: installing dependencies..."
-    npm install --include=dev --silent || {
-      warn "metabot-core: npm install failed."
-      exit 1
-    }
-    info "metabot-core: building..."
-    npm run build || {
-      warn "metabot-core: build failed."
-      exit 1
-    }
-  ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
+  )
+  [[ "$include_owned_core" == true ]] && protected_restart_args+=(--include-owned-core)
+  cmd_restart "${protected_restart_args[@]}"
 }
 
 # Controlled restart state lives outside the checkout so a runtime switch can
@@ -570,6 +545,17 @@ _pm2_app_json() {
   ' "$app_name"
 }
 
+_local_core_owned_by_root() {
+  local runtime_root="$1" live cwd script
+  live="$(_pm2_app_json metabot-core)"
+  [[ -n "$live" ]] || return 1
+  cwd="$(printf '%s' "$live" | _json_field cwd)"
+  script="$(printf '%s' "$live" | _json_field script)"
+  [[ -n "$cwd" && -n "$script" \
+    && "$(readlink -f "$cwd")" == "$(readlink -f "$runtime_root")" \
+    && "$(readlink -f "$script")" == "$(readlink -f "$runtime_root/packages/server/dist/index.js")" ]]
+}
+
 _wait_restart_terminal_state() {
   local request_id="$1" timeout="$2" started now state result
   started="$(date +%s)"
@@ -619,6 +605,17 @@ _ensure_runtime_artifacts() {
     packages/arc-worker-runner-adapter/dist/factory.js; do
     if [[ ! -f "$runtime_root/$artifact" ]]; then
       error "Missing built runtime artifact: $runtime_root/$artifact"
+      missing=true
+    fi
+  done
+  [[ "$missing" == false ]]
+}
+
+_ensure_local_core_artifacts() {
+  local runtime_root="$1" missing=false
+  for artifact in ecosystem.core.config.cjs packages/server/dist/index.js; do
+    if [[ ! -f "$runtime_root/$artifact" ]]; then
+      error "Missing local Core runtime artifact: $runtime_root/$artifact"
       missing=true
     fi
   done
@@ -786,6 +783,7 @@ cmd_restart() {
   local requester_bot="${METABOT_BOT_NAME:-}"
   local requester_chat="${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
   local source="cli" reason="MetaBot Bridge restart" resume=true wait=false json=false timeout=90
+  local include_owned_core=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --request-id) [[ $# -ge 2 ]] || { error "--request-id requires a value"; return 2; }; request_id="$2"; shift 2 ;;
@@ -798,6 +796,7 @@ cmd_restart() {
       --wait) wait=true; shift ;;
       --timeout) [[ $# -ge 2 ]] || { error "--timeout requires seconds"; return 2; }; timeout="$2"; shift 2 ;;
       --json) json=true; shift ;;
+      --include-owned-core) include_owned_core=true; shift ;;
       --help|-h)
         echo "Usage: metabot restart [--request-id ID] [--bot NAME --chat ID] [--reason TEXT] [--resume|--no-resume] [--wait] [--timeout SEC] [--json]"
         echo "       metabot restart --daemon <worker|arc> [--force]"
@@ -823,12 +822,23 @@ cmd_restart() {
     return 3
   }
 
+  local target_apps=metabot switch_apps=metabot
+  if [[ "$include_owned_core" == true ]]; then
+    if _local_core_owned_by_root "$METABOT_HOME"; then
+      _ensure_local_core_artifacts "$METABOT_HOME" || return 1
+      target_apps=metabot-core,metabot
+      switch_apps=metabot-core,metabot
+    else
+      warn "Leaving metabot-core untouched because this runtime does not own its PM2 cwd/script."
+    fi
+  fi
+
   request_id="${request_id:-$(_new_restart_request_id)}"
   SESSION_STORE_DIR="$(_restart_state_dir)"
   export SESSION_STORE_DIR
   local -a state_flags=(
     --request-id "$request_id" --kind restart --target-root "$METABOT_HOME"
-    --target-apps metabot --source "$source" --reason "$reason" --resume "$resume"
+    --target-apps "$target_apps" --source "$source" --reason "$reason" --resume "$resume"
   )
   [[ -n "$requester_bot" ]] && state_flags+=(--bot "$requester_bot")
   [[ -n "$requester_chat" ]] && state_flags+=(--chat "$requester_chat")
@@ -854,8 +864,8 @@ cmd_restart() {
   export METABOT_RESTART_RESUME="$resume"
   export METABOT_BOT_NAME="$requester_bot"
   export METABOT_CHAT_ID="$requester_chat"
-  if ! result="$(_protected_switch "$METABOT_HOME" metabot)"; then
-    _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected Bridge restart" >/dev/null || true
+  if ! result="$(_protected_switch "$METABOT_HOME" "$switch_apps")"; then
+    _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected owned-service restart" >/dev/null || true
     return 1
   fi
   if [[ "$wait" == true ]]; then
@@ -945,17 +955,30 @@ cmd_deploy_runtime() {
     fi
   done
 
-  local state_root live current_pid claim duplicate result
+  local state_root live current_root current_pid claim duplicate result
   state_root="$(_restart_state_dir)"
   SESSION_STORE_DIR="$state_root"
   export SESSION_STORE_DIR
   request_id="${request_id:-$(_new_restart_request_id)}"
   live="$(_pm2_app_json metabot)"
   [[ -n "$live" ]] || { error "metabot is not registered in PM2; deploy-runtime will not create an implicit replacement."; return 1; }
+  current_root="$(printf '%s' "$live" | _json_field cwd)"
   current_pid="$(printf '%s' "$live" | _json_field pid)"
+  local target_apps=metabot-worker-runnerd,metabot-arcd,metabot
+  local switch_apps=metabot-worker-runnerd,metabot-arcd,metabot
+  if _pm2_app_exists metabot-core; then
+    if _local_core_owned_by_root "$current_root"; then
+      _ensure_local_core_artifacts "$target" || return 1
+      target_apps=metabot-worker-runnerd,metabot-arcd,metabot-core,metabot
+      switch_apps=metabot-worker-runnerd,metabot-arcd,metabot-core,metabot
+      info "Including checkout-owned metabot-core in the protected runtime switch."
+    else
+      warn "Leaving external metabot-core untouched; its PM2 cwd/script is not owned by the Bridge runtime."
+    fi
+  fi
   local -a state_flags=(
     --request-id "$request_id" --kind deploy --target-root "$target"
-    --target-apps metabot-worker-runnerd,metabot-arcd,metabot
+    --target-apps "$target_apps"
     --source "$source" --reason "$reason" --resume "$resume"
   )
   [[ -n "$requester_bot" ]] && state_flags+=(--bot "$requester_bot")
@@ -982,7 +1005,7 @@ cmd_deploy_runtime() {
   export METABOT_RESTART_RESUME="$resume"
   export METABOT_BOT_NAME="$requester_bot"
   export METABOT_CHAT_ID="$requester_chat"
-  if ! result="$(_protected_switch "$target" metabot-worker-runnerd,metabot-arcd,metabot)"; then
+  if ! result="$(_protected_switch "$target" "$switch_apps")"; then
     _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected runtime switch; changed apps were rolled back" >/dev/null || true
     return 1
   fi
