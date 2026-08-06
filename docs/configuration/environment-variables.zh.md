@@ -51,6 +51,7 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 |---|---|---|
 | `FEISHU_APP_ID` | — | 单 Bot 飞书/Lark App ID |
 | `FEISHU_APP_SECRET` | — | 单 Bot 飞书/Lark App Secret |
+| `FEISHU_DOMAIN` | `feishu` | API 租户：`feishu` 或 `lark`；其他值会报错 |
 | `TELEGRAM_BOT_TOKEN` | — | 单 Bot Telegram Token |
 | `METABOT_FEISHU_WS_PING_TIMEOUT_SEC` | `20` | 飞书 WebSocket Pong 超时 |
 | `METABOT_FEISHU_WS_HANDSHAKE_TIMEOUT_MS` | `15000` | 飞书连接/重连超时 |
@@ -69,6 +70,7 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | `METABOT_ALLOWED_PEER_CIDRS` | — | 可选 IPv4 CIDR 转发白名单 |
 | `FEISHU_SERVICE_APP_ID` | 第一个飞书 Bot | 可选 Wiki/文档读取 Service App |
 | `FEISHU_SERVICE_APP_SECRET` | 第一个飞书 Bot | Service App Secret |
+| `FEISHU_SERVICE_DOMAIN` | `feishu` | 独立 Service App 的租户：`feishu` 或 `lark` |
 | `WIKI_SYNC_ENABLED` | `true` | 启用可选 Memory-to-Wiki 同步 |
 | `WIKI_SPACE_ID` | — | 已有 Wiki Space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki Space 名称 |
@@ -78,6 +80,9 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | `ELEVENLABS_API_KEY` | — | 可选 ElevenLabs TTS Key |
 
 完整 Provider 与 RTC 变量仍以内联注释写在 `.env.example` 中；源码部署以它为真值。
+
+在飞书与 Lark 之间迁移应用时，请按 [Lark 域名迁移指南](lark-domain-migration.md)
+操作。App、聊天、用户、Wiki、节点和文档 ID 都属于各自租户，不能跨租户复制。
 
 ## 代理
 

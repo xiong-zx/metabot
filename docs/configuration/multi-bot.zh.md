@@ -25,6 +25,7 @@
       "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
+      "feishuDomain": "lark",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": {
         "thinking": true
@@ -59,9 +60,13 @@
 
 | 渠道 | 字段 |
 |---|---|
-| 飞书/Lark | `feishuAppId`、`feishuAppSecret`，可选 `groupNoMention` |
+| 飞书/Lark | `feishuAppId`、`feishuAppSecret`；可选 `feishuDomain`（默认 `feishu`，国际版用 `lark`）和 `groupNoMention` |
 | Telegram | `telegramBotToken` |
 | 微信 | 可选 `wechatBotToken`；省略时扫码登录 |
+
+`feishuDomain` 只接受 `feishu` 和 `lark`。旧配置不写该字段时仍使用飞书。
+修改已有 Bot 前请阅读 [Lark 域名迁移](lark-domain-migration.md)，因为 ID 和 Wiki
+映射都只在各自租户内有效。
 
 ## Codex 配置
 

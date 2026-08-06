@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
+
+export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
+export type { FeishuDomain } from './feishu/domain.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -188,6 +192,7 @@ export interface BotConfig extends BotConfigBase {
   feishu: {
     appId: string;
     appSecret: string;
+    domain: FeishuDomain;
   };
   /** When true, respond to all messages in group chats without requiring @mention. */
   groupNoMention?: boolean;
@@ -223,6 +228,7 @@ export interface AppConfig {
   feishuService?: {
     appId: string;
     appSecret: string;
+    domain: FeishuDomain;
   };
   log: {
     level: string;
@@ -320,6 +326,8 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   memoryPublic?: boolean;
   feishuAppId: string;
   feishuAppSecret: string;
+  /** API tenant. Defaults to "feishu"; use "lark" for Lark international. */
+  feishuDomain?: FeishuDomain;
   defaultWorkingDirectory: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -351,6 +359,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,
+      domain: parseFeishuDomain(entry.feishuDomain, `Feishu bot "${entry.name}" feishuDomain`),
     },
     claude: buildClaudeConfig(entry),
   };
@@ -540,6 +549,7 @@ function feishuBotFromEnv(): BotConfig {
     feishu: {
       appId: required('FEISHU_APP_ID'),
       appSecret: required('FEISHU_APP_SECRET'),
+      domain: parseFeishuDomain(process.env.FEISHU_DOMAIN, 'FEISHU_DOMAIN'),
     },
     claude: {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
@@ -692,11 +702,13 @@ export function loadAppConfig(): AppConfig {
     feishuService = {
       appId: process.env.FEISHU_SERVICE_APP_ID,
       appSecret: process.env.FEISHU_SERVICE_APP_SECRET,
+      domain: parseFeishuDomain(process.env.FEISHU_SERVICE_DOMAIN, 'FEISHU_SERVICE_DOMAIN'),
     };
   } else if (feishuBots.length > 0) {
     feishuService = {
       appId: feishuBots[0].feishu.appId,
       appSecret: feishuBots[0].feishu.appSecret,
+      domain: feishuBots[0].feishu.domain,
     };
   }
 

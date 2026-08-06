@@ -122,6 +122,11 @@ metabot_install_skill_bundle() {
   cp -R "$source/." "$destination/"
 }
 
+is_lark_cli_brand() {
+  local brand="${1:-}"
+  [[ "$brand" == "feishu" || "$brand" == "lark" ]]
+}
+
 # Safe prompt — reads from /dev/tty, uses printf -v (no eval)
 prompt_input() {
   local varname="$1"
@@ -877,9 +882,14 @@ API_TIMEOUT_MS=600000"
 
   FEISHU_APP_ID=""
   FEISHU_APP_SECRET=""
+  FEISHU_DOMAIN="feishu"
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     echo ""
     echo -e "  ${BOLD}Feishu/Lark Credentials:${NC}"
+    echo "    1) Feishu (China)"
+    echo "    2) Lark (international)"
+    prompt_choice FEISHU_DOMAIN_CHOICE "1"
+    [[ "$FEISHU_DOMAIN_CHOICE" == "2" ]] && FEISHU_DOMAIN="lark"
     prompt_input FEISHU_APP_ID "App ID (e.g. cli_xxxx)"
     prompt_secret FEISHU_APP_SECRET "App Secret"
     if [[ -z "$FEISHU_APP_ID" || -z "$FEISHU_APP_SECRET" ]]; then
@@ -1028,18 +1038,19 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
 
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     FEISHU_BOTS_JSON=$(node -e "
-      const engine = process.argv[5];
+      const engine = process.argv[6];
       const bot = {
         name: process.argv[1],
         engine,
         feishuAppId: process.argv[2],
         feishuAppSecret: process.argv[3],
-        defaultWorkingDirectory: process.argv[4],
+        feishuDomain: process.argv[4],
+        defaultWorkingDirectory: process.argv[5],
       };
       if (engine === 'kimi') { bot.kimi = { model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' }; }
       if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
-    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$WORK_DIR" "${BOT_ENGINE:-claude}")
+    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$FEISHU_DOMAIN" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
 
   if [[ "$SETUP_TELEGRAM" == "true" ]]; then
@@ -1215,10 +1226,15 @@ if [[ "$SETUP_LARK_CLI" == "true" ]]; then
   if [[ ! -f "$HOME/.lark-cli/config.json" && -f "$METABOT_HOME/bots.json" ]]; then
     FEISHU_APP_ID=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppId||'')" 2>/dev/null)
     FEISHU_APP_SECRET=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppSecret||'')" 2>/dev/null)
+    FEISHU_CLI_BRAND=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); const d=(c.feishuBots||[])[0]?.feishuDomain||'feishu'; if (!['feishu','lark'].includes(d)) process.exit(1); console.log(d)" 2>/dev/null || true)
     if [[ -n "$FEISHU_APP_ID" && -n "$FEISHU_APP_SECRET" ]]; then
-      echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand feishu 2>/dev/null && \
-        success "lark-cli configured with app $FEISHU_APP_ID" || \
-        warn "lark-cli config failed — you can run manually: lark-cli config init"
+      if ! is_lark_cli_brand "$FEISHU_CLI_BRAND"; then
+        warn "lark-cli config skipped — feishuDomain must be 'feishu' or 'lark'"
+      else
+        echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand "$FEISHU_CLI_BRAND" 2>/dev/null && \
+          success "lark-cli configured with app $FEISHU_APP_ID" || \
+          warn "lark-cli config failed — you can run manually: lark-cli config init"
+      fi
     fi
   fi
 
