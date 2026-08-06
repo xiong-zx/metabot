@@ -10,6 +10,7 @@ import {
   type ArcExecutionInput,
   type ArcResultStatus,
   type ArcRunError,
+  type ArcRunOriginator,
   type ArcRunRecord,
   type ArcRunStatus,
   validateArcExecutionInput,
@@ -25,6 +26,8 @@ interface RunRow {
   idempotency_key: string;
   execution_input_json: string | null;
   request_fingerprint: string;
+  originator_bot_name: string | null;
+  originator_chat_id: string | null;
   status: string;
   phase: string;
   progress: number;
@@ -39,7 +42,14 @@ interface RunRow {
   started_at: string | null;
   finished_at: string | null;
   version: number;
+  notification_state: ArcNotificationState;
+  notification_attempts: number;
+  notification_next_attempt_at: number | null;
+  notification_last_error: string | null;
+  notification_delivered_at: number | null;
 }
+
+export type ArcNotificationState = 'none' | 'waiting' | 'sending' | 'delivered' | 'failed';
 
 export interface CreateArcRunInput {
   runId: string;
@@ -50,6 +60,7 @@ export interface CreateArcRunInput {
   requestFingerprint: string;
   artifactPath: string;
   executionInput: ArcExecutionInput;
+  originator?: ArcRunOriginator;
   now: string;
 }
 
@@ -127,10 +138,12 @@ export class ArcRunStore {
         .prepare(
           `INSERT INTO arc_runs (
             run_id, project_id, project_root, objective, idempotency_key, execution_input_json,
-            request_fingerprint, status, phase, progress, artifact_path,
+            request_fingerprint, originator_bot_name, originator_chat_id,
+            status, phase, progress, artifact_path,
             output_status, runner_handle_json, error_code, error_message,
-            recovery_generation, created_at, updated_at, started_at, finished_at, version
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0)`,
+            recovery_generation, created_at, updated_at, started_at, finished_at, version,
+            notification_state
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0, ?)`,
         )
         .run(
           input.runId,
@@ -140,9 +153,12 @@ export class ArcRunStore {
           input.idempotencyKey,
           JSON.stringify(input.executionInput),
           input.requestFingerprint,
+          input.originator?.bot_name ?? null,
+          input.originator?.chat_id ?? null,
           input.artifactPath,
           input.now,
           input.now,
+          input.originator ? 'waiting' : 'none',
         );
       return { created: true, run: this.requireRun(input.runId) };
     })();
@@ -277,6 +293,97 @@ export class ArcRunStore {
     return rows.map((row) => this.rowToRecord(row));
   }
 
+  resetInterruptedNotifications(now: number): void {
+    this.db
+      .prepare(
+        `UPDATE arc_runs SET notification_state = 'failed', notification_next_attempt_at = ?,
+           notification_last_error = COALESCE(notification_last_error, 'notification interrupted by restart')
+         WHERE notification_state = 'sending'`,
+      )
+      .run(now);
+  }
+
+  listDueTerminalNotifications(now: number, limit = 50): ArcRunRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM arc_runs
+         WHERE status IN ('completed', 'partial', 'failed', 'cancelled')
+           AND notification_state IN ('waiting', 'failed')
+           AND COALESCE(notification_next_attempt_at, 0) <= ?
+         ORDER BY COALESCE(notification_next_attempt_at, 0), finished_at, created_at
+         LIMIT ?`,
+      )
+      .all(now, limit) as RunRow[];
+    return rows.map((row) => this.rowToRecord(row));
+  }
+
+  claimTerminalNotification(runId: string, now: number): ArcRunRecord | undefined {
+    const result = this.db
+      .prepare(
+        `UPDATE arc_runs SET notification_state = 'sending',
+           notification_attempts = notification_attempts + 1
+         WHERE run_id = ?
+           AND status IN ('completed', 'partial', 'failed', 'cancelled')
+           AND notification_state IN ('waiting', 'failed')
+           AND COALESCE(notification_next_attempt_at, 0) <= ?`,
+      )
+      .run(runId, now);
+    return result.changes ? this.requireRun(runId) : undefined;
+  }
+
+  markNotificationDelivered(runId: string, deliveredAt: number): void {
+    this.db
+      .prepare(
+        `UPDATE arc_runs SET notification_state = 'delivered', notification_delivered_at = ?,
+           notification_next_attempt_at = NULL, notification_last_error = NULL
+         WHERE run_id = ? AND notification_state = 'sending'`,
+      )
+      .run(deliveredAt, runId);
+  }
+
+  markNotificationFailed(runId: string, error: string, nextAttemptAt: number): void {
+    this.db
+      .prepare(
+        `UPDATE arc_runs SET notification_state = 'failed', notification_last_error = ?,
+           notification_next_attempt_at = ?
+         WHERE run_id = ? AND notification_state = 'sending'`,
+      )
+      .run(error.slice(0, 2_000), nextAttemptAt, runId);
+  }
+
+  getNotificationState(runId: string): {
+    state: ArcNotificationState;
+    attempts: number;
+    nextAttemptAt?: number;
+    lastError?: string;
+    deliveredAt?: number;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT notification_state, notification_attempts, notification_next_attempt_at,
+                notification_last_error, notification_delivered_at
+         FROM arc_runs WHERE run_id = ?`,
+      )
+      .get(runId) as
+      | Pick<
+          RunRow,
+          | 'notification_state'
+          | 'notification_attempts'
+          | 'notification_next_attempt_at'
+          | 'notification_last_error'
+          | 'notification_delivered_at'
+        >
+      | undefined;
+    if (!row) throw new ArcError('run_not_found', 'ARC run was not found', { details: { runId } });
+    return {
+      state: row.notification_state,
+      attempts: row.notification_attempts,
+      ...(row.notification_next_attempt_at !== null ? { nextAttemptAt: row.notification_next_attempt_at } : {}),
+      ...(row.notification_last_error ? { lastError: row.notification_last_error } : {}),
+      ...(row.notification_delivered_at !== null ? { deliveredAt: row.notification_delivered_at } : {}),
+    };
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -311,6 +418,10 @@ export class ArcRunStore {
       objective: row.objective,
       idempotency_key: row.idempotency_key,
       request_fingerprint: row.request_fingerprint,
+      originator:
+        row.originator_bot_name && row.originator_chat_id
+          ? { bot_name: row.originator_bot_name, chat_id: row.originator_chat_id }
+          : null,
       status: row.status,
       phase: row.phase,
       progress: row.progress,
@@ -337,6 +448,8 @@ export class ArcRunStore {
         idempotency_key TEXT NOT NULL,
         execution_input_json TEXT,
         request_fingerprint TEXT NOT NULL,
+        originator_bot_name TEXT,
+        originator_chat_id TEXT,
         status TEXT NOT NULL CHECK (
           status IN ('queued', 'running', 'paused', 'completed', 'partial', 'failed', 'cancelled')
         ),
@@ -353,12 +466,34 @@ export class ArcRunStore {
         started_at TEXT,
         finished_at TEXT,
         version INTEGER NOT NULL DEFAULT 0,
+        notification_state TEXT NOT NULL DEFAULT 'none'
+          CHECK (notification_state IN ('none', 'waiting', 'sending', 'delivered', 'failed')),
+        notification_attempts INTEGER NOT NULL DEFAULT 0,
+        notification_next_attempt_at INTEGER,
+        notification_last_error TEXT,
+        notification_delivered_at INTEGER,
         UNIQUE(project_id, idempotency_key)
       );
       CREATE INDEX IF NOT EXISTS idx_arc_runs_project_status_created
         ON arc_runs(project_id, status, created_at DESC);
     `);
     this.addColumnIfMissing('arc_runs', 'execution_input_json', 'TEXT');
+    this.addColumnIfMissing('arc_runs', 'originator_bot_name', 'TEXT');
+    this.addColumnIfMissing('arc_runs', 'originator_chat_id', 'TEXT');
+    this.addColumnIfMissing(
+      'arc_runs',
+      'notification_state',
+      "TEXT NOT NULL DEFAULT 'none' CHECK (notification_state IN ('none', 'waiting', 'sending', 'delivered', 'failed'))",
+    );
+    this.addColumnIfMissing('arc_runs', 'notification_attempts', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumnIfMissing('arc_runs', 'notification_next_attempt_at', 'INTEGER');
+    this.addColumnIfMissing('arc_runs', 'notification_last_error', 'TEXT');
+    this.addColumnIfMissing('arc_runs', 'notification_delivered_at', 'INTEGER');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_arc_runs_notification_due
+        ON arc_runs(notification_state, notification_next_attempt_at)
+        WHERE status IN ('completed', 'partial', 'failed', 'cancelled');
+    `);
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
