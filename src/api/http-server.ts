@@ -31,6 +31,11 @@ import {
   AgentTeamCapabilityError,
   AgentTeamExecutionCapabilityService,
 } from '../agent-teams/governance-capability.js';
+import { ExecutionCapabilityService } from '../services/execution-capabilities.js';
+import {
+  deriveExecutionPrincipal,
+  mintOptedInExecutionCapabilities,
+} from '../services/execution-principal.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
@@ -70,6 +75,7 @@ export interface ApiServerOptions {
   agentTeamStore?: AgentTeamStore;
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   agentTeamCapabilityService?: AgentTeamExecutionCapabilityService;
+  executionCapabilityService?: ExecutionCapabilityService;
   agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
 }
@@ -175,6 +181,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(agentTeamStore), logger);
   const ownsAgentTeamGovernance = !options.agentTeamGovernance;
   const agentTeamCapabilityService = options.agentTeamCapabilityService ?? new AgentTeamExecutionCapabilityService();
+  const executionCapabilityService = options.executionCapabilityService ?? new ExecutionCapabilityService();
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
@@ -304,7 +311,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       string,
       { env: Record<string, string>; refreshAt: number; timer: ReturnType<typeof setTimeout> }
     >();
-    bot.bridge.setAgentTeamExecutionEnvProvider(({ botName, chatId }) => {
+    bot.bridge.setExecutionEnvProvider(({ botName, chatId }) => {
       const now = Date.now();
       const cached = capabilityCache.get(chatId);
       if (cached && cached.refreshAt > now) return cached.env;
@@ -312,14 +319,27 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         clearTimeout(cached.timer);
         capabilityRetirementTimers.delete(cached.timer);
       }
-      const principal = deriveExecutionCapabilityPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
+      const principal = deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
       const env = {
         [AGENT_TEAM_CAPABILITY_ENV]: agentTeamCapabilityService.issue({
           ...principal,
           ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
-        }),
+        }, now),
         METABOT_BOT_NAME: botName,
         METABOT_CHAT_ID: chatId,
+        ...mintOptedInExecutionCapabilities({
+          service: executionCapabilityService,
+          principal,
+          config: bot.config,
+          ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
+          now,
+          onError: (purpose, error) => {
+            logger.error(
+              { error, purpose, botName, chatId },
+              'Execution capability unavailable; external tools fail closed for this session',
+            );
+          },
+        }),
       };
       const refreshAt = now + AGENT_TEAM_CAPABILITY_TTL_MS - AGENT_TEAM_CAPABILITY_RETIRE_SKEW_MS;
       const entry = { env, refreshAt, timer: undefined as unknown as ReturnType<typeof setTimeout> };
@@ -580,53 +600,6 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 function headerValue(value: string | string[] | undefined): string | undefined {
   const item = Array.isArray(value) ? value[0] : value;
   return item?.trim() || undefined;
-}
-
-function deriveExecutionCapabilityPrincipal(
-  governance: AgentTeamGovernanceExtension,
-  store: AgentTeamStore,
-  botName: string,
-  chatId: string,
-): {
-  role: 'pm' | 'user' | 'manager' | 'agent';
-  botName: string;
-  chatId: string;
-  teamName?: string;
-  agentName?: string;
-} {
-  const governedMatch = /^teaminst:([^:]+):([^:]+)(?::.*)?$/.exec(chatId);
-  if (governedMatch) {
-    const instance = governance.getInstance(governedMatch[1]);
-    const agent = instance ? store.getAgent(instance.teamName, governedMatch[2]) : undefined;
-    const role = isManagerAgent(governedMatch[2], agent?.role) ? 'manager' : 'agent';
-    return {
-      role,
-      botName,
-      chatId,
-      ...(instance ? { teamName: instance.teamName } : {}),
-      agentName: governedMatch[2],
-    };
-  }
-  const legacyMatch = /^team:([^:]+):([^:]+)(?::.*)?$/.exec(chatId);
-  if (legacyMatch) {
-    const agent = store.getAgent(legacyMatch[1], legacyMatch[2]);
-    return {
-      role: isManagerAgent(legacyMatch[2], agent?.role) ? 'manager' : 'agent',
-      botName,
-      chatId,
-      teamName: legacyMatch[1],
-      agentName: legacyMatch[2],
-    };
-  }
-  return {
-    role: botName === 'metabot' || /^pm(?:-|$)/i.test(botName) ? 'pm' : 'user',
-    botName,
-    chatId,
-  };
-}
-
-function isManagerAgent(agentName: string, role: string | undefined): boolean {
-  return agentName === 'lead' || /(^|\b)(lead|manager)(\b|$)/i.test(role ?? '');
 }
 
 function parseRelayContent(content: string): Record<string, any> | undefined {
