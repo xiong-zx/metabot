@@ -18,13 +18,14 @@ Commands you can send to MetaBot in Feishu or Telegram.
 | `/help` | Show available commands |
 | `/metaskill ...` | Generate agent teams, agents, or skills |
 | `/metabot` | Load Agent Bus docs (scheduling, bot management, cross-instance talk) |
+| `/metabot-todos` | Show canonical MetaMemory ToDos; completed items require `--status done` or `--include-done` |
 | `/anything` | Any unrecognized command is forwarded to Claude Code as a skill |
 
 ## Notes
 
 - In **DMs**, the bot replies to all messages
 - Commands like `/memory` and `/sync` respond quickly without spawning Claude
-- `/metaskill` and `/metabot` are skills that get loaded into Claude's context on demand
+- `/metaskill`, `/metabot`, and `/metabot-todos` are skills loaded into the agent's context on demand
 
 ## Feishu Group Chat Behavior
 

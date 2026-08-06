@@ -125,7 +125,13 @@ done
 # install.sh and the metabot SKILL bundle are load-bearing — if either is
 # missing, the bootstrap → install.sh → Phase 6 chain will explode on the
 # bot host. Fail loud here instead.
-for required in 'install.sh' 'packages/skills/metabot/SKILL.md' 'packages/skills/metabot-team/SKILL.md'; do
+for required in \
+  'install.sh' \
+  'packages/skills/metabot/SKILL.md' \
+  'packages/skills/metabot-team/SKILL.md' \
+  'packages/skills/metabot-todos/SKILL.md' \
+  'packages/skills/metabot-todos/agents/openai.yaml' \
+  'packages/skills/metabot-todos/scripts/todo-display.mjs'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
@@ -243,6 +249,16 @@ if ! grep -Eq '^(\./)?packages/skills/metabot-team/SKILL\.md$' <<<"$TARBALL_LIST
   rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
   exit 1
 fi
+for required in \
+  'packages/skills/metabot-todos/SKILL.md' \
+  'packages/skills/metabot-todos/agents/openai.yaml' \
+  'packages/skills/metabot-todos/scripts/todo-display.mjs'; do
+  if ! grep -Eq "^(\\./)?${required//./\\.}$" <<<"$TARBALL_LISTING"; then
+    echo "error: packed tarball is missing $required" >&2
+    rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
+    exit 1
+  fi
+done
 if [[ "$PACKAGE_FLAVOR" == "personal" ]] && grep -Eq '^(\./)?packages/server/static(/|$)' <<<"$TARBALL_LISTING"; then
   echo "error: personal package contains prebuilt/stale packages/server/static content" >&2
   rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
