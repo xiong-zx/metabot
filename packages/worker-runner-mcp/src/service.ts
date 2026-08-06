@@ -130,10 +130,14 @@ export class WorkerService {
     }
   }
 
-  async dispatch(rawInput: DispatchWorkerInput, principal?: TrustedPrincipal): Promise<DispatchWorkerResult> {
+  async dispatch(
+    rawInput: DispatchWorkerInput,
+    principal?: TrustedPrincipal,
+    authorizingCapability?: string,
+  ): Promise<DispatchWorkerResult> {
     const actor = this.resolvePrincipal(principal);
     this.authorizeMutation(actor);
-    const input = this.normalizeDispatch(rawInput, actor);
+    const input = this.normalizeDispatch(rawInput, actor, authorizingCapability);
     const created = this.store.createWorker(this.makeId(), input, this.config.maxConcurrentPerScope, this.now());
     if (!created.deduplicated) void this.launchWorker(created.worker, false);
     return created;
@@ -364,10 +368,12 @@ export class WorkerService {
       return;
     }
     const { prompt: _prompt, ...publicWorker } = worker;
+    const authorizingCapability = this.store.getAuthorizingCapability(worker.id);
     try {
       await this.notifier.notify({
         eventId: `worker:${worker.id}:terminal:v1`,
         eventType: 'worker.terminal',
+        ...(authorizingCapability ? { authorizingCapability } : {}),
         worker: publicWorker,
       });
       this.store.markNotificationDelivered(id, this.now());
@@ -424,7 +430,11 @@ export class WorkerService {
     return normalized;
   }
 
-  private normalizeDispatch(input: DispatchWorkerInput, principal: TrustedPrincipal): ScopedDispatchWorkerInput {
+  private normalizeDispatch(
+    input: DispatchWorkerInput,
+    principal: TrustedPrincipal,
+    authorizingCapability?: string,
+  ): ScopedDispatchWorkerInput {
     if (!WORKER_ENGINES.includes(input.engine)) {
       throw new WorkerRunnerError(`Unsupported worker engine: ${String(input.engine)}`, 'INVALID_INPUT');
     }
@@ -479,6 +489,9 @@ export class WorkerService {
     return {
       botName: principal.botName,
       chatId: principal.chatId,
+      ...(authorizingCapability !== undefined
+        ? { authorizingCapability: normalizeNonempty(authorizingCapability, 'authorizingCapability', 4_096) }
+        : {}),
       workdir,
       prompt,
       engine: input.engine,

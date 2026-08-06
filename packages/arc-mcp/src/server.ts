@@ -22,6 +22,7 @@ export interface ArcTrustedPrincipal {
 
 export interface ArcMcpServerOptions {
   principal?: ArcTrustedPrincipal;
+  authorizingCapability?: string;
 }
 
 const runOutputSchema = z.object({ run: arcRunRecordSchema }).strict();
@@ -71,6 +72,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
           run: await coordinator.start(
             request,
             principal ? { bot_name: principal.botName, chat_id: principal.chatId } : undefined,
+            options.authorizingCapability,
           ),
         };
       }),

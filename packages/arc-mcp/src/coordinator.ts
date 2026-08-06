@@ -114,7 +114,11 @@ export class ArcCoordinator {
     return this.recoveryPromise;
   }
 
-  async start(value: unknown, originator?: ArcRunOriginator): Promise<ArcRunRecord> {
+  async start(
+    value: unknown,
+    originator?: ArcRunOriginator,
+    authorizingCapability?: string,
+  ): Promise<ArcRunRecord> {
     const request = parsedRequest(arcStartRequestSchema, value, 'ARC start');
     const projectRoot = this.scope.authorizeStart(request.project_id, request.project_root, this.artifacts);
     const runId = request.run_id ?? randomUUID();
@@ -147,6 +151,7 @@ export class ArcCoordinator {
       artifactPath,
       executionInput,
       ...(originator ? { originator } : {}),
+      ...(authorizingCapability ? { authorizingCapability } : {}),
       now: requestedAt,
     });
     const scopedRun = this.scope.authorizeRun(created.run);

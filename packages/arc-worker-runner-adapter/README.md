@@ -64,10 +64,11 @@ ARC's internal workers.
 ## Phase B integration still required
 
 This package does not issue capabilities, receive callbacks, supervise the two
-daemons, or write engine MCP configuration. Those Bridge responsibilities wait
-for the W01 governance capability work and belong to Phase B. A symmetric HMAC
-capability key places Bridge and both trusted daemons in one host trust domain:
-any holder of that key can mint as well as verify capabilities.
+daemons, or write engine MCP configuration. Those Bridge responsibilities
+belong to Phase B. The package daemons verify v2.1 Ed25519 capabilities and
+sign terminal callbacks, but this is scope hygiene rather than containment
+against malicious same-UID code; that stronger boundary needs OS-user
+separation.
 
 ## Development
 

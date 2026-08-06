@@ -70,6 +70,22 @@ describe('WorkerStore', () => {
     expect(other.worker.status).toBe('queued');
   });
 
+  it('persists callback authorization privately across store restart', () => {
+    const { store, dir } = makeStore();
+    store.createWorker(
+      'wrk-private-capability',
+      input(dir, { authorizingCapability: 'signed-worker-capability' }),
+      2,
+      100,
+    );
+    expect(store.require('wrk-private-capability')).not.toHaveProperty('authorizingCapability');
+    store.close();
+    const reopened = new WorkerStore(path.join(dir, 'state', 'workers.sqlite'));
+    stores.push(reopened);
+    expect(reopened.getAuthorizingCapability('wrk-private-capability')).toBe('signed-worker-capability');
+    expect(reopened.require('wrk-private-capability')).not.toHaveProperty('authorizingCapability');
+  });
+
   it('reuses successful dedupe keys only within TTL and retries terminal failures by policy', () => {
     const { store, dir } = makeStore();
     const firstInput = input(dir, { dedupeKey: 'same', dedupePolicy: { completedTtlMs: 100, retryTerminal: true } });

@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { readSecretFile } from './local-auth.js';
+import { readPrivateKeyFile } from './local-auth.js';
 import { createWorkerRunnerMcpServer } from './mcp-server.js';
 import { HttpCompletionNotifier, NoopCompletionNotifier } from './notifier.js';
 import { NodeCliProcessRunner } from './process-runner.js';
@@ -34,6 +34,9 @@ export function createWorkerRunnerServiceRuntime(
 ): WorkerRunnerServiceRuntime {
   const env = options.env ?? process.env;
   const dynamicPrincipals = options.dynamicPrincipals === true;
+  if (env.METABOT_WORKER_CALLBACK_URL?.trim() && !dynamicPrincipals) {
+    throw new Error('Worker terminal callbacks require authenticated daemon mode');
+  }
   const configuredPrincipal = options.principal ?? principalFromEnv(env);
   const principal = configuredPrincipal ? normalizeTrustedPrincipal(configuredPrincipal) : undefined;
   if (!dynamicPrincipals && !principal) normalizeTrustedPrincipal(undefined);
@@ -54,9 +57,9 @@ export function createWorkerRunnerServiceRuntime(
     const notifier = env.METABOT_WORKER_CALLBACK_URL
       ? new HttpCompletionNotifier({
           url: env.METABOT_WORKER_CALLBACK_URL,
-          signingKey: readSecretFile(
-            requiredAnyEnv(env, ['METABOT_WORKER_CALLBACK_KEY_FILE', 'METABOT_WORKER_CALLBACK_SIGNING_KEY_FILE']),
-            'Worker callback signing key',
+          signingKey: readPrivateKeyFile(
+            requiredEnv(env, 'METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE'),
+            'Worker callback private key',
           ),
           timeoutMs: integerEnv(env, 'METABOT_WORKER_CALLBACK_TIMEOUT_MS', 30_000),
         })

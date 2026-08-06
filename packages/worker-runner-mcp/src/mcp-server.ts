@@ -95,6 +95,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
 ];
 
 export interface WorkerRunnerMcpOptions {
+  authorizingCapability?: string;
   maxStatusOutputChars?: number;
 }
 
@@ -177,7 +178,7 @@ export function createWorkerRunnerMcpServer(
                   },
                 }
               : {}),
-          }, authenticatedPrincipal);
+          }, authenticatedPrincipal, options.authorizingCapability);
           return toolResult({
             deduplicated: result.deduplicated,
             retriedTerminal: result.retriedTerminal,

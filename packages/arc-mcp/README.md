@@ -86,11 +86,20 @@ chat are saved as the run's `originator` when `arc_run_start` creates it; those
 values never come from tool arguments. Project ID/root restrictions remain the
 separate trusted server policy described above.
 
-Capabilities use symmetric HMAC. Therefore a daemon holding the shared key can
-mint as well as verify tokens: the bridge and trusted daemons deliberately form
-one host trust domain. Capability and callback keys use distinct signed
-purposes and must be different private files (regular, non-symlink, at least 32
-bytes, mode 0600 or otherwise inaccessible to group/other users).
+Capabilities use the frozen v2.1 Ed25519 form
+`base64url(JSON claims).base64url(signature)` with exact claims
+`{v:1,purpose:'arc',role,botName,chatId,exp}`. The daemon holds the current
+capability public key and may also accept one previous public key during
+rotation (`<current>.prev` is discovered automatically); it signs callbacks
+with a distinct daemon-private Ed25519 key. Key
+files are bounded regular non-symlink PEM files inaccessible to group/other
+users.
+
+The session-establishing capability is stored privately alongside originator
+metadata so a terminal callback can prove its bot/chat authorization. It is
+never exposed in run status/list/tool output or passed to a runner. These
+controls provide scope hygiene, not containment against malicious same-UID
+code; host-user separation is required for that stronger boundary.
 
 Example daemon configuration:
 
@@ -99,9 +108,10 @@ METABOT_ARC_DATA_DIR=/absolute/private/state
 METABOT_ARC_PROJECT_ROOTS=["/absolute/project/root"]
 METABOT_ARC_RUNNER_MODULE=/absolute/path/to/runner-adapter.js
 METABOT_ARC_LISTEN=http://127.0.0.1:9312/mcp
-METABOT_ARC_CAPABILITY_KEY_FILE=/absolute/private/arc-capability.key
+METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE=/absolute/private/arc-capability.pub
+METABOT_ARC_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE=/absolute/private/arc-capability.pub.prev
 METABOT_ARC_CALLBACK_URL=http://127.0.0.1:9100/api/worker-events
-METABOT_ARC_CALLBACK_KEY_FILE=/absolute/private/arc-callback.key
+METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE=/absolute/private/arc-callback.key
 ```
 
 The proxy receives its capability only through
@@ -153,10 +163,13 @@ notification. A separate notifier observes terminal rows; the coordinator does
 not infer callback targets or perform network calls. The signed
 `metabot.terminal-callback.v1` envelope uses stable event ID
 `arc:<run-id>:terminal:v1`, includes the authenticated bot/chat scope, and sends
-the same ID in `Idempotency-Key`. Delivery is at least once: retry state and
-backoff deadlines are stored in SQLite, and a restarted notifier resumes them.
-Receivers must verify `X-MetaBot-Callback-Signature`, match the bot/chat scope,
-and durably deduplicate the event ID.
+the same ID in `Idempotency-Key`. It also includes numeric epoch-ms
+`finished_at` and the original `authorizing_capability` inside the signed body.
+`X-MetaBot-Callback-Signature` is `ed25519:<base64>` over the exact raw body.
+Delivery is at least once: retry state and backoff deadlines are stored in
+SQLite, and a restarted notifier resumes them. Receivers must verify the raw
+body signature, match the capability and envelope bot/chat scope, and durably
+deduplicate the event ID.
 
 If no callback URL is configured, no notification worker starts; originator
 metadata remains durable for a later correctly configured restart. ARC still

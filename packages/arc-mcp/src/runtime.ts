@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { ArcArtifactStore } from './artifact-store.js';
 import { ArcCoordinator } from './coordinator.js';
 import { ArcError } from './errors.js';
-import { readArcSecretFile } from './local-auth.js';
+import { readArcPrivateKeyFile } from './local-auth.js';
 import { ArcTerminalNotifierService, HttpArcTerminalNotifier } from './notifier.js';
 import type { ArcRunner } from './runner.js';
 import { ArcRunStore } from './run-store.js';
@@ -44,9 +44,9 @@ export async function createArcRuntime(options: CreateArcRuntimeOptions = {}): P
           store,
           new HttpArcTerminalNotifier({
             url: callbackUrl,
-            signingKey: readArcSecretFile(
-              requiredAnyEnv(env, ['METABOT_ARC_CALLBACK_KEY_FILE', 'METABOT_ARC_CALLBACK_SIGNING_KEY_FILE']),
-              'ARC callback signing key',
+            signingKey: readArcPrivateKeyFile(
+              requiredEnv(env, 'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE'),
+              'ARC callback private key',
             ),
             timeoutMs: integerEnv(env, 'METABOT_ARC_CALLBACK_TIMEOUT_MS', 30_000),
           }),

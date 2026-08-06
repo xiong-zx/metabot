@@ -35,7 +35,7 @@ describe('ArcWorkerRunnerAdapter', () => {
   });
 
   it('renders only contract data and no process secrets or lifecycle delegation', () => {
-    process.env.METABOT_ARC_CALLBACK_KEY_FILE = '/secret/callback.key';
+    process.env.METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE = '/secret/callback.key';
     process.env.API_SECRET = 'never-render-this';
     const prompt = renderArcWorkerPrompt(executionInput());
     expect(prompt).toContain('autoresearchclaw.input.v1');

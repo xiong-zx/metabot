@@ -1,4 +1,9 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  createPublicKey,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+  type KeyObject,
+} from 'node:crypto';
 
 import type { ArcRunRecord } from './contract.js';
 import type { ArcRunStore } from './run-store.js';
@@ -10,8 +15,9 @@ export interface ArcTerminalCallbackEnvelope {
   bot_name: string;
   chat_id: string;
   status: ArcRunRecord['status'];
-  finished_at: string;
+  finished_at: number;
   iat: number;
+  authorizing_capability: string;
   payload: {
     run_id: string;
     project_id: string;
@@ -28,22 +34,21 @@ export interface ArcTerminalNotifier {
 
 export interface HttpArcTerminalNotifierOptions {
   url: string;
-  signingKey: Uint8Array;
+  signingKey: KeyObject;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
 export class HttpArcTerminalNotifier implements ArcTerminalNotifier {
   private readonly url: URL;
-  private readonly key: Buffer;
+  private readonly key: KeyObject;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: HttpArcTerminalNotifierOptions) {
     this.url = new URL(options.url);
     if (!['http:', 'https:'].includes(this.url.protocol)) throw new Error('ARC callback URL must use HTTP or HTTPS');
-    this.key = Buffer.from(options.signingKey);
-    if (this.key.length < 32) throw new Error('ARC callback signing key must contain at least 32 bytes');
+    this.key = normalizePrivateKey(options.signingKey);
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -115,9 +120,10 @@ export class ArcTerminalNotifierService {
       for (const due of this.store.listDueTerminalNotifications(this.now())) {
         const run = this.store.claimTerminalNotification(due.run_id, this.now());
         if (!run?.originator || !run.finished_at) continue;
-        const envelope = terminalEnvelope(run, this.now());
         try {
-          await this.notifier.notify(envelope);
+          const authorizingCapability = this.store.getAuthorizingCapability(run.run_id);
+          if (!authorizingCapability) throw new Error('ARC terminal callback requires its durable authorizing capability');
+          await this.notifier.notify(terminalEnvelope(run, this.now(), authorizingCapability));
           this.store.markNotificationDelivered(run.run_id, this.now());
         } catch (error) {
           const attempts = this.store.getNotificationState(run.run_id).attempts;
@@ -135,8 +141,15 @@ export class ArcTerminalNotifierService {
   }
 }
 
-export function terminalEnvelope(run: ArcRunRecord, iat: number): ArcTerminalCallbackEnvelope {
+export function terminalEnvelope(
+  run: ArcRunRecord,
+  iat: number,
+  authorizingCapability: string,
+): ArcTerminalCallbackEnvelope {
   if (!run.originator || !run.finished_at) throw new Error('Terminal ARC callback requires origin and finish time');
+  const finishedAt = Date.parse(run.finished_at);
+  if (!Number.isSafeInteger(finishedAt)) throw new Error('Terminal ARC callback finish time is invalid');
+  if (!authorizingCapability) throw new Error('Terminal ARC callback requires an authorizing capability');
   return {
     contract_version: 'metabot.terminal-callback.v1',
     purpose: 'arc.terminal',
@@ -144,8 +157,9 @@ export function terminalEnvelope(run: ArcRunRecord, iat: number): ArcTerminalCal
     bot_name: run.originator.bot_name,
     chat_id: run.originator.chat_id,
     status: run.status,
-    finished_at: run.finished_at,
+    finished_at: finishedAt,
     iat,
+    authorizing_capability: authorizingCapability,
     payload: {
       run_id: run.run_id,
       project_id: run.project_id,
@@ -157,24 +171,41 @@ export function terminalEnvelope(run: ArcRunRecord, iat: number): ArcTerminalCal
   };
 }
 
-export function signArcTerminalCallback(body: string | Uint8Array, keyValue: Uint8Array): string {
-  const key = Buffer.from(keyValue);
-  if (key.length < 32) throw new Error('ARC callback signing key must contain at least 32 bytes');
-  const signature = createHmac('sha256', key)
-    .update('metabot.terminal-callback.v1\0arc.terminal\0')
-    .update(body)
-    .digest('base64url');
-  return `v1=${signature}`;
+export function signArcTerminalCallback(body: string | Uint8Array, keyValue: KeyObject): string {
+  return `ed25519:${cryptoSign(null, bodyBytes(body), normalizePrivateKey(keyValue)).toString('base64')}`;
 }
 
 export function verifyArcTerminalCallback(
   body: string | Uint8Array,
-  signature: string,
-  key: Uint8Array,
+  signatureHeader: string,
+  publicKeyValues: KeyObject | readonly KeyObject[],
 ): boolean {
-  const expected = Buffer.from(signArcTerminalCallback(body, key));
-  const supplied = Buffer.from(signature);
-  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+  const match = /^ed25519:([A-Za-z0-9+/]+={0,2})$/.exec(signatureHeader);
+  if (!match) return false;
+  const signature = Buffer.from(match[1], 'base64');
+  if (signature.length !== 64 || signature.toString('base64') !== match[1]) return false;
+  const publicKeys = Array.isArray(publicKeyValues) ? publicKeyValues : [publicKeyValues];
+  return publicKeys.some((key) => cryptoVerify(null, bodyBytes(body), normalizePublicKey(key), signature));
+}
+
+function bodyBytes(body: string | Uint8Array): Buffer {
+  return typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
+}
+
+function normalizePrivateKey(value: KeyObject): KeyObject {
+  const key = value;
+  if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') {
+    throw new Error('ARC callback signing key must be an Ed25519 private key');
+  }
+  return key;
+}
+
+function normalizePublicKey(value: KeyObject): KeyObject {
+  const key = value.type === 'public' ? value : createPublicKey(value);
+  if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') {
+    throw new Error('ARC callback verification key must be an Ed25519 public key');
+  }
+  return key;
 }
 
 function boundedInteger(value: number, name: string, min: number, max: number): number {

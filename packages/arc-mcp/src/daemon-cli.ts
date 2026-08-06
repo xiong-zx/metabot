@@ -1,21 +1,38 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import { ArcDaemon } from './daemon.js';
-import { ArcCapabilityAuthority, assertArcDistinctKeys, readArcSecretFile } from './local-auth.js';
+import {
+  ArcCapabilityVerifier,
+  assertArcDistinctKeys,
+  readArcPrivateKeyFile,
+  readArcPublicKeyFile,
+} from './local-auth.js';
 import { createArcRuntime, integerEnv, requiredAnyEnv, requiredEnv } from './runtime.js';
 
 const env = process.env;
-const capabilityKey = readArcSecretFile(requiredEnv(env, 'METABOT_ARC_CAPABILITY_KEY_FILE'), 'ARC capability key');
+const capabilityPublicKeyPath = requiredEnv(env, 'METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE');
+const capabilityPublicKeys = [
+  readArcPublicKeyFile(
+    capabilityPublicKeyPath,
+    'ARC capability public key',
+  ),
+];
+const previousCapabilityPath =
+  env.METABOT_ARC_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE?.trim() || `${capabilityPublicKeyPath}.prev`;
+if (existsSync(previousCapabilityPath)) {
+  capabilityPublicKeys.push(readArcPublicKeyFile(previousCapabilityPath, 'Previous ARC capability public key'));
+}
 if (env.METABOT_ARC_CALLBACK_URL) {
-  const callbackKey = readArcSecretFile(
-    requiredAnyEnv(env, ['METABOT_ARC_CALLBACK_KEY_FILE', 'METABOT_ARC_CALLBACK_SIGNING_KEY_FILE']),
-    'ARC callback signing key',
+  const callbackPrivateKey = readArcPrivateKeyFile(
+    requiredEnv(env, 'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE'),
+    'ARC callback private key',
   );
-  assertArcDistinctKeys(capabilityKey, callbackKey);
+  assertArcDistinctKeys(capabilityPublicKeys, callbackPrivateKey);
 }
 const runtime = await createArcRuntime({ env });
 const daemon = new ArcDaemon(runtime.coordinator, {
   endpoint: requiredAnyEnv(env, ['METABOT_ARC_LISTEN', 'METABOT_ARC_DAEMON_URL']),
-  capabilityAuthority: new ArcCapabilityAuthority(capabilityKey),
+  capabilityVerifier: new ArcCapabilityVerifier(capabilityPublicKeys),
   notifications: runtime.notifications,
   maxRequestBytes: integerEnv(env, 'METABOT_ARC_MAX_REQUEST_BYTES', 1_048_576),
 });

@@ -63,6 +63,7 @@ export interface DispatchWorkerInput {
 export interface ScopedDispatchWorkerInput extends DispatchWorkerInput {
   botName: string;
   chatId: string;
+  authorizingCapability?: string;
   dedupePolicy: DedupePolicy;
   timeoutMs: number;
   idleTimeoutMs: number;
@@ -118,6 +119,7 @@ export interface DispatchWorkerResult {
 export interface CompletionNotification {
   eventId: string;
   eventType: 'worker.terminal';
+  authorizingCapability?: string;
   worker: Omit<WorkerRecord, 'prompt'>;
 }
 
@@ -130,6 +132,7 @@ export interface TerminalCallbackEnvelope<TPayload = unknown> {
   status: string;
   finished_at: number;
   iat: number;
+  authorizing_capability: string;
   payload: TPayload;
 }
 

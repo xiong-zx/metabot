@@ -1,4 +1,10 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+  type KeyObject,
+} from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 
 import { ArcError } from './errors.js';
@@ -8,95 +14,76 @@ import {
   type ArcTrustedRole,
 } from './server.js';
 
-interface ArcCapabilityClaims {
+export interface ArcCapabilityClaims {
   v: 1;
   purpose: 'arc';
   role: ArcTrustedRole;
-  bot_name: string;
-  chat_id: string;
-  issued_at: number;
-  expires_at: number;
-  nonce?: string;
+  botName: string;
+  chatId: string;
+  exp: number;
 }
 
-export class ArcCapabilityAuthority {
-  private readonly key: Buffer;
+export class ArcCapabilityVerifier {
+  private readonly publicKeys: KeyObject[];
 
-  constructor(key: Uint8Array, private readonly now: () => number = Date.now) {
-    this.key = Buffer.from(key);
-    if (this.key.length < 32) throw new Error('ARC capability key must contain at least 32 bytes');
-  }
-
-  issue(principal: ArcTrustedPrincipal, options: { ttlMs: number; nonce?: string }): string {
-    const normalized = normalizeArcPrincipal(principal);
-    if (!Number.isSafeInteger(options.ttlMs) || options.ttlMs < 1 || options.ttlMs > 24 * 60 * 60 * 1_000) {
-      throw new Error('Capability ttlMs must be an integer between 1 and 86400000');
+  constructor(publicKeys: readonly KeyObject[], private readonly now: () => number = Date.now) {
+    if (publicKeys.length < 1 || publicKeys.length > 2) {
+      throw new Error('ARC capability verification requires one current and at most one previous public key');
     }
-    const issuedAt = this.now();
-    const claims: ArcCapabilityClaims = {
-      v: 1,
-      purpose: 'arc',
-      role: normalized.role,
-      bot_name: normalized.botName,
-      chat_id: normalized.chatId,
-      issued_at: issuedAt,
-      expires_at: issuedAt + options.ttlMs,
-      ...(options.nonce ? { nonce: bounded(options.nonce, 'nonce', 200) } : {}),
-    };
-    const encoded = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    return `${encoded}.${this.mac(encoded)}`;
+    this.publicKeys = publicKeys.map((key) => normalizePublicKey(key, 'ARC capability'));
   }
 
   verify(token: string): { claims: ArcCapabilityClaims; principal: ArcTrustedPrincipal } {
-    if (typeof token !== 'string' || token.length < 20 || token.length > 4_096) {
+    const [payload, signature, extra] = typeof token === 'string' ? token.split('.') : [];
+    if (
+      !payload ||
+      !signature ||
+      extra !== undefined ||
+      token.length > 4_096 ||
+      !isBase64Url(payload) ||
+      !isBase64Url(signature)
+    ) {
       throw denied('Missing or invalid ARC capability');
     }
-    const pieces = token.split('.');
-    if (pieces.length !== 2 || !pieces[0] || !pieces[1]) throw denied('Malformed ARC capability');
-    const [encoded, suppliedMac] = pieces as [string, string];
-    const expected = Buffer.from(this.mac(encoded));
-    const supplied = Buffer.from(suppliedMac);
-    if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+    const signatureBytes = Buffer.from(signature, 'base64url');
+    if (
+      signatureBytes.length !== 64 ||
+      signatureBytes.toString('base64url') !== signature ||
+      !this.publicKeys.some((key) => cryptoVerify(null, Buffer.from(payload), key, signatureBytes))
+    ) {
       throw denied('ARC capability signature is invalid');
     }
-    let claims: ArcCapabilityClaims;
+    let value: unknown;
     try {
-      const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
-      if (decoded.length > 2_048) throw new Error('payload too large');
-      claims = JSON.parse(decoded) as ArcCapabilityClaims;
+      const decoded = Buffer.from(payload, 'base64url');
+      if (decoded.length > 2_048 || decoded.toString('base64url') !== payload) throw new Error('invalid payload');
+      value = JSON.parse(decoded.toString('utf8')) as unknown;
     } catch {
       throw denied('ARC capability payload is invalid');
     }
-    if (claims.v !== 1 || claims.purpose !== 'arc') throw denied('ARC capability has the wrong version or purpose');
-    if (!Number.isSafeInteger(claims.issued_at) || !Number.isSafeInteger(claims.expires_at)) {
-      throw denied('ARC capability timestamps are invalid');
+    const claims = validateClaims(value, this.now());
+    const principal = normalizeArcPrincipal({ role: claims.role, botName: claims.botName, chatId: claims.chatId });
+    if (principal.botName !== claims.botName || principal.chatId !== claims.chatId) {
+      throw denied('ARC capability principal is not normalized');
     }
-    const now = this.now();
-    if (claims.issued_at > now + 30_000 || claims.expires_at <= now || claims.expires_at <= claims.issued_at) {
-      throw denied('ARC capability is expired or not yet valid');
-    }
-    const principal = normalizeArcPrincipal({
-      role: claims.role,
-      botName: claims.bot_name,
-      chatId: claims.chat_id,
-    });
     return { claims, principal };
-  }
-
-  private mac(encoded: string): string {
-    return createHmac('sha256', this.key).update(`metabot.local-capability.v1\0arc\0${encoded}`).digest('base64url');
   }
 }
 
-export function readArcSecretFile(filePath: string, label: string): Buffer {
-  const stat = lstatSync(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file`);
-  if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
-    throw new Error(`${label} permissions must not grant group or other access`);
-  }
-  const value = readFileSync(filePath);
-  if (value.length < 32 || value.length > 4_096) throw new Error(`${label} must contain 32-4096 bytes`);
-  return value;
+/** Test/Bridge-contract helper. The ARC daemon never receives this private key. */
+export function issueArcCapability(privateKeyValue: KeyObject, claims: ArcCapabilityClaims): string {
+  validateClaims(claims);
+  const privateKey = normalizePrivateKey(privateKeyValue, 'ARC capability');
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${payload}.${cryptoSign(null, Buffer.from(payload), privateKey).toString('base64url')}`;
+}
+
+export function readArcPublicKeyFile(filePath: string, label: string): KeyObject {
+  return normalizePublicKey(readBoundedKeyFile(filePath, label), label);
+}
+
+export function readArcPrivateKeyFile(filePath: string, label: string): KeyObject {
+  return normalizePrivateKey(readBoundedKeyFile(filePath, label), label);
 }
 
 export function readArcCapabilityFile(filePath: string): string {
@@ -112,18 +99,73 @@ export function readArcCapabilityFile(filePath: string): string {
   return value;
 }
 
-export function assertArcDistinctKeys(a: Uint8Array, b: Uint8Array): void {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.length === right.length && timingSafeEqual(left, right)) {
-    throw new Error('ARC capability and callback signing keys must be distinct');
+export function assertArcDistinctKeys(capabilityPublicKeys: readonly KeyObject[], callbackPrivateKey: KeyObject): void {
+  const challenge = Buffer.from('metabot-ed25519-purpose-separation-v1');
+  const signature = cryptoSign(null, challenge, normalizePrivateKey(callbackPrivateKey, 'ARC callback'));
+  if (capabilityPublicKeys.some((key) => cryptoVerify(null, challenge, normalizePublicKey(key, 'ARC capability'), signature))) {
+    throw new Error('ARC capability and callback signing must use distinct keypairs');
   }
 }
 
-function bounded(value: string, label: string, max: number): string {
-  const normalized = value.trim();
-  if (!normalized || normalized.length > max) throw new Error(`${label} must contain 1-${max} characters`);
-  return normalized;
+function readBoundedKeyFile(filePath: string, label: string): Buffer {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file`);
+  if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+    throw new Error(`${label} permissions must not grant group or other access`);
+  }
+  const value = readFileSync(filePath);
+  if (value.length < 64 || value.length > 4_096) throw new Error(`${label} must contain 64-4096 bytes`);
+  return value;
+}
+
+function normalizePublicKey(value: KeyObject | string | Buffer, label: string): KeyObject {
+  try {
+    let key: KeyObject;
+    if (typeof value === 'string' || Buffer.isBuffer(value)) key = createPublicKey(value);
+    else key = value;
+    if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') throw new Error('not an Ed25519 public key');
+    return key;
+  } catch (cause) {
+    throw new Error(`${label} must contain an Ed25519 public key`, { cause });
+  }
+}
+
+function normalizePrivateKey(value: KeyObject | string | Buffer, label: string): KeyObject {
+  try {
+    let key: KeyObject;
+    if (typeof value === 'string' || Buffer.isBuffer(value)) key = createPrivateKey(value);
+    else key = value;
+    if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') throw new Error('not an Ed25519 private key');
+    return key;
+  } catch (cause) {
+    throw new Error(`${label} must contain an Ed25519 private key`, { cause });
+  }
+}
+
+function validateClaims(value: unknown, now?: number): ArcCapabilityClaims {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw denied('ARC capability claims are invalid');
+  const claims = value as Partial<ArcCapabilityClaims>;
+  const expectedKeys = ['botName', 'chatId', 'exp', 'purpose', 'role', 'v'];
+  if (Object.keys(claims).sort().join(',') !== expectedKeys.join(',')) {
+    throw denied('ARC capability claims do not match the v2.1 contract');
+  }
+  if (claims.v !== 1 || claims.purpose !== 'arc') throw denied('ARC capability has the wrong version or purpose');
+  if (!Number.isSafeInteger(claims.exp) || (claims.exp as number) < 1 || (now !== undefined && (claims.exp as number) <= now)) {
+    throw denied('ARC capability is expired or has an invalid expiry');
+  }
+  const principal = normalizeArcPrincipal({
+    role: claims.role as ArcTrustedRole,
+    botName: claims.botName ?? '',
+    chatId: claims.chatId ?? '',
+  });
+  if (principal.botName !== claims.botName || principal.chatId !== claims.chatId) {
+    throw denied('ARC capability principal is not normalized');
+  }
+  return claims as ArcCapabilityClaims;
+}
+
+function isBase64Url(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value);
 }
 
 function denied(message: string): ArcError {

@@ -64,14 +64,21 @@ The daemon accepts only loopback HTTP and requires a signed Bearer capability
 before it creates an MCP session. It verifies the capability again on every
 request and rejects a token whose principal differs from the one bound during
 initialization. Missing, expired, malformed, wrong-purpose, and cross-session
-capabilities fail closed. Capability and callback key files must be regular,
-non-symbolic-link files with no group/other permissions and at least 32 bytes.
+capabilities fail closed. The frozen token is
+`base64url(JSON claims).base64url(Ed25519 signature)`; its exact claims are
+`{v:1,purpose:'worker',role,botName,chatId,exp}`. The daemon receives only the
+current capability public key plus an optional previous public key during
+rotation (`<current>.prev` is discovered automatically). Capability and
+callback key files must be bounded regular,
+non-symbolic-link Ed25519 PEM files with no group/other permissions.
 
-Capabilities are symmetric HMAC tokens. This means the daemon's key can both
-verify and mint tokens: the bridge and trusted daemon deliberately share one
-host trust domain. It is inaccurate to describe the daemon copy as
-verification-only. Capability and callback signing use different keys and
-different signed purposes; daemon startup rejects reuse of the same key.
+The capability that established a session is saved privately with each new
+job for terminal callback authorization. It is never returned by list/status,
+placed in tool schemas, or copied into a Worker child environment. Callback
+signing uses a distinct daemon-private Ed25519 key. These controls provide
+scope hygiene and prevent accidental cross-chat use. They are not containment
+against malicious code running as the same OS user, which can read or replace
+host key and state files; that requires OS-user separation.
 
 The proxy receives its capability only through
 `METABOT_WORKER_PROXY_CAPABILITY` (or a private token file), puts it in the
@@ -230,13 +237,14 @@ instances require separate `METABOT_WORKER_DATA_DIR` values.
 
 ## Completion callback
 
-Set `METABOT_WORKER_CALLBACK_URL` and
-`METABOT_WORKER_CALLBACK_KEY_FILE` to enable HTTP completion posts. The prompt
-is omitted. The signed `metabot.terminal-callback.v1` envelope contains the
-event, bot/chat scope, terminal status, finish time, issue time, and bounded
-worker payload. Its stable event ID is `worker:<id>:terminal:v1`, sent in the
-body and the `Idempotency-Key` header; the HMAC is sent in
-`X-MetaBot-Callback-Signature`.
+In authenticated daemon mode, set `METABOT_WORKER_CALLBACK_URL` and
+`METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` to enable HTTP completion posts. The
+prompt is omitted. The signed `metabot.terminal-callback.v1` envelope contains
+the event, bot/chat scope, terminal status, numeric epoch-ms finish time, issue
+time, original `authorizing_capability`, and bounded worker payload. Its stable
+event ID is `worker:<id>:terminal:v1`, sent in the body and the
+`Idempotency-Key` header. `X-MetaBot-Callback-Signature` is
+`ed25519:<base64>` over the exact raw body bytes.
 
 Notification state, attempt count, next retry deadline, last error, and
 delivery time are durable. Failures use bounded exponential backoff and an
@@ -269,12 +277,13 @@ stable event ID.
 | `METABOT_WORKER_CLAUDE_EXECUTABLE`       | `claude`                   | Claude CLI path                            |
 | `METABOT_WORKER_KIMI_EXECUTABLE`         | `kimi`                     | Kimi CLI path                              |
 | `METABOT_WORKER_CALLBACK_URL`            | unset                      | Terminal callback URL                      |
-| `METABOT_WORKER_CALLBACK_KEY_FILE`       | required with callback URL | Private HMAC callback key file              |
+| `METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` | required with callback URL | Daemon-private Ed25519 callback key file  |
 | `METABOT_WORKER_CALLBACK_TIMEOUT_MS`     | `30000`                    | Callback request timeout                   |
 | `METABOT_WORKER_NOTIFY_RETRY_INITIAL_MS` | `1000`                     | First notification retry delay             |
 | `METABOT_WORKER_NOTIFY_RETRY_MAX_MS`     | `60000`                    | Maximum notification retry delay           |
 | `METABOT_WORKER_LISTEN`                  | daemon: required           | Loopback HTTP MCP URL, including `/mcp`     |
-| `METABOT_WORKER_CAPABILITY_KEY_FILE`     | daemon: required           | Private HMAC capability key file            |
+| `METABOT_WORKER_CAPABILITY_PUBLIC_KEY_FILE` | daemon: required        | Bridge capability Ed25519 public key      |
+| `METABOT_WORKER_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE` | `<current>.prev` if present | Optional previous public key during rotation |
 | `METABOT_WORKER_MAX_REQUEST_BYTES`       | 1 MiB                      | Daemon request-body bound                   |
 | `METABOT_WORKER_PROXY_ENDPOINT`          | proxy: required            | Daemon loopback MCP URL                     |
 | `METABOT_WORKER_PROXY_CAPABILITY`        | proxy: required*           | Session capability from trusted spawn env   |

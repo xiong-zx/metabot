@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +35,7 @@ describe('ARC durable terminal callback', () => {
         run_id: 'run-callback-1',
       },
       { bot_name: 'research-pm', chat_id: 'chat-a' },
+      'signed-arc-capability',
     );
     kit.runner.finish(run.runner_handle!.id, validOutput('project-1', run.run_id));
     await kit.coordinator.waitForTerminal(run.run_id);
@@ -49,7 +51,9 @@ describe('ARC durable terminal callback', () => {
       bot_name: 'research-pm',
       chat_id: 'chat-a',
       status: 'completed',
+      authorizing_capability: 'signed-arc-capability',
     });
+    expect(kit.notifier.envelopes[0]?.finished_at).toEqual(expect.any(Number));
     expect(kit.store.getNotificationState(run.run_id)).toMatchObject({ state: 'delivered', attempts: 1 });
   });
 
@@ -65,6 +69,7 @@ describe('ARC durable terminal callback', () => {
         run_id: 'run-callback-retry',
       },
       { bot_name: 'research-pm', chat_id: 'chat-a' },
+      'signed-arc-capability',
     );
     kit.runner.finish(run.runner_handle!.id, validOutput('project-1', run.run_id));
     await kit.coordinator.waitForTerminal(run.run_id);
@@ -89,12 +94,15 @@ describe('ARC durable terminal callback', () => {
   });
 
   it('detects bad signatures for the stable callback body', () => {
-    const key = Buffer.alloc(32, 8);
+    const keys = generateKeyPairSync('ed25519');
     const body = JSON.stringify({ event_id: 'arc:run-1:terminal:v1' });
-    const signature = signArcTerminalCallback(body, key);
-    expect(verifyArcTerminalCallback(body, signature, key)).toBe(true);
-    expect(verifyArcTerminalCallback(`${body} `, signature, key)).toBe(false);
-    expect(verifyArcTerminalCallback(body, signature, Buffer.alloc(32, 9))).toBe(false);
+    const signature = signArcTerminalCallback(body, keys.privateKey);
+    expect(signature).toMatch(/^ed25519:/);
+    expect(verifyArcTerminalCallback(body, signature, keys.publicKey)).toBe(true);
+    expect(verifyArcTerminalCallback(`${body} `, signature, keys.publicKey)).toBe(false);
+    const rotated = generateKeyPairSync('ed25519');
+    expect(verifyArcTerminalCallback(body, signature, rotated.publicKey)).toBe(false);
+    expect(verifyArcTerminalCallback(body, signature, [rotated.publicKey, keys.publicKey])).toBe(true);
   });
 });
 

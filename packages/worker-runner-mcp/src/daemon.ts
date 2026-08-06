@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { TrustedPrincipal } from './types.js';
 import { WorkerRunnerError } from './types.js';
-import { LocalCapabilityAuthority } from './local-auth.js';
+import { LocalCapabilityVerifier } from './local-auth.js';
 import { createWorkerRunnerMcpServer } from './mcp-server.js';
 import type { WorkerService } from './service.js';
 
@@ -14,11 +14,12 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpProtocolServer;
   principal: TrustedPrincipal;
+  authorizingCapability: string;
 }
 
 export interface WorkerRunnerDaemonOptions {
   endpoint: URL | string;
-  capabilityAuthority: LocalCapabilityAuthority;
+  capabilityVerifier: LocalCapabilityVerifier;
   maxRequestBytes?: number;
   maxStatusOutputChars?: number;
 }
@@ -44,8 +45,8 @@ export class WorkerRunnerDaemon {
     if (!Number.isSafeInteger(this.maxRequestBytes) || this.maxRequestBytes < 1 || this.maxRequestBytes > 4_194_304) {
       throw new Error('maxRequestBytes must be an integer between 1 and 4194304');
     }
-    if (options.capabilityAuthority.purpose !== 'worker-runner') {
-      throw new Error('Worker Runner daemon requires a worker-runner capability authority');
+    if (options.capabilityVerifier.purpose !== 'worker') {
+      throw new Error('Worker Runner daemon requires a worker capability verifier');
     }
   }
 
@@ -97,7 +98,8 @@ export class WorkerRunnerDaemon {
         sendJson(response, 404, rpcError('Not found'));
         return;
       }
-      const principal = this.authenticate(request);
+      const authenticated = this.authenticate(request);
+      const principal = authenticated.principal;
       const sessionId = singleHeader(request, 'mcp-session-id');
       if (sessionId) {
         const session = this.sessions.get(sessionId);
@@ -124,12 +126,18 @@ export class WorkerRunnerDaemon {
       }
 
       const server = createWorkerRunnerMcpServer(this.service, principal, {
+        authorizingCapability: authenticated.capability,
         maxStatusOutputChars: this.options.maxStatusOutputChars,
       });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         onsessioninitialized: (id) => {
-          this.sessions.set(id, { transport, server, principal });
+          this.sessions.set(id, {
+            transport,
+            server,
+            principal,
+            authorizingCapability: authenticated.capability,
+          });
         },
       });
       transport.onclose = () => {
@@ -145,10 +153,11 @@ export class WorkerRunnerDaemon {
     }
   }
 
-  private authenticate(request: IncomingMessage): TrustedPrincipal {
+  private authenticate(request: IncomingMessage): { capability: string; principal: TrustedPrincipal } {
     const authorization = singleHeader(request, 'authorization');
     if (!authorization?.startsWith('Bearer ')) throw new WorkerRunnerError('Bearer capability required', 'FORBIDDEN');
-    return this.options.capabilityAuthority.verify(authorization.slice('Bearer '.length)).principal;
+    const capability = authorization.slice('Bearer '.length);
+    return { capability, principal: this.options.capabilityVerifier.verify(capability).principal };
   }
 }
 

@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -5,13 +6,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WorkerRunnerDaemon } from '../src/daemon.js';
-import { LocalCapabilityAuthority } from '../src/local-auth.js';
+import { LocalCapabilityVerifier, issueLocalCapability, type LocalCapabilityPurpose } from '../src/local-auth.js';
 import { WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
 import type { ScopedDispatchWorkerInput, TrustedPrincipal } from '../src/types.js';
 import { FakeProcessRunner, RecordingNotifier } from './helpers.js';
 
-const KEY = Buffer.alloc(32, 9);
+const CAPABILITY_KEYS = generateKeyPairSync('ed25519');
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
@@ -29,7 +30,7 @@ describe('Worker Runner daemon authentication', () => {
     };
     expect((await fetch(kit.daemon.url, { method: 'POST', body: JSON.stringify(initialize) })).status).toBe(401);
 
-    const wrongPurpose = new LocalCapabilityAuthority(KEY, 'arc').issue(PM, { ttlMs: 60_000 });
+    const wrongPurpose = issue(PM, 'arc');
     expect(
       (
         await fetch(kit.daemon.url, {
@@ -43,7 +44,7 @@ describe('Worker Runner daemon authentication', () => {
 
   it('binds a verified principal to the session and denies cross-scope access', async () => {
     const kit = await makeDaemon((store, dir) => store.createWorker('wrk-other', scopedInput(dir), 2, 1));
-    const connected = await connect(kit.daemon.url, kit.authority.issue(OTHER_PM, { ttlMs: 60_000 }));
+    const connected = await connect(kit.daemon.url, kit.issue(OTHER_PM));
     cleanups.push(() => connected.client.close());
 
     const listed = await connected.client.callTool({ name: 'worker_list', arguments: {} });
@@ -56,7 +57,7 @@ describe('Worker Runner daemon authentication', () => {
     const rebound = await fetch(kit.daemon.url, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${kit.authority.issue(PM, { ttlMs: 60_000 })}`,
+        authorization: `Bearer ${kit.issue(PM)}`,
         'content-type': 'application/json',
         'mcp-session-id': sessionId as string,
       },
@@ -70,7 +71,7 @@ describe('Worker Runner daemon authentication', () => {
     async (role) => {
     const kit = await makeDaemon((store, dir) => store.createWorker('wrk-own', scopedInput(dir), 2, 1));
     const readOnly: TrustedPrincipal = { role, botName: 'bot-a', chatId: 'chat-a' };
-    const connected = await connect(kit.daemon.url, kit.authority.issue(readOnly, { ttlMs: 60_000 }));
+    const connected = await connect(kit.daemon.url, kit.issue(readOnly));
     cleanups.push(() => connected.client.close());
 
     const listed = await connected.client.callTool({ name: 'worker_list', arguments: {} });
@@ -85,6 +86,22 @@ describe('Worker Runner daemon authentication', () => {
     expect(kit.runner.launches).toHaveLength(0);
     },
   );
+
+  it('retains the authorizing capability durably without exposing it through tools', async () => {
+    const kit = await makeDaemon();
+    const capability = kit.issue(PM);
+    const connected = await connect(kit.daemon.url, capability);
+    cleanups.push(() => connected.client.close());
+    const dispatched = await connected.client.callTool({
+      name: 'worker_dispatch',
+      arguments: { workdir: kit.dir, prompt: 'persist private authorization', engine: 'codex' },
+    });
+    const worker = (dispatched.structuredContent as { worker: { id: string } }).worker;
+    expect(kit.store.getAuthorizingCapability(worker.id)).toBe(capability);
+    expect(JSON.stringify(dispatched.structuredContent)).not.toContain(capability);
+    const status = await connected.client.callTool({ name: 'worker_status', arguments: { id: worker.id } });
+    expect(JSON.stringify(status.structuredContent)).not.toContain(capability);
+  });
 });
 
 const PM: TrustedPrincipal = { role: 'pm', botName: 'bot-a', chatId: 'chat-a' };
@@ -98,10 +115,10 @@ async function makeDaemon(seed?: (store: WorkerStore, dir: string) => void) {
   const service = new WorkerService(store, runner, new RecordingNotifier(), undefined, testConfig(), {
     dynamicPrincipals: true,
   });
-  const authority = new LocalCapabilityAuthority(KEY, 'worker-runner');
+  const verifier = new LocalCapabilityVerifier([CAPABILITY_KEYS.publicKey], 'worker');
   const daemon = new WorkerRunnerDaemon(service, {
     endpoint: 'http://127.0.0.1:0/mcp',
-    capabilityAuthority: authority,
+    capabilityVerifier: verifier,
   });
   await daemon.start();
   cleanups.push(async () => {
@@ -110,7 +127,18 @@ async function makeDaemon(seed?: (store: WorkerStore, dir: string) => void) {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, store, runner, service, authority, daemon };
+  return { dir, store, runner, service, issue: (principal: TrustedPrincipal) => issue(principal), daemon };
+}
+
+function issue(principal: TrustedPrincipal, purpose: LocalCapabilityPurpose = 'worker'): string {
+  return issueLocalCapability(CAPABILITY_KEYS.privateKey, {
+    v: 1,
+    purpose,
+    role: principal.role,
+    botName: principal.botName,
+    chatId: principal.chatId,
+    exp: Date.now() + 60_000,
+  });
 }
 
 async function connect(url: URL, capability: string) {

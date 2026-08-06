@@ -28,6 +28,7 @@ interface RunRow {
   request_fingerprint: string;
   originator_bot_name: string | null;
   originator_chat_id: string | null;
+  authorizing_capability: string | null;
   status: string;
   phase: string;
   progress: number;
@@ -61,6 +62,7 @@ export interface CreateArcRunInput {
   artifactPath: string;
   executionInput: ArcExecutionInput;
   originator?: ArcRunOriginator;
+  authorizingCapability?: string;
   now: string;
 }
 
@@ -138,12 +140,12 @@ export class ArcRunStore {
         .prepare(
           `INSERT INTO arc_runs (
             run_id, project_id, project_root, objective, idempotency_key, execution_input_json,
-            request_fingerprint, originator_bot_name, originator_chat_id,
+            request_fingerprint, originator_bot_name, originator_chat_id, authorizing_capability,
             status, phase, progress, artifact_path,
             output_status, runner_handle_json, error_code, error_message,
             recovery_generation, created_at, updated_at, started_at, finished_at, version,
             notification_state
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0, ?)`,
         )
         .run(
           input.runId,
@@ -155,10 +157,11 @@ export class ArcRunStore {
           input.requestFingerprint,
           input.originator?.bot_name ?? null,
           input.originator?.chat_id ?? null,
+          input.authorizingCapability ?? null,
           input.artifactPath,
           input.now,
           input.now,
-          input.originator ? 'waiting' : 'none',
+          input.originator && input.authorizingCapability ? 'waiting' : 'none',
         );
       return { created: true, run: this.requireRun(input.runId) };
     })();
@@ -190,6 +193,14 @@ export class ArcRunStore {
         details: { runId },
       });
     }
+  }
+
+  /** Private callback authorization state; deliberately omitted from ArcRunRecord. */
+  getAuthorizingCapability(runId: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT authorizing_capability FROM arc_runs WHERE run_id = ?')
+      .get(runId) as { authorizing_capability: string | null } | undefined;
+    return row?.authorizing_capability ?? undefined;
   }
 
   listRuns(options: ArcRunListOptions = {}): ArcRunRecord[] {
@@ -450,6 +461,7 @@ export class ArcRunStore {
         request_fingerprint TEXT NOT NULL,
         originator_bot_name TEXT,
         originator_chat_id TEXT,
+        authorizing_capability TEXT,
         status TEXT NOT NULL CHECK (
           status IN ('queued', 'running', 'paused', 'completed', 'partial', 'failed', 'cancelled')
         ),
@@ -480,6 +492,7 @@ export class ArcRunStore {
     this.addColumnIfMissing('arc_runs', 'execution_input_json', 'TEXT');
     this.addColumnIfMissing('arc_runs', 'originator_bot_name', 'TEXT');
     this.addColumnIfMissing('arc_runs', 'originator_chat_id', 'TEXT');
+    this.addColumnIfMissing('arc_runs', 'authorizing_capability', 'TEXT');
     this.addColumnIfMissing(
       'arc_runs',
       'notification_state',

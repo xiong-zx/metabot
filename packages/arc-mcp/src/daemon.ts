@@ -8,7 +8,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import type { ArcCoordinator } from './coordinator.js';
 import { ArcError } from './errors.js';
-import { ArcCapabilityAuthority } from './local-auth.js';
+import { ArcCapabilityVerifier } from './local-auth.js';
 import type { ArcTerminalNotifierService } from './notifier.js';
 import { createArcMcpServer, type ArcTrustedPrincipal } from './server.js';
 
@@ -16,11 +16,12 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   principal: ArcTrustedPrincipal;
+  authorizingCapability: string;
 }
 
 export interface ArcDaemonOptions {
   endpoint: URL | string;
-  capabilityAuthority: ArcCapabilityAuthority;
+  capabilityVerifier: ArcCapabilityVerifier;
   notifications?: ArcTerminalNotifierService;
   maxRequestBytes?: number;
 }
@@ -85,7 +86,8 @@ export class ArcDaemon {
       if (!isLoopback(request.socket.remoteAddress)) return sendJson(response, 403, rpcError('Loopback only'));
       const requestUrl = new URL(request.url ?? '/', 'http://localhost');
       if (requestUrl.pathname !== this.endpointConfig.pathname) return sendJson(response, 404, rpcError('Not found'));
-      const principal = this.authenticate(request);
+      const authenticated = this.authenticate(request);
+      const principal = authenticated.principal;
       const sessionId = singleHeader(request, 'mcp-session-id');
       if (sessionId) {
         const session = this.sessions.get(sessionId);
@@ -101,11 +103,19 @@ export class ArcDaemon {
       const body = await readJson(request, this.maxRequestBytes);
       if (!isInitializeRequest(body)) return sendJson(response, 400, rpcError('Only initialize may create a session'));
 
-      const server = createArcMcpServer(this.coordinator, { principal });
+      const server = createArcMcpServer(this.coordinator, {
+        principal,
+        authorizingCapability: authenticated.capability,
+      });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         onsessioninitialized: (id) => {
-          this.sessions.set(id, { transport, server, principal });
+          this.sessions.set(id, {
+            transport,
+            server,
+            principal,
+            authorizingCapability: authenticated.capability,
+          });
         },
       });
       transport.onclose = () => {
@@ -124,10 +134,11 @@ export class ArcDaemon {
     }
   }
 
-  private authenticate(request: IncomingMessage): ArcTrustedPrincipal {
+  private authenticate(request: IncomingMessage): { capability: string; principal: ArcTrustedPrincipal } {
     const authorization = singleHeader(request, 'authorization');
     if (!authorization?.startsWith('Bearer ')) throw new ArcError('scope_denied', 'Bearer capability required');
-    return this.options.capabilityAuthority.verify(authorization.slice('Bearer '.length)).principal;
+    const capability = authorization.slice('Bearer '.length);
+    return { capability, principal: this.options.capabilityVerifier.verify(capability).principal };
   }
 }
 

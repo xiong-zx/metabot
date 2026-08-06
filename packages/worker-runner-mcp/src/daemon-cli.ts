@@ -1,24 +1,41 @@
 #!/usr/bin/env node
-import { LocalCapabilityAuthority, assertDistinctKeys, readSecretFile } from './local-auth.js';
+import { existsSync } from 'node:fs';
+import {
+  LocalCapabilityVerifier,
+  assertDistinctKeys,
+  readPrivateKeyFile,
+  readPublicKeyFile,
+} from './local-auth.js';
 import { WorkerRunnerDaemon } from './daemon.js';
 import { createWorkerRunnerServiceRuntime, integerEnv, requiredAnyEnv, requiredEnv } from './runtime.js';
 
 const env = process.env;
-const capabilityKey = readSecretFile(
-  requiredEnv(env, 'METABOT_WORKER_CAPABILITY_KEY_FILE'),
-  'Worker Runner capability key',
-);
+const capabilityPublicKeyPath = requiredEnv(env, 'METABOT_WORKER_CAPABILITY_PUBLIC_KEY_FILE');
+const capabilityPublicKeys = [
+  readPublicKeyFile(
+    capabilityPublicKeyPath,
+    'Worker Runner capability public key',
+  ),
+];
+const previousCapabilityPath =
+  env.METABOT_WORKER_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE?.trim() || `${capabilityPublicKeyPath}.prev`;
+if (existsSync(previousCapabilityPath)) {
+  capabilityPublicKeys.push(readPublicKeyFile(previousCapabilityPath, 'Previous Worker Runner capability public key'));
+}
 if (env.METABOT_WORKER_CALLBACK_URL) {
-  const callbackKey = readSecretFile(
-    requiredAnyEnv(env, ['METABOT_WORKER_CALLBACK_KEY_FILE', 'METABOT_WORKER_CALLBACK_SIGNING_KEY_FILE']),
-    'Worker callback signing key',
+  const callbackPrivateKey = readPrivateKeyFile(
+    requiredEnv(env, 'METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE'),
+    'Worker callback private key',
   );
-  assertDistinctKeys(capabilityKey, callbackKey, ['Worker Runner capability', 'Worker callback signing']);
+  assertDistinctKeys(capabilityPublicKeys, callbackPrivateKey, [
+    'Worker Runner capability',
+    'Worker callback signing',
+  ]);
 }
 const runtime = createWorkerRunnerServiceRuntime({ env, dynamicPrincipals: true });
 const daemon = new WorkerRunnerDaemon(runtime.service, {
   endpoint: requiredAnyEnv(env, ['METABOT_WORKER_LISTEN', 'METABOT_WORKER_DAEMON_URL']),
-  capabilityAuthority: new LocalCapabilityAuthority(capabilityKey, 'worker-runner'),
+  capabilityVerifier: new LocalCapabilityVerifier(capabilityPublicKeys, 'worker'),
   maxRequestBytes: integerEnv(env, 'METABOT_WORKER_MAX_REQUEST_BYTES', 1_048_576),
   maxStatusOutputChars: integerEnv(env, 'METABOT_WORKER_STATUS_OUTPUT_CHARS', 16_384),
 });

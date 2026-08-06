@@ -1,114 +1,102 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+  type KeyObject,
+} from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { TrustedPrincipal, TrustedPrincipalRole } from './types.js';
 import { normalizeTrustedPrincipal } from './service.js';
 import { WorkerRunnerError } from './types.js';
 
 export const LOCAL_CAPABILITY_VERSION = 1 as const;
-export type LocalCapabilityPurpose = 'worker-runner' | 'arc';
+export type LocalCapabilityPurpose = 'worker' | 'arc';
 
 export interface LocalCapabilityClaims {
   v: typeof LOCAL_CAPABILITY_VERSION;
   purpose: LocalCapabilityPurpose;
   role: TrustedPrincipalRole;
-  bot_name: string;
-  chat_id: string;
-  issued_at: number;
-  expires_at: number;
-  nonce?: string;
+  botName: string;
+  chatId: string;
+  exp: number;
 }
 
-export class LocalCapabilityAuthority {
-  private readonly key: Buffer;
+/** Ed25519 verifier for the frozen Phase B v2.1 connection capability. */
+export class LocalCapabilityVerifier {
+  private readonly publicKeys: KeyObject[];
 
   constructor(
-    key: Uint8Array,
+    publicKeys: readonly KeyObject[],
     readonly purpose: LocalCapabilityPurpose,
     private readonly now: () => number = Date.now,
   ) {
-    this.key = normalizeKey(key, `${purpose} capability`);
-  }
-
-  issue(
-    principal: TrustedPrincipal,
-    options: { ttlMs: number; nonce?: string },
-  ): string {
-    const normalized = normalizeTrustedPrincipal(principal);
-    if (!Number.isSafeInteger(options.ttlMs) || options.ttlMs < 1 || options.ttlMs > 24 * 60 * 60 * 1_000) {
-      throw new Error('Capability ttlMs must be an integer between 1 and 86400000');
+    if (publicKeys.length < 1 || publicKeys.length > 2) {
+      throw new Error('Capability verification requires one current and at most one previous public key');
     }
-    const issuedAt = this.now();
-    const claims: LocalCapabilityClaims = {
-      v: LOCAL_CAPABILITY_VERSION,
-      purpose: this.purpose,
-      role: normalized.role,
-      bot_name: normalized.botName,
-      chat_id: normalized.chatId,
-      issued_at: issuedAt,
-      expires_at: issuedAt + options.ttlMs,
-      ...(options.nonce ? { nonce: normalizeBounded(options.nonce, 'nonce', 200) } : {}),
-    };
-    const encoded = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    return `${encoded}.${this.mac(encoded)}`;
+    this.publicKeys = publicKeys.map((key) => normalizePublicKey(key, `${purpose} capability`));
   }
 
   verify(token: string): { claims: LocalCapabilityClaims; principal: TrustedPrincipal } {
-    if (typeof token !== 'string' || token.length < 20 || token.length > 4_096) {
+    const [payload, signature, extra] = typeof token === 'string' ? token.split('.') : [];
+    if (
+      !payload ||
+      !signature ||
+      extra !== undefined ||
+      token.length > 4_096 ||
+      !isBase64Url(payload) ||
+      !isBase64Url(signature)
+    ) {
       throw forbidden('Missing or invalid local capability');
     }
-    const pieces = token.split('.');
-    if (pieces.length !== 2 || !pieces[0] || !pieces[1]) throw forbidden('Malformed local capability');
-    const [encoded, suppliedMac] = pieces as [string, string];
-    const expectedMac = this.mac(encoded);
-    const expected = Buffer.from(expectedMac);
-    const supplied = Buffer.from(suppliedMac);
-    if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+    const signatureBytes = Buffer.from(signature, 'base64url');
+    if (
+      signatureBytes.length !== 64 ||
+      signatureBytes.toString('base64url') !== signature ||
+      !this.publicKeys.some((key) => cryptoVerify(null, Buffer.from(payload), key, signatureBytes))
+    ) {
       throw forbidden('Local capability signature is invalid');
     }
 
-    let claims: LocalCapabilityClaims;
+    let value: unknown;
     try {
-      const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
-      if (decoded.length > 2_048) throw new Error('payload too large');
-      claims = JSON.parse(decoded) as LocalCapabilityClaims;
+      const decoded = Buffer.from(payload, 'base64url');
+      if (decoded.length > 2_048 || decoded.toString('base64url') !== payload) throw new Error('invalid payload');
+      value = JSON.parse(decoded.toString('utf8')) as unknown;
     } catch {
       throw forbidden('Local capability payload is invalid');
     }
-    if (claims.v !== LOCAL_CAPABILITY_VERSION || claims.purpose !== this.purpose) {
-      throw forbidden('Local capability has the wrong version or purpose');
-    }
-    if (!Number.isSafeInteger(claims.issued_at) || !Number.isSafeInteger(claims.expires_at)) {
-      throw forbidden('Local capability timestamps are invalid');
-    }
-    const now = this.now();
-    if (claims.issued_at > now + 30_000 || claims.expires_at <= now || claims.expires_at <= claims.issued_at) {
-      throw forbidden('Local capability is expired or not yet valid');
-    }
+    const claims = validateClaims(value, this.purpose, this.now());
     const principal = normalizeTrustedPrincipal({
       role: claims.role,
-      botName: claims.bot_name,
-      chatId: claims.chat_id,
+      botName: claims.botName,
+      chatId: claims.chatId,
     });
+    if (principal.botName !== claims.botName || principal.chatId !== claims.chatId) {
+      throw forbidden('Local capability principal is not normalized');
+    }
     return { claims, principal };
-  }
-
-  private mac(encoded: string): string {
-    return createHmac('sha256', this.key)
-      .update(`metabot.local-capability.v1\0${this.purpose}\0${encoded}`)
-      .digest('base64url');
   }
 }
 
-export function readSecretFile(filePath: string, label: string): Buffer {
-  const stat = lstatSync(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file`);
-  if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
-    throw new Error(`${label} permissions must not grant group or other access`);
-  }
-  const value = readFileSync(filePath);
-  if (value.length < 32) throw new Error(`${label} must contain at least 32 bytes`);
-  if (value.length > 4_096) throw new Error(`${label} must contain at most 4096 bytes`);
-  return value;
+/** Test/Bridge-contract helper. Daemon production code never receives this private key. */
+export function issueLocalCapability(
+  privateKeyValue: KeyObject,
+  claims: LocalCapabilityClaims,
+): string {
+  validateClaims(claims, claims.purpose);
+  const privateKey = normalizePrivateKey(privateKeyValue, `${claims.purpose} capability`);
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  const signature = cryptoSign(null, Buffer.from(payload), privateKey).toString('base64url');
+  return `${payload}.${signature}`;
+}
+
+export function readPublicKeyFile(filePath: string, label: string): KeyObject {
+  return normalizePublicKey(readBoundedKeyFile(filePath, label), label);
+}
+
+export function readPrivateKeyFile(filePath: string, label: string): KeyObject {
+  return normalizePrivateKey(readBoundedKeyFile(filePath, label), label);
 }
 
 export function readCapabilityTokenFile(filePath: string, label: string): string {
@@ -124,24 +112,79 @@ export function readCapabilityTokenFile(filePath: string, label: string): string
   return token;
 }
 
-export function assertDistinctKeys(first: Uint8Array, second: Uint8Array, labels: [string, string]): void {
-  const a = Buffer.from(first);
-  const b = Buffer.from(second);
-  if (a.length === b.length && timingSafeEqual(a, b)) {
-    throw new Error(`${labels[0]} and ${labels[1]} must use distinct keys`);
+export function assertDistinctKeys(
+  capabilityPublicKeys: readonly KeyObject[],
+  callbackPrivateKey: KeyObject,
+  labels: [string, string],
+): void {
+  const challenge = Buffer.from('metabot-ed25519-purpose-separation-v1');
+  const signature = cryptoSign(null, challenge, normalizePrivateKey(callbackPrivateKey, labels[1]));
+  if (capabilityPublicKeys.some((key) => cryptoVerify(null, challenge, normalizePublicKey(key, labels[0]), signature))) {
+    throw new Error(`${labels[0]} and ${labels[1]} must use distinct keypairs`);
   }
 }
 
-function normalizeKey(value: Uint8Array, label: string): Buffer {
-  const key = Buffer.from(value);
-  if (key.length < 32) throw new Error(`${label} key must contain at least 32 bytes`);
-  return key;
+function readBoundedKeyFile(filePath: string, label: string): Buffer {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a regular non-symlink file`);
+  if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+    throw new Error(`${label} permissions must not grant group or other access`);
+  }
+  const value = readFileSync(filePath);
+  if (value.length < 64 || value.length > 4_096) throw new Error(`${label} must contain 64-4096 bytes`);
+  return value;
 }
 
-function normalizeBounded(value: string, name: string, max: number): string {
-  const normalized = value.trim();
-  if (!normalized || normalized.length > max) throw new Error(`${name} must contain 1-${max} characters`);
-  return normalized;
+function normalizePublicKey(value: KeyObject | string | Buffer, label: string): KeyObject {
+  try {
+    let key: KeyObject;
+    if (typeof value === 'string' || Buffer.isBuffer(value)) key = createPublicKey(value);
+    else key = value;
+    if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') throw new Error('not an Ed25519 public key');
+    return key;
+  } catch (cause) {
+    throw new Error(`${label} must contain an Ed25519 public key`, { cause });
+  }
+}
+
+function normalizePrivateKey(value: KeyObject | string | Buffer, label: string): KeyObject {
+  try {
+    let key: KeyObject;
+    if (typeof value === 'string' || Buffer.isBuffer(value)) key = createPrivateKey(value);
+    else key = value;
+    if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') throw new Error('not an Ed25519 private key');
+    return key;
+  } catch (cause) {
+    throw new Error(`${label} must contain an Ed25519 private key`, { cause });
+  }
+}
+
+function validateClaims(value: unknown, purpose: LocalCapabilityPurpose, now?: number): LocalCapabilityClaims {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw forbidden('Local capability claims are invalid');
+  const claims = value as Partial<LocalCapabilityClaims>;
+  const expectedKeys = ['botName', 'chatId', 'exp', 'purpose', 'role', 'v'];
+  if (Object.keys(claims).sort().join(',') !== expectedKeys.join(',')) {
+    throw forbidden('Local capability claims do not match the v2.1 contract');
+  }
+  if (claims.v !== LOCAL_CAPABILITY_VERSION || claims.purpose !== purpose) {
+    throw forbidden('Local capability has the wrong version or purpose');
+  }
+  if (!Number.isSafeInteger(claims.exp) || (claims.exp as number) < 1 || (now !== undefined && (claims.exp as number) <= now)) {
+    throw forbidden('Local capability is expired or has an invalid expiry');
+  }
+  const principal = normalizeTrustedPrincipal({
+    role: claims.role as TrustedPrincipalRole,
+    botName: claims.botName ?? '',
+    chatId: claims.chatId ?? '',
+  });
+  if (principal.botName !== claims.botName || principal.chatId !== claims.chatId) {
+    throw forbidden('Local capability principal is not normalized');
+  }
+  return claims as LocalCapabilityClaims;
+}
+
+function isBase64Url(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value);
 }
 
 function forbidden(message: string): WorkerRunnerError {

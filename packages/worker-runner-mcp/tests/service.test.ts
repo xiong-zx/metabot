@@ -64,7 +64,7 @@ describe('WorkerService pinned authority and lifecycle', () => {
 
   it('records terminal output and notifies once with a stable event id', async () => {
     const kit = makeKit();
-    const dispatched = await kit.service.dispatch(input(kit.dir));
+    const dispatched = await kit.service.dispatch(input(kit.dir), undefined, 'signed-worker-capability');
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).status).toBe('running'));
     kit.runner.complete(4_000, SUCCESS_RESULT);
 
@@ -79,7 +79,10 @@ describe('WorkerService pinned authority and lifecycle', () => {
     expect(kit.notifier.notifications[0]).toMatchObject({
       eventId: `worker:${dispatched.worker.id}:terminal:v1`,
       eventType: 'worker.terminal',
+      authorizingCapability: 'signed-worker-capability',
     });
+    expect(kit.store.getAuthorizingCapability(dispatched.worker.id)).toBe('signed-worker-capability');
+    expect(kit.store.require(dispatched.worker.id)).not.toHaveProperty('authorizingCapability');
     expect(kit.notifier.notifications[0]?.worker).not.toHaveProperty('prompt');
   });
 
@@ -245,7 +248,7 @@ describe('WorkerService durable notifications', () => {
   it('resumes a persisted retry deadline after the service is recreated', async () => {
     const kit = makeKit({ notificationRetryInitialMs: 25, notificationRetryMaxMs: 25 });
     kit.notifier.error = new Error('callback unavailable');
-    const dispatched = await kit.service.dispatch(input(kit.dir));
+    const dispatched = await kit.service.dispatch(input(kit.dir), undefined, 'persisted-worker-capability');
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).status).toBe('running'));
     kit.runner.complete(4_000, SUCCESS_RESULT);
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).notificationState).toBe('failed'));
@@ -268,6 +271,7 @@ describe('WorkerService durable notifications', () => {
     });
     expect(resumedNotifier.notifications).toHaveLength(1);
     expect(resumedNotifier.notifications[0]?.eventId).toBe(eventId);
+    expect(resumedNotifier.notifications[0]?.authorizingCapability).toBe('persisted-worker-capability');
   });
 });
 
