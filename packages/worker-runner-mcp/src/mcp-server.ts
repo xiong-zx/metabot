@@ -62,7 +62,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
   {
     name: 'worker_list',
     description:
-      'List bounded worker metadata in the pinned bot+chat scope. Only a pinned admin may request all scopes.',
+      'List bounded worker metadata in the pinned bot+chat scope. Only the fixed read-only lifecycle admin may request all scopes.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,

@@ -32,7 +32,11 @@ Worker states map as follows:
 
 `recover()` performs one durable `worker_status` probe and never dispatches or
 changes the Worker. A fresh ARC daemon then uses `collect()` to keep polling
-that same handle. `cancel()` uses idempotent `worker_abort`. A
+that same handle. `cancel()` uses idempotent `worker_abort` when the adapter is
+given an ordinary authorized user/PM principal. The production
+`pm/arc-service/local:arc-service` machine credential is intentionally limited
+to dispatch and observation, so cancellation with that credential fails
+closed instead of granting it abort authority. A
 one-shot CLI has no checkpoint, so pause is explicitly unsupported while it is
 live; terminal races return the actual terminal mapping. `resume()` only reads
 the current durable worker state.
@@ -57,8 +61,10 @@ METABOT_ARC_WORKER_POLL_MS=5000
 ```
 
 The service capability file must be a regular non-symlink file inaccessible to
-group/other users. Its Worker Runner principal should use the dedicated
-`arc-service` scope; direct chat-scoped Worker tools then cannot see or abort
+group/other users. Its Worker Runner principal must be the dedicated
+`pm/arc-service/local:arc-service` identity. Worker Runner restricts that exact
+identity to dispatch plus same-scope list/status; it cannot request all scopes,
+abort, or redirect work. Direct chat-scoped Worker tools cannot see or abort
 ARC's internal workers.
 
 ## Runtime integration boundary

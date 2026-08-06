@@ -43,7 +43,8 @@ createWorkerRunnerRuntime({
 The stdio executable reads the same identity from these required environment
 variables:
 
-- `METABOT_WORKER_PRINCIPAL_ROLE`: `admin`, `user`, or `pm`
+- `METABOT_WORKER_PRINCIPAL_ROLE`: normally `user` or `pm`; `admin` is
+  reserved for the exact local lifecycle identity below
 - `METABOT_WORKER_PRINCIPAL_BOT_NAME`
 - `METABOT_WORKER_PRINCIPAL_CHAT_ID`
 
@@ -52,11 +53,19 @@ a `team:*` chat. The tool schemas contain no
 `actor_role`, `caller_context`, `botName`, `chatId`, or `pmChatId` fields, and
 unexpected arguments are rejected.
 
-Dispatch always uses the authenticated bot+chat scope. `admin`, `user`, and
-`pm` may dispatch or abort; `manager`, `agent`, and `worker` are read-only.
-A non-admin can list or read only its own scope. An admin may request an
-all-scope list and control another scope; model arguments cannot create admin
-authority.
+Dispatch always uses the authenticated bot+chat scope. Ordinary `user` and
+`pm` principals may dispatch or abort their own workers; `manager`, `agent`,
+and `worker` are read-only. The only accepted admin identity is
+`admin/metabot-local-lifecycle/local:daemon-lifecycle`. It may request the
+bounded all-scope list used by daemon health, but it cannot dispatch, inspect
+an arbitrary worker by ID, or abort. A signed admin capability with any other
+bot or chat is rejected during authentication.
+
+The exact long-lived `pm/arc-service/local:arc-service` identity is narrower
+than an ordinary PM: it may dispatch and observe only workers in its own scope,
+but it cannot request all scopes or abort. This keeps the machine credential
+from becoming an operator credential. Other user/PM principals retain their
+normal scoped abort behavior.
 
 ### Daemon sessions and capabilities
 
@@ -91,8 +100,8 @@ existing environment-pinned identity mode.
 The server advertises exactly four tools:
 
 - `worker_dispatch`: persist and asynchronously launch one CLI job.
-- `worker_list`: return bounded job summaries in the pinned scope; a pinned
-  admin may set `all_scopes`.
+- `worker_list`: return bounded job summaries in the pinned scope; only the
+  exact read-only lifecycle admin may set `all_scopes`.
 - `worker_status`: return one bounded lifecycle/result record.
 - `worker_abort`: abort queued or currently owned running work. Repeating an
   abort after terminal state is safe.
@@ -262,7 +271,7 @@ stable event ID.
 
 | Environment variable                     | Default                    | Meaning                                    |
 | ---------------------------------------- | -------------------------- | ------------------------------------------ |
-| `METABOT_WORKER_PRINCIPAL_ROLE`          | required                   | Pinned `admin`, `user`, or `pm` role       |
+| `METABOT_WORKER_PRINCIPAL_ROLE`          | required                   | Pinned `user`/`pm`; exact lifecycle identity only for `admin` |
 | `METABOT_WORKER_PRINCIPAL_BOT_NAME`      | required                   | Pinned bot scope                           |
 | `METABOT_WORKER_PRINCIPAL_CHAT_ID`       | required                   | Pinned non-Team chat scope                 |
 | `METABOT_WORKER_DATA_DIR`                | `~/.metabot/worker-runner` | Exclusively owned state/SQLite directory   |

@@ -22,6 +22,8 @@ import {
   WORKER_ENGINES,
   WORKER_MUTATING_ROLES,
   WorkerRunnerError,
+  isArcServicePrincipal,
+  isLocalLifecycleAdmin,
 } from './types.js';
 import type { WorkerStore } from './store.js';
 
@@ -112,11 +114,11 @@ export class WorkerService {
       return;
     }
     for (const scope of this.store.listScopes()) {
-      await this.recoverScope({ role: 'admin', ...scope });
+      await this.recoverScope(scope);
     }
   }
 
-  private async recoverScope(principal: TrustedPrincipal): Promise<void> {
+  private async recoverScope(principal: Pick<TrustedPrincipal, 'botName' | 'chatId'>): Promise<void> {
     const now = this.now();
     this.store.resetInterruptedNotifications(principal.botName, principal.chatId, now);
     for (const worker of this.store.listPendingNotifications(principal.botName, principal.chatId)) {
@@ -144,7 +146,7 @@ export class WorkerService {
     authorizingCapability?: string,
   ): Promise<DispatchWorkerResult> {
     const actor = this.resolvePrincipal(principal);
-    this.authorizeMutation(actor);
+    this.authorizeMutation(actor, 'dispatch');
     const input = this.normalizeDispatch(rawInput, actor, authorizingCapability);
     const created = this.store.createWorker(this.makeId(), input, this.config.maxConcurrentPerScope, this.now());
     if (!created.deduplicated) void this.launchWorker(created.worker, false);
@@ -155,8 +157,8 @@ export class WorkerService {
     const actor = this.resolvePrincipal(principal);
     const limit = normalizeLimit(options.limit, this.config.maxListLimit);
     if (options.allScopes) {
-      if (actor.role !== 'admin') {
-        throw new WorkerRunnerError('Only the pinned admin principal may list all worker scopes', 'FORBIDDEN');
+      if (!isLocalLifecycleAdmin(actor)) {
+        throw new WorkerRunnerError('Only the pinned lifecycle admin may list all worker scopes', 'FORBIDDEN');
       }
       return this.store.listAll(limit);
     }
@@ -172,7 +174,7 @@ export class WorkerService {
 
   async abort(idValue: string, principal?: TrustedPrincipal): Promise<WorkerRecord> {
     const actor = this.resolvePrincipal(principal);
-    this.authorizeMutation(actor);
+    this.authorizeMutation(actor, 'abort');
     const id = normalizeId(idValue);
     const worker = this.store.require(id);
     this.authorizeScope(worker, actor);
@@ -422,13 +424,21 @@ export class WorkerService {
   }
 
   private authorizeScope(worker: WorkerRecord, principal: TrustedPrincipal): void {
-    if (principal.role === 'admin') return;
     if (worker.botName !== principal.botName || worker.chatId !== principal.chatId) {
       throw new WorkerRunnerError('Worker is outside the pinned principal scope', 'FORBIDDEN');
     }
   }
 
-  private authorizeMutation(principal: TrustedPrincipal): void {
+  private authorizeMutation(principal: TrustedPrincipal, operation: 'dispatch' | 'abort'): void {
+    if (isLocalLifecycleAdmin(principal)) {
+      throw new WorkerRunnerError('The local lifecycle admin is read-only for Worker Runner', 'FORBIDDEN');
+    }
+    if (isArcServicePrincipal(principal) && operation !== 'dispatch') {
+      throw new WorkerRunnerError(
+        'The ARC service principal may dispatch and observe workers but may not abort them',
+        'FORBIDDEN',
+      );
+    }
     if (!WORKER_MUTATING_ROLES.includes(principal.role as (typeof WORKER_MUTATING_ROLES)[number])) {
       throw new WorkerRunnerError(`Role ${principal.role} is read-only for Worker Runner`, 'FORBIDDEN');
     }
@@ -542,7 +552,11 @@ export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefine
   if (chatId.toLowerCase().startsWith('team:')) {
     throw new WorkerRunnerError('Agent Team chats cannot be trusted Worker Runner principals', 'FORBIDDEN');
   }
-  return { role: principal.role, botName, chatId };
+  const normalized = { role: principal.role, botName, chatId };
+  if (normalized.role === 'admin' && !isLocalLifecycleAdmin(normalized)) {
+    throw new WorkerRunnerError('Only the fixed local lifecycle identity may use the admin role', 'FORBIDDEN');
+  }
+  return normalized;
 }
 
 function validateConfig(config: WorkerServiceConfig): void {
