@@ -50,6 +50,7 @@
       "id": "arc-worker-runner-adapter",
       "status": "planned",
       "roots": ["packages/arc-worker-runner-adapter"],
+      "importRoots": ["packages/arc-worker-runner-adapter/src"],
       "forbiddenImports": [
         "src/memory-core",
         "src/agent-teams",
