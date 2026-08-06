@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkerRunnerDaemon } from '../src/daemon.js';
 import { LocalCapabilityVerifier, issueLocalCapability, type LocalCapabilityPurpose } from '../src/local-auth.js';
 import { WorkerService } from '../src/service.js';
@@ -85,7 +85,7 @@ describe('Worker Runner daemon authentication', () => {
     expect(aborted).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
   });
 
-  it('lets the exact ARC service dispatch and observe only its own workers but denies abort and all-scope list', async () => {
+  it('lets the exact ARC service dispatch, observe, and abort only its own workers', async () => {
     const kit = await makeDaemon((store, dir) => store.createWorker('wrk-other', scopedInput(dir), 2, 1));
     const connected = await connect(kit.daemon.url, kit.issue(ARC_SERVICE_PRINCIPAL));
     cleanups.push(() => connected.client.close());
@@ -100,12 +100,55 @@ describe('Worker Runner daemon authentication', () => {
     expect(status).toMatchObject({ structuredContent: { worker: { id } } });
     const listed = await connected.client.callTool({ name: 'worker_list', arguments: {} });
     expect(listed).toMatchObject({ structuredContent: { workers: [expect.objectContaining({ id })] } });
+    await vi.waitFor(() => expect(kit.store.require(id).status).toBe('running'));
+    const ownPid = kit.store.require(id).pid;
+    const otherStatusBefore = kit.store.require('wrk-other').status;
     const aborted = await connected.client.callTool({ name: 'worker_abort', arguments: { id } });
-    expect(aborted).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    expect(aborted).toMatchObject({ structuredContent: { worker: { id, status: 'aborted' } } });
     const allScopes = await connected.client.callTool({ name: 'worker_list', arguments: { all_scopes: true } });
     expect(allScopes).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
     const otherStatus = await connected.client.callTool({ name: 'worker_status', arguments: { id: 'wrk-other' } });
     expect(otherStatus).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const otherAbort = await connected.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-other' } });
+    expect(otherAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    expect(kit.store.require('wrk-other').status).toBe(otherStatusBefore);
+    expect(kit.runner.aborts).toEqual([ownPid]);
+  });
+
+  it('does not grant ARC service treatment to partial or role-forged identities', async () => {
+    const kit = await makeDaemon((store, dir) =>
+      store.createWorker('wrk-service', {
+        ...scopedInput(dir),
+        botName: ARC_SERVICE_PRINCIPAL.botName,
+        chatId: ARC_SERVICE_PRINCIPAL.chatId,
+      }, 2, 1),
+    );
+    const partial = await connect(kit.daemon.url, kit.issue({
+      role: 'pm',
+      botName: ARC_SERVICE_PRINCIPAL.botName,
+      chatId: 'local:arc-service-forged',
+    }));
+    cleanups.push(() => partial.client.close());
+    const partialStatus = await partial.client.callTool({ name: 'worker_status', arguments: { id: 'wrk-service' } });
+    expect(partialStatus).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const partialAbort = await partial.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-service' } });
+    expect(partialAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+
+    const forgedRole = await connect(kit.daemon.url, kit.issue({
+      role: 'manager',
+      botName: ARC_SERVICE_PRINCIPAL.botName,
+      chatId: ARC_SERVICE_PRINCIPAL.chatId,
+    }));
+    cleanups.push(() => forgedRole.client.close());
+    const forgedDispatch = await forgedRole.client.callTool({
+      name: 'worker_dispatch',
+      arguments: { workdir: kit.dir, prompt: 'must not run', engine: 'codex' },
+    });
+    expect(forgedDispatch).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const forgedAbort = await forgedRole.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-service' } });
+    expect(forgedAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const forgedAllScopes = await forgedRole.client.callTool({ name: 'worker_list', arguments: { all_scopes: true } });
+    expect(forgedAllScopes).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
     expect(kit.runner.aborts).toEqual([]);
   });
 

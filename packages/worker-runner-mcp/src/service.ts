@@ -433,11 +433,12 @@ export class WorkerService {
     if (isLocalLifecycleAdmin(principal)) {
       throw new WorkerRunnerError('The local lifecycle admin is read-only for Worker Runner', 'FORBIDDEN');
     }
-    if (isArcServicePrincipal(principal) && operation !== 'dispatch') {
-      throw new WorkerRunnerError(
-        'The ARC service principal may dispatch and observe workers but may not abort them',
-        'FORBIDDEN',
-      );
+    if (isArcServicePrincipal(principal)) {
+      // This exact, session-bound machine identity needs only the two Worker
+      // mutations used by the ARC adapter. Scope authorization still runs
+      // independently before an abort can affect a durable Worker record.
+      if (operation === 'dispatch' || operation === 'abort') return;
+      throw new WorkerRunnerError('The ARC service principal cannot perform this Worker mutation', 'FORBIDDEN');
     }
     if (!WORKER_MUTATING_ROLES.includes(principal.role as (typeof WORKER_MUTATING_ROLES)[number])) {
       throw new WorkerRunnerError(`Role ${principal.role} is read-only for Worker Runner`, 'FORBIDDEN');

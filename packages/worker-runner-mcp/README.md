@@ -63,9 +63,11 @@ bot or chat is rejected during authentication.
 
 The exact long-lived `pm/arc-service/local:arc-service` identity is narrower
 than an ordinary PM: it may dispatch and observe only workers in its own scope,
-but it cannot request all scopes or abort. This keeps the machine credential
-from becoming an operator credential. Other user/PM principals retain their
-normal scoped abort behavior.
+and may abort only a Worker record in that same exact scope so `arc_run_cancel`
+can converge. It cannot request all scopes, inspect or abort another scope,
+redirect work, or use the lifecycle-admin identity. This keeps the machine
+credential from becoming an operator credential. Other user/PM principals
+retain their normal scoped abort behavior.
 
 ### Daemon sessions and capabilities
 
