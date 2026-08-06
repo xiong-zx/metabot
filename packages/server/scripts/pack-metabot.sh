@@ -9,8 +9,8 @@
 #   - bin/, install.sh, ecosystem.config.cjs, tsconfig*.json
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
-#   - packages/cli, cli-core, metamemory, skill-hub, arc-mcp
-#                                               (5 bot-host workspaces)
+#   - packages/cli, cli-core, metamemory, skill-hub, arc-mcp,
+#     worker-runner-mcp                         (6 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -99,6 +99,7 @@ INCLUDES=(
   'packages/metamemory'
   'packages/skill-hub'
   'packages/arc-mcp'
+  'packages/worker-runner-mcp'
   'packages/skills'
   'LICENSE'
   'README.md'
@@ -133,7 +134,9 @@ for required in \
   'packages/skills/metabot-team/SKILL.md' \
   'packages/skills/metabot-todos/SKILL.md' \
   'packages/skills/metabot-todos/agents/openai.yaml' \
-  'packages/skills/metabot-todos/scripts/todo-display.mjs'; do
+  'packages/skills/metabot-todos/scripts/todo-display.mjs' \
+  'packages/arc-mcp/package.json' \
+  'packages/worker-runner-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
@@ -174,6 +177,7 @@ if (flavor === 'bridge') {
     'packages/metamemory',
     'packages/skill-hub',
     'packages/arc-mcp',
+    'packages/worker-runner-mcp',
   ];
   pkg.scripts = {
     ...pkg.scripts,

@@ -21,6 +21,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/",
     "start": "node dist/cli.js",
     "test": "vitest run",

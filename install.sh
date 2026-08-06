@@ -441,7 +441,8 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-#   - independent @xvirobotics/arc-mcp (built but not automatically started)
+#   - independent @xvirobotics/arc-mcp and @xvirobotics/worker-runner-mcp
+#     (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
 # personal edition and excluded only from the legacy/private bridge flavor.
@@ -457,6 +458,7 @@ else
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
     --workspace=@xvirobotics/arc-mcp \
+    --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
 fi
@@ -1471,6 +1473,17 @@ if npm run build -w @xvirobotics/arc-mcp; then
   success "ARC MCP build complete"
 else
   error "ARC MCP build failed. MetaBot was not started."
+  exit 1
+fi
+
+# Worker Runner is shipped as an independent stdio binary. Installation only
+# builds it; a trusted runtime must pin its principal, state directory, and
+# completion callback before starting it.
+info "Building independent Worker Runner MCP..."
+if npm run build -w @xvirobotics/worker-runner-mcp; then
+  success "Worker Runner MCP build complete"
+else
+  error "Worker Runner MCP build failed. MetaBot was not started."
   exit 1
 fi
 
