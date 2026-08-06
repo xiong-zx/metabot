@@ -49,6 +49,7 @@ describe('GitHub release package', () => {
     expect(listing).toContain('ecosystem.core.config.cjs');
     expect(listing).toContain('packages/server/package.json');
     expect(listing).toContain('packages/web-ui/package.json');
+    expect(listing).toContain('packages/arc-mcp/package.json');
     expect(listing).not.toContain('packages/server/static/');
     expect(listing).not.toMatch(/(^|\n)\.?\/?web\//);
 
@@ -65,6 +66,7 @@ describe('GitHub release package', () => {
     const packageJson = JSON.parse(execSync(`tar xOf ${JSON.stringify(TARBALL)} package.json`, { encoding: 'utf-8' }));
     expect(packageJson.workspaces).toContain('packages/server');
     expect(packageJson.workspaces).toContain('packages/web-ui');
+    expect(packageJson.workspaces).toContain('packages/arc-mcp');
     expect(packageJson.metabotEdition).toBe('personal');
   });
 
@@ -73,6 +75,7 @@ describe('GitHub release package', () => {
     expect(source).toContain('PERSONAL_EDITION_PACKAGE=true');
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-server');
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-web-ui');
+    expect(source).toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(source).toContain('pm2 start ecosystem.core.config.cjs --only metabot-core');
     expect(source).toContain('Local Core token saved to $token_file (mode 600)');
     expect(source).not.toContain('echo "$METABOT_CORE_TOKEN"');

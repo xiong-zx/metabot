@@ -9,7 +9,8 @@
 #   - bin/, install.sh, ecosystem.config.cjs, tsconfig*.json
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
-#   - packages/cli, cli-core, metamemory, skill-hub  (4 bot-host workspaces)
+#   - packages/cli, cli-core, metamemory, skill-hub, arc-mcp
+#                                               (5 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -97,6 +98,7 @@ INCLUDES=(
   'packages/cli-core'
   'packages/metamemory'
   'packages/skill-hub'
+  'packages/arc-mcp'
   'packages/skills'
   'LICENSE'
   'README.md'
@@ -171,6 +173,7 @@ if (flavor === 'bridge') {
     'packages/cli-core',
     'packages/metamemory',
     'packages/skill-hub',
+    'packages/arc-mcp',
   ];
   pkg.scripts = {
     ...pkg.scripts,
