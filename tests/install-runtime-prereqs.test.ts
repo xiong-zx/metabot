@@ -50,6 +50,7 @@ version_at_least v23.0.0 22.19.0
     for (const source of [SH_SOURCE, PS_SOURCE]) {
       expect(source.replaceAll('\\', '/')).toContain('packages/skills/metabot');
       expect(source).toContain('metabot-team');
+      expect(source).toContain('metabot-todos');
       expect(source).toContain('Retired project-level');
     }
   });
