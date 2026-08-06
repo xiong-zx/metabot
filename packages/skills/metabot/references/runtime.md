@@ -6,9 +6,9 @@ Bridge-local commands exist only when listed by `metabot help`:
 metabot schedule add <agent> <chatId> <delaySeconds> "<prompt>"
 metabot schedule cron <agent> <chatId> "<cronExpr>" "<prompt>"
 metabot update [--git|--package|--version <version>]
-metabot restart
+metabot restart [--request-id ID] [--bot NAME --chat ID] [--resume|--no-resume] [--wait] [--json]
 metabot restart --daemon <worker|arc> [--force]
-metabot deploy-runtime --runtime <absolute-directory> [--force]
+metabot deploy-runtime --runtime <absolute-directory> [--request-id ID] [--wait|--no-wait] [--force] [--json]
 metabot status
 metabot logs
 metabot health
@@ -20,7 +20,12 @@ Schedules target Agent + Chat ID; the engine Session ID is diagnostic and may
 change. Immutable release versions provide the package rollback surface.
 
 `start`/`stop` cover Bridge, Worker Runner, and ARC. Plain `restart` remains
-Bridge-only. Daemon restart and runtime deployment refuse active work unless
+Bridge-only and changes its registered PM2 process in place. A stable request
+ID deduplicates retries. The new Bridge saves PM2 only after startup health and
+queues one continuation for normal user/PM chats when `--resume` is enabled;
+Team and Worker/ARC internal recovery stays with their durable owners.
+`deploy-runtime` prevalidates and switches the three apps without deleting PM2
+registrations, rolling back changed apps on failure. Daemon restart and runtime deployment refuse active work unless
 the operator passes `--force`; forced interruption can leave durable records
 in `recovery_required`. Run `deploy-runtime` only from outside the MetaBot
 process tree. Rolling back to a pre-daemon release also requires

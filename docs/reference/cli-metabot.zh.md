@@ -23,10 +23,11 @@ metabot update --package --version 1.3.0        # 固定不可变 Release v1.3.0
 metabot update --git                            # 强制 git pull + 构建 + 重启
 metabot start                       # 启动 Bridge、Worker Runner 与 ARC
 metabot stop                        # 停止整套三个 PM2 应用
-metabot restart                     # 只重启 Bridge
+metabot restart --wait --json       # 受保护的 Bridge 单独重启
+metabot restart --request-id ID     # 调用方提供的稳定去重键
 metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
 metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
-metabot deploy-runtime --runtime /absolute/checkout  # 从外部切换整套运行目录
+metabot deploy-runtime --runtime /absolute/checkout --wait  # 从外部安全切换整套运行目录
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态
 ```
@@ -47,8 +48,28 @@ Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--
 7. 刷新内置/工作区 Skills，以及已有的 Lark CLI Skills。
 8. 重启 Bridge 与两个执行守护进程，健康检查通过后再保存 PM2 状态。
 
+普通 `restart` 支持 `--request-id`、`--bot`、`--chat`、`--source`、
+`--reason`、`--resume`/`--no-resume`、`--wait`、`--timeout` 和 `--json`。
+`deploy-runtime` 还支持 `--wait`/`--no-wait` 与 `--force`。相同 request ID
+再次提交时只读取已有的持久结果，不会重复执行 PM2 操作。
+
+旧 Bridge 会原子写入 breadcrumb（用于告诉新进程这次重启的结构化小文件）和
+SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 Bridge 依次验证
+自身 HTTP 健康、两个执行守护进程的通信健康、以及 PM2 的运行目录和脚本；全部
+通过后才执行 `pm2 save --force` 并把请求标为健康。完成通知和恢复归属都持久化
+之后才删除 breadcrumb，从而避免恢复后的会话再次重启。
+
+带 `--resume` 且来源是普通用户或 PM chat 时，启动流程会在原有 chat 会话中创建
+一个可去重的持久续做任务，让被中断的工作只继续一次。Agent Team、Worker 和 ARC
+内部 chat 不走通用恢复，而由各自的持久 supervisor 或守护进程负责。状态文件位于
+`SESSION_STORE_DIR`、`METABOT_STATE_DIR` 或 `~/.metabot/` 下，文件名为
+`restart-state.sqlite` 和 `last-restart.json`。
+
 守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
 `recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
+它会先校验三个应用的目标配置和回退配置，再按 Worker Runner、ARC、Bridge 的顺序
+就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。只有健康的新
+Bridge 会保存 PM2 进程列表。
 
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。

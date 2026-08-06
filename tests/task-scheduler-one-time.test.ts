@@ -139,6 +139,20 @@ describe('TaskScheduler one-time tasks — creation', () => {
     expect(scheduler.taskCount()).toBe(2);
     scheduler.destroy();
   });
+
+  it('returns the existing task for a durable dedupe key', () => {
+    const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const first = scheduler.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'continue once', delaySeconds: 60, dedupeKey: 'restart-resume:r1',
+    });
+    const duplicate = scheduler.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'must not replace', delaySeconds: 60, dedupeKey: 'restart-resume:r1',
+    });
+    expect(duplicate.id).toBe(first.id);
+    expect(duplicate.prompt).toBe('continue once');
+    expect(scheduler.listTasks()).toHaveLength(1);
+    scheduler.destroy();
+  });
 });
 
 // =====================================================================
@@ -285,6 +299,27 @@ describe('TaskScheduler one-time tasks — persistence', () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0].id).toBe('fresh-task-1');
     s.destroy();
+  });
+
+  it('retains a terminal dedupe key so a completed continuation is not replayed', async () => {
+    const registry = createMockRegistry();
+    const logger = createMockLogger();
+    const first = new TaskScheduler(registry, logger);
+    const task = first.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'continue', delaySeconds: 0, dedupeKey: 'restart-resume:r2',
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    const persisted = JSON.parse(fs.readFileSync(PERSIST_FILE, 'utf8')) as { tasks: Array<{ id: string; status: string }> };
+    expect(persisted.tasks.find((item) => item.id === task.id)?.status).toBe('completed');
+    first.destroy();
+
+    const second = new TaskScheduler(registry, logger);
+    const duplicate = second.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'replay', delaySeconds: 0, dedupeKey: 'restart-resume:r2',
+    });
+    expect(duplicate.id).toBe(task.id);
+    expect(duplicate.status).toBe('completed');
+    second.destroy();
   });
 });
 

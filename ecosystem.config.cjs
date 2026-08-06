@@ -57,6 +57,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         CLAUDE_MAX_TURNS: '',
         ...proxyEnv,
       },
@@ -69,6 +70,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'worker-runner-out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         METABOT_WORKER_DATA_DIR: configured('METABOT_WORKER_DATA_DIR', path.join(stateRoot, 'worker-runner')),
         METABOT_WORKER_LISTEN: workerEndpoint,
         METABOT_WORKER_CAPABILITY_PUBLIC_KEY_FILE: configured(
@@ -92,6 +94,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'arc-out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         METABOT_ARC_DATA_DIR: configured('METABOT_ARC_DATA_DIR', path.join(stateRoot, 'arc')),
         METABOT_ARC_PROJECT_ROOTS: configured(
           'METABOT_ARC_PROJECT_ROOTS',

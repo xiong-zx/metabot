@@ -165,6 +165,15 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?package\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package-lock\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?bin\/metabot\b/);
+    expect(tarListing).toContain('scripts/pm2-protected-runtime-switch.cjs');
+    expect(tarListing).toContain('src/runtime/restart-state-cli.ts');
+    expect(tarListing).toContain('src/bridge/restart-recovery.ts');
+  });
+
+  it('keeps the TypeScript source launcher in runtime dependencies', () => {
+    const packageJson = JSON.parse(execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} package.json`, { encoding: 'utf-8' }));
+    expect(packageJson.dependencies.tsx).toMatch(/^\^4\./);
+    expect(packageJson.devDependencies?.tsx).toBeUndefined();
   });
 
   it('tarball includes the seven bot-host workspaces', () => {

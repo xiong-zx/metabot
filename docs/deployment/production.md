@@ -93,6 +93,7 @@ daemons. Ordinary `metabot restart` is intentionally Bridge-only, so detached
 work survives it. A daemon restart is explicit and guarded:
 
 ```bash
+metabot restart --request-id <stable-id> --wait --json
 metabot restart --daemon worker
 metabot restart --daemon arc
 metabot restart --daemon worker --force
@@ -103,6 +104,15 @@ operator acknowledgement: ambiguous in-flight work can become
 `recovery_required` and is never blindly relaunched. Updates perform the same
 busy check, drain idle daemon connections, then restart both daemons so old
 code never continues against a migrated database.
+
+The protected Bridge restart never deletes its PM2 registration. It claims
+the request ID in SQLite, atomically writes `last-restart.json`, and restarts
+only Bridge in the same cwd/script. A duplicate request ID returns the durable
+record without restarting again. After startup, the new Bridge verifies its
+HTTP endpoint, both daemon wire endpoints, and PM2 identity; it saves the PM2
+list only after all checks pass. Normal user/PM chats with `--resume` receive
+one durable continuation in their existing session. Agent Team and
+Worker/ARC internal chats remain owned by their purpose-built durable recovery.
 
 Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
 state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
@@ -121,8 +131,12 @@ The Ed25519 trust keys and SQLite state under `~/.metabot/` may remain; they are
 inert when the old runtime has no matching apps. For a source runtime switch,
 run `metabot deploy-runtime --runtime /absolute/checkout` from SSH or another
 controller outside the MetaBot process tree. It refuses active work unless
-`--force`, deletes all three old-runtime apps, starts all three from the target,
-and saves PM2 only after wire health succeeds.
+`--force`. The command prevalidates target and rollback configurations, then
+changes Worker Runner, ARC, and Bridge in place without a `pm2 delete` gap.
+Failure rolls back every app PM2 already accepted. The old controller does not
+save PM2 state; the new Bridge saves it only after full startup health. Use a
+stable `--request-id` for retryable automation and `--wait --json` for a
+durable terminal result.
 
 ## Source deployments
 

@@ -24,10 +24,11 @@ metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
 metabot update --git                            # force git pull + rebuild + restart
 metabot start                       # start Bridge + Worker Runner + ARC
 metabot stop                        # stop the whole three-app runtime
-metabot restart                     # restart Bridge only
+metabot restart --wait --json       # protected Bridge-only restart
+metabot restart --request-id ID     # caller-stable idempotency key
 metabot restart --daemon worker     # guarded Worker Runner restart
 metabot restart --daemon arc        # guarded ARC restart
-metabot deploy-runtime --runtime /absolute/checkout  # external runtime switch
+metabot deploy-runtime --runtime /absolute/checkout --wait  # protected external runtime switch
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
@@ -48,9 +49,34 @@ instead of `latest`. Package updating performs:
 7. Refresh bundled/workspace Skills and existing Lark CLI Skills when present.
 8. Restart Bridge and both execution daemons, then save PM2 only after health.
 
+Plain `restart` accepts `--request-id`, `--bot`, `--chat`, `--source`,
+`--reason`, `--resume`/`--no-resume`, `--wait`, `--timeout`, and `--json`.
+`deploy-runtime` accepts the same request metadata plus `--wait`/`--no-wait`
+and `--force`. A repeated request ID reads the existing durable result and
+does not repeat the PM2 action.
+
+The old Bridge process writes an atomic breadcrumb and a transactional SQLite
+request record, then changes only the registered `metabot` process in place.
+The new Bridge verifies its HTTP health, both execution-daemon wire probes,
+and the expected PM2 cwd/script before it runs `pm2 save --force` and marks the
+request healthy. The breadcrumb is retained until reporting and continuation
+ownership are recorded, preventing a recovered session from starting a
+restart loop.
+
+When `--resume` has a normal user or PM bot/chat scope, startup schedules one
+durable continuation in the existing chat session so the interrupted task
+continues exactly once. Agent Team and Worker/ARC internal chats are not
+generically resumed; their durable supervisors and daemons remain responsible
+for recovery. Restart state is under `SESSION_STORE_DIR`, `METABOT_STATE_DIR`,
+or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).
+
 Daemon restarts refuse while work is active. `--force` explicitly accepts that
 ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
-the same guard and must run outside the MetaBot process tree.
+the same guard and must run outside the MetaBot process tree. It prevalidates
+all three target/rollback configurations, restarts Worker Runner, ARC, then
+Bridge without deleting their PM2 registrations, and rolls back every changed
+app if PM2 rejects or cannot verify a switch. Only the healthy new Bridge saves
+the process list.
 
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and
