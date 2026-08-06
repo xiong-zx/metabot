@@ -48,8 +48,24 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
       const missing = roots.filter((item) => !existingRoots.includes(item));
       failures.push(`${feature.id}: missing required roots: ${missing.join(', ')}`);
     }
-    if (existingRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
-      scanForbiddenImports(root, feature.id, existingRoots, feature.forbiddenImports, failures);
+    const importRoots = feature.importRoots ?? roots;
+    if (
+      !Array.isArray(importRoots) ||
+      importRoots.some((item) => typeof item !== 'string' || item.trim() === '')
+    ) {
+      failures.push(`${feature.id}: importRoots must contain non-empty relative paths`);
+    } else if (importRoots.some((item) => !roots.some((featureRoot) => containsPath(featureRoot, item)))) {
+      failures.push(`${feature.id}: importRoots must stay within declared roots`);
+    } else {
+      const existingImportRoots = importRoots.filter((item) => pathEntryExists(resolveInside(root, item)));
+      assertSourceRootsAreNotSymlinks(root, existingImportRoots);
+      if (feature.status === 'required' && existingImportRoots.length !== importRoots.length) {
+        const missing = importRoots.filter((item) => !existingImportRoots.includes(item));
+        failures.push(`${feature.id}: missing required importRoots: ${missing.join(', ')}`);
+      }
+      if (existingImportRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
+        scanForbiddenImports(root, feature.id, existingImportRoots, feature.forbiddenImports, failures);
+      }
     }
     checkedFeatures.push({ id: feature.id, status: feature.status, presentRoots: existingRoots.length });
   }
@@ -134,6 +150,12 @@ function isRelativeSpecifier(specifier) {
 
 function stripSourceExtension(file) {
   return SOURCE_EXTENSIONS.has(path.extname(file)) ? file.slice(0, -path.extname(file).length) : file;
+}
+
+function containsPath(parent, child) {
+  const normalizedParent = path.normalize(parent);
+  const normalizedChild = path.normalize(child);
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${path.sep}`);
 }
 
 function pathEntryExists(file) {

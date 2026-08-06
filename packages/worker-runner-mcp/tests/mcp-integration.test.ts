@@ -111,8 +111,8 @@ describe('worker runner MCP trust boundary', () => {
     await vi.waitFor(() => expect(kit.store.require(id).status).toBe('running'));
     kit.runner.complete(4_000, {
       exitCode: 0,
-      stdout: 'o'.repeat(100),
-      stderr: 'e'.repeat(100),
+      stdout: `STDOUT_SENTINEL:${'o'.repeat(300_000)}`,
+      stderr: `STDERR_SENTINEL:${'e'.repeat(300_000)}`,
       stdoutTruncated: false,
       stderrTruncated: false,
     });
@@ -127,8 +127,8 @@ describe('worker runner MCP trust boundary', () => {
     const status = await kit.client.callTool({ name: 'worker_status', arguments: { id } });
     expect(status.structuredContent).toMatchObject({
       worker: {
-        stdout: 'o'.repeat(16),
-        stderr: 'e'.repeat(16),
+        stdout: 'STDOUT_SENTINEL:',
+        stderr: 'STDERR_SENTINEL:',
         stdoutTruncated: true,
         stderrTruncated: true,
       },

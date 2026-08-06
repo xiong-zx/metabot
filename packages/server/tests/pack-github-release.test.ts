@@ -50,6 +50,7 @@ describe('GitHub release package', () => {
     expect(listing).toContain('packages/server/package.json');
     expect(listing).toContain('packages/web-ui/package.json');
     expect(listing).toContain('packages/arc-mcp/package.json');
+    expect(listing).toContain('packages/arc-worker-runner-adapter/package.json');
     expect(listing).toContain('packages/worker-runner-mcp/package.json');
     expect(listing).not.toContain('packages/server/static/');
     expect(listing).not.toMatch(/(^|\n)\.?\/?web\//);
@@ -68,6 +69,7 @@ describe('GitHub release package', () => {
     expect(packageJson.workspaces).toContain('packages/server');
     expect(packageJson.workspaces).toContain('packages/web-ui');
     expect(packageJson.workspaces).toContain('packages/arc-mcp');
+    expect(packageJson.workspaces).toContain('packages/arc-worker-runner-adapter');
     expect(packageJson.workspaces).toContain('packages/worker-runner-mcp');
     expect(packageJson.metabotEdition).toBe('personal');
   });
@@ -78,6 +80,7 @@ describe('GitHub release package', () => {
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-server');
     expect(source).toContain('npm run build -w @xvirobotics/metabot-core-web-ui');
     expect(source).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(source).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(source).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(source).toContain('pm2 start ecosystem.core.config.cjs --only metabot-core');
     expect(source).toContain('Local Core token saved to $token_file (mode 600)');

@@ -1,6 +1,6 @@
 {
   "name": "@xvirobotics/arc-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Independent AutoResearchClaw lifecycle and stdio MCP server",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,9 @@
     }
   },
   "bin": {
-    "metabot-arc-mcp": "dist/bin.js"
+    "metabot-arc-mcp": "dist/bin.js",
+    "metabot-arcd": "dist/daemon-cli.js",
+    "metabot-arc-proxy": "dist/proxy-cli.js"
   },
   "files": [
     "dist",

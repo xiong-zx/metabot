@@ -71,6 +71,14 @@ resolvers. Keep boundary-sensitive imports relative or add a separate lint rule
 when aliases are introduced. `reverseBoundaries` applies the same package check
 from upstream-owned roots back toward downstream packages.
 
+By default, `forbiddenImports` scans every source file under a feature's
+`roots`. A feature may declare narrower `importRoots` when its production code
+must stay isolated but its integration tests need another package's public API.
+Every `importRoots` entry must remain inside one of the declared `roots`, and a
+required feature must contain every declared import root. This is not a general
+exception list: forbidden imports inside the selected production roots still
+fail closed.
+
 The repository Actions settings must allow workflows to create pull requests.
 If that permission is disabled, the publish job fails without changing
 `main`; a maintainer can download the validated candidate artifact during its

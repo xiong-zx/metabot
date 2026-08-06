@@ -70,6 +70,22 @@ describe('WorkerStore', () => {
     expect(other.worker.status).toBe('queued');
   });
 
+  it('persists callback authorization privately across store restart', () => {
+    const { store, dir } = makeStore();
+    store.createWorker(
+      'wrk-private-capability',
+      input(dir, { authorizingCapability: 'signed-worker-capability' }),
+      2,
+      100,
+    );
+    expect(store.require('wrk-private-capability')).not.toHaveProperty('authorizingCapability');
+    store.close();
+    const reopened = new WorkerStore(path.join(dir, 'state', 'workers.sqlite'));
+    stores.push(reopened);
+    expect(reopened.getAuthorizingCapability('wrk-private-capability')).toBe('signed-worker-capability');
+    expect(reopened.require('wrk-private-capability')).not.toHaveProperty('authorizingCapability');
+  });
+
   it('reuses successful dedupe keys only within TTL and retries terminal failures by policy', () => {
     const { store, dir } = makeStore();
     const firstInput = input(dir, { dedupeKey: 'same', dedupePolicy: { completedTtlMs: 100, retryTerminal: true } });
@@ -123,6 +139,28 @@ describe('WorkerStore', () => {
     expect(store.createWorker('wrk-2', noRetry, 2, 2)).toMatchObject({
       deduplicated: true,
       worker: { id: 'wrk-1', status: 'failed' },
+    });
+  });
+
+  it('durably reuses a completed key beyond its TTL when retryTerminal is false', () => {
+    const { store, dir } = makeStore();
+    const noRetry = input(dir, {
+      dedupeKey: 'arc:v1:project:run',
+      dedupePolicy: { completedTtlMs: 1, retryTerminal: false },
+    });
+    store.createWorker('wrk-1', noRetry, 2, 0);
+    store.markRunning('wrk-1', 'launch-1', 100, 1, false);
+    store.markTerminal('wrk-1', {
+      status: 'completed',
+      expectedStatus: 'running',
+      expectedLaunchId: 'launch-1',
+      finishedAt: 2,
+      terminalReason: 'process_exit',
+    });
+
+    expect(store.createWorker('wrk-2', noRetry, 2, 10_000)).toMatchObject({
+      deduplicated: true,
+      worker: { id: 'wrk-1', status: 'completed' },
     });
   });
 

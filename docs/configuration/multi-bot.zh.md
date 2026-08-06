@@ -53,6 +53,8 @@
 | `model` | 否 | 引擎默认 | Session 模型覆盖 |
 | `visible` | 否 | `true` | 是否注册到 Agent Bus 供发现 |
 | `memoryPublic` | 否 | 粘性/默认策略 | 显式设置时固定 Bot 的默认 Memory 可见性 |
+| `workerTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 Worker Runner 凭证 |
+| `arcTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 ARC 凭证 |
 | `maxTurns` / `maxBudgetUsd` | 否 | 不限制 | Claude 兼容限制 |
 | `outputsBaseDir` | 否 | 用户临时目录 | 自动回传到聊天的文件目录 |
 
@@ -141,6 +143,14 @@ MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久
 - 飞书群回复模式按 Bot 和群持久化。
 - Agent Teams 和 Agent Bus 可以协调不同引擎的 Bot。
 - 环境变量提供默认值；显式 `bots.json` 字段优先。
+- `workerTools` 和 `arcTools` 是授权设置，不是普通便利开关。非团队会话
+  默认会得到 `user` 角色，因此每个 Bot 的开关才是真正的派发边界。Agent
+  Team 的 `manager`/`agent` 会话永远拿不到这些凭证。引擎侧还会同时检查
+  本轮已经签发的凭证，以及仅监听本机的 `METABOT_WORKER_DAEMON_URL` /
+  `METABOT_ARC_DAEMON_URL`；端点缺失或不安全时不会安装对应工具。Codex
+  使用单次调用配置，Claude 使用追加式会话配置，都不会覆盖用户共享的
+  MCP 设置。Kimi 目前没有隔离的单会话 MCP 配置入口，因此即使开关已启用
+  也不会获得这两个工具。
 
 设置 `BOTS_CONFIG` 后，单 Bot 的 `FEISHU_APP_ID` 和
 `FEISHU_APP_SECRET` 会被忽略。

@@ -16,6 +16,9 @@ export function createArcRunner() {
       states.set(handle.id, 'running');
       return handle;
     },
+    async recover(handle) {
+      return { state: states.get(handle.id) };
+    },
     async pause(handle) {
       const current = states.get(handle.id);
       if (current === 'finished' || current === 'cancelled') return { state: current };

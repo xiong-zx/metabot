@@ -10,7 +10,7 @@
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
 #   - packages/cli, cli-core, metamemory, skill-hub, arc-mcp,
-#     worker-runner-mcp                         (6 bot-host workspaces)
+#     arc-worker-runner-adapter, worker-runner-mcp (7 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -90,6 +90,7 @@ TAR_EXCLUDES=(
 INCLUDES=(
   'bin'
   'install.sh'
+  'uninstall.sh'
   'ecosystem.config.cjs'
   'package-lock.json'
   'tsconfig.bridge.json'
@@ -99,6 +100,7 @@ INCLUDES=(
   'packages/metamemory'
   'packages/skill-hub'
   'packages/arc-mcp'
+  'packages/arc-worker-runner-adapter'
   'packages/worker-runner-mcp'
   'packages/skills'
   'LICENSE'
@@ -130,12 +132,14 @@ done
 # bot host. Fail loud here instead.
 for required in \
   'install.sh' \
+  'uninstall.sh' \
   'packages/skills/metabot/SKILL.md' \
   'packages/skills/metabot-team/SKILL.md' \
   'packages/skills/metabot-todos/SKILL.md' \
   'packages/skills/metabot-todos/agents/openai.yaml' \
   'packages/skills/metabot-todos/scripts/todo-display.mjs' \
   'packages/arc-mcp/package.json' \
+  'packages/arc-worker-runner-adapter/package.json' \
   'packages/worker-runner-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
@@ -177,6 +181,7 @@ if (flavor === 'bridge') {
     'packages/metamemory',
     'packages/skill-hub',
     'packages/arc-mcp',
+    'packages/arc-worker-runner-adapter',
     'packages/worker-runner-mcp',
   ];
   pkg.scripts = {

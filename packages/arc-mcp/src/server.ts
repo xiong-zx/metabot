@@ -12,6 +12,25 @@ import {
 import { arcRunRecordSchema } from './contract.js';
 import { ArcError, asArcError } from './errors.js';
 
+export const ARC_TRUSTED_ROLES = ['admin', 'user', 'pm', 'manager', 'agent', 'worker'] as const;
+export type ArcTrustedRole = (typeof ARC_TRUSTED_ROLES)[number];
+export interface ArcTrustedPrincipal {
+  role: ArcTrustedRole;
+  botName: string;
+  chatId: string;
+}
+
+export const LOCAL_LIFECYCLE_ADMIN_PRINCIPAL = {
+  role: 'admin',
+  botName: 'metabot-local-lifecycle',
+  chatId: 'local:daemon-lifecycle',
+} as const satisfies ArcTrustedPrincipal;
+
+export interface ArcMcpServerOptions {
+  principal?: ArcTrustedPrincipal;
+  authorizingCapability?: string;
+}
+
 const runOutputSchema = z.object({ run: arcRunRecordSchema }).strict();
 const listOutputSchema = z.object({ runs: z.array(arcRunRecordSchema) }).strict();
 
@@ -40,8 +59,9 @@ async function invoke(operation: () => unknown | Promise<unknown>): Promise<Call
   }
 }
 
-export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
-  const server = new McpServer({ name: 'metabot-arc-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
+export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpServerOptions = {}): McpServer {
+  const principal = options.principal ? normalizeArcPrincipal(options.principal) : undefined;
+  const server = new McpServer({ name: 'metabot-arc-mcp', version: '0.2.0' }, { capabilities: { tools: {} } });
 
   server.registerTool(
     'arc_run_start',
@@ -51,7 +71,17 @@ export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
       outputSchema: runOutputSchema,
       annotations: { idempotentHint: true },
     },
-    (request) => invoke(async () => ({ run: await coordinator.start(request) })),
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return {
+          run: await coordinator.start(
+            request,
+            principal ? { bot_name: principal.botName, chat_id: principal.chatId } : undefined,
+            options.authorizingCapability,
+          ),
+        };
+      }),
   );
 
   server.registerTool(
@@ -84,7 +114,11 @@ export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
       outputSchema: runOutputSchema,
       annotations: { idempotentHint: true },
     },
-    (request) => invoke(async () => ({ run: await coordinator.pause(request) })),
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return { run: await coordinator.pause(request) };
+      }),
   );
 
   server.registerTool(
@@ -95,7 +129,11 @@ export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
       outputSchema: runOutputSchema,
       annotations: { idempotentHint: true },
     },
-    (request) => invoke(async () => ({ run: await coordinator.resume(request) })),
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return { run: await coordinator.resume(request) };
+      }),
   );
 
   server.registerTool(
@@ -106,10 +144,47 @@ export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
       outputSchema: runOutputSchema,
       annotations: { idempotentHint: true, destructiveHint: true },
     },
-    (request) => invoke(async () => ({ run: await coordinator.cancel(request) })),
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return { run: await coordinator.cancel(request) };
+      }),
   );
 
   return server;
+}
+
+export function normalizeArcPrincipal(principal: ArcTrustedPrincipal): ArcTrustedPrincipal {
+  if (!ARC_TRUSTED_ROLES.includes(principal.role)) {
+    throw new ArcError('scope_denied', 'ARC connection role is not recognized');
+  }
+  const botName = principal.botName.trim();
+  const chatId = principal.chatId.trim();
+  if (!botName || botName.length > 200 || !chatId || chatId.length > 500) {
+    throw new ArcError('scope_denied', 'ARC connection principal is invalid');
+  }
+  if (chatId.toLowerCase().startsWith('team:')) {
+    throw new ArcError('scope_denied', 'Agent Team chats cannot be trusted ARC principals');
+  }
+  const normalized = { role: principal.role, botName, chatId };
+  if (normalized.role === 'admin' && !isLocalLifecycleAdmin(normalized)) {
+    throw new ArcError('scope_denied', 'Only the fixed local lifecycle identity may use the ARC admin role');
+  }
+  return normalized;
+}
+
+function authorizeArcMutation(principal: ArcTrustedPrincipal | undefined): void {
+  // No principal means the existing operator-pinned standalone stdio mode.
+  if (!principal || ['user', 'pm'].includes(principal.role)) return;
+  throw new ArcError('scope_denied', `Role ${principal.role} is read-only for ARC`);
+}
+
+function isLocalLifecycleAdmin(principal: ArcTrustedPrincipal): boolean {
+  return (
+    principal.role === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.role &&
+    principal.botName === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.botName &&
+    principal.chatId === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.chatId
+  );
 }
 
 export async function connectArcStdioServer(coordinator: ArcCoordinator): Promise<McpServer> {

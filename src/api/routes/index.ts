@@ -17,5 +17,6 @@ export { handleSessionRoutes } from './session-routes.js';
 export { handleExecutorRoutes } from './executor-routes.js';
 export { handleAgentTeamRoutes } from './agent-team-routes.js';
 export { handleAgentTeamGovernanceRoutes } from './agent-team-governance-routes.js';
+export { handleWorkerEventsRoutes } from './worker-events-routes.js';
 export { jsonResponse, readBody, parseJsonBody } from './helpers.js';
 export type { RouteContext, RouteHandler } from './types.js';

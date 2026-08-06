@@ -432,6 +432,116 @@ if node -e '
 fi
 
 # ============================================================================
+# Phase 2.5: Provision cross-process execution trust keys (TOFU)
+# ============================================================================
+step "Phase 2.5: Provisioning execution trust keys"
+
+# These keys deliberately live outside the replaceable Git runtime. Creation
+# is trust-on-first-use and create-if-missing only: incomplete, mismatched, or
+# unsafe existing material fails rather than being silently replaced. File
+# modes do not contain arbitrary code running under the same OS uid; they are
+# scope-hygiene until the optional service-user isolation is deployed.
+METABOT_KEYS_DIR="${METABOT_KEYS_DIR:-$HOME/.metabot/keys}" node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const keysDir = process.env.METABOT_KEYS_DIR;
+const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
+const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+
+function nodeType(value) {
+  if (value.isSymbolicLink()) return 'symbolic-link';
+  if (value.isFile()) return 'regular-file';
+  if (value.isDirectory()) return 'directory';
+  if (value.isFIFO()) return 'fifo';
+  if (value.isSocket()) return 'socket';
+  if (value.isBlockDevice()) return 'block-device';
+  if (value.isCharacterDevice()) return 'character-device';
+  return 'unknown';
+}
+
+function lstatIfPresent(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return undefined;
+    throw error;
+  }
+}
+
+function assertStat(value, mode, label, expectedType) {
+  const typeOk = expectedType === 'directory' ? value.isDirectory() : value.isFile();
+  if (value.isSymbolicLink() || !typeOk) {
+    throw new Error(`unsafe ${label} node type: expected ${expectedType}, got ${nodeType(value)}`);
+  }
+  const actual = value.mode & 0o777;
+  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
+  if (uid !== undefined && value.uid !== uid) throw new Error(`unexpected ${label} owner uid ${value.uid}; expected ${uid}`);
+}
+
+function assertPath(file, mode, label, expectedType) {
+  const value = fs.lstatSync(file);
+  assertStat(value, mode, label, expectedType);
+  return value;
+}
+
+function readKey(file, label) {
+  const before = assertPath(file, 0o600, label, 'regular-file');
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fs.constants.O_NONBLOCK === 'number' ? fs.constants.O_NONBLOCK : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    assertStat(opened, 0o600, label, 'regular-file');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new Error(`unsafe ${label} path changed while opening`);
+    }
+    return fs.readFileSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+const existingKeysDir = lstatIfPresent(keysDir);
+if (existingKeysDir) {
+  assertStat(existingKeysDir, 0o700, 'key directory', 'directory');
+} else {
+  fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(keysDir, 0o700);
+  assertPath(keysDir, 0o700, 'key directory', 'directory');
+}
+
+for (const name of names) {
+  const privatePath = path.join(keysDir, `${name}.key`);
+  const publicPath = path.join(keysDir, `${name}.pub`);
+  const previousPath = `${publicPath}.prev`;
+  const privateStat = lstatIfPresent(privatePath);
+  const publicStat = lstatIfPresent(publicPath);
+  const previousStat = lstatIfPresent(previousPath);
+  if (privateStat) assertStat(privateStat, 0o600, `${name} private key`, 'regular-file');
+  if (publicStat) assertStat(publicStat, 0o600, `${name} public key`, 'regular-file');
+  if (previousStat) assertStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+  const privateExists = Boolean(privateStat);
+  const publicExists = Boolean(publicStat);
+  if (privateExists !== publicExists) throw new Error(`refusing to replace incomplete ${name} keypair`);
+  if (!privateExists) {
+    const pair = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+  }
+  assertPath(privatePath, 0o600, `${name} private key`, 'regular-file');
+  assertPath(publicPath, 0o600, `${name} public key`, 'regular-file');
+  const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
+  const signature = crypto.sign(null, challenge, readKey(privatePath, `${name} private key`));
+  if (!crypto.verify(null, challenge, readKey(publicPath, `${name} public key`), signature)) {
+    throw new Error(`${name} public/private keys do not correspond`);
+  }
+}
+NODE
+success "Execution trust keys ready at ${METABOT_KEYS_DIR} (TOFU; outside METABOT_HOME)"
+
+# ============================================================================
 # Phase 3: Install dependencies
 # ============================================================================
 step "Phase 3: Installing dependencies"
@@ -441,7 +551,7 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-#   - independent @xvirobotics/arc-mcp and @xvirobotics/worker-runner-mcp
+#   - independent ARC MCP, Worker Runner MCP, and their MCP-wire adapter
 #     (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
@@ -458,6 +568,7 @@ else
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
     --workspace=@xvirobotics/arc-mcp \
+    --workspace=@xvirobotics/arc-worker-runner-adapter \
     --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
@@ -1465,9 +1576,9 @@ else
   exit 1
 fi
 
-# ARC MCP is shipped as an independent stdio binary. Installation only builds
-# it; a trusted runtime must explicitly configure its project scope and runner
-# adapter before starting it.
+# ARC ships both an independent stdio binary and the authenticated daemon used
+# by the PM2 lifecycle below. The daemon receives its scope and runner adapter
+# only through trusted process configuration.
 info "Building independent ARC MCP..."
 if npm run build -w @xvirobotics/arc-mcp; then
   success "ARC MCP build complete"
@@ -1476,9 +1587,9 @@ else
   exit 1
 fi
 
-# Worker Runner is shipped as an independent stdio binary. Installation only
-# builds it; a trusted runtime must pin its principal, state directory, and
-# completion callback before starting it.
+# Worker Runner ships both an independent stdio binary and the authenticated
+# PM2 daemon. The daemon receives principal scope per signed MCP connection;
+# its state directory and completion callback remain trusted process config.
 info "Building independent Worker Runner MCP..."
 if npm run build -w @xvirobotics/worker-runner-mcp; then
   success "Worker Runner MCP build complete"
@@ -1487,16 +1598,48 @@ else
   exit 1
 fi
 
-# Always delete + start fresh to avoid stale/stopped process issues
-if pm2 describe metabot &>/dev/null 2>&1; then
-  info "Removing old MetaBot PM2 process..."
-  pm2 delete metabot 2>/dev/null || true
+# This adapter connects the two independent services over the Worker Runner
+# MCP wire. This phase supervises the daemons; per-engine MCP materialization
+# remains a separate, opt-in integration.
+info "Building independent ARC Worker Runner adapter..."
+if npm run build -w @xvirobotics/arc-worker-runner-adapter; then
+  success "ARC Worker Runner adapter build complete"
+else
+  error "ARC Worker Runner adapter build failed. MetaBot was not started."
+  exit 1
 fi
-info "Starting MetaBot with PM2..."
-pm2 start ecosystem.config.cjs
 
-pm2 save --force 2>/dev/null || true
-success "MetaBot is running!"
+# Always delete + start the three sibling apps from this runtime. Daemons are
+# never Bridge children, so a later ordinary `metabot restart` remains
+# Bridge-only. The lifecycle command saves PM2 state only after all three
+# authenticated health probes pass.
+for daemon in worker arc; do
+  app="metabot-${daemon}"
+  [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
+  [[ "$daemon" == "arc" ]] && app="metabot-arcd"
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    set +e
+    METABOT_HOME="$METABOT_HOME" node --import tsx \
+      "$METABOT_HOME/src/services/local-daemon-health.ts" --busy "$daemon" >/dev/null
+    DAEMON_BUSY_STATUS=$?
+    set -e
+    if [[ "$DAEMON_BUSY_STATUS" -eq 10 ]]; then
+      warn "$app has in-flight work; package replacement may leave it recovery_required."
+    elif [[ "$DAEMON_BUSY_STATUS" -ne 0 ]]; then
+      error "Could not verify whether $app is idle. Refusing package replacement."
+      exit 1
+    fi
+  fi
+done
+for app in metabot metabot-worker-runnerd metabot-arcd; do
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    info "Removing old $app PM2 process..."
+    pm2 delete "$app" 2>/dev/null || true
+  fi
+done
+info "Starting MetaBot Bridge and execution daemons with PM2..."
+METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+success "MetaBot Bridge and execution daemons are running!"
 
 # --- WeChat QR login: wait for URL and display it ---
 HAS_WECHAT_BOT=false
@@ -1537,6 +1680,8 @@ if [[ "$HAS_WECHAT_BOT" == "true" ]]; then
   else
     warn "QR URL not yet available. Check logs to get it:"
     echo "    pm2 logs metabot --lines 30"
+    echo "    pm2 logs metabot-worker-runnerd --lines 30"
+    echo "    pm2 logs metabot-arcd --lines 30"
   fi
 fi
 
@@ -1566,12 +1711,15 @@ echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
+echo "    pm2 logs metabot-worker-runnerd  # View Worker Runner daemon logs"
+echo "    pm2 logs metabot-arcd      # View ARC daemon logs"
 if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
   echo "    pm2 logs metabot-core     # View local Core logs"
   echo "    open http://localhost:9200 # Personal Web UI (or use your browser)"
 fi
-echo "    pm2 restart metabot       # Restart MetaBot"
-echo "    pm2 stop metabot          # Stop MetaBot"
+echo "    metabot restart           # Restart Bridge only"
+echo "    metabot restart --daemon worker  # Guarded Worker Runner restart"
+echo "    metabot stop              # Stop the whole MetaBot runtime"
 echo "    metabot memory list       # Browse central memory (delegated to metabot-core)"
 echo "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 echo "    metabot skills list       # List shared skills"

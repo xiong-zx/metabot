@@ -31,6 +31,12 @@ import {
   AgentTeamCapabilityError,
   AgentTeamExecutionCapabilityService,
 } from '../agent-teams/governance-capability.js';
+import { ExecutionCapabilityService } from '../services/execution-capabilities.js';
+import { TerminalEventDispatcher, TerminalEventStore } from '../services/terminal-event-store.js';
+import {
+  deriveExecutionPrincipal,
+  mintOptedInExecutionCapabilities,
+} from '../services/execution-principal.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
@@ -50,8 +56,13 @@ import {
   handleExecutorRoutes,
   handleAgentTeamRoutes,
   handleAgentTeamGovernanceRoutes,
+  handleWorkerEventsRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
+import {
+  buildTerminalWakePrompt,
+  TerminalEventRateLimiter,
+} from './routes/worker-events-routes.js';
 import type { RouteContext } from './routes/index.js';
 
 export interface ApiServerOptions {
@@ -70,6 +81,9 @@ export interface ApiServerOptions {
   agentTeamStore?: AgentTeamStore;
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   agentTeamCapabilityService?: AgentTeamExecutionCapabilityService;
+  executionCapabilityService?: ExecutionCapabilityService;
+  terminalEventStore?: TerminalEventStore;
+  terminalEventRateLimiter?: TerminalEventRateLimiter;
   agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
 }
@@ -175,6 +189,28 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(agentTeamStore), logger);
   const ownsAgentTeamGovernance = !options.agentTeamGovernance;
   const agentTeamCapabilityService = options.agentTeamCapabilityService ?? new AgentTeamExecutionCapabilityService();
+  const executionCapabilityService = options.executionCapabilityService ?? new ExecutionCapabilityService();
+  const terminalEventStore = options.terminalEventStore ?? new TerminalEventStore(logger);
+  const ownsTerminalEventStore = !options.terminalEventStore;
+  const terminalEventRateLimiter = options.terminalEventRateLimiter ?? new TerminalEventRateLimiter();
+  const terminalEventDispatcher = new TerminalEventDispatcher({
+    store: terminalEventStore,
+    logger,
+    wake: async (envelope) => {
+      const bot = registry.get(envelope.bot_name);
+      if (!bot) throw new Error(`Terminal callback bot no longer exists: ${envelope.bot_name}`);
+      const result = await bot.bridge.executeApiTask({
+        prompt: buildTerminalWakePrompt(envelope),
+        chatId: envelope.chat_id,
+        userId: 'terminal-event-dispatcher',
+        sendCards: true,
+        maxTurns: 1,
+      });
+      if (!result.success) {
+        throw new Error(result.error || `Failed to wake terminal callback chat ${envelope.chat_id}`);
+      }
+    },
+  });
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
@@ -227,6 +263,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     agentTeamStore,
     agentTeamSupervisor,
     agentTeamGovernance,
+    executionCapabilityService,
+    terminalEventStore,
+    terminalEventDispatcher,
+    terminalEventRateLimiter,
     resolveAgentTeamPrincipal: (req) =>
       agentTeamCapabilityService.resolve({
         capability: headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]),
@@ -304,7 +344,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       string,
       { env: Record<string, string>; refreshAt: number; timer: ReturnType<typeof setTimeout> }
     >();
-    bot.bridge.setAgentTeamExecutionEnvProvider(({ botName, chatId }) => {
+    bot.bridge.setExecutionEnvProvider(({ botName, chatId }) => {
       const now = Date.now();
       const cached = capabilityCache.get(chatId);
       if (cached && cached.refreshAt > now) return cached.env;
@@ -312,14 +352,27 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         clearTimeout(cached.timer);
         capabilityRetirementTimers.delete(cached.timer);
       }
-      const principal = deriveExecutionCapabilityPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
+      const principal = deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
       const env = {
         [AGENT_TEAM_CAPABILITY_ENV]: agentTeamCapabilityService.issue({
           ...principal,
           ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
-        }),
+        }, now),
         METABOT_BOT_NAME: botName,
         METABOT_CHAT_ID: chatId,
+        ...mintOptedInExecutionCapabilities({
+          service: executionCapabilityService,
+          principal,
+          config: bot.config,
+          ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
+          now,
+          onError: (purpose, error) => {
+            logger.error(
+              { error, purpose, botName, chatId },
+              'Execution capability unavailable; external tools fail closed for this session',
+            );
+          },
+        }),
       };
       const refreshAt = now + AGENT_TEAM_CAPABILITY_TTL_MS - AGENT_TEAM_CAPABILITY_RETIRE_SKEW_MS;
       const entry = { env, refreshAt, timer: undefined as unknown as ReturnType<typeof setTimeout> };
@@ -346,6 +399,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     });
   }
   agentTeamSupervisor.start();
+  terminalEventDispatcher.start();
 
   // Route handlers in priority order
   const routeHandlers = [
@@ -361,6 +415,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleExecutorRoutes,
     handleAgentTeamRoutes,
     handleAgentTeamGovernanceRoutes,
+    handleWorkerEventsRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {
@@ -404,7 +459,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
-    if (secret && !isPublicHealth && !url.startsWith('/api/files/')) {
+    const isSignedTerminalCallback = method === 'POST' && url === '/api/worker-events';
+    if (secret && !isPublicHealth && !isSignedTerminalCallback && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const bearer = typeof auth === 'string' && /^Bearer\s+/i.test(auth)
         ? auth.replace(/^Bearer\s+/i, '')
@@ -567,10 +623,12 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     closing = true;
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
+    terminalEventDispatcher.stop();
     for (const timer of capabilityRetirementTimers) clearTimeout(timer);
     capabilityRetirementTimers.clear();
     if (ownsAgentTeamGovernance) agentTeamGovernance.close();
     if (ownsAgentTeamStore) agentTeamStore.close();
+    if (ownsTerminalEventStore) terminalEventStore.close();
     rateLimiter.stopSweep();
   });
 
@@ -580,53 +638,6 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 function headerValue(value: string | string[] | undefined): string | undefined {
   const item = Array.isArray(value) ? value[0] : value;
   return item?.trim() || undefined;
-}
-
-function deriveExecutionCapabilityPrincipal(
-  governance: AgentTeamGovernanceExtension,
-  store: AgentTeamStore,
-  botName: string,
-  chatId: string,
-): {
-  role: 'pm' | 'user' | 'manager' | 'agent';
-  botName: string;
-  chatId: string;
-  teamName?: string;
-  agentName?: string;
-} {
-  const governedMatch = /^teaminst:([^:]+):([^:]+)(?::.*)?$/.exec(chatId);
-  if (governedMatch) {
-    const instance = governance.getInstance(governedMatch[1]);
-    const agent = instance ? store.getAgent(instance.teamName, governedMatch[2]) : undefined;
-    const role = isManagerAgent(governedMatch[2], agent?.role) ? 'manager' : 'agent';
-    return {
-      role,
-      botName,
-      chatId,
-      ...(instance ? { teamName: instance.teamName } : {}),
-      agentName: governedMatch[2],
-    };
-  }
-  const legacyMatch = /^team:([^:]+):([^:]+)(?::.*)?$/.exec(chatId);
-  if (legacyMatch) {
-    const agent = store.getAgent(legacyMatch[1], legacyMatch[2]);
-    return {
-      role: isManagerAgent(legacyMatch[2], agent?.role) ? 'manager' : 'agent',
-      botName,
-      chatId,
-      teamName: legacyMatch[1],
-      agentName: legacyMatch[2],
-    };
-  }
-  return {
-    role: botName === 'metabot' || /^pm(?:-|$)/i.test(botName) ? 'pm' : 'user',
-    botName,
-    chatId,
-  };
-}
-
-function isManagerAgent(agentName: string, role: string | undefined): boolean {
-  return agentName === 'lead' || /(^|\b)(lead|manager)(\b|$)/i.test(role ?? '');
 }
 
 function parseRelayContent(content: string): Record<string, any> | undefined {
