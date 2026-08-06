@@ -59,6 +59,31 @@ export { isContextOverflowError, isStaleSessionError } from './error-classifiers
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
+const MEDIA_BEARING_REFERENCE_TYPES = new Set(['image', 'file', 'post']);
+
+function describeTextlessReference(messageType: string): string {
+  return MEDIA_BEARING_REFERENCE_TYPES.has(messageType)
+    ? `[Referenced ${messageType} attachment; see the attached file paths below.]`
+    : `[Referenced ${messageType} message had no extractable text.]`;
+}
+
+export function buildPromptWithReplyContext(
+  currentText: string,
+  replyContext?: IncomingMessage['replyContext'],
+): string {
+  if (!replyContext) return currentText;
+  const quotedText = replyContext.text || describeTextlessReference(replyContext.messageType);
+  return [
+    `<replied_message message_id="${replyContext.messageId}" type="${replyContext.messageType}">`,
+    quotedText,
+    '</replied_message>',
+    '',
+    '<current_user_message>',
+    currentText,
+    '</current_user_message>',
+  ].join('\n');
+}
+
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
 /**
@@ -2028,7 +2053,8 @@ export class MessageBridge {
     const cwd = session.workingDirectory;
     const abortController = startingTask.abortController;
     const activeEngine = session.engine ?? resolveEngineName(this.config);
-    const enginePromptText = normalizePromptForEngine(text, activeEngine);
+    const normalizedCurrentText = normalizePromptForEngine(text, activeEngine);
+    const enginePromptText = buildPromptWithReplyContext(normalizedCurrentText, msg.replyContext);
 
     // Prepare downloads directory (bot-isolated)
     const downloadsDir = this.config.claude.downloadsDir;

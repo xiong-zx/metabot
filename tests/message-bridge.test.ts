@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildPromptWithReplyContext,
   MessageBridge,
   isStaleSessionError,
   normalizePromptForEngine,
@@ -158,6 +159,71 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('hello /metaskill', 'codex')).toBe('hello /metaskill');
     expect(normalizePromptForEngine('/bad/path', 'codex')).toBe('/bad/path');
+  });
+});
+
+describe('buildPromptWithReplyContext', () => {
+  it('keeps the current instruction separate from the replied text', () => {
+    expect(buildPromptWithReplyContext('分析这个结论', {
+      messageId: 'om-parent',
+      messageType: 'text',
+      text: '这是未 @ 机器人的原消息',
+    })).toBe([
+      '<replied_message message_id="om-parent" type="text">',
+      '这是未 @ 机器人的原消息',
+      '</replied_message>',
+      '',
+      '<current_user_message>',
+      '分析这个结论',
+      '</current_user_message>',
+    ].join('\n'));
+  });
+
+  it('distinguishes referenced attachments from text-less interactive cards', () => {
+    expect(buildPromptWithReplyContext('读取文件', {
+      messageId: 'om-file',
+      messageType: 'file',
+    })).toContain('[Referenced file attachment; see the attached file paths below.]');
+
+    const cardPrompt = buildPromptWithReplyContext('继续', {
+      messageId: 'om-card',
+      messageType: 'interactive',
+    });
+    expect(cardPrompt).not.toContain('see the attached file paths below');
+    expect(cardPrompt).toContain('[Referenced interactive message had no extractable text.]');
+  });
+
+  it('passes the wrapped reply context to the engine without changing the card title', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'done' };
+      })(),
+      finish: vi.fn(),
+      resolveQuestion: vi.fn(),
+    }));
+
+    await bridge.handleMessage({
+      messageId: 'm-reply',
+      chatId: 'chat-1',
+      chatType: 'group',
+      userId: 'u1',
+      text: 'analyze this',
+      replyContext: {
+        messageId: 'om-parent',
+        messageType: 'text',
+        text: 'quoted parent',
+      },
+    });
+
+    expect(bridge.runOneTurn.mock.calls[0][2].prompt).toContain([
+      '<replied_message message_id="om-parent" type="text">',
+      'quoted parent',
+      '</replied_message>',
+    ].join('\n'));
+    expect(sender.sent[0].state.userPrompt).toBe('analyze this');
+    bridge.destroy();
   });
 });
 
