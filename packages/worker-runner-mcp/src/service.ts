@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { KIMI_PROMPT_MAX_BYTES, renderedPromptBytes } from './prompt.js';
 import type {
   CompletionNotifier,
   DispatchWorkerInput,
@@ -372,6 +373,14 @@ export class WorkerService {
       throw new WorkerRunnerError(`Unsupported worker engine: ${String(input.engine)}`, 'INVALID_INPUT');
     }
     const prompt = normalizeNonempty(input.prompt, 'prompt', 500_000);
+    const outputContract =
+      input.outputContract !== undefined ? normalizeOutputContract(input.outputContract) : undefined;
+    if (input.engine === 'kimi' && renderedPromptBytes(prompt, outputContract) > KIMI_PROMPT_MAX_BYTES) {
+      throw new WorkerRunnerError(
+        `Kimi rendered prompt exceeds the ${KIMI_PROMPT_MAX_BYTES}-byte argv safety limit`,
+        'INVALID_INPUT',
+      );
+    }
     if (!path.isAbsolute(input.workdir)) {
       throw new WorkerRunnerError('workdir must be an absolute path', 'INVALID_INPUT');
     }
@@ -412,19 +421,19 @@ export class WorkerService {
     }
 
     return {
-      ...input,
       botName: this.principal.botName,
       chatId: this.principal.chatId,
       workdir,
       prompt,
-      ...(input.model ? { model: normalizeNonempty(input.model, 'model', 200) } : {}),
-      ...(input.label ? { label: normalizeNonempty(input.label, 'label', 200) } : {}),
-      ...(input.dedupeKey ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 300) } : {}),
+      engine: input.engine,
+      ...(input.model !== undefined ? { model: normalizeNonempty(input.model, 'model', 200) } : {}),
+      ...(input.label !== undefined ? { label: normalizeNonempty(input.label, 'label', 200) } : {}),
+      ...(input.dedupeKey !== undefined ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 300) } : {}),
       dedupePolicy: { completedTtlMs, retryTerminal },
       timeoutMs,
       idleTimeoutMs,
       recoveryPolicy,
-      ...(input.outputContract ? { outputContract: normalizeOutputContract(input.outputContract) } : {}),
+      ...(outputContract ? { outputContract } : {}),
     };
   }
 }
@@ -480,7 +489,7 @@ function normalizeOutputContract(contract: GenericOutputContract): GenericOutput
   }
   return {
     format: contract.format,
-    ...(contract.description
+    ...(contract.description !== undefined
       ? { description: normalizeNonempty(contract.description, 'outputContract.description', 10_000) }
       : {}),
     ...(contract.jsonSchema ? { jsonSchema: contract.jsonSchema } : {}),

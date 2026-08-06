@@ -172,9 +172,11 @@ export interface WorkerServiceConfig {
 export class WorkerRunnerError extends Error {
   constructor(
     message: string,
-    readonly code: 'FORBIDDEN' | 'INVALID_INPUT' | 'NOT_FOUND' | 'CONCURRENCY_LIMIT' | 'CONFLICT',
+    readonly code: 'FORBIDDEN' | 'INVALID_INPUT' | 'NOT_FOUND' | 'CONCURRENCY_LIMIT' | 'CONFLICT' | 'DATA_DIR_LOCKED',
+    readonly details?: Record<string, unknown>,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = 'WorkerRunnerError';
   }
 }

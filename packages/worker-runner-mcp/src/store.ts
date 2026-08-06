@@ -1,6 +1,7 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { WorkerDataDirLock } from './data-dir-lock.js';
 import type {
   DispatchWorkerResult,
   GenericOutputContract,
@@ -68,14 +69,44 @@ export interface TerminalPatch {
 }
 
 export class WorkerStore {
+  readonly dataDir: string;
+  readonly databasePath: string;
+  readonly lock: WorkerDataDirLock;
   private readonly db: Database.Database;
+  private closed = false;
 
-  constructor(readonly databasePath: string) {
-    mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
-    this.db = new Database(databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.migrate();
+  constructor(databasePath: string) {
+    if (typeof databasePath !== 'string' || !databasePath.trim()) {
+      throw new WorkerRunnerError('Worker database path is required', 'INVALID_INPUT');
+    }
+    const resolvedDatabasePath = path.resolve(databasePath);
+    const resolvedDataDir = path.dirname(resolvedDatabasePath);
+    if (resolvedDataDir === path.parse(resolvedDataDir).root) {
+      throw new WorkerRunnerError('Worker data directory cannot be a filesystem root', 'INVALID_INPUT');
+    }
+    mkdirSync(resolvedDataDir, { recursive: true, mode: 0o700 });
+    this.dataDir = realpathSync.native(resolvedDataDir);
+    if (this.dataDir === path.parse(this.dataDir).root) {
+      throw new WorkerRunnerError('Worker data directory cannot resolve to a filesystem root', 'INVALID_INPUT');
+    }
+    this.databasePath = path.join(this.dataDir, path.basename(resolvedDatabasePath));
+    this.lock = WorkerDataDirLock.acquire(this.dataDir);
+    try {
+      this.db = new Database(this.databasePath);
+    } catch (error) {
+      this.lock.release();
+      throw error;
+    }
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 5000');
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      this.lock.release();
+      throw error;
+    }
   }
 
   private migrate(): void {
@@ -417,7 +448,13 @@ export class WorkerStore {
   }
 
   close(): void {
-    this.db.close();
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.db.close();
+    } finally {
+      this.lock.release();
+    }
   }
 }
 

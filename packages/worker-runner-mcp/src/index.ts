@@ -1,4 +1,6 @@
 export * from './types.js';
+export * from './data-dir-lock.js';
+export * from './prompt.js';
 export * from './store.js';
 export * from './process-runner.js';
 export * from './notifier.js';

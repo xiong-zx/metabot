@@ -114,6 +114,31 @@ describe('WorkerService pinned authority and lifecycle', () => {
     await vi.waitFor(() => expect(kit.runner.launches[0]?.outputContract).toBeUndefined());
   });
 
+  it.each(['model', 'label', 'dedupeKey'] as const)('rejects an explicitly empty optional %s', async (field) => {
+    const kit = makeKit();
+    await expect(kit.service.dispatch(input(kit.dir, { [field]: '' }))).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(kit.runner.launches).toHaveLength(0);
+  });
+
+  it('rejects an explicitly empty output-contract description', async () => {
+    const kit = makeKit();
+    await expect(
+      kit.service.dispatch(input(kit.dir, { outputContract: { format: 'text', description: '' } })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(kit.runner.launches).toHaveLength(0);
+  });
+
+  it('rejects an oversized Kimi rendered prompt before persistence or launch', async () => {
+    const kit = makeKit();
+    await expect(
+      kit.service.dispatch(input(kit.dir, { engine: 'kimi', prompt: '界'.repeat(6_000) })),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(kit.service.list()).toEqual([]);
+    expect(kit.runner.launches).toHaveLength(0);
+  });
+
   it('aborts an owned live launch and ignores its late successful completion', async () => {
     const kit = makeKit();
     const dispatched = await kit.service.dispatch(input(kit.dir));

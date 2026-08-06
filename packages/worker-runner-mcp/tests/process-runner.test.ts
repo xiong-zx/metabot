@@ -57,21 +57,65 @@ describe('NodeCliProcessRunner command construction', () => {
         PATH: '/usr/bin',
         LANG: 'C.UTF-8',
         CUSTOM_SAFE: 'allowed',
+        HTTP_PROXY: 'http://proxy.example.test:8080',
+        HTTPS_PROXY: 'http://proxy.example.test:8080',
+        http_proxy: 'http://proxy.example.test:8080',
+        https_proxy: 'http://proxy.example.test:8080',
+        NO_PROXY: 'localhost,127.0.0.1',
+        no_proxy: 'localhost,127.0.0.1',
         METABOT_WORKER_CALLBACK_URL: 'https://callback.invalid',
         METABOT_WORKER_CALLBACK_TOKEN: 'callback-secret',
         OPENAI_API_KEY: 'api-secret',
         ANTHROPIC_AUTH_TOKEN: 'auth-secret',
+        METABOT_ADMIN_ROLE: 'admin',
+        METABOT_CALLBACK_URL: 'https://callback.invalid',
+        METABOT_CAPABILITY_SET: 'worker-admin',
+        METABOT_PRINCIPAL_ROLE: 'pm',
+        HTTP_PROXY_PASSWORD: 'proxy-secret',
         UNLISTED_VALUE: 'not-allowed',
       },
       [
         'CUSTOM_SAFE',
+        'HTTP_PROXY',
+        'HTTPS_PROXY',
+        'http_proxy',
+        'https_proxy',
+        'NO_PROXY',
+        'no_proxy',
         'METABOT_WORKER_CALLBACK_URL',
         'METABOT_WORKER_CALLBACK_TOKEN',
         'OPENAI_API_KEY',
         'ANTHROPIC_AUTH_TOKEN',
+        'METABOT_ADMIN_ROLE',
+        'METABOT_CALLBACK_URL',
+        'METABOT_CAPABILITY_SET',
+        'METABOT_PRINCIPAL_ROLE',
+        'HTTP_PROXY_PASSWORD',
       ],
     );
 
-    expect(childEnv).toEqual({ PATH: '/usr/bin', LANG: 'C.UTF-8', CUSTOM_SAFE: 'allowed' });
+    expect(childEnv).toEqual({
+      PATH: '/usr/bin',
+      LANG: 'C.UTF-8',
+      CUSTOM_SAFE: 'allowed',
+      HTTP_PROXY: 'http://proxy.example.test:8080',
+      HTTPS_PROXY: 'http://proxy.example.test:8080',
+      http_proxy: 'http://proxy.example.test:8080',
+      https_proxy: 'http://proxy.example.test:8080',
+      NO_PROXY: 'localhost,127.0.0.1',
+      no_proxy: 'localhost,127.0.0.1',
+    });
+  });
+
+  it('rejects a Kimi prompt above the argv safety limit', () => {
+    expect(() =>
+      runner.buildCommand({
+        id: 'wrk-large',
+        launchId: 'launch-large',
+        engine: 'kimi',
+        workdir: '/tmp/project',
+        prompt: 'x'.repeat(16_385),
+      }),
+    ).toThrow('16384-byte argv safety limit');
   });
 });

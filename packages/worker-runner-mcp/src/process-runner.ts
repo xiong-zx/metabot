@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { KIMI_PROMPT_MAX_BYTES, renderWorkerPrompt, renderedPromptBytes } from './prompt.js';
 import type {
-  GenericOutputContract,
   ProcessLaunchHooks,
   ProcessLaunchSpec,
   ProcessResult,
@@ -34,7 +34,7 @@ const DEFAULT_SAFE_ENV = [
 ] as const;
 
 const FORBIDDEN_ENV_NAME =
-  /(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API|AUTH|CREDENTIALS?|COOKIE|SESSION|CALLBACK|ACCESS_KEY|PRIVATE_KEY)(_|$)|^METABOT_WORKER_/i;
+  /(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API|ADMIN|AUTH|CALLBACK|CAPABILIT(?:Y|IES)|PRINCIPAL|CREDENTIALS?|COOKIE|SESSION|ACCESS_KEY|PRIVATE_KEY)(_|$)|^METABOT_WORKER_/i;
 
 export interface NodeCliProcessRunnerConfig {
   executables?: Partial<Record<WorkerEngine, string>>;
@@ -167,7 +167,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
   }
 
   buildCommand(spec: ProcessLaunchSpec): CommandSpec {
-    const prompt = withOutputContract(spec.prompt, spec.outputContract);
+    const prompt = renderWorkerPrompt(spec.prompt, spec.outputContract);
     switch (spec.engine) {
       case 'codex':
         return {
@@ -200,6 +200,9 @@ export class NodeCliProcessRunner implements ProcessRunner {
           stdin: prompt,
         };
       case 'kimi':
+        if (renderedPromptBytes(spec.prompt, spec.outputContract) > KIMI_PROMPT_MAX_BYTES) {
+          throw new Error(`Kimi rendered prompt exceeds the ${KIMI_PROMPT_MAX_BYTES}-byte argv safety limit`);
+        }
         return {
           command: this.executables.kimi,
           args: [...(spec.model ? ['--model', spec.model] : []), '--prompt', prompt, '--output-format', 'text'],
@@ -225,19 +228,6 @@ export function buildSanitizedEnv(source: NodeJS.ProcessEnv, extraAllowlist: str
     if (typeof value === 'string' && !value.includes('\0')) result[name] = value;
   }
   return result;
-}
-
-function withOutputContract(prompt: string, contract?: GenericOutputContract): string {
-  if (!contract) return prompt;
-  const lines = [
-    prompt,
-    '',
-    '[Caller-supplied generic output contract]',
-    `Return the final response as ${contract.format}.`,
-  ];
-  if (contract.description) lines.push(contract.description);
-  if (contract.jsonSchema) lines.push(`JSON Schema: ${JSON.stringify(contract.jsonSchema)}`);
-  return lines.join('\n');
 }
 
 class BoundedCollector {

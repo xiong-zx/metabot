@@ -12,8 +12,8 @@ engine configuration.
 
 ## Components
 
-- `WorkerStore`: SQLite lifecycle, quota, dedupe, process result, recovery, and
-  notification delivery state.
+- `WorkerStore`: exclusive data-directory ownership plus SQLite lifecycle,
+  quota, dedupe, process result, recovery, and notification delivery state.
 - `ProcessRunner`: injectable process interface; `NodeCliProcessRunner` is the
   one-shot CLI implementation.
 - `WorkerService`: pinned authority, validation, lifecycle, timeout, abort,
@@ -95,7 +95,9 @@ Example dispatch arguments:
 
 The generic output contract is only forwarded as final-response instructions.
 The runner never scans the workdir, interprets artifact names, or infers a
-contract from prompt wording.
+contract from prompt wording. When an optional `model`, `label`, `dedupe_key`,
+or output-contract `description` is supplied, it must contain non-whitespace
+text; an empty value is rejected rather than silently treated as absent.
 
 ## Lifecycle, quota, and dedupe
 
@@ -123,7 +125,10 @@ or stderr refreshes the no-output timer.
 
 - Codex: `codex exec --json ... -`, with the prompt on stdin.
 - Claude: `claude --print --output-format text`, with the prompt on stdin.
-- Kimi: `kimi --prompt ... --output-format text`.
+- Kimi: `kimi --prompt ... --output-format text`. No safe stdin or prompt-file
+  mode has been verified for the supported CLI, so the fully rendered prompt
+  is rejected above 16,384 UTF-8 bytes before it is persisted. The process
+  adapter repeats the check before spawn to prevent `E2BIG` argument overflow.
 
 The canonical absolute `workdir` is the child working directory. Codex defaults
 to the `workspace-write` sandbox and `never` approval policy. A working
@@ -133,10 +138,21 @@ use host-level containment for untrusted tasks.
 The child does not inherit the parent environment. It receives a small default
 set needed by interactive CLIs, such as `PATH`, locale, home, temp, and CLI
 config directories. `METABOT_WORKER_ENV_ALLOWLIST` may add safe variable names.
-Names that look like API, auth, token, password, callback, cookie, session,
-credential, or private/access-key values are always rejected, even if added to
-the allowlist. Worker Runner configuration and callback variables are also
-never forwarded.
+Names that look like API, admin, auth, callback, capability, principal, token,
+password, cookie, session, credential, or private/access-key values are always
+rejected, even if added to the allowlist. Worker Runner configuration and
+proxy-secret variables such as `HTTP_PROXY_PASSWORD` are also never forwarded.
+
+Ordinary proxy routing variables are not secrets by name and can be explicitly
+enabled in production:
+
+```bash
+METABOT_WORKER_ENV_ALLOWLIST=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy,NO_PROXY,no_proxy
+```
+
+They remain opt-in because their values are visible to the child and proxy URLs
+can themselves contain credentials. Operators should use credential-free URLs
+where possible and never encode secrets into an allowlisted variable.
 
 Stdout and stderr are stored separately and bounded by
 `METABOT_WORKER_MAX_OUTPUT_BYTES` per stream. Terminal records include exit
@@ -162,6 +178,29 @@ only a child held in the current process runner's active map with the matching
 launch identity. An ambiguous persisted running job becomes
 `recovery_required` instead.
 
+An idempotent relaunch does not prove that the previous process exited. The old
+launch may still be running while the replacement starts, so `idempotent: true`
+must mean concurrent duplicate execution and repeated external side effects are
+safe. Use the default manual policy when that cannot be guaranteed.
+
+## Exclusive data-directory ownership
+
+Only one Worker Runner process may open a data directory. `WorkerStore` creates
+`.worker-runner.lock` with an exclusive filesystem operation before SQLite is
+opened. The lock records an instance ID, process ID, hostname, and start time.
+
+- A second live local owner fails startup with `DATA_DIR_LOCKED`.
+- A verifiably dead local owner is renamed to a timestamped stale-lock
+  diagnostic before startup continues. The stdio executable reports that path
+  on stderr.
+- An owner on another host, an unreadable lock, a symlink, or malformed owner
+  metadata is unverifiable and fails closed; it is never removed automatically.
+- A clean `WorkerStore.close()` removes only its own matching lock. A crash
+  leaves enough owner metadata for safe stale recovery on the next start.
+
+Use one long-lived daemon or stdio instance per data directory. Separate
+instances require separate `METABOT_WORKER_DATA_DIR` values.
+
 ## Completion callback
 
 Set `METABOT_WORKER_CALLBACK_URL` to enable HTTP completion posts. The payload
@@ -182,7 +221,7 @@ stable event ID.
 | `METABOT_WORKER_PRINCIPAL_ROLE`          | required                   | Pinned `admin`, `user`, or `pm` role       |
 | `METABOT_WORKER_PRINCIPAL_BOT_NAME`      | required                   | Pinned bot scope                           |
 | `METABOT_WORKER_PRINCIPAL_CHAT_ID`       | required                   | Pinned non-Team chat scope                 |
-| `METABOT_WORKER_DATA_DIR`                | `~/.metabot/worker-runner` | Directory containing `workers.sqlite`      |
+| `METABOT_WORKER_DATA_DIR`                | `~/.metabot/worker-runner` | Exclusively owned state/SQLite directory   |
 | `METABOT_WORKER_MAX_PER_SCOPE`           | `4`                        | `queued` + `running` quota per bot+chat    |
 | `METABOT_WORKER_DEFAULT_TIMEOUT_MS`      | 1 hour                     | Default wall timeout                       |
 | `METABOT_WORKER_DEFAULT_IDLE_TIMEOUT_MS` | 10 minutes                 | Default no-output timeout                  |
@@ -212,6 +251,8 @@ From the repository root:
 npm run build -w @xvirobotics/worker-runner-mcp
 npm test -w @xvirobotics/worker-runner-mcp
 ```
+
+The package requires Node 22.19 or newer.
 
 Example MCP configuration after building:
 
