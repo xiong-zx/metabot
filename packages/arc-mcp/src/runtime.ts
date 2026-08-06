@@ -105,7 +105,7 @@ export function integerEnv(env: NodeJS.ProcessEnv, name: string, fallback: numbe
 
 function assertRunner(value: unknown): asserts value is ArcRunner {
   const candidate = value as Partial<ArcRunner> | null;
-  for (const method of ['start', 'pause', 'resume', 'cancel', 'collect'] as const) {
+  for (const method of ['start', 'recover', 'pause', 'resume', 'cancel', 'collect'] as const) {
     if (!candidate || typeof candidate[method] !== 'function') {
       throw new ArcError('runner_unconfigured', `ARC runner adapter is missing ${method}()`);
     }

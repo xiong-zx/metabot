@@ -23,6 +23,10 @@ export function validateArcRunnerResult(value: unknown, operation: string): ArcR
  * Contract:
  * - start is idempotent by input.run_id and returns the same durable handle
  *   after retry or process restart.
+ * - recover probes a durable handle after coordinator restart without starting,
+ *   pausing, resuming, or otherwise changing the underlying execution. It must
+ *   return the actual current state and fail closed when the runner cannot
+ *   prove that the handle still identifies the same execution.
  * - control methods are idempotent and return the underlying run's current
  *   state. A terminal race returns finished/cancelled instead of throwing.
  * - collect has at most one active call per coordinator process. It remains
@@ -32,6 +36,7 @@ export function validateArcRunnerResult(value: unknown, operation: string): ArcR
  */
 export interface ArcRunner {
   start(input: ArcExecutionInput): Promise<ArcExecutionHandle>;
+  recover(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;
   pause(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;
   resume(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;
   cancel(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;

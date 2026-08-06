@@ -348,7 +348,7 @@ export class ArcCoordinator {
       );
     }
     try {
-      const result = validateArcRunnerResult(await this.runner.pause(run.runner_handle), 'recovery pause');
+      const result = validateArcRunnerResult(await this.runner.recover(run.runner_handle), 'recovery probe');
       return this.synchronizeRunnerState(run.run_id, result, 'recovery');
     } catch (error) {
       const latest = this.requireScopedRun(run.run_id);
@@ -388,14 +388,14 @@ export class ArcCoordinator {
     }
     if (result.state === 'running') {
       if (operation === 'recovery' && current.status === 'running') {
-        const failed = this.recordOperationalFailure(
-          runId,
-          ['running'],
-          'recovery_failed',
-          new ArcError('runner_failure', 'Runner did not pause during restart recovery'),
-        );
-        this.ensureCollection(failed);
-        return failed;
+        const recovered = this.transitionConverged(runId, ['running'], {
+          phase: 'recovered_executing',
+          error: null,
+          recoveryGeneration: current.recovery_generation + 1,
+          updatedAt: this.now(),
+        });
+        this.ensureCollection(recovered);
+        return recovered;
       }
       let running = current;
       if (current.status === 'paused') {

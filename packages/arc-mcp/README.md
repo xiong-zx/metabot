@@ -60,8 +60,9 @@ environment tuple:
 ```
 
 The runner module must export `createArcRunner()`. Its returned object implements
-`start`, `pause`, `resume`, `cancel`, and `collect`. The runner handle must be a
-JSON-safe object with an `id`, so a paused run can survive MCP process restart.
+`start`, `recover`, `pause`, `resume`, `cancel`, and `collect`. The runner handle
+must be a JSON-safe object with an `id`, so a live run can survive MCP process
+restart.
 `METABOT_ARC_DATA_DIR` is required; the server never defaults state into the
 repository or a broad shared directory.
 
@@ -125,6 +126,9 @@ unverifiable and is never removed automatically.
 
 `ArcRunner.start()` must be idempotent by `input.run_id`: retrying after a crash
 returns the same durable handle and must not create a second underlying run.
+`ArcRunner.recover()` is a read-only durable-handle probe. It must not launch,
+pause, resume, or otherwise alter the underlying run, and it fails closed if it
+cannot prove the handle still identifies that run.
 Control methods are idempotent and return the underlying state (`running`,
 `paused`, `finished`, or `cancelled`). If completion races with pause or cancel,
 they return `finished`; ARC validates the artifact and records its real terminal
@@ -134,9 +138,9 @@ status.
 pending while a run is paused, continues after resume, and returns `finished`
 only after the output artifact has been atomically written. After process
 restart, ARC awaits recovery before connecting MCP: queued rows retry
-`start(run_id)`, while running handles are actively paused through the runner
-before the database is marked `restart_recovered`. Recovery failures remain
-visible in the run phase and error fields.
+`start(run_id)`, while running handles use `recover(handle)` to reattach and
+resume collection without relaunching or changing the underlying execution.
+Recovery failures remain visible in the run phase and error fields.
 
 The runner adapter shares the MCP server process. It must never write logs or
 diagnostics to stdout, because stdout carries the stdio MCP protocol. Write

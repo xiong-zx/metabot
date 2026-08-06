@@ -70,6 +70,35 @@ describe('ARC to real Worker Runner MCP wire', () => {
     expect(kit.processRunner.launches).toHaveLength(1);
   });
 
+  it('reattaches a fresh coordinator to one live worker and reaches terminal output', async () => {
+    const kit = await makeKit();
+    const run = await kit.coordinator.start({
+      project_id: 'project-1',
+      project_root: kit.projectRoot,
+      objective: 'Recover a running detached Worker without relaunch.',
+      idempotency_key: 'running-restart',
+      run_id: 'run-running-restart',
+    });
+    const workerId = run.runner_handle!.id;
+    const input = kit.arcStore.getExecutionInput(run.run_id)!;
+    await vi.waitFor(() => expect(kit.workerStore.require(workerId).status).toBe('running'));
+
+    const restarted = kit.restartArcCoordinator();
+    const [recovered] = await restarted.recover();
+    expect(recovered).toMatchObject({
+      status: 'running',
+      phase: 'recovered_executing',
+      runner_handle: { id: workerId },
+    });
+    expect(kit.processRunner.launches).toHaveLength(1);
+
+    writeOutput(input);
+    kit.processRunner.complete(4_000, success());
+    await expect(restarted.waitForTerminal(run.run_id)).resolves.toMatchObject({ status: 'completed' });
+    expect(kit.workerStore.require(workerId).id).toBe(workerId);
+    expect(kit.processRunner.launches).toHaveLength(1);
+  });
+
   it('surfaces honest pause semantics and converges cancel through worker_abort', async () => {
     const kit = await makeKit();
     const run = await kit.coordinator.start({
@@ -121,13 +150,23 @@ async function makeKit() {
     pollIntervalMs: 10,
   });
   const artifacts = new ArcArtifactStore();
-  const arcStore = new ArcRunStore(path.join(temporary, 'arc-state'));
+  const arcDataDir = path.join(temporary, 'arc-state');
+  let arcStore = new ArcRunStore(arcDataDir);
   const scope = new ArcProjectScope(artifacts, { allowedProjectRoots: [projectRoot], fixedProjectId: 'project-1' });
-  const coordinator = new ArcCoordinator(arcStore, artifacts, adapter, {
-    scope,
-    artifactPollIntervalMs: 5,
-    artifactWaitTimeoutMs: 100,
-  });
+  const createCoordinator = () =>
+    new ArcCoordinator(arcStore, artifacts, adapter, {
+      scope,
+      artifactPollIntervalMs: 5,
+      artifactWaitTimeoutMs: 100,
+    });
+  let coordinator = createCoordinator();
+  const restartArcCoordinator = () => {
+    coordinator.dispose();
+    arcStore.close();
+    arcStore = new ArcRunStore(arcDataDir);
+    coordinator = createCoordinator();
+    return coordinator;
+  };
   cleanups.push(async () => {
     coordinator.dispose();
     await client.close();
@@ -137,7 +176,21 @@ async function makeKit() {
     workerStore.close();
     rmSync(temporary, { recursive: true, force: true });
   });
-  return { temporary, projectRoot, workerStore, processRunner, workerService, adapter, arcStore, coordinator };
+  return {
+    temporary,
+    projectRoot,
+    workerStore,
+    processRunner,
+    workerService,
+    adapter,
+    get arcStore() {
+      return arcStore;
+    },
+    get coordinator() {
+      return coordinator;
+    },
+    restartArcCoordinator,
+  };
 }
 
 class FakeProcessRunner implements ProcessRunner {

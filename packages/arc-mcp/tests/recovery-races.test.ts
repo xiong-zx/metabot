@@ -137,6 +137,50 @@ describe('ARC recovery and terminal races', () => {
     expect(runner.startCalls).toHaveLength(0);
   });
 
+  it('probes and reattaches a running handle without pausing or relaunching it', async () => {
+    const temporary = temporaryDirectory();
+    cleanupDirectories.push(temporary);
+    const projectRoot = projectDirectory(temporary);
+    const dataDir = path.join(temporary, 'state');
+    const artifacts = new ArcArtifactStore();
+    const runner = new FakeArcRunner();
+    const beforeCrashStore = new ArcRunStore(dataDir);
+    const beforeCrash = new ArcCoordinator(beforeCrashStore, artifacts, runner, {
+      scope: scope(artifacts, projectRoot),
+    });
+    const run = await beforeCrash.start({
+      project_id: 'project-1',
+      project_root: projectRoot,
+      objective: 'Reattach to a live durable runner handle.',
+      idempotency_key: 'running-recovery',
+      run_id: 'run-running-recovery',
+    });
+    beforeCrash.dispose();
+    beforeCrashStore.close();
+
+    const recoveredStore = new ArcRunStore(dataDir);
+    cleanupStores.push(recoveredStore);
+    const coordinator = new ArcCoordinator(recoveredStore, artifacts, runner, {
+      artifactPollIntervalMs: 5,
+      artifactWaitTimeoutMs: 100,
+      scope: scope(artifacts, projectRoot),
+    });
+    cleanupCoordinators.push(coordinator);
+    const [recovered] = await coordinator.recover();
+    expect(recovered).toMatchObject({
+      status: 'running',
+      phase: 'recovered_executing',
+      runner_handle: run.runner_handle,
+      recovery_generation: 1,
+    });
+    expect(runner.recoverCalls).toEqual([run.runner_handle]);
+    expect(runner.pauseCalls).toHaveLength(0);
+    expect(runner.startCalls).toHaveLength(1);
+
+    runner.finish(handleId(run), validOutput('project-1', run.run_id));
+    await expect(coordinator.waitForTerminal(run.run_id)).resolves.toMatchObject({ status: 'completed' });
+  });
+
   it('converges pause and cancel races to a finished artifact without duplicate collect', async () => {
     const temporary = temporaryDirectory();
     cleanupDirectories.push(temporary);

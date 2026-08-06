@@ -73,6 +73,10 @@ export class ArcWorkerRunnerAdapter implements ArcRunner {
     });
   }
 
+  async recover(handle: ArcExecutionHandle): Promise<ArcRunnerResult> {
+    return mapWorkerState(await this.status(handle));
+  }
+
   async resume(handle: ArcExecutionHandle): Promise<ArcRunnerResult> {
     return mapWorkerState(await this.status(handle));
   }

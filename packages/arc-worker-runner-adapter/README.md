@@ -30,8 +30,9 @@ Worker states map as follows:
 | `aborted` | `cancelled` |
 | `recovery_required` | `runner_failure`; explicit PM/operator action required |
 
-`collect()` polls durable `worker_status`, so another ARC daemon process can
-reattach to the same handle. `cancel()` uses idempotent `worker_abort`. A
+`recover()` performs one durable `worker_status` probe and never dispatches or
+changes the Worker. A fresh ARC daemon then uses `collect()` to keep polling
+that same handle. `cancel()` uses idempotent `worker_abort`. A
 one-shot CLI has no checkpoint, so pause is explicitly unsupported while it is
 live; terminal races return the actual terminal mapping. `resume()` only reads
 the current durable worker state.
@@ -78,5 +79,6 @@ npm test -w @xvirobotics/arc-worker-runner-adapter
 ```
 
 Tests use the real W05 MCP protocol server with a fake process runner. They
-cover prompt hygiene, durable dedupe, queued crash recovery, output collection,
-cancel, honest pause behavior, wire validation, and forbidden imports.
+cover prompt hygiene, durable dedupe, queued and running crash recovery without
+duplicate launch, output collection, cancel, honest pause behavior, wire
+validation, and forbidden imports.
