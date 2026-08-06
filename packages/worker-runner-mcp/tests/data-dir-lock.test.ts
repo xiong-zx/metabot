@@ -1,4 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -75,6 +87,48 @@ describe('Worker Runner data-directory ownership', () => {
     );
     expect(readFileSync(lockPath, 'utf8')).toBe('{"pid":"not-valid"}\n');
   });
+
+  it('fails closed without following or changing a symlink-planted lock', () => {
+    const directory = temporaryDirectory();
+    const dataDir = path.join(directory, 'state');
+    const targetPath = path.join(directory, 'external-lock-target.json');
+    const lockPath = path.join(dataDir, '.worker-runner.lock');
+    mkdirSync(dataDir, { recursive: true });
+    const targetContent = ownerContent({ pid: 2_000_000_000, ownerHostname: hostname() });
+    writeFileSync(targetPath, targetContent, { encoding: 'utf8', mode: 0o600 });
+    const targetBefore = statSync(targetPath);
+    symlinkSync(targetPath, lockPath);
+
+    let failure: unknown;
+    try {
+      new WorkerStore(path.join(dataDir, 'workers.sqlite'));
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: 'DATA_DIR_LOCKED',
+      details: expect.objectContaining({ ownerState: 'unknown' }),
+      cause: expect.objectContaining({ code: 'ELOOP' }),
+    });
+    expect(lstatSync(lockPath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(lockPath)).toBe(targetPath);
+    expect(readdirSync(dataDir).filter((name) => name.startsWith('.worker-runner.lock.stale-'))).toEqual([]);
+    expect(existsSync(targetPath)).toBe(true);
+    expect(readFileSync(targetPath, 'utf8')).toBe(targetContent);
+    const targetAfter = statSync(targetPath);
+    expect({
+      ino: targetAfter.ino,
+      mode: targetAfter.mode,
+      size: targetAfter.size,
+      mtimeMs: targetAfter.mtimeMs,
+    }).toEqual({
+      ino: targetBefore.ino,
+      mode: targetBefore.mode,
+      size: targetBefore.size,
+      mtimeMs: targetBefore.mtimeMs,
+    });
+  });
 });
 
 function temporaryDirectory(): string {
@@ -85,15 +139,15 @@ function temporaryDirectory(): string {
 
 function writeOwner(dataDir: string, input: { pid: number; ownerHostname: string }): string {
   const lockPath = path.join(dataDir, '.worker-runner.lock');
-  writeFileSync(
-    lockPath,
-    `${JSON.stringify({
-      instance_id: randomUUID(),
-      pid: input.pid,
-      hostname: input.ownerHostname,
-      started_at: new Date(0).toISOString(),
-    })}\n`,
-    { encoding: 'utf8', mode: 0o600 },
-  );
+  writeFileSync(lockPath, ownerContent(input), { encoding: 'utf8', mode: 0o600 });
   return lockPath;
+}
+
+function ownerContent(input: { pid: number; ownerHostname: string }): string {
+  return `${JSON.stringify({
+    instance_id: randomUUID(),
+    pid: input.pid,
+    hostname: input.ownerHostname,
+    started_at: new Date(0).toISOString(),
+  })}\n`;
 }
