@@ -28,6 +28,7 @@ import {
   AGENT_TEAM_CAPABILITY_ENV,
   AGENT_TEAM_CAPABILITY_HEADER,
   AGENT_TEAM_CHAT_HEADER,
+  AgentTeamCapabilityError,
   AgentTeamExecutionCapabilityService,
 } from '../agent-teams/governance-capability.js';
 import { metrics as _metrics } from '../utils/metrics.js';
@@ -109,6 +110,16 @@ export function isCrossVerifyRoute(method: string, url: string): boolean {
   if (method === 'GET' && (url === '/api/skills' || url.startsWith('/api/skills?'))) return true;
   if (method === 'GET' && (url === '/api/peers' || url.startsWith('/api/peers?'))) return true;
   return false;
+}
+
+/**
+ * Non-Team Bridge reads that an engine session may perform with its scoped
+ * Agent Team execution capability. Keep this list exact: bot detail/profile
+ * and every mutation remain local-administrator-only.
+ */
+export function isAgentTeamCapabilityReadRoute(method: string, url: string): boolean {
+  return method === 'GET'
+    && (url === '/api/bots' || url === '/api/peers' || url === '/api/stats' || url === '/api/metrics');
 }
 
 function metabotCoreBaseUrl(): string | undefined {
@@ -405,27 +416,46 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const localOk = timingSafeStrEqual(bearer, secret)
         || timingSafeStrEqual(urlToken, secret);
       if (localOk) locallyAuthenticatedRequests.add(req);
+      const capability = headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]);
+      const capabilityBotName = headerValue(req.headers[AGENT_TEAM_BOT_HEADER]);
+      const capabilityChatId = headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]);
+      const hasExecutionCapabilityHeaders = !!capability || !!capabilityBotName || !!capabilityChatId;
+      const acceptsExecutionCapability = url.startsWith('/api/agent-team')
+        || isAgentTeamCapabilityReadRoute(method, url);
       let executionCapabilityOk = false;
-      if (url.startsWith('/api/agent-team')) {
+      let executionCapabilityError: AgentTeamCapabilityError | undefined;
+      if (acceptsExecutionCapability && hasExecutionCapabilityHeaders) {
         try {
           agentTeamCapabilityService.resolve({
-            capability: headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]),
-            botName: headerValue(req.headers[AGENT_TEAM_BOT_HEADER]),
-            chatId: headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]),
+            capability,
+            botName: capabilityBotName,
+            chatId: capabilityChatId,
             localApiSecretAuthenticated: false,
           });
           executionCapabilityOk = true;
-        } catch {
+        } catch (error) {
+          if (error instanceof AgentTeamCapabilityError) executionCapabilityError = error;
           executionCapabilityOk = false;
         }
       }
 
-      const rejectUnauthorized = () => {
+      const rejectUnauthorized = (error?: AgentTeamCapabilityError) => {
         // Count this as a failed auth attempt; trips the per-IP lockout once the
         // threshold is crossed. The next request from this IP will see 429.
         rateLimiter.recordAuthFailure(clientIp);
-        jsonResponse(res, 401, { error: 'Unauthorized' });
+        jsonResponse(res, 401, error
+          ? { error: error.message, code: error.code }
+          : { error: 'Unauthorized' });
       };
+
+      // A request marked as an engine session must never fall back to the
+      // bridge-wide secret or metabot-core cross verification. Its signed
+      // capability is accepted only on Agent Team routes and the four exact
+      // read-only Bridge endpoints above.
+      if (hasExecutionCapabilityHeaders && !executionCapabilityOk) {
+        rejectUnauthorized(executionCapabilityError);
+        return;
+      }
 
       if (!localOk && !executionCapabilityOk) {
         const canCrossVerify = isCrossVerifyRoute(method, url) && typeof auth === 'string' && /^Bearer\s+/i.test(auth);

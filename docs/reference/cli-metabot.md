@@ -53,6 +53,13 @@ cannot be combined with `--git`.
 
 These commands curl the local bridge daemon at `localhost:9100`, reading
 `API_PORT` / `API_SECRET` (and optional `METABOT_URL`) from the bridge `.env`.
+Human or local management mutations require `API_SECRET`, including on
+loopback; the Bridge does not restore unauthenticated local mutation access.
+An Agent Team engine session instead forwards its short-lived scoped
+credential for only `metabot bots`, `metabot peers`, `metabot stats`, and
+`metabot metrics` outside the Team coordination API. It never forwards
+`API_SECRET` or `METABOT_API_SECRET`, and the scoped credential cannot read bot
+details/profiles or call other Bridge routes.
 
 ### Bot management
 

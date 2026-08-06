@@ -81,6 +81,22 @@ _load_bridge_api_config() {
 
 _json() { python3 -m json.tool 2>/dev/null || cat; }
 
+# Issue one of the four Bridge reads allowed to an Agent Team engine session.
+# Capability mode deliberately sends only the signed scoped token plus its
+# runtime bot/chat binding; bridge-wide administrator secrets are never used.
+_bridge_scoped_read() {
+  local path="$1"
+  local -a headers=(-H "$METABOT_AUTH")
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    headers+=(
+      -H "X-MetaBot-Team-Capability: $METABOT_TEAM_CAPABILITY"
+      -H "X-MetaBot-Bot-Name: ${METABOT_BOT_NAME:-}"
+      -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    )
+  fi
+  curl -s "${headers[@]}" "$METABOT_URL$path"
+}
+
 cmd_update() {
   local update_source="${METABOT_UPDATE_SOURCE:-auto}"
   local update_version="${METABOT_UPDATE_VERSION:-}"
@@ -914,7 +930,7 @@ cmd_bridge_api() {
   local cmd="$1"; shift 2>/dev/null || true
   case "$cmd" in
     bots|b)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots" | _json
+      _bridge_scoped_read "/api/bots" | _json
       ;;
     bot)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
@@ -1001,7 +1017,7 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys
       local subcmd="${1:-list}"; shift 2>/dev/null || true
       case "$subcmd" in
         list|ls)
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+          _bridge_scoped_read "/api/peers" | _json
           ;;
         add|a)
           local pname="$1" purl="$2" psecret="${3:-}"
@@ -1038,10 +1054,10 @@ print(json.dumps(body))
       esac
       ;;
     stats)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/stats" | _json
+      _bridge_scoped_read "/api/stats" | _json
       ;;
     metrics|m)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/metrics"
+      _bridge_scoped_read "/api/metrics"
       ;;
     voice|v)
       local subcmd="${1:-help}"; shift 2>/dev/null || true
