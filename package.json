@@ -22,6 +22,8 @@
     "test": "vitest run && npm run test --workspaces --if-present",
     "test:bridge": "vitest run",
     "test:packages": "npm run test --workspaces --if-present",
+    "check:downstream-boundaries": "node scripts/check-downstream-boundaries.mjs",
+    "check:downstream-boundaries:release": "node scripts/check-downstream-boundaries.mjs --release",
     "lint": "eslint src/ tests/ && npm run lint --workspaces --if-present",
     "lint:fix": "eslint src/ tests/ --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",

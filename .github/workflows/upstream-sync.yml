@@ -1,0 +1,93 @@
+name: Prepare upstream sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/xvirobotics/metabot.git 2>/dev/null || git remote set-url upstream https://github.com/xvirobotics/metabot.git
+          git fetch --no-tags upstream main
+
+      - name: Check whether sync is needed
+        id: delta
+        shell: bash
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse --short=12 upstream/main)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into a review branch
+        if: steps.delta.outputs.needed == 'true'
+        shell: bash
+        run: |
+          branch="sync/upstream-${{ steps.delta.outputs.sha }}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          set +e
+          git merge --no-edit --no-ff upstream/main
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            git diff --name-only --diff-filter=U | tee upstream-sync-conflicts.txt
+            exit "$status"
+          fi
+          echo "SYNC_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Use Node.js 22.19.0
+        if: steps.delta.outputs.needed == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Validate merged tree
+        if: steps.delta.outputs.needed == 'true'
+        run: |
+          npm ci
+          npm run check:downstream-boundaries:release
+          npm test
+          npm run build
+
+      - name: Push review branch
+        if: steps.delta.outputs.needed == 'true'
+        run: git push --force-with-lease origin "$SYNC_BRANCH"
+
+      - name: Open or reuse pull request
+        if: steps.delta.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number' | grep -q . || \
+            gh pr create --base main --head "$SYNC_BRANCH" \
+              --title "sync: merge upstream/main ${{ steps.delta.outputs.sha }}" \
+              --body "Automated upstream merge candidate. CI, downstream feature boundaries, and human review are required before merge."
+
+      - name: Upload conflict report
+        if: failure() && steps.delta.outputs.needed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-conflicts-${{ steps.delta.outputs.sha }}
+          path: upstream-sync-conflicts.txt
+          if-no-files-found: ignore
