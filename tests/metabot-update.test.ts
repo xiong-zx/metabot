@@ -227,7 +227,7 @@ describe('workspace and packaged Skill ownership', () => {
     expect(windowsInstaller).toContain('Retired project-level $skill mirror');
   });
 
-  it('installs only canonical global MetaBot Skills and retires voice', () => {
+  it('installs the canonical global MetaBot Skills and retires voice', () => {
     const installer = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
     const updater = fs.readFileSync(METABOT_BIN, 'utf-8');
     const windowsInstaller = fs.readFileSync(path.join(REPO_ROOT, 'install.ps1'), 'utf-8');
@@ -235,12 +235,14 @@ describe('workspace and packaged Skill ownership', () => {
     for (const source of [installer, updater]) {
       expect(source).toContain('packages/skills/metabot');
       expect(source).toContain('packages/skills/metabot-team');
+      expect(source).toContain('packages/skills/metabot-todos');
       expect(source).toContain('Retired voice Skill');
       expect(source).not.toContain('src/skills/metabot-team');
       expect(source).not.toContain('src/skills/voice');
     }
     expect(windowsInstaller).toContain('packages\\skills\\metabot');
     expect(windowsInstaller).toContain('packages\\skills\\metabot-team');
+    expect(windowsInstaller).toContain('packages\\skills\\metabot-todos');
     expect(windowsInstaller).toContain('Retired voice Skill');
     expect(windowsInstaller).not.toContain('src\\skills\\metabot-team');
     expect(windowsInstaller).not.toContain('src\\skills\\voice');
