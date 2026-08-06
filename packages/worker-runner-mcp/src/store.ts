@@ -15,6 +15,7 @@ interface WorkerRow {
   id: string;
   bot_name: string;
   chat_id: string;
+  authorizing_capability: string | null;
   workdir: string;
   prompt: string;
   engine: WorkerRecord['engine'];
@@ -115,6 +116,7 @@ export class WorkerStore {
         id TEXT PRIMARY KEY,
         bot_name TEXT NOT NULL,
         chat_id TEXT NOT NULL,
+        authorizing_capability TEXT,
         workdir TEXT NOT NULL,
         prompt TEXT NOT NULL,
         engine TEXT NOT NULL CHECK (engine IN ('codex', 'claude', 'kimi')),
@@ -169,6 +171,14 @@ export class WorkerStore {
         ON worker_jobs(notification_state, notification_next_attempt_at)
         WHERE status NOT IN ('queued', 'running');
     `);
+    this.addColumnIfMissing('worker_jobs', 'authorizing_capability', 'TEXT');
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   createWorker(
@@ -204,12 +214,12 @@ export class WorkerStore {
       this.db
         .prepare(
           `INSERT INTO worker_jobs (
-             id, bot_name, chat_id, workdir, prompt, engine, model, label,
+             id, bot_name, chat_id, authorizing_capability, workdir, prompt, engine, model, label,
              dedupe_key, dedupe_ttl_ms, retry_terminal, timeout_ms, idle_timeout_ms,
              restart_policy, restart_idempotent, output_contract_json, status,
              created_at
            ) VALUES (
-             @id, @botName, @chatId, @workdir, @prompt, @engine, @model, @label,
+             @id, @botName, @chatId, @authorizingCapability, @workdir, @prompt, @engine, @model, @label,
              @dedupeKey, @dedupeTtlMs, @retryTerminal, @timeoutMs, @idleTimeoutMs,
              @restartPolicy, @restartIdempotent, @outputContractJson, 'queued',
              @createdAt
@@ -219,6 +229,7 @@ export class WorkerStore {
           id,
           botName: input.botName,
           chatId: input.chatId,
+          authorizingCapability: input.authorizingCapability ?? null,
           workdir: input.workdir,
           prompt: input.prompt,
           engine: input.engine,
@@ -250,6 +261,14 @@ export class WorkerStore {
     return worker;
   }
 
+  /** Private callback authorization state; deliberately omitted from WorkerRecord. */
+  getAuthorizingCapability(id: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT authorizing_capability FROM worker_jobs WHERE id = ?')
+      .get(id) as { authorizing_capability: string | null } | undefined;
+    return row?.authorizing_capability ?? undefined;
+  }
+
   findLatestByDedupe(botName: string, chatId: string, dedupeKey: string): WorkerRecord | undefined {
     const row = this.db
       .prepare(
@@ -276,6 +295,19 @@ export class WorkerStore {
       .prepare('SELECT * FROM worker_jobs ORDER BY created_at DESC LIMIT ?')
       .all(limit) as WorkerRow[];
     return rows.map(fromRow);
+  }
+
+  listScopes(): Array<{ botName: string; chatId: string }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT bot_name, chat_id FROM worker_jobs
+           WHERE status IN ('queued', 'running')
+              OR notification_state IN ('pending', 'sending', 'failed')
+           ORDER BY bot_name, chat_id`,
+        )
+        .all() as Array<{ bot_name: string; chat_id: string }>
+    ).map((row) => ({ botName: row.bot_name, chatId: row.chat_id }));
   }
 
   listRestartCandidates(botName: string, chatId: string): WorkerRecord[] {
@@ -460,11 +492,15 @@ export class WorkerStore {
 
 function shouldReuseDedupe(existing: WorkerRecord, input: ScopedDispatchWorkerInput, now: number): boolean {
   if (existing.status === 'queued' || existing.status === 'running') return true;
+  // A caller that declares retryTerminal=false is asking for durable
+  // idempotence, not merely a longer successful-result cache. This must win
+  // over the completed-result TTL or a late retry could launch twice.
+  if (!input.dedupePolicy.retryTerminal) return true;
   if (existing.status === 'completed') {
     const terminalAt = existing.finishedAt ?? existing.createdAt;
     return input.dedupePolicy.completedTtlMs > 0 && now - terminalAt < input.dedupePolicy.completedTtlMs;
   }
-  return !input.dedupePolicy.retryTerminal;
+  return false;
 }
 
 function isTerminal(status: WorkerRecord['status']): boolean {

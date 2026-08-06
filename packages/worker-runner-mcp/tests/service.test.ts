@@ -1,10 +1,16 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  HttpCompletionNotifier,
+  verifyTerminalCallback,
+  WORKER_TERMINAL_CALLBACK_MAX_BYTES,
+} from '../src/notifier.js';
 import { WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
-import type { DispatchWorkerInput, ScopedDispatchWorkerInput, TrustedPrincipal } from '../src/types.js';
+import type { DispatchWorkerInput, ScopedDispatchWorkerInput } from '../src/types.js';
 import { FakeProcessRunner, PM_PRINCIPAL, RecordingNotifier, SUCCESS_RESULT } from './helpers.js';
 
 const dirs: string[] = [];
@@ -25,7 +31,7 @@ describe('WorkerService pinned authority and lifecycle', () => {
     );
   });
 
-  it('rejects Team principals and roles outside admin/user/pm', () => {
+  it('rejects Team principals while accepting low-privilege read-only roles', () => {
     const { store } = makeStore();
     expect(
       () =>
@@ -35,14 +41,13 @@ describe('WorkerService pinned authority and lifecycle', () => {
           chatId: 'team:project:agent',
         }),
     ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
-    expect(
-      () =>
-        new WorkerService(store, new FakeProcessRunner(), new RecordingNotifier(), {
-          role: 'agent',
-          botName: 'bot-a',
-          chatId: 'chat-a',
-        } as unknown as TrustedPrincipal),
-    ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+    const readOnly = new WorkerService(store, new FakeProcessRunner(), new RecordingNotifier(), {
+      role: 'agent',
+      botName: 'bot-a',
+      chatId: 'chat-a',
+    });
+    services.push(readOnly);
+    expect(readOnly.list()).toEqual([]);
   });
 
   it('persists queued before spawn and transitions to running only with a launch identity', async () => {
@@ -65,7 +70,7 @@ describe('WorkerService pinned authority and lifecycle', () => {
 
   it('records terminal output and notifies once with a stable event id', async () => {
     const kit = makeKit();
-    const dispatched = await kit.service.dispatch(input(kit.dir));
+    const dispatched = await kit.service.dispatch(input(kit.dir), undefined, 'signed-worker-capability');
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).status).toBe('running'));
     kit.runner.complete(4_000, SUCCESS_RESULT);
 
@@ -80,8 +85,17 @@ describe('WorkerService pinned authority and lifecycle', () => {
     expect(kit.notifier.notifications[0]).toMatchObject({
       eventId: `worker:${dispatched.worker.id}:terminal:v1`,
       eventType: 'worker.terminal',
+      authorizingCapability: 'signed-worker-capability',
     });
-    expect(kit.notifier.notifications[0]?.worker).not.toHaveProperty('prompt');
+    expect(kit.store.getAuthorizingCapability(dispatched.worker.id)).toBe('signed-worker-capability');
+    expect(kit.store.require(dispatched.worker.id)).not.toHaveProperty('authorizingCapability');
+    expect(kit.notifier.notifications[0]?.worker).toEqual({
+      id: dispatched.worker.id,
+      engine: 'codex',
+      status: 'completed',
+      exitCode: 0,
+      durationMs: expect.any(Number),
+    });
   });
 
   it('denies cross-scope status and abort while returning only the pinned scope from list', async () => {
@@ -120,6 +134,18 @@ describe('WorkerService pinned authority and lifecycle', () => {
       code: 'INVALID_INPUT',
     });
     expect(kit.runner.launches).toHaveLength(0);
+  });
+
+  it('accepts the bounded encoded dedupe key for maximum-size ARC identifiers', async () => {
+    const kit = makeKit();
+    const dedupeKey = `arc:v1:${encodeURIComponent('界'.repeat(200))}:${encodeURIComponent('界'.repeat(200))}`;
+    expect(dedupeKey.length).toBeLessThanOrEqual(4_096);
+    await expect(kit.service.dispatch(input(kit.dir, { dedupeKey }))).resolves.toMatchObject({
+      worker: { dedupeKey },
+    });
+    await expect(kit.service.dispatch(input(kit.dir, { dedupeKey: 'x'.repeat(4_097) }))).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
   });
 
   it('rejects an explicitly empty output-contract description', async () => {
@@ -211,6 +237,88 @@ describe('WorkerService restart recovery', () => {
 });
 
 describe('WorkerService durable notifications', () => {
+  it('delivers a small metadata-only callback when stored output exceeds the Bridge request limit', async () => {
+    const { store, dir } = makeStore();
+    const runner = new FakeProcessRunner();
+    const signingKeys = generateKeyPairSync('ed25519');
+    const requests: Array<{ body: string; signature: string }> = [];
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      requests.push({
+        body: init?.body as string,
+        signature: headers['x-metabot-callback-signature'],
+      });
+      return new Response(null, { status: 204 });
+    });
+    const notifier = new HttpCompletionNotifier({
+      url: 'http://127.0.0.1/worker-events',
+      signingKey: signingKeys.privateKey,
+      fetchImpl,
+      now: () => 10_000,
+    });
+    const service = new WorkerService(store, runner, notifier, PM_PRINCIPAL, testConfig(), {
+      makeId: () => 'wrk-large-output',
+      makeLaunchId: () => 'launch-large-output',
+    });
+    services.push(service);
+    const stdout = `STDOUT_SENTINEL:${'o'.repeat(300_000)}`;
+    const stderr = `STDERR_SENTINEL:${'e'.repeat(300_000)}`;
+
+    const dispatched = await service.dispatch(
+      input(dir, {
+        prompt: 'PROMPT_SENTINEL',
+        model: 'MODEL_SENTINEL',
+        label: 'bounded terminal callback',
+        outputContract: { format: 'text', description: 'CONTRACT_SENTINEL' },
+      }),
+      undefined,
+      'signed-worker-capability',
+    );
+    await vi.waitFor(() => expect(store.require(dispatched.worker.id).status).toBe('running'));
+    runner.complete(4_000, {
+      exitCode: 1,
+      stdout,
+      stderr,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      error: 'ERROR_SENTINEL',
+    });
+
+    await vi.waitFor(() => expect(store.require(dispatched.worker.id).notificationState).toBe('delivered'));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveLength(1);
+    const request = requests[0]!;
+    expect(Buffer.byteLength(request.body, 'utf8')).toBeLessThan(WORKER_TERMINAL_CALLBACK_MAX_BYTES);
+    expect(Buffer.byteLength(request.body, 'utf8')).toBeLessThan(256 * 1_024);
+    expect(request.body).not.toContain('STDOUT_SENTINEL');
+    expect(request.body).not.toContain('STDERR_SENTINEL');
+    expect(request.body).not.toContain('PROMPT_SENTINEL');
+    expect(request.body).not.toContain('MODEL_SENTINEL');
+    expect(request.body).not.toContain('CONTRACT_SENTINEL');
+    expect(request.body).not.toContain('ERROR_SENTINEL');
+    expect(request.body).not.toContain(dir);
+    expect(verifyTerminalCallback(request.body, request.signature, signingKeys.publicKey)).toBe(true);
+    const envelope = JSON.parse(request.body) as Record<string, unknown>;
+    expect(envelope).toMatchObject({
+      purpose: 'worker.terminal',
+      event_id: 'worker:wrk-large-output:terminal:v1',
+      bot_name: 'bot-a',
+      chat_id: 'chat-a',
+      status: 'failed',
+      finished_at: expect.any(Number),
+      authorizing_capability: 'signed-worker-capability',
+    });
+    expect(envelope.payload).toEqual({
+      id: 'wrk-large-output',
+      label: 'bounded terminal callback',
+      engine: 'codex',
+      status: 'failed',
+      exitCode: 1,
+      durationMs: expect.any(Number),
+    });
+    expect(service.status(dispatched.worker.id)).toMatchObject({ stdout, stderr, error: 'ERROR_SENTINEL' });
+  });
+
   it('retries in-process with bounded backoff and the same stable event id', async () => {
     const kit = makeKit({ notificationRetryInitialMs: 10, notificationRetryMaxMs: 20 });
     kit.notifier.error = new Error('callback unavailable');
@@ -234,7 +342,7 @@ describe('WorkerService durable notifications', () => {
   it('resumes a persisted retry deadline after the service is recreated', async () => {
     const kit = makeKit({ notificationRetryInitialMs: 25, notificationRetryMaxMs: 25 });
     kit.notifier.error = new Error('callback unavailable');
-    const dispatched = await kit.service.dispatch(input(kit.dir));
+    const dispatched = await kit.service.dispatch(input(kit.dir), undefined, 'persisted-worker-capability');
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).status).toBe('running'));
     kit.runner.complete(4_000, SUCCESS_RESULT);
     await vi.waitFor(() => expect(kit.store.require(dispatched.worker.id).notificationState).toBe('failed'));
@@ -257,6 +365,7 @@ describe('WorkerService durable notifications', () => {
     });
     expect(resumedNotifier.notifications).toHaveLength(1);
     expect(resumedNotifier.notifications[0]?.eventId).toBe(eventId);
+    expect(resumedNotifier.notifications[0]?.authorizingCapability).toBe('persisted-worker-capability');
   });
 });
 

@@ -95,6 +95,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
 ];
 
 export interface WorkerRunnerMcpOptions {
+  authorizingCapability?: string;
   maxStatusOutputChars?: number;
 }
 
@@ -104,6 +105,7 @@ export function createWorkerRunnerMcpServer(
   options: WorkerRunnerMcpOptions = {},
 ): Server {
   service.assertTrustedPrincipal(principal);
+  const authenticatedPrincipal = principal as TrustedPrincipal;
   const maxStatusOutputChars = options.maxStatusOutputChars ?? 16_384;
   if (!Number.isSafeInteger(maxStatusOutputChars) || maxStatusOutputChars < 1 || maxStatusOutputChars > 65_536) {
     throw new Error('maxStatusOutputChars must be an integer between 1 and 65536');
@@ -176,7 +178,7 @@ export function createWorkerRunnerMcpServer(
                   },
                 }
               : {}),
-          });
+          }, authenticatedPrincipal, options.authorizingCapability);
           return toolResult({
             deduplicated: result.deduplicated,
             retriedTerminal: result.retriedTerminal,
@@ -188,15 +190,17 @@ export function createWorkerRunnerMcpServer(
           const workers = service.list({
             ...(args.limit !== undefined ? { limit: asNumber(args.limit) } : {}),
             ...(args.all_scopes !== undefined ? { allScopes: asBoolean(args.all_scopes) } : {}),
-          });
+          }, authenticatedPrincipal);
           return toolResult({ workers: workers.map(listWorker) });
         }
         case 'worker_status':
           assertAllowedKeys(args, ['id']);
-          return toolResult({ worker: statusWorker(service.status(asString(args.id)), maxStatusOutputChars) });
+          return toolResult({
+            worker: statusWorker(service.status(asString(args.id), authenticatedPrincipal), maxStatusOutputChars),
+          });
         case 'worker_abort':
           assertAllowedKeys(args, ['id']);
-          return toolResult({ worker: listWorker(await service.abort(asString(args.id))) });
+          return toolResult({ worker: listWorker(await service.abort(asString(args.id), authenticatedPrincipal)) });
         default:
           throw new WorkerRunnerError(`Unknown tool: ${request.params.name}`, 'NOT_FOUND');
       }

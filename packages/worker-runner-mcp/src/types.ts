@@ -13,8 +13,11 @@ export const WORKER_STATUSES = [
 export type WorkerStatus = (typeof WORKER_STATUSES)[number];
 export type TerminalWorkerStatus = Exclude<WorkerStatus, 'queued' | 'running'>;
 
-export const TRUSTED_PRINCIPAL_ROLES = ['admin', 'user', 'pm'] as const;
+export const TRUSTED_PRINCIPAL_ROLES = ['admin', 'user', 'pm', 'manager', 'agent', 'worker'] as const;
 export type TrustedPrincipalRole = (typeof TRUSTED_PRINCIPAL_ROLES)[number];
+
+export const WORKER_MUTATING_ROLES = ['admin', 'user', 'pm'] as const;
+export type WorkerMutatingRole = (typeof WORKER_MUTATING_ROLES)[number];
 
 /** Trusted identity pinned by the process that starts this MCP server. */
 export interface TrustedPrincipal {
@@ -60,6 +63,7 @@ export interface DispatchWorkerInput {
 export interface ScopedDispatchWorkerInput extends DispatchWorkerInput {
   botName: string;
   chatId: string;
+  authorizingCapability?: string;
   dedupePolicy: DedupePolicy;
   timeoutMs: number;
   idleTimeoutMs: number;
@@ -112,10 +116,40 @@ export interface DispatchWorkerResult {
   retriedTerminal: boolean;
 }
 
+/**
+ * Strict, bounded wake-up metadata for a Worker terminal callback. Full
+ * process results remain available only through worker_status.
+ */
+export interface WorkerTerminalCallbackMetadata {
+  id: string;
+  label?: string;
+  engine: WorkerEngine;
+  status: TerminalWorkerStatus;
+  exitCode?: number;
+  durationMs?: number;
+}
+
 export interface CompletionNotification {
   eventId: string;
   eventType: 'worker.terminal';
-  worker: Omit<WorkerRecord, 'prompt'>;
+  botName: string;
+  chatId: string;
+  finishedAt: number;
+  authorizingCapability?: string;
+  worker: WorkerTerminalCallbackMetadata;
+}
+
+export interface TerminalCallbackEnvelope<TPayload = unknown> {
+  contract_version: 'metabot.terminal-callback.v1';
+  purpose: 'worker.terminal' | 'arc.terminal';
+  event_id: string;
+  bot_name: string;
+  chat_id: string;
+  status: string;
+  finished_at: number;
+  iat: number;
+  authorizing_capability: string;
+  payload: TPayload;
 }
 
 export interface CompletionNotifier {

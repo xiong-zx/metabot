@@ -1,6 +1,6 @@
 # MetaBot Worker Runner MCP
 
-`@xvirobotics/worker-runner-mcp` is a standalone stdio MCP server for durable,
+`@xvirobotics/worker-runner-mcp` is an independent MCP server for durable,
 one-shot Codex, Claude, or Kimi CLI jobs. `worker_dispatch` persists a `queued`
 record before process creation and returns without waiting for the CLI task to
 finish.
@@ -21,7 +21,9 @@ engine configuration.
 - `CompletionNotifier`: injected callback interface; the HTTP adapter uses a
   stable idempotency key.
 - `createWorkerRunnerMcpServer`: MCP protocol adapter with bounded responses.
-- `metabot-worker-runner-mcp`: standalone stdio executable.
+- `metabot-worker-runner-mcp`: standalone, environment-pinned stdio executable.
+- `metabot-worker-runnerd`: long-lived, authenticated loopback HTTP daemon.
+- `metabot-worker-runner-proxy`: thin stdio-to-local-HTTP relay.
 
 Tests use fake process and callback adapters. They do not invoke an agent CLI
 or HTTP service.
@@ -45,15 +47,44 @@ variables:
 - `METABOT_WORKER_PRINCIPAL_BOT_NAME`
 - `METABOT_WORKER_PRINCIPAL_CHAT_ID`
 
-Construction fails closed if the principal is missing, incomplete, has a role
-outside `admin|user|pm`, or uses a `team:*` chat. The tool schemas contain no
+Construction fails closed if the principal is missing or incomplete, or uses
+a `team:*` chat. The tool schemas contain no
 `actor_role`, `caller_context`, `botName`, `chatId`, or `pmChatId` fields, and
 unexpected arguments are rejected.
 
-Dispatch always uses the pinned bot+chat scope. A non-admin principal can only
-list, read, abort, reconcile, and notify jobs in that scope. A pinned admin may
-request an all-scope list and may read or abort another scope; model arguments
-cannot create admin authority.
+Dispatch always uses the authenticated bot+chat scope. `admin`, `user`, and
+`pm` may dispatch or abort; `manager`, `agent`, and `worker` are read-only.
+A non-admin can list or read only its own scope. An admin may request an
+all-scope list and control another scope; model arguments cannot create admin
+authority.
+
+### Daemon sessions and capabilities
+
+The daemon accepts only loopback HTTP and requires a signed Bearer capability
+before it creates an MCP session. It verifies the capability again on every
+request and rejects a token whose principal differs from the one bound during
+initialization. Missing, expired, malformed, wrong-purpose, and cross-session
+capabilities fail closed. The frozen token is
+`base64url(JSON claims).base64url(Ed25519 signature)`; its exact claims are
+`{v:1,purpose:'worker',role,botName,chatId,exp}`. The daemon receives only the
+current capability public key plus an optional previous public key during
+rotation (`<current>.prev` is discovered automatically). Capability and
+callback key files must be bounded regular,
+non-symbolic-link Ed25519 PEM files with no group/other permissions.
+
+The capability that established a session is saved privately with each new
+job for terminal callback authorization. It is never returned by list/status,
+placed in tool schemas, or copied into a Worker child environment. Callback
+signing uses a distinct daemon-private Ed25519 key. These controls provide
+scope hygiene and prevent accidental cross-chat use. They are not containment
+against malicious code running as the same OS user, which can read or replace
+host key and state files; that requires OS-user separation.
+
+The proxy receives its capability only through
+`METABOT_WORKER_PROXY_CAPABILITY` (or a private token file), puts it in the
+local HTTP Authorization header, and forwards JSON-RPC unchanged. It never
+adds identity fields to tool calls. The standalone stdio executable keeps the
+existing environment-pinned identity mode.
 
 ## MCP tools
 
@@ -113,9 +144,12 @@ The per-bot+chat concurrency quota atomically counts both `queued` and
 `running`. Dedupe is evaluated before the quota:
 
 - `queued` and `running` work with the same key is always reused;
-- a completed result is reused only within `dedupe_ttl_ms`;
+- a completed result is reused within `dedupe_ttl_ms` when terminal retries are
+  enabled;
 - `failed`, `aborted`, `timed_out`, and `recovery_required` work is retried by
-  default, or reused when `retry_terminal` is explicitly false.
+  default;
+- when `retry_terminal` is explicitly false, every terminal result is reused
+  permanently for that key. This is the durable idempotence mode used by ARC.
 
 Each job has a bounded wall timeout and no-output timeout. Defaults are one hour
 and ten minutes, so silent work cannot occupy quota forever. Activity on stdout
@@ -203,9 +237,19 @@ instances require separate `METABOT_WORKER_DATA_DIR` values.
 
 ## Completion callback
 
-Set `METABOT_WORKER_CALLBACK_URL` to enable HTTP completion posts. The payload
-omits the prompt. Its stable event ID is `worker:<id>:terminal:v1`, sent in the
-body and the `Idempotency-Key` header.
+In authenticated daemon mode, set `METABOT_WORKER_CALLBACK_URL` and
+`METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` to enable HTTP completion posts. The
+signed `metabot.terminal-callback.v1` envelope contains the event, bot/chat
+scope, terminal status, numeric epoch-ms finish time, issue time, original
+`authorizing_capability`, and a metadata-only Worker payload. That payload is
+strictly limited to `id`, optional `label`, `engine`, terminal `status`,
+optional `exitCode`, and optional `durationMs`. It excludes prompt, workdir,
+stdout, stderr, error text, model, output contract, and notification internals;
+full bounded results remain available through `worker_status`. The serialized
+callback has a 16 KiB hard ceiling, well below Bridge's 256 KiB request limit.
+Its stable event ID is `worker:<id>:terminal:v1`, sent in the body and the
+`Idempotency-Key` header. `X-MetaBot-Callback-Signature` is `ed25519:<base64>`
+over the exact raw body bytes.
 
 Notification state, attempt count, next retry deadline, last error, and
 delivery time are durable. Failures use bounded exponential backoff and an
@@ -238,10 +282,21 @@ stable event ID.
 | `METABOT_WORKER_CLAUDE_EXECUTABLE`       | `claude`                   | Claude CLI path                            |
 | `METABOT_WORKER_KIMI_EXECUTABLE`         | `kimi`                     | Kimi CLI path                              |
 | `METABOT_WORKER_CALLBACK_URL`            | unset                      | Terminal callback URL                      |
-| `METABOT_WORKER_CALLBACK_TOKEN`          | unset                      | Optional callback bearer token             |
+| `METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` | required with callback URL | Daemon-private Ed25519 callback key file  |
 | `METABOT_WORKER_CALLBACK_TIMEOUT_MS`     | `30000`                    | Callback request timeout                   |
 | `METABOT_WORKER_NOTIFY_RETRY_INITIAL_MS` | `1000`                     | First notification retry delay             |
 | `METABOT_WORKER_NOTIFY_RETRY_MAX_MS`     | `60000`                    | Maximum notification retry delay           |
+| `METABOT_WORKER_LISTEN`                  | daemon: required           | Loopback HTTP MCP URL, including `/mcp`     |
+| `METABOT_WORKER_CAPABILITY_PUBLIC_KEY_FILE` | daemon: required        | Bridge capability Ed25519 public key      |
+| `METABOT_WORKER_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE` | `<current>.prev` if present | Optional previous public key during rotation |
+| `METABOT_WORKER_MAX_REQUEST_BYTES`       | 1 MiB                      | Daemon request-body bound                   |
+| `METABOT_WORKER_PROXY_ENDPOINT`          | proxy: required            | Daemon loopback MCP URL                     |
+| `METABOT_WORKER_PROXY_CAPABILITY`        | proxy: required*           | Session capability from trusted spawn env   |
+| `METABOT_WORKER_PROXY_CAPABILITY_FILE`   | proxy: optional*           | Private capability token file alternative   |
+
+`*` Configure exactly one capability source for the proxy. All daemon and
+proxy diagnostics go to stderr; stdout is reserved exclusively for stdio MCP
+JSON-RPC framing.
 
 ## Build and test
 

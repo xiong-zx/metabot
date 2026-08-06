@@ -115,7 +115,7 @@ describe('ArcCoordinator lifecycle', () => {
     });
   });
 
-  it('recovers an interrupted running record as paused before explicit resume', async () => {
+  it('reattaches an interrupted running record without changing its execution state', async () => {
     const { coordinator, projectRoot, runner, store, temporary } = setup();
     const started = await coordinator.start({
       project_id: 'project-1',
@@ -144,16 +144,16 @@ describe('ArcCoordinator lifecycle', () => {
     cleanupCoordinators.push(recovered);
     await recovered.recover();
     expect(recovered.get({ run_id: started.run_id })).toMatchObject({
-      status: 'paused',
-      phase: 'restart_recovered',
+      status: 'running',
+      phase: 'recovered_executing',
     });
-    expect(runner.pauseCalls).toContainEqual(started.runner_handle);
+    expect(runner.recoverCalls).toContainEqual(started.runner_handle);
+    expect(runner.pauseCalls).not.toContainEqual(started.runner_handle);
 
-    await recovered.resume({ run_id: started.run_id });
     runner.finish(handleId(started), validOutput('project-1', started.run_id));
     await expect(recovered.waitForTerminal(started.run_id)).resolves.toMatchObject({
       status: 'completed',
-      recovery_generation: 2,
+      recovery_generation: 1,
     });
   });
 

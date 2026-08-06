@@ -21,6 +21,7 @@ export class FakeArcRunner implements ArcRunner {
   readonly inputs = new Map<string, ArcExecutionInput>();
   readonly states = new Map<string, ArcRunnerState>();
   readonly startCalls: ArcExecutionInput[] = [];
+  readonly recoverCalls: ArcExecutionHandle[] = [];
   readonly pauseCalls: ArcExecutionHandle[] = [];
   readonly resumeCalls: ArcExecutionHandle[] = [];
   readonly cancelCalls: ArcExecutionHandle[] = [];
@@ -48,6 +49,11 @@ export class FakeArcRunner implements ArcRunner {
     if (state === 'finished' || state === 'cancelled') return { state };
     this.states.set(handle.id, 'paused');
     return { state: 'paused' };
+  }
+
+  async recover(handle: ArcExecutionHandle): Promise<ArcRunnerResult> {
+    this.recoverCalls.push(handle);
+    return { state: this.requireState(handle) };
   }
 
   async resume(handle: ArcExecutionHandle): Promise<ArcRunnerResult> {

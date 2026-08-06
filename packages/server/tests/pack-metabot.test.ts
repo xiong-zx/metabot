@@ -84,6 +84,7 @@ describe('pack-metabot.sh', () => {
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(installSh).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(installSh).not.toContain('npm run build --workspaces');
   });
@@ -100,6 +101,7 @@ describe('pack-metabot.sh', () => {
       'packages/metamemory',
       'packages/skill-hub',
       'packages/arc-mcp',
+      'packages/arc-worker-runner-adapter',
       'packages/worker-runner-mcp',
     ]);
 
@@ -134,8 +136,16 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?bin\/metabot\b/);
   });
 
-  it('tarball includes the six bot-host workspaces', () => {
-    for (const ws of ['cli', 'cli-core', 'metamemory', 'skill-hub', 'arc-mcp', 'worker-runner-mcp']) {
+  it('tarball includes the seven bot-host workspaces', () => {
+    for (const ws of [
+      'cli',
+      'cli-core',
+      'metamemory',
+      'skill-hub',
+      'arc-mcp',
+      'arc-worker-runner-adapter',
+      'worker-runner-mcp',
+    ]) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);
     }
   });

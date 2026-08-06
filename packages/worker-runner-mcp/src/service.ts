@@ -10,11 +10,12 @@ import type {
   ProcessResult,
   ProcessRunner,
   ScopedDispatchWorkerInput,
+  TerminalWorkerStatus,
   TrustedPrincipal,
   WorkerRecord,
   WorkerServiceConfig,
 } from './types.js';
-import { TRUSTED_PRINCIPAL_ROLES, WORKER_ENGINES, WorkerRunnerError } from './types.js';
+import { TRUSTED_PRINCIPAL_ROLES, WORKER_ENGINES, WORKER_MUTATING_ROLES, WorkerRunnerError } from './types.js';
 import type { WorkerStore } from './store.js';
 
 interface ActiveJob {
@@ -44,7 +45,8 @@ export class WorkerService {
   private readonly now: () => number;
   private readonly makeId: () => string;
   private readonly makeLaunchId: () => string;
-  private readonly principal: TrustedPrincipal;
+  private readonly principal?: TrustedPrincipal;
+  private readonly dynamicPrincipals: boolean;
 
   constructor(
     private readonly store: WorkerStore,
@@ -52,9 +54,19 @@ export class WorkerService {
     private readonly notifier: CompletionNotifier,
     principal: TrustedPrincipal | undefined,
     config: Partial<WorkerServiceConfig> = {},
-    options: { now?: () => number; makeId?: () => string; makeLaunchId?: () => string } = {},
+    options: {
+      now?: () => number;
+      makeId?: () => string;
+      makeLaunchId?: () => string;
+      dynamicPrincipals?: boolean;
+    } = {},
   ) {
-    this.principal = normalizeTrustedPrincipal(principal);
+    this.dynamicPrincipals = options.dynamicPrincipals === true;
+    this.principal = principal
+      ? normalizeTrustedPrincipal(principal)
+      : this.dynamicPrincipals
+        ? undefined
+        : normalizeTrustedPrincipal(principal);
     this.config = { ...DEFAULT_CONFIG, ...config };
     validateConfig(this.config);
     this.now = options.now ?? Date.now;
@@ -63,11 +75,16 @@ export class WorkerService {
   }
 
   getTrustedPrincipal(): TrustedPrincipal {
+    if (!this.principal) {
+      throw new WorkerRunnerError('The multi-principal daemon has no process-pinned principal', 'FORBIDDEN');
+    }
     return { ...this.principal };
   }
 
   assertTrustedPrincipal(principal: TrustedPrincipal | undefined): void {
     const normalized = normalizeTrustedPrincipal(principal);
+    if (this.dynamicPrincipals) return;
+    if (!this.principal) throw new WorkerRunnerError('A pinned principal is required', 'FORBIDDEN');
     if (
       normalized.role !== this.principal.role ||
       normalized.botName !== this.principal.botName ||
@@ -78,13 +95,28 @@ export class WorkerService {
   }
 
   async start(): Promise<void> {
+    const principal = this.requirePrincipal();
+    await this.recoverScope(principal);
+  }
+
+  async startAll(): Promise<void> {
+    if (!this.dynamicPrincipals) {
+      await this.start();
+      return;
+    }
+    for (const scope of this.store.listScopes()) {
+      await this.recoverScope({ role: 'admin', ...scope });
+    }
+  }
+
+  private async recoverScope(principal: TrustedPrincipal): Promise<void> {
     const now = this.now();
-    this.store.resetInterruptedNotifications(this.principal.botName, this.principal.chatId, now);
-    for (const worker of this.store.listPendingNotifications(this.principal.botName, this.principal.chatId)) {
+    this.store.resetInterruptedNotifications(principal.botName, principal.chatId, now);
+    for (const worker of this.store.listPendingNotifications(principal.botName, principal.chatId)) {
       this.scheduleNotification(worker);
     }
 
-    for (const worker of this.store.listRestartCandidates(this.principal.botName, this.principal.chatId)) {
+    for (const worker of this.store.listRestartCandidates(principal.botName, principal.chatId)) {
       if (worker.recoveryPolicy.restart === 'relaunch' && worker.recoveryPolicy.idempotent) {
         const queued = this.store.prepareRecovery(worker.id);
         if (queued) void this.launchWorker(queued, true);
@@ -99,34 +131,44 @@ export class WorkerService {
     }
   }
 
-  async dispatch(rawInput: DispatchWorkerInput): Promise<DispatchWorkerResult> {
-    const input = this.normalizeDispatch(rawInput);
+  async dispatch(
+    rawInput: DispatchWorkerInput,
+    principal?: TrustedPrincipal,
+    authorizingCapability?: string,
+  ): Promise<DispatchWorkerResult> {
+    const actor = this.resolvePrincipal(principal);
+    this.authorizeMutation(actor);
+    const input = this.normalizeDispatch(rawInput, actor, authorizingCapability);
     const created = this.store.createWorker(this.makeId(), input, this.config.maxConcurrentPerScope, this.now());
     if (!created.deduplicated) void this.launchWorker(created.worker, false);
     return created;
   }
 
-  list(options: { limit?: number; allScopes?: boolean } = {}): WorkerRecord[] {
+  list(options: { limit?: number; allScopes?: boolean } = {}, principal?: TrustedPrincipal): WorkerRecord[] {
+    const actor = this.resolvePrincipal(principal);
     const limit = normalizeLimit(options.limit, this.config.maxListLimit);
     if (options.allScopes) {
-      if (this.principal.role !== 'admin') {
+      if (actor.role !== 'admin') {
         throw new WorkerRunnerError('Only the pinned admin principal may list all worker scopes', 'FORBIDDEN');
       }
       return this.store.listAll(limit);
     }
-    return this.store.listScope(this.principal.botName, this.principal.chatId, limit);
+    return this.store.listScope(actor.botName, actor.chatId, limit);
   }
 
-  status(id: string): WorkerRecord {
+  status(id: string, principal?: TrustedPrincipal): WorkerRecord {
+    const actor = this.resolvePrincipal(principal);
     const worker = this.store.require(normalizeId(id));
-    this.authorizeScope(worker);
+    this.authorizeScope(worker, actor);
     return worker;
   }
 
-  async abort(idValue: string): Promise<WorkerRecord> {
+  async abort(idValue: string, principal?: TrustedPrincipal): Promise<WorkerRecord> {
+    const actor = this.resolvePrincipal(principal);
+    this.authorizeMutation(actor);
     const id = normalizeId(idValue);
     const worker = this.store.require(id);
-    this.authorizeScope(worker);
+    this.authorizeScope(worker, actor);
     if (worker.status === 'queued') {
       return (
         this.finishQueued(id, 'aborted', 'abort_requested', 'Worker aborted before its process launch completed') ??
@@ -326,12 +368,23 @@ export class WorkerService {
       if (current) this.scheduleNotification(current);
       return;
     }
-    const { prompt: _prompt, ...publicWorker } = worker;
+    const authorizingCapability = this.store.getAuthorizingCapability(worker.id);
     try {
       await this.notifier.notify({
         eventId: `worker:${worker.id}:terminal:v1`,
         eventType: 'worker.terminal',
-        worker: publicWorker,
+        botName: worker.botName,
+        chatId: worker.chatId,
+        finishedAt: requireTerminalFinishedAt(worker),
+        ...(authorizingCapability ? { authorizingCapability } : {}),
+        worker: {
+          id: worker.id,
+          ...(worker.label !== undefined ? { label: worker.label } : {}),
+          engine: worker.engine,
+          status: requireTerminalStatus(worker.status),
+          ...(worker.exitCode !== undefined ? { exitCode: worker.exitCode } : {}),
+          ...(worker.durationMs !== undefined ? { durationMs: worker.durationMs } : {}),
+        },
       });
       this.store.markNotificationDelivered(id, this.now());
     } catch (error) {
@@ -361,14 +414,37 @@ export class WorkerService {
     this.active.delete(id);
   }
 
-  private authorizeScope(worker: WorkerRecord): void {
-    if (this.principal.role === 'admin') return;
-    if (worker.botName !== this.principal.botName || worker.chatId !== this.principal.chatId) {
+  private authorizeScope(worker: WorkerRecord, principal: TrustedPrincipal): void {
+    if (principal.role === 'admin') return;
+    if (worker.botName !== principal.botName || worker.chatId !== principal.chatId) {
       throw new WorkerRunnerError('Worker is outside the pinned principal scope', 'FORBIDDEN');
     }
   }
 
-  private normalizeDispatch(input: DispatchWorkerInput): ScopedDispatchWorkerInput {
+  private authorizeMutation(principal: TrustedPrincipal): void {
+    if (!WORKER_MUTATING_ROLES.includes(principal.role as (typeof WORKER_MUTATING_ROLES)[number])) {
+      throw new WorkerRunnerError(`Role ${principal.role} is read-only for Worker Runner`, 'FORBIDDEN');
+    }
+  }
+
+  private requirePrincipal(): TrustedPrincipal {
+    if (!this.principal) {
+      throw new WorkerRunnerError('An authenticated connection principal is required', 'FORBIDDEN');
+    }
+    return this.principal;
+  }
+
+  private resolvePrincipal(principal: TrustedPrincipal | undefined): TrustedPrincipal {
+    const normalized = principal ? normalizeTrustedPrincipal(principal) : this.requirePrincipal();
+    if (this.principal && !this.dynamicPrincipals) this.assertTrustedPrincipal(normalized);
+    return normalized;
+  }
+
+  private normalizeDispatch(
+    input: DispatchWorkerInput,
+    principal: TrustedPrincipal,
+    authorizingCapability?: string,
+  ): ScopedDispatchWorkerInput {
     if (!WORKER_ENGINES.includes(input.engine)) {
       throw new WorkerRunnerError(`Unsupported worker engine: ${String(input.engine)}`, 'INVALID_INPUT');
     }
@@ -421,14 +497,17 @@ export class WorkerService {
     }
 
     return {
-      botName: this.principal.botName,
-      chatId: this.principal.chatId,
+      botName: principal.botName,
+      chatId: principal.chatId,
+      ...(authorizingCapability !== undefined
+        ? { authorizingCapability: normalizeNonempty(authorizingCapability, 'authorizingCapability', 4_096) }
+        : {}),
       workdir,
       prompt,
       engine: input.engine,
       ...(input.model !== undefined ? { model: normalizeNonempty(input.model, 'model', 200) } : {}),
       ...(input.label !== undefined ? { label: normalizeNonempty(input.label, 'label', 200) } : {}),
-      ...(input.dedupeKey !== undefined ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 300) } : {}),
+      ...(input.dedupeKey !== undefined ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 4_096) } : {}),
       dedupePolicy: { completedTtlMs, retryTerminal },
       timeoutMs,
       idleTimeoutMs,
@@ -441,7 +520,7 @@ export class WorkerService {
 export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefined): TrustedPrincipal {
   if (!principal) throw new WorkerRunnerError('A server-instance-pinned trusted principal is required', 'FORBIDDEN');
   if (!TRUSTED_PRINCIPAL_ROLES.includes(principal.role)) {
-    throw new WorkerRunnerError('Trusted principal role must be admin, user, or pm', 'FORBIDDEN');
+    throw new WorkerRunnerError('Trusted principal role is not recognized', 'FORBIDDEN');
   }
   const botName = normalizeNonempty(principal.botName, 'principal.botName', 200);
   const chatId = normalizeNonempty(principal.chatId, 'principal.chatId', 500);
@@ -513,6 +592,20 @@ function normalizeNonempty(value: unknown, name: string, maxLength: number): str
 
 function normalizeId(id: unknown): string {
   return normalizeNonempty(id, 'id', 200);
+}
+
+function requireTerminalStatus(status: WorkerRecord['status']): TerminalWorkerStatus {
+  if (status === 'queued' || status === 'running') {
+    throw new Error(`Cannot notify for non-terminal Worker status: ${status}`);
+  }
+  return status;
+}
+
+function requireTerminalFinishedAt(worker: WorkerRecord): number {
+  if (worker.finishedAt === undefined) {
+    throw new Error(`Terminal Worker ${worker.id} is missing finishedAt`);
+  }
+  return worker.finishedAt;
 }
 
 function normalizeLimit(limit: number | undefined, max: number): number {

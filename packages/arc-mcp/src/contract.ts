@@ -271,6 +271,13 @@ export const arcRunErrorSchema = z
   })
   .strict();
 
+export const arcRunOriginatorSchema = z
+  .object({
+    bot_name: identifier,
+    chat_id: nonEmpty.max(500),
+  })
+  .strict();
+
 export const arcRunRecordSchema = z
   .object({
     contract_version: z.literal(ARC_RUN_CONTRACT_VERSION),
@@ -280,6 +287,7 @@ export const arcRunRecordSchema = z
     objective: arcObjectiveSchema,
     idempotency_key: identifier,
     request_fingerprint: nonEmpty,
+    originator: arcRunOriginatorSchema.nullable(),
     status: arcRunStatusSchema,
     phase: nonEmpty,
     progress: z.number().min(0).max(1),
@@ -301,6 +309,7 @@ export type ArcExecutionInput = z.infer<typeof arcExecutionInputSchema>;
 export type ArcOutput = z.infer<typeof arcOutputSchema>;
 export type ArcResultStatus = z.infer<typeof arcResultStatusSchema>;
 export type ArcRunError = z.infer<typeof arcRunErrorSchema>;
+export type ArcRunOriginator = z.infer<typeof arcRunOriginatorSchema>;
 export type ArcRunRecord = z.infer<typeof arcRunRecordSchema>;
 export type ArcRunStatus = z.infer<typeof arcRunStatusSchema>;
 
