@@ -18,14 +18,42 @@ export type TrustedPrincipalRole = (typeof TRUSTED_PRINCIPAL_ROLES)[number];
 export const TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH = 200;
 export const TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH = 500;
 
-export const WORKER_MUTATING_ROLES = ['admin', 'user', 'pm'] as const;
+export const WORKER_MUTATING_ROLES = ['user', 'pm'] as const;
 export type WorkerMutatingRole = (typeof WORKER_MUTATING_ROLES)[number];
+
+export const LOCAL_LIFECYCLE_ADMIN_PRINCIPAL = {
+  role: 'admin',
+  botName: 'metabot-local-lifecycle',
+  chatId: 'local:daemon-lifecycle',
+} as const satisfies TrustedPrincipal;
+
+export const ARC_SERVICE_PRINCIPAL = {
+  role: 'pm',
+  botName: 'arc-service',
+  chatId: 'local:arc-service',
+} as const satisfies TrustedPrincipal;
 
 /** Trusted identity pinned by the process that starts this MCP server. */
 export interface TrustedPrincipal {
   role: TrustedPrincipalRole;
   botName: string;
   chatId: string;
+}
+
+export function isLocalLifecycleAdmin(principal: TrustedPrincipal): boolean {
+  return (
+    principal.role === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.role &&
+    principal.botName === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.botName &&
+    principal.chatId === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.chatId
+  );
+}
+
+export function isArcServicePrincipal(principal: TrustedPrincipal): boolean {
+  return (
+    principal.role === ARC_SERVICE_PRINCIPAL.role &&
+    principal.botName === ARC_SERVICE_PRINCIPAL.botName &&
+    principal.chatId === ARC_SERVICE_PRINCIPAL.chatId
+  );
 }
 
 /**

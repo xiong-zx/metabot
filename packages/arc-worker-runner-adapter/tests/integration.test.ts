@@ -15,6 +15,7 @@ import {
 } from '@xvirobotics/arc-mcp';
 import {
   createWorkerRunnerMcpServer,
+  ARC_SERVICE_PRINCIPAL,
   NoopCompletionNotifier,
   WorkerService,
   WorkerStore,
@@ -123,7 +124,7 @@ async function makeKit() {
   mkdirSync(projectRoot, { recursive: true });
   const workerStore = new WorkerStore(path.join(temporary, 'worker-state', 'workers.sqlite'));
   const processRunner = new FakeProcessRunner();
-  const principal = { role: 'pm' as const, botName: 'arc-service', chatId: 'arc:test-host' };
+  const principal = ARC_SERVICE_PRINCIPAL;
   const workerService = new WorkerService(workerStore, processRunner, new NoopCompletionNotifier(), principal, {
     maxConcurrentPerScope: 2,
     defaultTimeoutMs: 5_000,

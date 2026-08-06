@@ -80,11 +80,15 @@ session, and verifies both capability validity and the same principal on every
 later request. Tool schemas remain identity-free. Missing, expired,
 wrong-purpose, malformed, or session-rebinding capabilities fail closed.
 
-`admin`, `user`, and `pm` may start, pause, resume, or cancel runs.
-`manager`, `agent`, and `worker` are read-only. A trusted principal's bot and
-chat are saved as the run's `originator` when `arc_run_start` creates it; those
-values never come from tool arguments. Project ID/root restrictions remain the
-separate trusted server policy described above.
+`user` and `pm` may start, pause, resume, or cancel runs. `manager`, `agent`,
+and `worker` are read-only. The only accepted admin identity is
+`admin/metabot-local-lifecycle/local:daemon-lifecycle`; it may use the bounded
+get/list operations needed by daemon health but cannot start, pause, resume,
+or cancel. A signed admin capability with any other bot or chat is rejected
+during authentication. A trusted principal's bot and chat are saved as the
+run's `originator` when `arc_run_start` creates it; those values never come
+from tool arguments. Project ID/root restrictions remain the separate trusted
+server policy described above.
 
 Capabilities use the frozen v2.1 Ed25519 form
 `base64url(JSON claims).base64url(signature)` with exact claims

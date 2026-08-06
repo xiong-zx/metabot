@@ -20,6 +20,12 @@ export interface ArcTrustedPrincipal {
   chatId: string;
 }
 
+export const LOCAL_LIFECYCLE_ADMIN_PRINCIPAL = {
+  role: 'admin',
+  botName: 'metabot-local-lifecycle',
+  chatId: 'local:daemon-lifecycle',
+} as const satisfies ArcTrustedPrincipal;
+
 export interface ArcMcpServerOptions {
   principal?: ArcTrustedPrincipal;
   authorizingCapability?: string;
@@ -160,13 +166,25 @@ export function normalizeArcPrincipal(principal: ArcTrustedPrincipal): ArcTruste
   if (chatId.toLowerCase().startsWith('team:')) {
     throw new ArcError('scope_denied', 'Agent Team chats cannot be trusted ARC principals');
   }
-  return { role: principal.role, botName, chatId };
+  const normalized = { role: principal.role, botName, chatId };
+  if (normalized.role === 'admin' && !isLocalLifecycleAdmin(normalized)) {
+    throw new ArcError('scope_denied', 'Only the fixed local lifecycle identity may use the ARC admin role');
+  }
+  return normalized;
 }
 
 function authorizeArcMutation(principal: ArcTrustedPrincipal | undefined): void {
   // No principal means the existing operator-pinned standalone stdio mode.
-  if (!principal || ['admin', 'user', 'pm'].includes(principal.role)) return;
+  if (!principal || ['user', 'pm'].includes(principal.role)) return;
   throw new ArcError('scope_denied', `Role ${principal.role} is read-only for ARC`);
+}
+
+function isLocalLifecycleAdmin(principal: ArcTrustedPrincipal): boolean {
+  return (
+    principal.role === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.role &&
+    principal.botName === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.botName &&
+    principal.chatId === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.chatId
+  );
 }
 
 export async function connectArcStdioServer(coordinator: ArcCoordinator): Promise<McpServer> {

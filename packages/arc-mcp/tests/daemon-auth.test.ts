@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
 import path from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -11,7 +11,7 @@ import { ArcDaemon } from '../src/daemon.js';
 import { ArcCapabilityVerifier, issueArcCapability } from '../src/local-auth.js';
 import { ArcRunStore } from '../src/run-store.js';
 import { ArcProjectScope } from '../src/scope-policy.js';
-import type { ArcTrustedPrincipal } from '../src/server.js';
+import { LOCAL_LIFECYCLE_ADMIN_PRINCIPAL, type ArcTrustedPrincipal } from '../src/server.js';
 import { FakeArcRunner } from './fake-runner.js';
 import { projectDirectory, removeDirectory, temporaryDirectory } from './helpers.js';
 
@@ -55,6 +55,62 @@ describe('ARC daemon connection authority', () => {
     expect(JSON.stringify((await connected.client.listTools()).tools)).not.toMatch(
       /actor_role|caller_context|botName|chatId|pmChatId/,
     );
+  });
+
+  it.each([
+    { role: 'admin' as const, botName: 'forged-lifecycle', chatId: 'local:daemon-lifecycle' },
+    { role: 'admin' as const, botName: 'metabot-local-lifecycle', chatId: 'local:forged-lifecycle' },
+  ])('rejects a signed admin capability unless every lifecycle identity field is exact', async (principal) => {
+    const kit = await makeDaemon();
+    const response = await initialize(kit.daemon.url, issueUnchecked(principal));
+    expect(response.status).toBe(401);
+  });
+
+  it('keeps the exact lifecycle admin read-only across every ARC mutation', async () => {
+    const kit = await makeDaemon();
+    const pm = await connect(kit.daemon.url, kit.issue(PM));
+    cleanups.push(() => pm.client.close());
+    await pm.client.callTool({
+      name: 'arc_run_start',
+      arguments: {
+        project_id: 'project-1',
+        project_root: kit.projectRoot,
+        objective: 'Seed a lifecycle health read.',
+        idempotency_key: 'admin-read-seed',
+        run_id: 'admin-read-seed',
+      },
+    });
+
+    const lifecycle = await connect(kit.daemon.url, kit.issue(LOCAL_LIFECYCLE_ADMIN_PRINCIPAL));
+    cleanups.push(() => lifecycle.client.close());
+    expect((await lifecycle.client.callTool({ name: 'arc_run_list', arguments: { limit: 1 } })).isError).not.toBe(true);
+    expect(
+      (await lifecycle.client.callTool({ name: 'arc_run_get', arguments: { run_id: 'admin-read-seed' } })).isError,
+    ).not.toBe(true);
+
+    const mutations = [
+      {
+        name: 'arc_run_start',
+        arguments: {
+          project_id: 'project-1',
+          project_root: kit.projectRoot,
+          objective: 'must not start',
+          idempotency_key: 'admin-denied',
+        },
+      },
+      { name: 'arc_run_pause', arguments: { run_id: 'admin-read-seed' } },
+      { name: 'arc_run_resume', arguments: { run_id: 'admin-read-seed' } },
+      { name: 'arc_run_cancel', arguments: { run_id: 'admin-read-seed' } },
+    ];
+    for (const request of mutations) {
+      const denied = await lifecycle.client.callTool(request);
+      expect(denied.isError).toBe(true);
+      expect(JSON.stringify(denied.content)).toContain('scope_denied');
+    }
+    expect(kit.runner.startCalls).toHaveLength(1);
+    expect(kit.runner.pauseCalls).toEqual([]);
+    expect(kit.runner.resumeCalls).toEqual([]);
+    expect(kit.runner.cancelCalls).toEqual([]);
   });
 
   it('allows a low-privilege principal to read but not mutate and prevents session rebinding', async () => {
@@ -147,4 +203,30 @@ async function connect(url: URL, capability: string) {
   const client = new Client({ name: 'arc-daemon-test', version: '1.0.0' });
   await client.connect(transport);
   return { client, transport };
+}
+
+function issueUnchecked(principal: ArcTrustedPrincipal): string {
+  const claims = {
+    v: 1,
+    purpose: 'arc',
+    role: principal.role,
+    botName: principal.botName,
+    chatId: principal.chatId,
+    exp: Date.now() + 60_000,
+  };
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${payload}.${cryptoSign(null, Buffer.from(payload), CAPABILITY_KEYS.privateKey).toString('base64url')}`;
+}
+
+function initialize(url: URL, capability: string): Promise<Response> {
+  return fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${capability}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+    }),
+  });
 }

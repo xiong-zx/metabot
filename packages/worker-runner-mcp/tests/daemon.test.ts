@@ -1,15 +1,20 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkerRunnerDaemon } from '../src/daemon.js';
 import { LocalCapabilityVerifier, issueLocalCapability, type LocalCapabilityPurpose } from '../src/local-auth.js';
 import { WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
-import type { ScopedDispatchWorkerInput, TrustedPrincipal } from '../src/types.js';
+import {
+  ARC_SERVICE_PRINCIPAL,
+  LOCAL_LIFECYCLE_ADMIN_PRINCIPAL,
+  type ScopedDispatchWorkerInput,
+  type TrustedPrincipal,
+} from '../src/types.js';
 import { FakeProcessRunner, RecordingNotifier } from './helpers.js';
 
 const CAPABILITY_KEYS = generateKeyPairSync('ed25519');
@@ -40,6 +45,111 @@ describe('Worker Runner daemon authentication', () => {
         })
       ).status,
     ).toBe(401);
+  });
+
+  it.each([
+    { role: 'admin' as const, botName: 'forged-lifecycle', chatId: 'local:daemon-lifecycle' },
+    { role: 'admin' as const, botName: 'metabot-local-lifecycle', chatId: 'local:forged-lifecycle' },
+  ])('rejects a signed admin capability unless every lifecycle identity field is exact', async (principal) => {
+    const kit = await makeDaemon();
+    const response = await initialize(kit.daemon.url, issueUnchecked(principal));
+    expect(response.status).toBe(401);
+  });
+
+  it('allows the exact lifecycle admin a bounded all-scope list but denies status and every mutation', async () => {
+    const kit = await makeDaemon((store, dir) => {
+      store.createWorker('wrk-a', scopedInput(dir), 2, 1);
+      store.createWorker(
+        'wrk-b',
+        { ...scopedInput(dir), botName: 'bot-b', chatId: 'chat-b', dedupeKey: 'other-scope' },
+        2,
+        2,
+      );
+    });
+    const connected = await connect(kit.daemon.url, kit.issue(LOCAL_LIFECYCLE_ADMIN_PRINCIPAL));
+    cleanups.push(() => connected.client.close());
+
+    const listed = await connected.client.callTool({
+      name: 'worker_list',
+      arguments: { all_scopes: true, limit: 1 },
+    });
+    expect((listed.structuredContent as { workers: unknown[] }).workers).toHaveLength(1);
+    const status = await connected.client.callTool({ name: 'worker_status', arguments: { id: 'wrk-a' } });
+    expect(status).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const dispatched = await connected.client.callTool({
+      name: 'worker_dispatch',
+      arguments: { workdir: kit.dir, prompt: 'must not run', engine: 'codex' },
+    });
+    expect(dispatched).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const aborted = await connected.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-a' } });
+    expect(aborted).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+  });
+
+  it('lets the exact ARC service dispatch, observe, and abort only its own workers', async () => {
+    const kit = await makeDaemon((store, dir) => store.createWorker('wrk-other', scopedInput(dir), 2, 1));
+    const connected = await connect(kit.daemon.url, kit.issue(ARC_SERVICE_PRINCIPAL));
+    cleanups.push(() => connected.client.close());
+
+    const dispatched = await connected.client.callTool({
+      name: 'worker_dispatch',
+      arguments: { workdir: kit.dir, prompt: 'run ARC work', engine: 'codex' },
+    });
+    expect(dispatched.isError).not.toBe(true);
+    const id = (dispatched.structuredContent as { worker: { id: string } }).worker.id;
+    const status = await connected.client.callTool({ name: 'worker_status', arguments: { id } });
+    expect(status).toMatchObject({ structuredContent: { worker: { id } } });
+    const listed = await connected.client.callTool({ name: 'worker_list', arguments: {} });
+    expect(listed).toMatchObject({ structuredContent: { workers: [expect.objectContaining({ id })] } });
+    await vi.waitFor(() => expect(kit.store.require(id).status).toBe('running'));
+    const ownPid = kit.store.require(id).pid;
+    const otherStatusBefore = kit.store.require('wrk-other').status;
+    const aborted = await connected.client.callTool({ name: 'worker_abort', arguments: { id } });
+    expect(aborted).toMatchObject({ structuredContent: { worker: { id, status: 'aborted' } } });
+    const allScopes = await connected.client.callTool({ name: 'worker_list', arguments: { all_scopes: true } });
+    expect(allScopes).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const otherStatus = await connected.client.callTool({ name: 'worker_status', arguments: { id: 'wrk-other' } });
+    expect(otherStatus).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const otherAbort = await connected.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-other' } });
+    expect(otherAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    expect(kit.store.require('wrk-other').status).toBe(otherStatusBefore);
+    expect(kit.runner.aborts).toEqual([ownPid]);
+  });
+
+  it('does not grant ARC service treatment to partial or role-forged identities', async () => {
+    const kit = await makeDaemon((store, dir) =>
+      store.createWorker('wrk-service', {
+        ...scopedInput(dir),
+        botName: ARC_SERVICE_PRINCIPAL.botName,
+        chatId: ARC_SERVICE_PRINCIPAL.chatId,
+      }, 2, 1),
+    );
+    const partial = await connect(kit.daemon.url, kit.issue({
+      role: 'pm',
+      botName: ARC_SERVICE_PRINCIPAL.botName,
+      chatId: 'local:arc-service-forged',
+    }));
+    cleanups.push(() => partial.client.close());
+    const partialStatus = await partial.client.callTool({ name: 'worker_status', arguments: { id: 'wrk-service' } });
+    expect(partialStatus).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const partialAbort = await partial.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-service' } });
+    expect(partialAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+
+    const forgedRole = await connect(kit.daemon.url, kit.issue({
+      role: 'manager',
+      botName: ARC_SERVICE_PRINCIPAL.botName,
+      chatId: ARC_SERVICE_PRINCIPAL.chatId,
+    }));
+    cleanups.push(() => forgedRole.client.close());
+    const forgedDispatch = await forgedRole.client.callTool({
+      name: 'worker_dispatch',
+      arguments: { workdir: kit.dir, prompt: 'must not run', engine: 'codex' },
+    });
+    expect(forgedDispatch).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const forgedAbort = await forgedRole.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-service' } });
+    expect(forgedAbort).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    const forgedAllScopes = await forgedRole.client.callTool({ name: 'worker_list', arguments: { all_scopes: true } });
+    expect(forgedAllScopes).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
+    expect(kit.runner.aborts).toEqual([]);
   });
 
   it('binds a verified principal to the session and denies cross-scope access', async () => {
@@ -138,6 +248,32 @@ function issue(principal: TrustedPrincipal, purpose: LocalCapabilityPurpose = 'w
     botName: principal.botName,
     chatId: principal.chatId,
     exp: Date.now() + 60_000,
+  });
+}
+
+function issueUnchecked(principal: TrustedPrincipal): string {
+  const claims = {
+    v: 1,
+    purpose: 'worker',
+    role: principal.role,
+    botName: principal.botName,
+    chatId: principal.chatId,
+    exp: Date.now() + 60_000,
+  };
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${payload}.${cryptoSign(null, Buffer.from(payload), CAPABILITY_KEYS.privateKey).toString('base64url')}`;
+}
+
+function initialize(url: URL, capability: string): Promise<Response> {
+  return fetch(url, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${capability}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+    }),
   });
 }
 
