@@ -432,6 +432,60 @@ if node -e '
 fi
 
 # ============================================================================
+# Phase 2.5: Provision cross-process execution trust keys (TOFU)
+# ============================================================================
+step "Phase 2.5: Provisioning execution trust keys"
+
+# These keys deliberately live outside the replaceable Git runtime. Creation
+# is trust-on-first-use and create-if-missing only: incomplete, mismatched, or
+# unsafe existing material fails rather than being silently replaced. File
+# modes do not contain arbitrary code running under the same OS uid; they are
+# scope-hygiene until the optional service-user isolation is deployed.
+METABOT_KEYS_DIR="${METABOT_KEYS_DIR:-$HOME/.metabot/keys}" node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const keysDir = process.env.METABOT_KEYS_DIR;
+const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
+const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+
+function assertPath(file, mode, label) {
+  const stat = fs.statSync(file);
+  const actual = stat.mode & 0o777;
+  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
+  if (uid !== undefined && stat.uid !== uid) throw new Error(`unexpected ${label} owner uid ${stat.uid}; expected ${uid}`);
+}
+
+fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+fs.chmodSync(keysDir, 0o700);
+assertPath(keysDir, 0o700, 'key directory');
+
+for (const name of names) {
+  const privatePath = path.join(keysDir, `${name}.key`);
+  const publicPath = path.join(keysDir, `${name}.pub`);
+  const privateExists = fs.existsSync(privatePath);
+  const publicExists = fs.existsSync(publicPath);
+  if (privateExists !== publicExists) throw new Error(`refusing to replace incomplete ${name} keypair`);
+  if (!privateExists) {
+    const pair = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+  }
+  assertPath(privatePath, 0o600, `${name} private key`);
+  assertPath(publicPath, 0o600, `${name} public key`);
+  const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
+  const signature = crypto.sign(null, challenge, fs.readFileSync(privatePath));
+  if (!crypto.verify(null, challenge, fs.readFileSync(publicPath), signature)) {
+    throw new Error(`${name} public/private keys do not correspond`);
+  }
+  const previousPath = `${publicPath}.prev`;
+  if (fs.existsSync(previousPath)) assertPath(previousPath, 0o600, `${name} previous public key`);
+}
+NODE
+success "Execution trust keys ready at ${METABOT_KEYS_DIR} (TOFU; outside METABOT_HOME)"
+
+# ============================================================================
 # Phase 3: Install dependencies
 # ============================================================================
 step "Phase 3: Installing dependencies"

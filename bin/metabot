@@ -534,6 +534,7 @@ cmd_doctor() {
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -643,6 +644,80 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       "Package builds should include .metabot-package/manifest.json; package default env may include .metabot-package/default.env.",
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
+
+keys_dir = Path(env("METABOT_KEYS_DIR", str(Path.home() / ".metabot" / "keys"))).expanduser()
+key_names = ("worker-capability", "arc-capability", "worker-callback", "arc-callback")
+current_uid = os.geteuid() if hasattr(os, "geteuid") else None
+
+def key_path_data(path, expected_mode):
+    if not path.exists():
+        return {"path": str(path), "exists": False, "permissionsOk": False, "ownerMatches": False}
+    try:
+        file_stat = path.stat()
+        mode = stat.S_IMODE(file_stat.st_mode)
+        return {
+            "path": str(path),
+            "exists": True,
+            "mode": oct(mode),
+            "permissionsOk": mode == expected_mode,
+            "ownerUid": file_stat.st_uid,
+            "ownerMatches": current_uid is None or file_stat.st_uid == current_uid,
+        }
+    except Exception as e:
+        return {"path": str(path), "exists": True, "permissionsOk": False, "ownerMatches": False, "error": str(e)}
+
+key_dir_data = key_path_data(keys_dir, 0o700)
+key_pairs = []
+pair_check_source = """
+const c=require('node:crypto'),f=require('node:fs');
+const b=Buffer.from('metabot-ed25519-keypair-check-v1');
+const s=c.sign(null,b,f.readFileSync(process.argv[1]));
+process.exit(c.verify(null,b,f.readFileSync(process.argv[2]),s)?0:1);
+"""
+for key_name in key_names:
+    private_data = key_path_data(keys_dir / f"{key_name}.key", 0o600)
+    public_data = key_path_data(keys_dir / f"{key_name}.pub", 0o600)
+    previous_data = key_path_data(keys_dir / f"{key_name}.pub.prev", 0o600)
+    pair_result = {"ok": False, "stderr": "missing key file"}
+    if private_data["exists"] and public_data["exists"]:
+        pair_result = run([
+            "node", "-e", pair_check_source,
+            private_data["path"], public_data["path"],
+        ], timeout=3)
+    previous_ok = (not previous_data["exists"]) or (
+        previous_data["permissionsOk"] and previous_data["ownerMatches"]
+    )
+    pair_ok = all((
+        private_data["permissionsOk"], private_data["ownerMatches"],
+        public_data["permissionsOk"], public_data["ownerMatches"],
+        previous_ok, pair_result["ok"],
+    ))
+    key_pairs.append({
+        "name": key_name,
+        "ok": pair_ok,
+        "pairMatches": pair_result["ok"],
+        "privateKey": private_data,
+        "publicKey": public_data,
+        "previousPublicKey": previous_data,
+        **({"pairError": pair_result["stderr"]} if not pair_result["ok"] else {}),
+    })
+execution_keys_ok = bool(
+    key_dir_data["exists"]
+    and key_dir_data["permissionsOk"]
+    and key_dir_data["ownerMatches"]
+    and all(pair["ok"] for pair in key_pairs)
+)
+check("execution_keys", execution_keys_ok,
+      "execution_keys_unavailable_or_unsafe" if not execution_keys_ok else "ok",
+      "All execution keypairs are present, owner-matched, mode-safe, and corresponding." if execution_keys_ok else "Execution key material is missing, unsafe, or mismatched; worker/ARC capabilities and callbacks fail closed.",
+      "Re-run install.sh to create missing TOFU keypairs; repair partial/mismatched ownership or permissions manually without replacing trusted keys.",
+      False,
+      {
+          "path": str(keys_dir),
+          "trustModel": "TOFU scope hygiene; not containment against arbitrary same-UID code",
+          "directory": key_dir_data,
+          "pairs": key_pairs,
+      })
 
 pm2 = shutil.which("pm2")
 pm2_data = {"installed": bool(pm2)}

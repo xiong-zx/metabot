@@ -198,6 +198,15 @@ describe('metabot doctor command', () => {
     expect(source).toContain('"skillsDirExists"');
     expect(source).toContain('"mcpServerCount"');
   });
+
+  it('checks out-of-runtime execution key ownership, modes, and key-pair correspondence', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('check("execution_keys"');
+    expect(source).toContain('METABOT_KEYS_DIR');
+    expect(source).toContain('pair_check_source');
+    expect(source).toContain('ownerMatches');
+    expect(source).toContain('TOFU scope hygiene; not containment against arbitrary same-UID code');
+  });
 });
 
 describe('Codex install defaults', () => {
