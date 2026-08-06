@@ -18,6 +18,7 @@
 | `METABOT_CORE_PORT` | `9200` | Core 端口 |
 | `METABOT_CORE_DATA_DIR` | `~/.metabot-core/data` | Core 数据目录 |
 | `METABOT_PUBLIC_DISTRIBUTION` | `0` | 匿名提供 Core 安装/CLI 资源；仅在明确需要时开启 |
+| `METABOT_NODE_INTERPRETER` | 当前 `node` 可执行文件 | 固定到所有 PM2 应用的 Node.js >=22.19 绝对路径；适合系统 Node 仍较旧的升级环境 |
 | `LOG_LEVEL` | `info` | Bridge 日志级别 |
 
 Memory、Skills、Agents 和 T5T 都由 `METABOT_CORE_URL` 指向的 Core 提供。旧的独立
