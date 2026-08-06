@@ -844,15 +844,22 @@ cmd_restart() {
     fi
   fi
 
+  request_id="${request_id:-$(_new_restart_request_id)}"
+  SESSION_STORE_DIR="$(_restart_state_dir)"
+  export SESSION_STORE_DIR
+  export METABOT_RESTART_REQUEST_ID="$request_id"
+  export METABOT_RESTART_REASON="$reason"
+  export METABOT_RESTART_SOURCE="$source"
+  export METABOT_RESTART_RESUME="$resume"
+  export METABOT_BOT_NAME="$requester_bot"
+  export METABOT_CHAT_ID="$requester_chat"
+
   local runtime_expectations
   runtime_expectations="$(_protected_switch_plan "$METABOT_HOME" "$switch_apps")" || {
     error "Could not resolve the expected PM2 runtime before restart."
     return 1
   }
 
-  request_id="${request_id:-$(_new_restart_request_id)}"
-  SESSION_STORE_DIR="$(_restart_state_dir)"
-  export SESSION_STORE_DIR
   local -a state_flags=(
     --request-id "$request_id" --kind restart --target-root "$METABOT_HOME"
     --target-apps "$target_apps" --source "$source" --reason "$reason" --resume "$resume"
@@ -876,12 +883,6 @@ cmd_restart() {
 
   _restart_state breadcrumb "${state_flags[@]}" >/dev/null
   _restart_state mark-restarting --request-id "$request_id" --old-pid "$current_pid" >/dev/null
-  export METABOT_RESTART_REQUEST_ID="$request_id"
-  export METABOT_RESTART_REASON="$reason"
-  export METABOT_RESTART_SOURCE="$source"
-  export METABOT_RESTART_RESUME="$resume"
-  export METABOT_BOT_NAME="$requester_bot"
-  export METABOT_CHAT_ID="$requester_chat"
   if ! result="$(_protected_switch "$METABOT_HOME" "$switch_apps")"; then
     _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected owned-service restart" >/dev/null || true
     return 1
@@ -1018,6 +1019,12 @@ cmd_deploy_runtime() {
   SESSION_STORE_DIR="$state_root"
   export SESSION_STORE_DIR
   request_id="${request_id:-$(_new_restart_request_id)}"
+  export METABOT_RESTART_REQUEST_ID="$request_id"
+  export METABOT_RESTART_REASON="$reason"
+  export METABOT_RESTART_SOURCE="$source"
+  export METABOT_RESTART_RESUME="$resume"
+  export METABOT_BOT_NAME="$requester_bot"
+  export METABOT_CHAT_ID="$requester_chat"
   live="$(_pm2_app_json metabot)"
   [[ -n "$live" ]] || { error "metabot is not registered in PM2; deploy-runtime will not create an implicit replacement."; return 1; }
   current_root="$(printf '%s' "$live" | _json_field cwd)"
@@ -1063,12 +1070,6 @@ cmd_deploy_runtime() {
 
   _restart_state breadcrumb "${state_flags[@]}" >/dev/null
   _restart_state mark-restarting --request-id "$request_id" --old-pid "$current_pid" >/dev/null
-  export METABOT_RESTART_REQUEST_ID="$request_id"
-  export METABOT_RESTART_REASON="$reason"
-  export METABOT_RESTART_SOURCE="$source"
-  export METABOT_RESTART_RESUME="$resume"
-  export METABOT_BOT_NAME="$requester_bot"
-  export METABOT_CHAT_ID="$requester_chat"
   if ! result="$(_protected_switch "$target" "$switch_apps")"; then
     _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected runtime switch; changed apps were rolled back" >/dev/null || true
     return 1

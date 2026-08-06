@@ -46,7 +46,8 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     "const args = process.argv.slice(2);",
     "const value = (name) => args[args.indexOf(name) + 1];",
     "const planOnly = value('--plan-only') === 'true';",
-    "fs.appendFileSync(process.env.PM2_LOG, `${planOnly ? 'protected-plan' : 'protected-switch'} ${args.join(' ')}\\n`);",
+    "const context = `request=${process.env.METABOT_RESTART_REQUEST_ID || ''} source=${process.env.METABOT_RESTART_SOURCE || ''} bot=${process.env.METABOT_BOT_NAME || ''} chat=${process.env.METABOT_CHAT_ID || ''}`;",
+    "fs.appendFileSync(process.env.PM2_LOG, `${planOnly ? 'protected-plan' : 'protected-switch'} ${args.join(' ')} ${context}\\n`);",
     "if (planOnly) {",
     "  const root = value('--runtime');",
     "  const scripts = { metabot: 'src/index.ts', 'metabot-worker-runnerd': 'packages/worker-runner-mcp/dist/daemon-cli.js', 'metabot-arcd': 'packages/arc-mcp/dist/daemon-cli.js', 'metabot-core': 'packages/server/dist/index.js' };",
@@ -134,6 +135,24 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(switches).toHaveLength(1);
   });
 
+  it('uses the same restart context while planning and switching runtime expectations', () => {
+    const kit = fixture();
+    run(kit, [
+      'restart', '--request-id', 'restart-context-1', '--source', 'pm',
+      '--bot', 'admin', '--chat', 'oc_context', '--reason', 'context check',
+    ]);
+    const lifecycle = readFileSync(kit.log, 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('protected-plan ') || line.startsWith('protected-switch '));
+    expect(lifecycle).toHaveLength(2);
+    for (const line of lifecycle) {
+      expect(line).toContain('request=restart-context-1');
+      expect(line).toContain('source=pm');
+      expect(line).toContain('bot=admin');
+      expect(line).toContain('chat=oc_context');
+    }
+  });
+
   it('refuses a wrong live runtime or missing artifact before the protected switch', () => {
     const wrongRuntime = fixture();
     expect(() => run(wrongRuntime, ['restart'], { FAKE_RUNTIME: '/srv/other-metabot' })).toThrow(
@@ -179,6 +198,25 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(log).not.toContain('delete ');
     expect(log).not.toContain('start ');
     expect(log).not.toContain('save --force');
+  });
+
+  it('uses the same deployment context while planning and switching a new runtime', () => {
+    const current = fixture();
+    const target = fixture();
+    run(current, [
+      'deploy-runtime', '--runtime', target.runtime, '--request-id', 'deploy-context-1',
+      '--source', 'admin', '--bot', 'admin', '--chat', 'oc_deploy', '--reason', 'deploy context', '--no-wait',
+    ]);
+    const lifecycle = readFileSync(current.log, 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('protected-plan ') || line.startsWith('protected-switch '));
+    expect(lifecycle).toHaveLength(2);
+    for (const line of lifecycle) {
+      expect(line).toContain('request=deploy-context-1');
+      expect(line).toContain('source=admin');
+      expect(line).toContain('bot=admin');
+      expect(line).toContain('chat=oc_deploy');
+    }
   });
 
   it('fails closed when the live PM2 process tree cannot be verified', () => {
