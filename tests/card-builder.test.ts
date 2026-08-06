@@ -217,7 +217,7 @@ describe('buildCard', () => {
     expect(goal.content).toContain('Ship the PR by Friday');
   });
 
-  it('renders a compact 🧑‍🤝‍🧑 Team panel when teamState has members or tasks (regression)', () => {
+  it('renders 🧑‍🤝‍🧑 Team panel when teamState has members or tasks (regression)', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   't',
@@ -225,23 +225,18 @@ describe('buildCard', () => {
       toolCalls:    [],
       teamState: {
         name:      'feishu-ux-review',
-        agents: [
-          { name: 'ux-researcher', status: 'working', lastSubject: 'audit' },
-          { name: 'arch-reviewer', status: 'idle' },
-        ],
-        tasks:  [{ taskId: 't1', subject: 'UX audit', status: 'in_progress', agent: 'ux-researcher' }],
+        teammates: [{ name: 'ux-researcher', status: 'working', lastSubject: 'audit' }],
+        tasks:     [{ taskId: 't1', subject: 'UX audit', status: 'in_progress', teammate: 'ux-researcher' }],
       },
     };
     const json = JSON.parse(buildCard(state));
     const team = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
     );
     expect(team).toBeDefined();
     expect(team.content).toContain('feishu-ux-review');
-    expect(team.content).toContain('1/2 working');
     expect(team.content).toContain('ux-researcher');
-    expect(team.content).toContain('audit');
-    expect(team.content).not.toContain('arch-reviewer');
+    expect(team.content).toContain('UX audit');
   });
 
   it('renders pending Agent Team tasks', () => {
@@ -252,8 +247,8 @@ describe('buildCard', () => {
       toolCalls: [],
       teamState: {
         name: 'demo',
-        agents: [{ name: 'lead', status: 'idle' }],
-        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' }],
+        teammates: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
       },
     };
     const json = JSON.parse(buildCard(state));
@@ -263,40 +258,6 @@ describe('buildCard', () => {
     expect(team).toBeDefined();
     expect(team.content).toContain('1 pending');
     expect(team.content).toContain('Plan work');
-  });
-
-  it('renders non-closed lifecycle state and key', () => {
-    const state: CardState = {
-      status: 'running',
-      userPrompt: 'restart recovery',
-      responseText: '',
-      toolCalls: [],
-      lifecycleStage: 'recovering',
-      lifecycleKey: 'teaminst:abc:manager:run-123',
-    };
-    const json = JSON.parse(buildCard(state));
-    const lifecycle = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
-    );
-    expect(lifecycle).toBeDefined();
-    expect(lifecycle.content).toContain('Recovering');
-    expect(lifecycle.content).toContain('teaminst:abc:manager:run-123');
-  });
-
-  it('hides closed lifecycle state', () => {
-    const state: CardState = {
-      status: 'complete',
-      userPrompt: 'done',
-      responseText: 'Done.',
-      toolCalls: [],
-      lifecycleStage: 'closed',
-      lifecycleKey: 'chat:done',
-    };
-    const json = JSON.parse(buildCard(state));
-    const lifecycle = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
-    );
-    expect(lifecycle).toBeUndefined();
   });
 });
 

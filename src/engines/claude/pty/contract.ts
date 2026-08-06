@@ -34,13 +34,12 @@
  * enqueued user message = one turn (or a tool_result injection). The PTY
  * session consumes that iterable and types prompts into the TUI as keystrokes.
  *
- * This file is types/interfaces ONLY — no runtime logic — so every Agent Team
- * contributor can build against a stable shape in parallel.
+ * This file is types/interfaces ONLY — no runtime logic — so every teammate
+ * can build against a stable shape in parallel.
  */
 
 import type { SDKMessage } from '../executor.js';
 import type { Logger } from '../../../utils/logger.js';
-import type { ModelTelemetry } from '../../../types.js';
 
 // SDKUserMessage is the SDK's input shape. We re-declare the structural subset
 // the PTY backend consumes so the pty module has no hard dependency on the SDK
@@ -71,8 +70,8 @@ export type PtyPromptSource = AsyncIterable<PtyUserMessage>;
  * Options accepted by {@link ptyQuery}. This is intentionally a SUBSET of the
  * Agent SDK's query options — only the fields the PTY backend can honor. The
  * caller (persistent-executor.ts) passes its full `queryOptions` object; extra
- * fields are ignored. We list the ones that matter so Agent Team agents know
- * what to wire through to the spawned `claude` process.
+ * fields are ignored. We list the ones that matter so teammates know what to
+ * wire through to the spawned `claude` process.
  */
 export interface PtyQueryOptions {
   /** Working directory for the claude process. Drives the jsonl path. */
@@ -104,22 +103,10 @@ export interface PtyQueryOptions {
    * interactive default (NOT 'sdk-cli') so billing lands on the subscription.
    */
   env?: NodeJS.ProcessEnv;
+  /** Private additive MCP config passed as `--mcp-config`; never strict. */
+  mcpConfigPath?: string;
   /** Path to the claude executable (defaults to resolveClaudePath()). */
   pathToClaudeExecutable?: string;
-  /**
-   * MCP servers to expose to the spawned `claude` (the worker-manager server
-   * that provides worker_dispatch / remind_me, plus anything configured in
-   * ~/.claude/settings.json `mcpServers`). Same object the SDK backend passes
-   * as `queryOptions.mcpServers`.
-   *
-   * The CLI does NOT read `mcpServers` out of a --settings file, so ptyQuery
-   * materializes this into a temp `{"mcpServers": {...}}` json and passes it
-   * via `claude --mcp-config <file>`. Without this the PTY backend silently
-   * runs with no metabot MCP tools at all while the SDK backend has them —
-   * the exact asymmetry that left claude-engine bots unable to dispatch
-   * workers while codex-engine bots (which read ~/.codex/config.toml) could.
-   */
-  mcpServers?: Record<string, unknown>;
   /** PTY geometry. Defaults: 120x40. */
   cols?: number;
   rows?: number;
@@ -205,7 +192,7 @@ export type PtyQueryFn = (args: {
  *   - Self-generate a session id (uuid) so the jsonl path is predictable, OR
  *     adopt `resume`.
  *   - spawn `claude` (NO -p) with --session-id/--resume, --settings,
- *     a suitable permission mode, and --append-system-prompt.
+ *     --dangerously-skip-permissions, --append-system-prompt.
  *   - Wait for TUI readiness (the `❯` input box) before accepting input.
  *   - typePrompt(): feed a prompt as keystrokes + submit (Enter), with the
  *     double-Enter safeguard proven in the POC.
@@ -216,13 +203,8 @@ export interface PtyClaudeSession {
   readonly sessionId: string;
   /** Resolves once the TUI input box is ready to accept typing. */
   ready(): Promise<void>;
-  /**
-   * Type a prompt string into the TUI and submit it. Resolves only after the
-   * current terminal screen proves that the input was echoed and then left the
-   * input box (or entered the running state). This is a submit acknowledgement,
-   * not proof that the upstream model has produced a response.
-   */
-  typePrompt(text: string): Promise<PtyPromptSubmission>;
+  /** Type a prompt string into the TUI and submit it. */
+  typePrompt(text: string): Promise<void>;
   /**
    * Write raw bytes to the PTY (no prompt-submit framing). Used by the
    * interactive-tool keystroke layer to drive native TUI menus.
@@ -244,11 +226,6 @@ export interface PtyClaudeSession {
   readonly jsonlPath: string;
 }
 
-export interface PtyPromptSubmission {
-  submittedAt: number;
-  acknowledgement: 'running' | 'accepted';
-}
-
 export interface PtyClaudeSessionOptions {
   cwd: string;
   resume?: string;
@@ -256,10 +233,7 @@ export interface PtyClaudeSessionOptions {
   appendSystemPrompt?: string;
   /** Absolute path to a settings.json (contains Stop + team hooks). */
   settingsPath: string;
-  /**
-   * Absolute path to a `{"mcpServers": {...}}` json, passed as
-   * `claude --mcp-config <file>`. Omitted when there are no servers to expose.
-   */
+  /** Private additive MCP config passed as `--mcp-config`; never strict. */
   mcpConfigPath?: string;
   env?: NodeJS.ProcessEnv;
   pathToClaudeExecutable?: string;
@@ -290,15 +264,6 @@ export type RawJsonlRecord = Record<string, unknown>;
 export interface JsonlScanner extends AsyncIterable<RawJsonlRecord> {
   /** Stop tailing and end the async iteration. */
   stop(): void;
-  /**
-   * Synchronously return records already read by the iterator but not yet
-   * delivered, followed by any records appended since the last poll. This is
-   * the ordering barrier used before a synthetic terminal result. When
-   * `includePartial` is true, it also emits a trailing record whose
-   * terminating newline hasn't landed yet (used at end-of-turn to recover
-   * claude's final assistant line before synthesizing the `result`).
-   */
-  drainPending(includePartial?: boolean): RawJsonlRecord[];
 }
 
 export type CreateJsonlScanner = (args: {
@@ -343,7 +308,6 @@ export interface SynthesizeResultArgs {
   numTurns?: number;
   /** Real model name (from the assistant jsonl records), e.g. claude-fable-5. */
   model?: string;
-  modelTelemetry?: ModelTelemetry;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
@@ -370,8 +334,6 @@ export type SynthesizeResult = (args: SynthesizeResultArgs) => SDKMessage;
 export interface PtyHookBridge {
   /** Absolute path of the generated settings.json (with command hooks). */
   writeSettings(): Promise<string>;
-  /** Absolute path of a generated `{"mcpServers":{...}}` json for --mcp-config. */
-  writeMcpConfig(servers: Record<string, unknown>): Promise<string>;
   /** Register the per-turn completion callback (Stop hook sentinel). */
   onTurnComplete(cb: () => void): void;
   /** Register team-event callback (TaskCreated/Completed/TeammateIdle). */

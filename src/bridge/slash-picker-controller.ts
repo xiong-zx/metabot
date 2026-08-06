@@ -13,10 +13,12 @@ const SLASH_PICKERS: Record<string, { question: string; header: string; options:
     question: 'Set the reasoning effort level',
     header: 'Effort',
     options: [
-      { label: 'xhigh', description: 'Maximum Codex-supported effort for deep agentic/coding work' },
-      { label: 'high', description: 'Complex reasoning — quality over speed/cost' },
-      { label: 'medium', description: 'Balanced speed, cost & performance (default)' },
-      { label: 'low', description: 'Fastest — high-volume / latency-sensitive work' },
+      { label: 'low', description: 'Fast responses with lighter reasoning' },
+      { label: 'medium', description: 'Balanced speed and reasoning depth for everyday tasks' },
+      { label: 'high', description: 'Greater reasoning depth for complex problems' },
+      { label: 'xhigh', description: 'Extra-high reasoning depth for complex problems' },
+      { label: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+      { label: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
     ],
   },
 };
@@ -119,6 +121,16 @@ export class SlashPickerController {
     this.pending.delete(chatId);
 
     if (pending.command === '/resume') {
+      if (this.deps.isBusy(chatId)) {
+        await this.deps.finalizeQuestionCard(pending.cardMessageId, {
+          status: 'error',
+          userPrompt: '/resume',
+          responseText: 'Resume cancelled because a task is in progress. Use `/stop` first, then send `/resume` again.',
+          toolCalls: [],
+          errorMessage: 'Task in progress',
+        });
+        return true;
+      }
       await this.deps.applyResume(chatId, choice);
       await this.deps.finalizeQuestionCard(pending.cardMessageId, {
         status: 'complete',
@@ -199,7 +211,26 @@ export class SlashPickerController {
       return true;
     }
 
+    if (this.deps.isBusy(chatId)) {
+      await this.deps.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is running. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return true;
+    }
+
     const sessions = await this.deps.listSessionsForChat(chatId);
+    if (this.deps.isBusy(chatId)) {
+      await this.deps.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task started while sessions were loading. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return true;
+    }
     if (sessions.length === 0) {
       await this.deps.sender.sendTextNotice(
         chatId,
@@ -310,9 +341,7 @@ function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | u
     normalized === 'xhigh' ||
     normalized === 'max' ||
     normalized === 'ultra'
-  ) {
-    return normalized;
-  }
+  ) return normalized;
   return undefined;
 }
 

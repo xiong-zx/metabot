@@ -1,7 +1,5 @@
 // Shared types used across IM platforms (Feishu, Telegram, etc.)
 
-import type { TeamActorRole } from './agent-teams/team-store.js';
-
 export type CardStatus =
   | 'thinking'
   | 'running'
@@ -10,7 +8,7 @@ export type CardStatus =
   | 'waiting_for_input'
   /**
    * Card was emitted by `flushSpontaneous` at the end of a between-turn
-   * burst (background task return / Agent Team ping / `/goal` evaluator).
+   * burst (background task return / teammate ping / `/goal` evaluator).
    * Rendered in blue with an "Agent activity" title so users can tell
    * it apart from a normal user-prompted turn without reading body text.
    */
@@ -34,16 +32,6 @@ export interface PendingQuestion {
 
 export type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
-export type CardLifecycleStage =
-  | 'received'
-  | 'acknowledged'
-  | 'executing'
-  | 'checkpointing'
-  | 'responding'
-  | 'closed'
-  | 'recovering'
-  | 'blocked';
-
 export interface BackgroundEvent {
   taskId: string;
   description: string;
@@ -56,12 +44,12 @@ export interface BackgroundEvent {
  * Snapshot of an Agent Teams session, derived from Claude Code's
  * TaskCreated / TaskCompleted / TeammateIdle hooks. Rendered in the
  * Feishu card and Web UI as a "team panel" so the user can see
- * agents and the shared task list at a glance.
+ * teammates and the shared task list at a glance.
  */
 export interface TeamMember {
   name: string;
   status: 'working' | 'idle';
-  /** Most recent task subject this agent touched (best-effort). */
+  /** Most recent task subject this teammate touched (best-effort). */
   lastSubject?: string;
 }
 
@@ -69,45 +57,14 @@ export interface TeamTask {
   taskId: string;
   subject: string;
   status: 'pending' | 'in_progress' | 'completed';
-  agent?: string;
-  /** @deprecated Compatibility for persisted pre-terminology card state. */
   teammate?: string;
 }
 
 export interface TeamState {
   /** Team name as reported by the SDK hooks (first non-empty wins). */
   name?: string;
-  agents: TeamMember[];
-  /** @deprecated Compatibility for persisted pre-terminology card state. */
-  teammates?: TeamMember[];
+  teammates: TeamMember[];
   tasks: TeamTask[];
-}
-
-/** Per-turn model provenance. Never populated from assistant natural-language claims. */
-export interface ModelTelemetry {
-  configuredModel?: string;
-  spawnModel?: string;
-  runtimeModel?: string;
-  runtimeModelSource?: 'assistant_jsonl' | 'result_model_usage';
-  sessionId?: string;
-  sessionMode?: 'fresh' | 'resume' | 'continue';
-  fallbackOriginalModel?: string;
-  fallbackModel?: string;
-  fallbackReason?: string;
-  /** Whether the observed CLI session may be resumed for a later user turn. */
-  sessionDisposition?: 'active' | 'retired';
-  /** Machine-readable reason for retiring a session from resume mappings. */
-  sessionRetireReason?: 'turn_start_timeout';
-  /** Whether the PTY accepted this turn's prompt, for bounded bridge recovery. */
-  promptSubmission?: 'accepted' | 'not_submitted' | 'ambiguous';
-  /** Machine-readable PTY input failure classification. */
-  promptFailureReason?:
-    | 'tui_not_ready'
-    | 'tui_not_idle'
-    | 'session_disposed'
-    | 'input_not_echoed'
-    | 'submit_unacknowledged'
-    | 'unknown';
 }
 
 export interface CardState {
@@ -115,18 +72,12 @@ export interface CardState {
   userPrompt: string;
   responseText: string;
   toolCalls: ToolCall[];
-  /** Bounded card lifecycle stage used for recovery, observability, and stuck-card prevention. */
-  lifecycleStage?: CardLifecycleStage;
-  /** Optional idempotency/recovery key for the card lifecycle. */
-  lifecycleKey?: string;
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;
   pendingQuestion?: PendingQuestion;
   /** Primary model used (e.g. "claude-fable-5") */
   model?: string;
-  /** Auditable configured/spawn/runtime model provenance for this turn. */
-  modelTelemetry?: ModelTelemetry;
   /** Total input+output tokens consumed */
   totalTokens?: number;
   /** Context window size of the primary model */
@@ -137,7 +88,7 @@ export interface CardState {
   backgroundEvents?: BackgroundEvent[];
   /** Active /goal condition for this session, if any. Mirrored locally so the card can show "🎯 Goal" badge across turns. */
   goalCondition?: string;
-  /** Snapshot of the active Agent Team (agents + tasks), if any. */
+  /** Snapshot of the active Agent Team (teammates + tasks), if any. */
   teamState?: TeamState;
 }
 
@@ -147,8 +98,6 @@ export interface IncomingMessage {
   chatType: string;
   userId: string;
   text: string;
-  /** Authority role for synthetic/internal messages. Human chat messages default to user. */
-  actorRole?: TeamActorRole;
   timestamp?: number;
   imageKey?: string;
   fileKey?: string;

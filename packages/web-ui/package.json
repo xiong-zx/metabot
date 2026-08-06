@@ -3,20 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "metabot-core internal web console (React + Vite SPA)",
+  "description": "MetaBot Personal Core Console (React + Vite SPA)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "echo 'no SPA unit tests in v1' && exit 0",
+    "test": "vitest run",
     "lint": "echo 'lint not configured for web-ui v1'"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.27.0",
+    "react-router-dom": "^6.30.4",
     "marked": "^14.1.3",
-    "dompurify": "^3.2.4"
+    "dompurify": "^3.4.12"
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",

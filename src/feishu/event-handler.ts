@@ -35,13 +35,13 @@ const MEMBER_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const memberCountCache = new Map<string, { count: number; ts: number }>();
 
 // Cache for recent media messages in group chats (file/image sent without @mention).
-// When a user later @mentions the bot, cached media is attached automatically.
+// Entries are consumed only when the user replies to that exact message and @mentions the bot.
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const MESSAGE_DEDUPE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_PENDING_MEDIA_PER_USER = 10;
 const MAX_REFERENCED_TEXT_CHARS = 16_000;
 interface CachedMedia {
   messageId: string;
+  provenanceChatId?: string;
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
@@ -69,7 +69,9 @@ function consumeCachedMedia(
     return [];
   }
 
-  const selected = valid.filter(m => m.messageId === replyToMessageId);
+  const selected = valid.filter(
+    m => m.messageId === replyToMessageId && m.provenanceChatId === chatId,
+  );
   if (selected.length === 0) {
     cache.set(key, valid);
     return [];
@@ -84,24 +86,13 @@ function cachePendingMedia(
   cache: PendingMediaCache,
   chatId: string,
   userId: string,
-  media: Omit<CachedMedia, 'ts'>,
+  media: Omit<CachedMedia, 'ts' | 'provenanceChatId'>,
 ): void {
   const key = cacheMediaKey(chatId, userId);
   const now = Date.now();
   const valid = (cache.get(key) ?? []).filter(item => now - item.ts < MEDIA_CACHE_TTL_MS);
-  valid.push({ ...media, ts: now });
+  valid.push({ ...media, provenanceChatId: chatId, ts: now });
   cache.set(key, valid.slice(-MAX_PENDING_MEDIA_PER_USER));
-}
-
-function isDuplicateMessage(cache: Map<string, number>, messageId: string): boolean {
-  const now = Date.now();
-  for (const [id, ts] of cache) {
-    if (now - ts >= MESSAGE_DEDUPE_TTL_MS) cache.delete(id);
-  }
-  const prior = cache.get(messageId);
-  if (prior !== undefined && now - prior < MESSAGE_DEDUPE_TTL_MS) return true;
-  cache.set(messageId, now);
-  return false;
 }
 
 function cleanMessageText(text: string): string {
@@ -126,6 +117,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const METABOT_CARD_CHROME_PREFIXES = [
   '\u{1F3AF} **Goal:**',
   '**State:**',
+  '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team:**',
   '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team**',
   '\u{1F4E1} **Background**',
 ];
@@ -168,42 +160,29 @@ function isMetaBotStatsFooter(node: Record<string, unknown>): boolean {
   });
 }
 
-/**
- * MetaBot's own telemetry footer (`ctx: 1.2k/200k (1%) | $0.03 | model | 4.2s`)
- * as emitted by `card-builder.ts` (a `note`) and `card-builder-v2.ts` (a grey
- * `column_set`). Only consulted by the permissive pass below, where `note`
- * elements are otherwise fair game.
- */
 const METABOT_STATS_FOOTER_PATTERN = /^(?:ctx: \d|\$\d)/;
-
-// Bounds for card traversal. `body.content` is `JSON.parse` output so it cannot
-// contain real cycles, but the walker is shared-reference safe anyway and both
-// depth and node count are capped so a pathological (or hostile) card can never
-// turn one reply into unbounded work.
 const MAX_CARD_TRAVERSAL_DEPTH = 40;
-const MAX_CARD_TEXT_NODES = 4_000;
+const MAX_CARD_TRAVERSAL_NODES = 4_000;
 
 const TEXT_LEAF_TAGS = new Set(['markdown', 'plain_text', 'lark_md', 'md', 'text', 'a', 'at']);
 const TEXT_CONTENT_KEYS = ['content', 'text', 'plain_text', 'lark_md'];
 const UI_CONTROL_TAGS = new Set(['note', 'button', 'select_static', 'overflow']);
-/** Card metadata that never carries the conversational answer. */
 const DEEP_SCAN_SKIP_KEYS = new Set([
   'config', 'header', 'i18n_header', 'card_link', 'style', 'styles',
   'behaviors', 'action', 'value', 'confirm',
 ]);
-/** Preferred locales when a card is delivered in the `i18n_elements` form. */
 const I18N_LOCALE_ORDER = ['zh_cn', 'zh_hk', 'zh_tw', 'en_us', 'ja_jp'];
 
 interface CardTextContext {
   output: string[];
   seen: Set<object>;
-  /** Also read `note` / `button` / control labels (fallback pass only). */
+  budget: { remaining: number };
+  /** Also read note/button/control labels (fallback pass only). */
   permissive: boolean;
   /** Descend every property, not just known element containers. */
   deep: boolean;
 }
 
-/** First non-empty of the conventional text-bearing keys on a leaf node. */
 function readLeafText(node: Record<string, unknown>): string {
   for (const key of TEXT_CONTENT_KEYS) {
     const value = node[key];
@@ -213,11 +192,10 @@ function readLeafText(node: Record<string, unknown>): string {
 }
 
 function collectInteractiveCardText(node: unknown, ctx: CardTextContext, depth = 0): void {
-  if (ctx.output.length >= MAX_CARD_TEXT_NODES || depth > MAX_CARD_TRAVERSAL_DEPTH) return;
+  if (ctx.budget.remaining <= 0 || depth > MAX_CARD_TRAVERSAL_DEPTH) return;
+  ctx.budget.remaining -= 1;
 
   if (typeof node === 'string') {
-    // Bare strings only count inside a known element tree (e.g. `div.text` on
-    // some dialects). The deep scan must not scoop up styling scalars.
     if (!ctx.deep && node.trim()) ctx.output.push(node.trim());
     return;
   }
@@ -237,9 +215,6 @@ function collectInteractiveCardText(node: unknown, ctx: CardTextContext, depth =
     return;
   }
 
-  // Footer panels and controls are visible UI metadata, not the conversational
-  // answer the user intended to quote — unless nothing else in the card yielded
-  // text, in which case a foreign card's only content may well live here.
   if (UI_CONTROL_TAGS.has(tag)) {
     if (!ctx.permissive) return;
     const nested: string[] = [];
@@ -304,7 +279,6 @@ function collectInteractiveTableText(node: Record<string, unknown>, ctx: CardTex
   }
 }
 
-/** Numeric/boolean cells still belong in the row — dropping them misaligns it. */
 function formatTableCell(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
@@ -322,21 +296,6 @@ function pushI18nElementRoots(value: unknown, roots: unknown[]): void {
   }
 }
 
-/**
- * Every plausible element container in a read-back card, most specific first.
- *
- * Feishu does NOT contractually guarantee that `im.v1.message.get` returns an
- * `interactive` message's `body.content` in the same shape MetaBot sent. In
- * practice it echoes the sent JSON, but card payloads reach this code through
- * several other routes too — forwarded cards, cards sent by other apps on older
- * schemas, and i18n cards — which are documented in alternate envelopes such as
- * `{ card: { elements } }`, `{ card: { body: { elements } } }`,
- * `{ i18n_elements: { zh_cn: [...] } }`, and the legacy row-of-columns form
- * `{ title, elements: [[{ tag: 'text', text: '...' }]] }`. Probing every
- * container (and, as a last resort, walking the card generically) is deliberate:
- * an unrecognized envelope must degrade to "less precise text", never to the
- * silent "no text at all" that a single hardcoded shape would produce.
- */
 function cardElementRoots(card: Record<string, unknown>): unknown[] {
   const roots: unknown[] = [];
   const seen = new Set<Record<string, unknown>>();
@@ -349,7 +308,6 @@ function cardElementRoots(card: Record<string, unknown>): unknown[] {
     if (node.elements !== undefined) roots.push(node.elements);
     pushI18nElementRoots(body?.i18n_elements, roots);
     pushI18nElementRoots(node.i18n_elements, roots);
-    // Wrapper envelopes: `{ card: {...} }`, `{ data: { card: {...} } }`.
     visit(node.card, depth + 1);
     visit(node.data, depth + 1);
   };
@@ -376,6 +334,7 @@ function runCardTextPass(roots: unknown[], options: { permissive: boolean; deep:
     const ctx: CardTextContext = {
       output: [],
       seen: new Set<object>(),
+      budget: { remaining: MAX_CARD_TRAVERSAL_NODES },
       permissive: options.permissive,
       deep: options.deep,
     };
@@ -388,24 +347,15 @@ function runCardTextPass(roots: unknown[], options: { permissive: boolean; deep:
 function extractInteractiveCardText(card: unknown): string {
   if (!isRecord(card)) return '';
   const roots = cardElementRoots(card);
-
-  // 1. Strict pass over every known element container: content elements only.
   const strict = runCardTextPass(roots, { permissive: false, deep: false });
   if (strict) return strict;
 
-  // 2. Same containers, but control/footer labels now count — a foreign card's
-  //    only text may live in a note or a button.
   const permissive = runCardTextPass(roots, { permissive: true, deep: false });
   if (permissive) return permissive;
 
-  // 3. Card-level fallbacks, then a bounded generic walk for envelopes we have
-  //    never seen. Better an imprecise quote than a silent no-op.
   const summary = extractCardSummaryText(card);
   if (summary) return cleanMessageText(summary);
 
-  // The card header is deliberately NOT consulted: on MetaBot cards it is the
-  // status chrome (`✅ Complete`) this extractor exists to strip. See F-6 in
-  // remediation-report.md.
   return runCardTextPass([card], { permissive: true, deep: true });
 }
 
@@ -427,8 +377,9 @@ function parseReferencedMessage(
     if (messageType === 'text') {
       text = cleanMessageText(parsed.text || '');
     } else if (messageType === 'post') {
-      text = cleanMessageText(extractTextFromPost(parsed));
-      media = extractImagesFromPost(parsed).map(imageKey => ({
+      const post = extractPostInterleaved(parsed);
+      text = cleanMessageText(post.text);
+      media = post.imageKeys.map(imageKey => ({
         messageId: snapshot.messageId,
         imageKey,
         ts: Date.now(),
@@ -490,7 +441,11 @@ async function resolveReferencedMessage(
 
   const snapshot = await messageSender.getMessage(messageId);
   if (!snapshot) return { media: cachedMedia };
-  if (snapshot.chatId && snapshot.chatId !== chatId) {
+  if (!snapshot.chatId) {
+    logger.warn({ messageId, chatId }, 'Ignoring reply reference without chat provenance');
+    return { media: [], messageType: snapshot.messageType };
+  }
+  if (snapshot.chatId !== chatId) {
     logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
     return { media: [], messageType: snapshot.messageType };
   }
@@ -618,33 +573,6 @@ export async function handleGroupReplyModeCommand(options: {
   return true;
 }
 
-function resolveGroupReplyArgs(
-  onAnyEventOrStore?: (() => void) | FeishuGroupReplyModeStore,
-  groupReplyModeStoreOrNotice?: FeishuGroupReplyModeStore | GroupReplyModeNoticeHandler,
-  onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
-): {
-  onAnyEvent?: () => void;
-  groupReplyModeStore?: FeishuGroupReplyModeStore;
-  groupReplyModeNotice?: GroupReplyModeNoticeHandler;
-} {
-  if (typeof onAnyEventOrStore === 'function') {
-    return {
-      onAnyEvent: onAnyEventOrStore,
-      groupReplyModeStore: groupReplyModeStoreOrNotice instanceof FeishuGroupReplyModeStore
-        ? groupReplyModeStoreOrNotice
-        : undefined,
-      groupReplyModeNotice: onGroupReplyModeNotice,
-    };
-  }
-
-  return {
-    groupReplyModeStore: onAnyEventOrStore,
-    groupReplyModeNotice: typeof groupReplyModeStoreOrNotice === 'function'
-      ? groupReplyModeStoreOrNotice
-      : onGroupReplyModeNotice,
-  };
-}
-
 export function createEventDispatcher(
   config: BotConfig,
   logger: Logger,
@@ -652,20 +580,13 @@ export function createEventDispatcher(
   botOpenId?: string,
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
-  onAnyEventOrStore?: (() => void) | FeishuGroupReplyModeStore,
-  groupReplyModeStoreOrNotice?: FeishuGroupReplyModeStore | GroupReplyModeNoticeHandler,
+  groupReplyModeStore?: FeishuGroupReplyModeStore,
   onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
 ): lark.EventDispatcher {
-  const {
-    onAnyEvent,
-    groupReplyModeStore,
-    groupReplyModeNotice,
-  } = resolveGroupReplyArgs(onAnyEventOrStore, groupReplyModeStoreOrNotice, onGroupReplyModeNotice);
   const dispatcher = new lark.EventDispatcher({});
-  // Each Feishu app gets an independent dispatcher. Keep routing state local so
-  // one bot cannot consume another bot's pending attachment or dedupe entry.
+  // Each bot dispatcher owns its own fallback cache so one bot cannot consume
+  // another bot's pending attachment state.
   const pendingMediaCache: PendingMediaCache = new Map();
-  const recentMessageIds = new Map<string, number>();
 
   // Register the card action trigger handler (fired when a user clicks a button
   // on an interactive card). The lark SDK types omit this event so we cast.
@@ -674,7 +595,6 @@ export function createEventDispatcher(
       register: (handlers: Record<string, (data: unknown) => unknown>) => void;
     }).register({
       'card.action.trigger': (data: unknown) => {
-        onAnyEvent?.();
         try {
           const d = data as {
             operator?: { open_id?: string };
@@ -706,7 +626,6 @@ export function createEventDispatcher(
 
   dispatcher.register({
     'im.message.receive_v1': async (data: any) => {
-      onAnyEvent?.();
       try {
         const event = data;
         const message = event.message;
@@ -720,37 +639,20 @@ export function createEventDispatcher(
           return;
         }
 
-        const chatId = message.chat_id;
-        const chatType = message.chat_type;
-        const messageId = message.message_id;
-        const replyToMessageId = message.parent_id || undefined;
-        if (!messageId) {
-          logger.warn({ chatId, chatType }, 'Message missing message_id');
-          return;
-        }
-        if (isDuplicateMessage(recentMessageIds, messageId)) {
-          logger.info({ messageId, chatId }, 'Ignoring duplicate message event');
-          return;
-        }
-
-        // include_bot permissions can deliver messages authored by another app.
-        // Feishu chat is a user-facing ingress; bot-to-bot work belongs on the
-        // agent bus and must not silently consume model context here.
-        const senderType = sender?.sender_type;
-        if (senderType && senderType !== 'user') {
-          logger.info({ messageId, chatId, senderType }, 'Ignoring non-user message event');
-          return;
-        }
-
         const userId = sender?.sender_id?.open_id;
         if (!userId) {
           logger.warn('Message missing sender open_id');
           return;
         }
 
+        const chatId = message.chat_id;
+        const chatType = message.chat_type;
+        const messageId = message.message_id;
+        const replyToMessageId = message.parent_id || undefined;
         const mentions = message.mentions;
-        let botMentioned = false;
+
         let commandText = '';
+        let botMentioned = false;
         if (chatType === 'group') {
           botMentioned = isBotMentioned(mentions, botOpenId);
         }
@@ -767,7 +669,7 @@ export function createEventDispatcher(
             logger.debug({ chatId, botName: config.name }, 'Ignoring group reply mode command not addressed to this Bot');
             return;
           }
-          if (groupReplyCommand && groupReplyModeStore && groupReplyModeNotice) {
+          if (groupReplyCommand && groupReplyModeStore && onGroupReplyModeNotice) {
             const storedMode = groupReplyModeStore.get(config.name, chatId);
             const inheritedPrivateLike = !storedMode && !config.groupNoMention
               && messageSender && typeof messageSender.getChatMemberCount === 'function'
@@ -783,7 +685,7 @@ export function createEventDispatcher(
               defaultMode: config.groupNoMention || inheritedPrivateLike ? 'all' : 'mention',
               canChangeMode,
               store: groupReplyModeStore,
-              sendNotice: groupReplyModeNotice,
+              sendNotice: onGroupReplyModeNotice,
             });
             logger.info({ chatId, userId, botName: config.name }, 'Handled group reply mode command');
             return;
@@ -803,11 +705,11 @@ export function createEventDispatcher(
             privateLikeGroup,
           })) {
             if (msgType === 'image' || msgType === 'file') {
-              // Cache media messages for later retrieval when user @mentions bot
+              // Cache media only as a fallback for a later reply to this exact message.
               const media = parseMediaMessage(message, msgType, logger);
               if (media) {
                 cachePendingMedia(pendingMediaCache, chatId, userId, { ...media, messageId });
-                logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for later @mention');
+                logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for an explicit reply');
               }
               return;
             }
@@ -855,17 +757,18 @@ export function createEventDispatcher(
           text = '请分析这个文件';
           logger.info({ userId, chatId, chatType, fileKey, fileName }, 'Received file message');
         } else if (msgType === 'post') {
-          // Rich text (post) message: extract plain text and images from nested structure
+          // Rich text (post) message: extract plain text and images from nested structure,
+          // preserving the original ordering by inlining [图N] placeholders where images appeared.
           try {
             const content = JSON.parse(message.content);
             logger.debug({ postContent: JSON.stringify(content).slice(0, 500) }, 'Raw post content');
-            text = extractTextFromPost(content);
-            const postImages = extractImagesFromPost(content);
-            if (postImages.length > 0) {
-              imageKey = postImages[0];
-              postExtraImages = postImages.slice(1);
+            const interleaved = extractPostInterleaved(content);
+            text = interleaved.text;
+            if (interleaved.imageKeys.length > 0) {
+              imageKey = interleaved.imageKeys[0];
+              postExtraImages = interleaved.imageKeys.slice(1);
             }
-            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: postImages.length }, 'Extracted post content');
+            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: interleaved.imageKeys.length }, 'Extracted post content');
           } catch {
             logger.warn({ content: message.content }, 'Failed to parse post message content');
             return;
@@ -925,7 +828,7 @@ export function createEventDispatcher(
           }, 'Resolved replied message context');
         }
 
-        // Collect extra media: post images (2nd+) and explicitly referenced media
+        // Collect extra media: post images (2nd+) and explicitly referenced media.
         let extraMedia: IncomingMessage['extraMedia'];
         if (postExtraImages.length > 0) {
           extraMedia = postExtraImages.map(key => ({
@@ -935,13 +838,13 @@ export function createEventDispatcher(
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
         if (referencedMedia.length > 0) {
-          const cachedMedia = referencedMedia.map(m => ({
-            messageId: m.messageId,
-            imageKey: m.imageKey,
-            fileKey: m.fileKey,
-            fileName: m.fileName,
+          const media = referencedMedia.map(item => ({
+            messageId: item.messageId,
+            imageKey: item.imageKey,
+            fileKey: item.fileKey,
+            fileName: item.fileName,
           }));
-          extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
+          extraMedia = extraMedia ? [...extraMedia, ...media] : media;
           logger.info({
             chatId,
             userId,
@@ -993,58 +896,23 @@ function parseMediaMessage(
 }
 
 /**
- * Extract all image_keys from a Feishu post (rich text) message.
- * Looks for { tag: "img", image_key: "..." } elements in the post content.
+ * Extract text and images from a Feishu post (rich text) message in a single pass,
+ * preserving the original ordering. Images are replaced with [Image N] placeholders
+ * (1-indexed) inside the text, and the matching image_keys are returned in the
+ * same order, so the caller can re-align them downstream.
+ *
+ * Handles two content shapes:
+ *   With locale wrapper:    { "zh_cn": { "title": "...", "content": [[{tag, ...}, ...], ...] } }
+ *   Without locale wrapper: { "title": "...", "content": [[{tag, ...}, ...], ...] }
  */
-function extractImagesFromPost(content: Record<string, unknown>): string[] {
+function extractPostInterleaved(
+  content: Record<string, unknown>,
+): { text: string; imageKeys: string[] } {
   const bodies: Array<Record<string, unknown>> = [];
 
   if (Array.isArray(content.content)) {
     bodies.push(content);
   } else {
-    for (const locale of Object.values(content)) {
-      if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
-        const loc = locale as Record<string, unknown>;
-        if (Array.isArray(loc.content)) {
-          bodies.push(loc);
-        }
-      }
-    }
-  }
-
-  const keys: string[] = [];
-  for (const body of bodies) {
-    const paragraphs = body.content as unknown[][];
-    for (const paragraph of paragraphs) {
-      if (!Array.isArray(paragraph)) continue;
-      for (const element of paragraph) {
-        if (!element || typeof element !== 'object') continue;
-        const el = element as Record<string, unknown>;
-        if (el.tag === 'img' && typeof el.image_key === 'string') {
-          keys.push(el.image_key);
-        }
-      }
-    }
-  }
-
-  return keys;
-}
-
-/**
- * Extract plain text from Feishu post (rich text) message content.
- * Handles two formats:
- *   With locale wrapper: { "zh_cn": { "title": "...", "content": [[{tag, text}, ...], ...] } }
- *   Without locale wrapper: { "title": "...", "content": [[{tag, text}, ...], ...] }
- */
-function extractTextFromPost(content: Record<string, unknown>): string {
-  // Try to find the post body — either the content itself or nested under a locale key
-  const bodies: Array<Record<string, unknown>> = [];
-
-  if (Array.isArray(content.content)) {
-    // Direct format (no locale wrapper)
-    bodies.push(content);
-  } else {
-    // Locale-wrapped format: values are { title, content }
     for (const locale of Object.values(content)) {
       if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
         const loc = locale as Record<string, unknown>;
@@ -1057,6 +925,7 @@ function extractTextFromPost(content: Record<string, unknown>): string {
 
   for (const body of bodies) {
     const parts: string[] = [];
+    const imageKeys: string[] = [];
 
     if (body.title && typeof body.title === 'string') {
       parts.push(body.title);
@@ -1071,6 +940,9 @@ function extractTextFromPost(content: Record<string, unknown>): string {
         const el = element as Record<string, unknown>;
         if ((el.tag === 'text' || el.tag === 'a') && typeof el.text === 'string') {
           line.push(el.text);
+        } else if (el.tag === 'img' && typeof el.image_key === 'string') {
+          imageKeys.push(el.image_key);
+          line.push(`[Image ${imageKeys.length}]`);
         }
       }
       if (line.length > 0) {
@@ -1078,10 +950,10 @@ function extractTextFromPost(content: Record<string, unknown>): string {
       }
     }
 
-    if (parts.length > 0) {
-      return parts.join('\n');
+    if (parts.length > 0 || imageKeys.length > 0) {
+      return { text: parts.join('\n'), imageKeys };
     }
   }
 
-  return '';
+  return { text: '', imageKeys: [] };
 }

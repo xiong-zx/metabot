@@ -7,7 +7,7 @@
 # Inputs (resolved at runtime):
 #   - packages/cli/src/index.ts (+ scripts/standalone-entry.ts wrapper)
 #   - packages/cli/install-cli.sh
-#   - packages/skills/metabot/{SKILL.md,README.md}
+#   - packages/skills/metabot/ (complete Skill bundle)
 #   - root package.json version
 #
 # Outputs:
@@ -45,12 +45,12 @@ if [[ ! -x "$ESBUILD_BIN" ]]; then
   exit 1
 fi
 
-echo "==> Bundling CLI with esbuild (target=node20, format=esm)"
+echo "==> Bundling CLI with esbuild (target=node22, format=esm)"
 "$ESBUILD_BIN" \
   "$CLI_PKG_DIR/scripts/standalone-entry.ts" \
   --bundle \
   --platform=node \
-  --target=node20 \
+  --target=node22 \
   --format=esm \
   --banner:js='#!/usr/bin/env node' \
   --outfile="$STAGE_DIR/bundle.mjs" \
@@ -71,9 +71,8 @@ cat > "$STAGE_DIR/package.json" <<EOF
 }
 EOF
 
-echo "==> Copying bundled skill (metabot SKILL.md + README)"
-cp "$SKILL_SRC_DIR/SKILL.md" "$STAGE_DIR/skills/metabot/SKILL.md"
-cp "$SKILL_SRC_DIR/README.md" "$STAGE_DIR/skills/metabot/README.md"
+echo "==> Copying complete bundled metabot Skill"
+cp -R "$SKILL_SRC_DIR/." "$STAGE_DIR/skills/metabot/"
 
 echo "==> Running npm pack in stage dir"
 mkdir -p "$SERVER_STATIC_DIR"

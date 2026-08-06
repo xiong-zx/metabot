@@ -11,12 +11,16 @@ const CORE_CHAT_RUN_PREFIX = '/api/core-chat/runs';
 const CORE_CHAT_CAPABILITIES_PATH = '/api/core-chat/capabilities';
 const CALLBACK_RETRY_ATTEMPTS = 3;
 const CALLBACK_RETRY_DELAY_MS = 250;
-const QUESTION_AUTO_ANSWER = JSON.stringify({
-  answers: { _auto: 'Core chat question answers are not available yet; please decide on your own and proceed.' },
-});
+const DEFAULT_QUESTION_TIMEOUT_MS = 15 * 60 * 1000;
 
 type CoreChatRunStatus = 'running' | 'completed' | 'failed' | 'canceled';
 type CoreChatEventType = 'state' | 'question' | 'file' | 'log' | 'complete' | 'error';
+
+interface PendingCoreChatQuestion {
+  toolUseId: string;
+  resolve: (answerJson: string) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
 
 interface CoreChatRunRecord {
   runId: string;
@@ -24,6 +28,8 @@ interface CoreChatRunRecord {
   executionChatId: string;
   eventCallbackUrl: string;
   status: CoreChatRunStatus;
+  dispatcher?: CoreChatEventDispatcher;
+  pendingQuestion?: PendingCoreChatQuestion;
 }
 
 export interface CoreChatRunRequest {
@@ -97,6 +103,15 @@ function sanitizeChatIdPart(value: string): string {
 
 function defaultExecutionChatId(conversationId: string, targetBot: string): string {
   return `core-${sanitizeChatIdPart(conversationId)}-${sanitizeChatIdPart(targetBot)}`;
+}
+
+function questionAnswerJson(answer: string): string {
+  return JSON.stringify({ answers: { _web: answer } });
+}
+
+function questionTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.METABOT_CORE_CHAT_QUESTION_TIMEOUT_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUESTION_TIMEOUT_MS;
 }
 
 function validateCallbackUrl(raw: string): boolean {
@@ -251,6 +266,86 @@ class CoreChatEventDispatcher {
   }
 }
 
+function waitForCoreChatAnswer(runId: string, toolUseId: string): Promise<string> {
+  return new Promise((resolve) => {
+    const record = activeCoreChatRuns.get(runId);
+    if (!record || record.status !== 'running') {
+      resolve(questionAnswerJson('The run is no longer active. Stop safely.'));
+      return;
+    }
+    if (record.pendingQuestion) {
+      clearTimeout(record.pendingQuestion.timeout);
+      record.pendingQuestion.resolve(questionAnswerJson('A newer question replaced this one. Continue safely.'));
+    }
+    const timeout = setTimeout(() => {
+      const current = activeCoreChatRuns.get(runId);
+      if (!current?.pendingQuestion || current.pendingQuestion.toolUseId !== toolUseId) return;
+      activeCoreChatRuns.set(runId, { ...current, pendingQuestion: undefined });
+      resolve(questionAnswerJson('No browser answer arrived before timeout. Use your safest reasonable default and continue.'));
+    }, questionTimeoutMs());
+    timeout.unref?.();
+    activeCoreChatRuns.set(runId, {
+      ...record,
+      pendingQuestion: { toolUseId, resolve, timeout },
+    });
+  });
+}
+
+export function answerCoreChatRun(
+  runId: string,
+  toolUseId: string,
+  answer: string,
+): { status: number; body: Record<string, unknown> } {
+  const record = activeCoreChatRuns.get(runId);
+  if (!record || record.status !== 'running') {
+    return { status: 200, body: { runId, status: 'not_running', answered: false } };
+  }
+  const pending = record.pendingQuestion;
+  if (!pending || pending.toolUseId !== toolUseId) {
+    return { status: 409, body: { runId, status: 'question_not_pending', answered: false } };
+  }
+  clearTimeout(pending.timeout);
+  activeCoreChatRuns.set(runId, { ...record, pendingQuestion: undefined });
+  pending.resolve(questionAnswerJson(answer));
+  return { status: 200, body: { runId, status: 'answered', answered: true } };
+}
+
+export async function cancelCoreChatRun(
+  ctx: RouteContext,
+  runId: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const record = activeCoreChatRuns.get(runId);
+  if (!record || record.status !== 'running') {
+    return { status: 200, body: { runId, status: 'not_running', stopped: false } };
+  }
+
+  if (record.pendingQuestion) {
+    clearTimeout(record.pendingQuestion.timeout);
+    record.pendingQuestion.resolve(questionAnswerJson('The user canceled this run. Stop now.'));
+  }
+  const bot = ctx.registry.get(record.targetBot);
+  const stopped = bot?.bridge.stopChatTask(record.executionChatId) ?? false;
+  const status = stopped ? 'canceled' : 'failed';
+  activeCoreChatRuns.set(runId, { ...record, status, pendingQuestion: undefined });
+  if (stopped && record.dispatcher) {
+    await record.dispatcher.send('error', {
+      final: true,
+      status: 'canceled',
+      error: 'Canceled by user',
+    });
+  }
+  return {
+    status: 200,
+    body: {
+      runId,
+      status: stopped ? 'canceled' : 'not_running',
+      stopped,
+      executionChatId: record.executionChatId,
+      targetBot: record.targetBot,
+    },
+  };
+}
+
 function outputFilePayload(files: OutputFile[]): Record<string, unknown> {
   return {
     files: files.map((file) => ({
@@ -390,6 +485,7 @@ export function buildCoreChatCapabilities(ctx: RouteContext): Record<string, unk
     }),
     routes: {
       coreChatRun: CORE_CHAT_RUN_PREFIX,
+      coreChatAnswer: `${CORE_CHAT_RUN_PREFIX}/{runId}/answer`,
       coreChatCancel: `${CORE_CHAT_RUN_PREFIX}/{runId}/cancel`,
       capabilities: CORE_CHAT_CAPABILITIES_PATH,
     },
@@ -425,6 +521,8 @@ async function runCoreChatTask(ctx: RouteContext, request: CoreChatRunRequest, e
     executionChatId,
     logger,
   );
+  const activeRecord = activeCoreChatRuns.get(request.runId);
+  if (activeRecord) activeCoreChatRuns.set(request.runId, { ...activeRecord, dispatcher });
 
   let finalState: CardState | undefined;
   let finalMessageId: string | undefined;
@@ -479,9 +577,9 @@ async function runCoreChatTask(ctx: RouteContext, request: CoreChatRunRequest, e
         await dispatcher.send('question', {
           toolUseId: question.toolUseId,
           question,
-          autoAnswer: true,
+          autoAnswer: false,
         });
-        return QUESTION_AUTO_ANSWER;
+        return waitForCoreChatAnswer(request.runId, question.toolUseId);
       },
       onOutputFiles: (files) => {
         if (files.length > 0) {
@@ -489,6 +587,8 @@ async function runCoreChatTask(ctx: RouteContext, request: CoreChatRunRequest, e
         }
       },
     });
+
+    if (activeCoreChatRuns.get(request.runId)?.status === 'canceled') return;
 
     if (result.success) {
       circuitBreaker.recordSuccess(request.targetBot);
@@ -513,6 +613,7 @@ async function runCoreChatTask(ctx: RouteContext, request: CoreChatRunRequest, e
 
     updateRunTerminalStatus(request.runId, result.success ? 'completed' : 'failed');
   } catch (err: any) {
+    if (activeCoreChatRuns.get(request.runId)?.status === 'canceled') return;
     circuitBreaker.recordFailure(request.targetBot);
     await dispatcher.drain();
     if (err instanceof CoreChatTerminalStateError) {
@@ -593,8 +694,6 @@ export async function handleCoreChatRoutes(
   method: string,
   url: string,
 ): Promise<boolean> {
-  const { registry } = ctx;
-
   if (method === 'GET' && (url === CORE_CHAT_CAPABILITIES_PATH || url.startsWith(`${CORE_CHAT_CAPABILITIES_PATH}?`))) {
     jsonResponse(res, 200, buildCoreChatCapabilities(ctx));
     return true;
@@ -611,25 +710,26 @@ export async function handleCoreChatRoutes(
     return true;
   }
 
+  const answerMatch = url.match(/^\/api\/core-chat\/runs\/([^/?]+)\/answer(?:\?.*)?$/);
+  if (method === 'POST' && answerMatch) {
+    const runId = decodeURIComponent(answerMatch[1] || '');
+    const body = await parseJsonBody(req);
+    const toolUseId = asString(body.toolUseId);
+    const answer = asString(body.answer);
+    if (!toolUseId || !answer) {
+      jsonResponse(res, 400, { error: 'toolUseId and answer are required' });
+      return true;
+    }
+    const result = answerCoreChatRun(runId, toolUseId, answer);
+    jsonResponse(res, result.status, result.body);
+    return true;
+  }
+
   const cancelMatch = url.match(/^\/api\/core-chat\/runs\/([^/?]+)\/cancel(?:\?.*)?$/);
   if (method === 'POST' && cancelMatch) {
     const runId = decodeURIComponent(cancelMatch[1] || '');
-    const record = activeCoreChatRuns.get(runId);
-    if (!record || record.status !== 'running') {
-      jsonResponse(res, 200, { runId, status: 'not_running', stopped: false });
-      return true;
-    }
-
-    const bot = registry.get(record.targetBot);
-    const stopped = bot?.bridge.stopChatTask(record.executionChatId) ?? false;
-    activeCoreChatRuns.set(runId, { ...record, status: stopped ? 'canceled' : 'failed' });
-    jsonResponse(res, 200, {
-      runId,
-      status: stopped ? 'canceled' : 'not_running',
-      stopped,
-      executionChatId: record.executionChatId,
-      targetBot: record.targetBot,
-    });
+    const result = await cancelCoreChatRun(ctx, runId);
+    jsonResponse(res, result.status, result.body);
     return true;
   }
 
@@ -637,5 +737,8 @@ export async function handleCoreChatRoutes(
 }
 
 export function __resetCoreChatRunsForTests(): void {
+  for (const record of activeCoreChatRuns.values()) {
+    if (record.pendingQuestion) clearTimeout(record.pendingQuestion.timeout);
+  }
   activeCoreChatRuns.clear();
 }

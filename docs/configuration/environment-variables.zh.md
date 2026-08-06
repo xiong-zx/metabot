@@ -1,142 +1,109 @@
 # 环境变量
 
-所有配置通过 `.env` 文件或系统环境变量。复制 `.env.example` 到 `.env` 开始使用。
+每个 Bot 的引擎、工作区和渠道设置放在 `bots.json`；整套部署共享的运行时设置放在
+`.env`。复制 `.env.example` 后，只添加实际需要的变量。
 
-## MetaBot 核心
+## Core 与 Bridge
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `METABOT_HOME` | `process.cwd()` | MetaBot 运行时目录。安装器会写入 `.env` 并导出到 shell profile。`$METABOT_HOME/CLAUDE.md`（旁边还有 `AGENTS.md`）是本机全局项目规则，bridge 会把它注入**每个** bot 的 system prompt —— 见[本机项目规则](#本机项目规则) |
-| `BOTS_CONFIG` | — | `bots.json` 路径（多 Bot 模式） |
-| `FEISHU_APP_ID` | — | 飞书 App ID（单 Bot 模式） |
-| `FEISHU_APP_SECRET` | — | 飞书 App Secret（单 Bot 模式） |
-| `API_PORT` | `9100` | HTTP API 端口 |
-| `API_SECRET` | — | Bearer Token 认证 |
-| `LOG_LEVEL` | `info` | 日志级别（debug, info, warn, error） |
-| `METABOT_LOCAL_ADDRESS` | — | 所有飞书 socket（REST + wss 长连接）绑定到该本机源 IP，触发 source-based routing 绕过 VPN 智能分流（如某些企业 VPN 把 `*.feishu.cn` 劫持进失效隧道）。不设则走默认路由 |
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `BOTS_CONFIG` | — | 多 Bot 配置路径，通常为 `./bots.json` |
+| `METABOT_ENGINE` | `codex` | 单 Bot 默认引擎：`codex`、`kimi` 或兼容 `claude` |
+| `API_PORT` | `9100` | 本地 Bridge API 端口 |
+| `API_SECRET` | — | Bridge Bearer Secret；为空时只监听 localhost |
+| `METABOT_URL` | `http://localhost:9100` | Bridge CLI 命令使用的地址 |
+| `METABOT_CORE_URL` | `http://localhost:9200` | Core Console 与委托 CLI 地址 |
+| `METABOT_CORE_TOKEN` | Token 文件 | 覆盖 `~/.metabot-core/token` |
+| `METABOT_CORE_HOST` | `127.0.0.1` | Core 监听地址 |
+| `METABOT_CORE_PORT` | `9200` | Core 端口 |
+| `METABOT_CORE_DATA_DIR` | `~/.metabot-core/data` | Core 数据目录 |
+| `METABOT_PUBLIC_DISTRIBUTION` | `0` | 匿名提供 Core 安装/CLI 资源；仅在明确需要时开启 |
+| `LOG_LEVEL` | `info` | Bridge 日志级别 |
 
-### 本机项目规则
+Memory、Skills、Agents 和 T5T 都由 `METABOT_CORE_URL` 指向的 Core 提供。旧的独立
+MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
-`$METABOT_HOME/CLAUDE.md` 是 MetaBot **唯一的跨服务器规则传播通道** —— MetaMemory
-每台服务器独立、不共享，因此签入运行时目录的这份文件才是该机器上所有 bot 都要遵守的规则。
-`AGENTS.md` 与它并列存在（POSIX 上是符号链接，Windows 上是副本），供 Codex / Kimi 引擎读取。
+## 执行守护进程
 
-各引擎只会从会话工作目录**向上**逐级查找并自动加载 `CLAUDE.md` / `AGENTS.md`。
-工作目录在 `METABOT_HOME` 之外的 bot 因此永远读不到这些规则，所以 bridge 改为在会话
-启动时读取该文件并追加到 system prompt。这条通路与引擎无关（Claude / Codex / Kimi 通用），
-且对**所有** bot 生效，不限于 `pmPrompt: true` 的 PM bot。
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `METABOT_STATE_DIR` | `~/.metabot` | 守护进程 SQLite 状态与默认 ARC 项目根目录的上级目录 |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | 运行目录之外的 Ed25519 密钥与 ARC 服务凭证目录 |
+| `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner 本机 MCP 地址 |
+| `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite 状态与独占锁 |
+| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC 本机 MCP 地址 |
+| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite 状态与独占锁 |
+| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | ARC 信任的规范项目根目录 JSON 数组 |
+| `METABOT_ARC_WORKER_ENGINE` | `codex` | ARC 适配器调用的一次性工作引擎 |
 
-当 bot 工作目录位于 `METABOT_HOME` **之内**时会**跳过**注入 —— 引擎自身的自动加载已经覆盖，
-再注入只会重复。文件超过 128 KiB 会截断并加标记；文件缺失或不可读只打 debug 日志并跳过，
-绝不会导致会话起不来。
+健康检查通过短期签名凭证执行只读 MCP 调用；守护进程不提供未鉴权健康接口。
 
-## Claude Code
+## 工作区与引擎
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `DEFAULT_WORKING_DIRECTORY` | — | Claude 工作目录（单 Bot 模式） |
-| `CLAUDE_MAX_TURNS` | 不限 | 每次请求最大轮次 |
-| `CLAUDE_MAX_BUDGET_USD` | 不限 | 每次请求费用上限（美元） |
-| `CLAUDE_MODEL` | SDK 默认 | Claude 模型 |
-| `CLAUDE_EXECUTABLE_PATH` | 自动检测 | `claude` 二进制路径 |
-
-## Codex CLI
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `CLAUDE_DEFAULT_WORKING_DIRECTORY` | — | 历史单 Bot 工作区变量，所有引擎都会使用 |
 | `CODEX_MODEL` | Codex 默认 | Codex 模型 |
-| `CODEX_API_KEY` | — | Codex 的 OpenAI 兼容 API Key。子进程里会标准化成 `OPENAI_API_KEY` |
-| `CODEX_BASE_URL` | Codex 默认 | OpenAI 兼容 API Base URL。会传给 Codex：`-c openai_base_url="..."` |
-| `CODEX_PROFILE` | — | Codex 配置 profile |
-| `CODEX_APPROVAL_POLICY` | `never` | 审批策略（`untrusted`、`on-failure`、`on-request`、`never`） |
-| `CODEX_SANDBOX` | `danger-full-access` | 沙箱模式（`read-only`、`workspace-write`、`danger-full-access`） |
-| `CODEX_EXECUTABLE_PATH` | 自动检测 | `codex` 二进制路径 |
+| `CODEX_PROFILE` | — | Codex 配置 Profile |
+| `CODEX_API_KEY` | 登录状态 | OpenAI 兼容 Key，会映射到 `OPENAI_API_KEY` |
+| `CODEX_BASE_URL` | Codex 默认 | OpenAI 兼容 API 地址 |
+| `CODEX_APPROVAL_POLICY` | `never` | Codex 批准策略 |
+| `CODEX_SANDBOX` | `workspace-write` | Codex Sandbox 模式 |
+| `CODEX_REASONING_EFFORT` | — | `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra` |
+| `CODEX_EXECUTABLE_PATH` | 自动 | Codex 二进制路径 |
+| `KIMI_CODE_SERVER_URL` | `http://127.0.0.1:58627` | 已有本地 Kimi Server；否则按需启动 |
+| `KIMI_CODE_HOME` | `~/.kimi-code` | Kimi 配置和本地 Token 目录 |
+| `KIMI_API_KEY` | 登录状态 | 本地 Kimi Server 继承的可选 Provider Key |
+| `CLAUDE_MODEL` | Claude 默认 | 兼容引擎模型 |
+| `CLAUDE_EXECUTABLE_PATH` | 自动 | Claude 兼容二进制路径 |
 
-`read-only` 和 `workspace-write` 依赖 Codex CLI 的 Bubblewrap namespace
-sandbox。在 Docker/Kubernetes 运行环境中，如果 user namespace、seccomp 或
-AppArmor 受限，工具调用可能报 `bwrap: No permissions to create new namespace`。
-给 Codex worker/agent 分配沙箱模式前，先运行 `metabot doctor --json` 并查看
-`codex_sandbox_namespaces`。受限宿主机上应使用 `danger-full-access` / Bot 级
-bypass，或调整容器/宿主机策略以允许 user namespace。
+工作区、引擎、模型、Sandbox 和 Kimi 权限优先在每个 Bot 的 `bots.json` 中配置。
+详见[多 Bot 与引擎](multi-bot.md)。
 
-## MetaMemory
+## 渠道
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `MEMORY_ENABLED` | `true` | 启用内嵌 MetaMemory |
-| `MEMORY_PORT` | `8100` | MetaMemory 端口 |
-| `MEMORY_SECRET` | `API_SECRET` | MetaMemory 认证（旧版） |
-| `MEMORY_ADMIN_TOKEN` | — | 管理员 Token（完整访问） |
-| `MEMORY_TOKEN` | — | 读者 Token（仅 shared 文件夹） |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 地址（CLI 远程访问） |
-| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许写入的顶层路径，逗号分隔 |
-| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | 本服务器的 MetaMemory 顶层命名空间，例如 `/cargo1`；设置后会加入 Memory API 可写根 |
-| `METABOT_ASYNC_TASK_STALE_MS` | `86400000` | `/api/talk?async=true` 任务超过该时长仍未完成时标记为 `task_expired` |
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `FEISHU_APP_ID` | — | 单 Bot 飞书/Lark App ID |
+| `FEISHU_APP_SECRET` | — | 单 Bot 飞书/Lark App Secret |
+| `FEISHU_DOMAIN` | `feishu` | API 租户：`feishu` 或 `lark`；其他值会报错 |
+| `TELEGRAM_BOT_TOKEN` | — | 单 Bot Telegram Token |
+| `METABOT_FEISHU_WS_PING_TIMEOUT_SEC` | `20` | 飞书 WebSocket Pong 超时 |
+| `METABOT_FEISHU_WS_HANDSHAKE_TIMEOUT_MS` | `15000` | 飞书连接/重连超时 |
+| `METABOT_LOCAL_ADDRESS` | — | 飞书 Socket 可选源 IP |
 
-## 飞书服务应用
+多 Bot 部署应把渠道凭证放在受保护的 `bots.json`，不要在 `.env` 中重复维护。
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `FEISHU_SERVICE_APP_ID` | — | 专用于知识库同步和文档阅读的飞书应用 |
-| `FEISHU_SERVICE_APP_SECRET` | — | 服务应用密钥 |
+## 可选服务
 
-未设置时回退到第一个飞书 Bot 的凭证。
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `SCHEDULE_TIMEZONE` | 系统时区 | Cron 任务使用的 IANA 时区 |
+| `METABOT_PEERS` | — | 逗号分隔的 Peer URL |
+| `METABOT_PEER_SECRETS` | — | 与 Peer URL 对应的 Secret |
+| `METABOT_PEER_NAMES` | 自动 | Peer 显示名称 |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | 可选 IPv4 CIDR 转发白名单 |
+| `FEISHU_SERVICE_APP_ID` | 第一个飞书 Bot | 可选 Wiki/文档读取 Service App |
+| `FEISHU_SERVICE_APP_SECRET` | 第一个飞书 Bot | Service App Secret |
+| `FEISHU_SERVICE_DOMAIN` | `feishu` | 独立 Service App 的租户：`feishu` 或 `lark` |
+| `WIKI_SYNC_ENABLED` | `true` | 启用可选 Memory-to-Wiki 同步 |
+| `WIKI_SPACE_ID` | — | 已有 Wiki Space ID |
+| `WIKI_SPACE_NAME` | `MetaMemory` | Wiki Space 名称 |
+| `VOLCENGINE_TTS_APPID` | — | 豆包 STT/TTS App ID |
+| `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包 STT/TTS Access Key |
+| `OPENAI_API_KEY` | — | 可选 Whisper/OpenAI TTS Fallback |
+| `ELEVENLABS_API_KEY` | — | 可选 ElevenLabs TTS Key |
 
-## Wiki 同步
+完整 Provider 与 RTC 变量仍以内联注释写在 `.env.example` 中；源码部署以它为真值。
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `WIKI_SYNC_ENABLED` | `true` | 启用 MetaMemory → 知识库同步 |
-| `WIKI_SPACE_ID` | — | 飞书知识库空间 ID |
-| `WIKI_SPACE_NAME` | `MetaMemory` | 知识库空间名称 |
-| `WIKI_AUTO_SYNC` | `true` | 变更时自动同步 |
-| `WIKI_AUTO_SYNC_ON_START` | `true` | 启动时捕获基线后执行一次同步 |
-| `WIKI_AUTO_SYNC_POLL_MS` | `60000` | 快照轮询间隔 |
-| `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | 防抖延迟 |
-| `WIKI_SYNC_THROTTLE_MS` | `300` | API 调用间隔 |
+在飞书与 Lark 之间迁移应用时，请按 [Lark 域名迁移指南](lark-domain-migration.md)
+操作。App、聊天、用户、Wiki、节点和文档 ID 都属于各自租户，不能跨租户复制。
 
-## Peers 联邦
+## 代理
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `METABOT_PEERS` | — | 逗号分隔的 peer URL |
-| `METABOT_PEER_SECRETS` | — | 逗号分隔的 peer secret（位置对应） |
-| `METABOT_PEER_NAMES` | 自动 | 逗号分隔的 peer 名称 |
-| `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | peer 拉取间隔 |
-| `METABOT_ALLOWED_PEER_CIDRS` | — | 可选的逗号/空格分隔 IPv4 CIDR 白名单。设置后，任务转发仅允许目标 peer 的字面 IPv4 地址落在指定范围内。基于主机名的 peer 仍受已知 peer 白名单约束，但不受 CIDR 过滤。不设置 = 无 CIDR 约束。示例：`10.0.0.0/8,192.168.0.0/16` |
+生产守护进程支持 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy`、
+`NO_PROXY` 和 `no_proxy`。这些普通代理变量可以进入 Worker Runner 的安全白名单；
+看起来像密码、Token 或 API 凭证的代理变量即使写入白名单也会被拒绝。应在 `NO_PROXY` 中包含
+`localhost` 和 `127.0.0.1`，保证 Core、Bridge 与本地 Kimi Server 流量不经过代理。
 
-## 远程访问
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `METABOT_URL` | `http://localhost:9100` | MetaBot API 地址（CLI 用） |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 地址（CLI 用） |
-
-## 语音
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `VOLCENGINE_TTS_APPID` | — | 豆包 STT + TTS（推荐） |
-| `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包 STT + TTS（推荐） |
-| `VOLCENGINE_TTS_RESOURCE_ID` | `volc.service_type.10029` | 豆包 TTS 资源 ID |
-| `OPENAI_API_KEY` | — | Whisper STT + OpenAI TTS 备选 |
-| `ELEVENLABS_API_KEY` | — | ElevenLabs TTS |
-| `VOICE_MODEL` | — | 语音模式使用的 Claude 模型（可选覆盖） |
-
-## 第三方 AI 服务商
-
-支持任何 Anthropic 兼容 API：
-
-```bash
-# Kimi/月之暗面
-ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic
-ANTHROPIC_AUTH_TOKEN=你的key
-
-# DeepSeek
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-ANTHROPIC_AUTH_TOKEN=你的key
-
-# GLM/智谱
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_AUTH_TOKEN=你的key
-```
+不要提交已填写的 `.env` 或 `bots.json`。

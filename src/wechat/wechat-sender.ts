@@ -94,10 +94,9 @@ export class WechatSender implements IMessageSender {
     return true;
   }
 
-  async sendTextNotice(chatId: string, title: string, content: string): Promise<string | undefined> {
+  async sendTextNotice(chatId: string, title: string, content: string): Promise<void> {
     const text = `【${title}】\n${content}`;
     await this.sendText(chatId, text);
-    return undefined;
   }
 
   async sendText(chatId: string, text: string): Promise<void> {

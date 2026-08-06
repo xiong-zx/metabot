@@ -420,14 +420,12 @@ export class TelegramSender implements IMessageSender {
     }
   }
 
-  async sendTextNotice(chatId: string, title: string, content: string, _color?: string): Promise<string | undefined> {
+  async sendTextNotice(chatId: string, title: string, content: string, _color?: string): Promise<void> {
     try {
       const html = renderNoticeHtml(title, content);
-      const msg = await this.bot.api.sendMessage(Number(chatId), html, { parse_mode: 'HTML' });
-      return `tg:${chatId}:${msg.message_id}`;
+      await this.bot.api.sendMessage(Number(chatId), html, { parse_mode: 'HTML' });
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send Telegram notice');
-      return undefined;
     }
   }
 

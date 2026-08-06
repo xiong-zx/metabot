@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # MetaBot Installer
 # Usage:
-#   git clone https://github.com/xiong-zx/metabot.git ~/metabot
+#   git clone https://github.com/xvirobotics/metabot.git ~/metabot
 #   cd ~/metabot && bash install.sh
 #   # Optional: METABOT_HOME=/opt/metabot bash install.sh
 set -euo pipefail
@@ -69,8 +69,7 @@ done
 # ============================================================================
 # METABOT_HOME is resolved later (Phase 0.5) — priority: --dir > env var > prompt > default.
 DEFAULT_METABOT_HOME="$HOME/metabot"
-METABOT_REPO="${METABOT_REPO:-https://github.com/xiong-zx/metabot.git}"
-DEFAULT_METABOT_CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
+METABOT_REPO="${METABOT_REPO:-https://github.com/xvirobotics/metabot.git}"
 
 # ============================================================================
 # Colors and formatting
@@ -99,6 +98,34 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 step()    { echo -e "\n${BOLD}==> $*${NC}"; }
+
+metabot_backup_existing_skill() {
+  local source="$1"
+  local backup_root="$2"
+  [[ -e "$source" || -L "$source" ]] || return 0
+  mkdir -p "$backup_root"
+  local backup
+  backup="$(mktemp -d "$backup_root/$(basename "$source").XXXXXX")"
+  rmdir "$backup"
+  mv "$source" "$backup"
+}
+
+metabot_install_skill_bundle() {
+  local source="$1"
+  local destination="$2"
+  local backup_root="$3"
+  if [[ -d "$destination" ]] && diff -qr "$source" "$destination" >/dev/null 2>&1; then
+    return 0
+  fi
+  metabot_backup_existing_skill "$destination" "$backup_root"
+  mkdir -p "$destination"
+  cp -R "$source/." "$destination/"
+}
+
+is_lark_cli_brand() {
+  local brand="${1:-}"
+  [[ "$brand" == "feishu" || "$brand" == "lark" ]]
+}
 
 # Safe prompt — reads from /dev/tty, uses printf -v (no eval)
 prompt_input() {
@@ -184,57 +211,6 @@ sed_i() {
   fi
 }
 
-# Deploy the bundled skills (metabot, metabot-team, metabot-todos, voice) into one or more skill
-# roots. Idempotent: re-running overwrites the copies in place. Shared by Phase 6
-# below and `metabot repair-skills` (bin/metabot reimplements the same four
-# sources + roots so a host that never ran install.sh can self-heal — keep the
-# two in sync). Fails loudly on a stale/incomplete checkout, never claiming
-# success when a bundled source is missing.
-# Usage: deploy_bundled_skills <metabot_home> <root> [<root> ...]
-deploy_bundled_skills() {
-  local home="$1"; shift
-  local roots=("$@")
-
-  # Sentinel: the bundled skill tree must exist in the checkout. A missing
-  # sentinel means a stale/incomplete checkout — bail with a clear message
-  # instead of cryptic cp errors (or, worse, a false success).
-  local sentinel="$home/packages/skills/metabot/SKILL.md"
-  if [[ ! -f "$sentinel" ]]; then
-    error "Bundled skill source not found at: $sentinel"
-    error "Your $home checkout appears to be stale or incomplete."
-    error "Try: cd $home && git fetch origin && git reset --hard origin/main"
-    error "(WARNING: 'git reset --hard' discards uncommitted local changes.)"
-    return 1
-  fi
-
-  local sources=(
-    "metabot:$home/packages/skills/metabot"
-    "metabot-team:$home/packages/skills/metabot-team"
-    "metabot-todos:$home/packages/skills/metabot-todos"
-    "voice:$home/src/skills/voice"
-  )
-
-  local root spec skill src
-  for root in "${roots[@]}"; do
-    mkdir -p "$root"
-    for spec in "${sources[@]}"; do
-      skill="${spec%%:*}"
-      src="${spec#*:}"
-      if [[ ! -d "$src" ]]; then
-        error "Bundled skill source missing: $src"
-        return 1
-      fi
-      mkdir -p "$root/$skill"
-      if ! cp -r "$src/." "$root/$skill/"; then
-        error "Failed to copy $skill into $root/$skill"
-        return 1
-      fi
-      success "$skill installed → $root/$skill"
-    done
-  done
-  return 0
-}
-
 # ============================================================================
 # Phase 0.5: Resolve install directory
 # Priority: --dir CLI arg > METABOT_HOME env var > interactive prompt > default.
@@ -293,14 +269,26 @@ check_command() {
   fi
 }
 
-version_at_least() {
-  local version="${1#v}"
-  local minimum="${2#v}"
-  [[ "$(printf '%s\n%s\n' "$minimum" "$version" | sort -V | head -n1)" == "$minimum" ]]
-}
-
 MISSING=0
 check_command git "Git" "https://git-scm.com/downloads" || MISSING=1
+
+version_at_least() {
+  local current="${1#v}"
+  local required="${2#v}"
+  local current_major current_minor current_patch
+  local required_major required_minor required_patch
+
+  current="$(printf '%s' "$current" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
+  required="$(printf '%s' "$required" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
+  [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$required" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+
+  IFS=. read -r current_major current_minor current_patch <<< "$current"
+  IFS=. read -r required_major required_minor required_patch <<< "$required"
+  (( current_major > required_major )) ||
+    (( current_major == required_major && current_minor > required_minor )) ||
+    (( current_major == required_major && current_minor == required_minor && current_patch >= required_patch ))
+}
 
 MIN_NODE_VERSION="22.19.0"
 
@@ -309,19 +297,19 @@ install_node() {
   if [[ "$OS" == "Linux" ]]; then
     if command -v apt-get &>/dev/null; then
       # Debian/Ubuntu
-      curl --connect-timeout 10 --max-time 30 -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+      curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
       sudo -n bash /tmp/nodesource_setup.sh 2>/dev/null || sudo bash /tmp/nodesource_setup.sh
       sudo -n apt-get install -y nodejs 2>/dev/null || sudo apt-get install -y nodejs
       rm -f /tmp/nodesource_setup.sh
     elif command -v dnf &>/dev/null; then
       # Fedora/RHEL
-      curl --connect-timeout 10 --max-time 30 -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+      curl -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
       sudo -n bash /tmp/nodesource_setup.sh 2>/dev/null || sudo bash /tmp/nodesource_setup.sh
       sudo -n dnf install -y nodejs 2>/dev/null || sudo dnf install -y nodejs
       rm -f /tmp/nodesource_setup.sh
     elif command -v yum &>/dev/null; then
       # CentOS/older RHEL
-      curl --connect-timeout 10 --max-time 30 -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+      curl -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
       sudo -n bash /tmp/nodesource_setup.sh 2>/dev/null || sudo bash /tmp/nodesource_setup.sh
       sudo -n yum install -y nodejs 2>/dev/null || sudo yum install -y nodejs
       rm -f /tmp/nodesource_setup.sh
@@ -336,13 +324,9 @@ install_node() {
     fi
   fi
   # Verify
-  if command -v node &>/dev/null; then
-    local node_ver
-    node_ver="$(node --version)"
-    if version_at_least "$node_ver" "$MIN_NODE_VERSION"; then
-      success "Node.js installed: ${node_ver}"
-      return 0
-    fi
+  if command -v node &>/dev/null && version_at_least "$(node --version)" "$MIN_NODE_VERSION"; then
+    success "Node.js installed: $(node --version)"
+    return 0
   fi
   return 1
 }
@@ -382,70 +366,6 @@ if [[ "$MISSING" -eq 1 ]]; then
   error "Please install missing prerequisites and re-run this script."
   exit 1
 fi
-
-ensure_native_build_deps() {
-  local missing=()
-  command -v python3 &>/dev/null || missing+=("python3")
-  command -v make &>/dev/null || missing+=("make")
-  command -v g++ &>/dev/null || missing+=("g++")
-
-  if [[ "${#missing[@]}" -eq 0 ]]; then
-    success "Native build tools found (python3, make, g++)"
-    return 0
-  fi
-
-  warn "Native npm build tools missing: ${missing[*]}"
-  if [[ "$OS" == "Linux" ]]; then
-    if ! prompt_yn "Install native build tools automatically?"; then
-      error "Native build tools are required for npm packages such as node-pty and better-sqlite3."
-      exit 1
-    fi
-    if command -v apt-get &>/dev/null; then
-      sudo -n apt-get update 2>/dev/null || sudo apt-get update
-      sudo -n apt-get install -y python3 make g++ 2>/dev/null || sudo apt-get install -y python3 make g++
-    elif command -v dnf &>/dev/null; then
-      sudo -n dnf install -y python3 make gcc-c++ 2>/dev/null || sudo dnf install -y python3 make gcc-c++
-    elif command -v yum &>/dev/null; then
-      sudo -n yum install -y python3 make gcc-c++ 2>/dev/null || sudo yum install -y python3 make gcc-c++
-    else
-      error "No supported package manager found. Install python3, make, and g++ manually, then re-run."
-      exit 1
-    fi
-  elif [[ "$OS" == "Darwin" ]]; then
-    if xcode-select -p &>/dev/null; then
-      success "Xcode Command Line Tools found"
-    else
-      error "Install Xcode Command Line Tools first: xcode-select --install"
-      exit 1
-    fi
-  fi
-
-  command -v python3 &>/dev/null && command -v make &>/dev/null && command -v g++ &>/dev/null \
-    || { error "Native build tools are still missing after install attempt."; exit 1; }
-  success "Native build tools ready"
-}
-
-ensure_native_build_deps
-
-configure_npm_native_headers() {
-  if [[ -n "${npm_config_nodedir:-}" ]]; then
-    info "Using existing npm_config_nodedir=${npm_config_nodedir}"
-    return 0
-  fi
-  if [[ "$OS" != "Linux" || ! -f /usr/include/node/node.h ]]; then
-    return 0
-  fi
-  local node_path
-  node_path="$(node -p 'process.execPath' 2>/dev/null || true)"
-  case "$node_path" in
-    /usr/bin/node|/bin/node)
-      export npm_config_nodedir=/usr
-      info "Using system Node headers for native npm builds: npm_config_nodedir=/usr"
-      ;;
-  esac
-}
-
-configure_npm_native_headers
 
 # ============================================================================
 # Phase 2: Clone or update repo
@@ -490,29 +410,169 @@ else
 fi
 success "MetaBot code ready at ${METABOT_HOME}"
 
+# GitHub Releases ship the complete self-hosted personal edition. Private or
+# legacy bridge packages retain the smaller five-workspace layout.
+PERSONAL_EDITION_PACKAGE=false
+PACKAGE_MANIFEST="$METABOT_HOME/.metabot-package/manifest.json"
+if node -e '
+  const fs = require("node:fs");
+  const [manifestPath, packagePath] = process.argv.slice(1);
+  let personal;
+  if (fs.existsSync(manifestPath)) {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    personal = manifest.package === "metabot-personal-edition" && manifest.includesCore === true;
+  } else {
+    const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+    personal = pkg.metabotEdition === "personal";
+  }
+  process.exit(personal ? 0 : 1);
+' "$PACKAGE_MANIFEST" "$METABOT_HOME/package.json"; then
+  PERSONAL_EDITION_PACKAGE=true
+  success "Personal edition package detected (Bridge + Core + Web UI)"
+fi
+
+# ============================================================================
+# Phase 2.5: Provision cross-process execution trust keys (TOFU)
+# ============================================================================
+step "Phase 2.5: Provisioning execution trust keys"
+
+# These keys deliberately live outside the replaceable Git runtime. Creation
+# is trust-on-first-use and create-if-missing only: incomplete, mismatched, or
+# unsafe existing material fails rather than being silently replaced. File
+# modes do not contain arbitrary code running under the same OS uid; they are
+# scope-hygiene until the optional service-user isolation is deployed.
+METABOT_KEYS_DIR="${METABOT_KEYS_DIR:-$HOME/.metabot/keys}" node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const keysDir = process.env.METABOT_KEYS_DIR;
+const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
+const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+
+function nodeType(value) {
+  if (value.isSymbolicLink()) return 'symbolic-link';
+  if (value.isFile()) return 'regular-file';
+  if (value.isDirectory()) return 'directory';
+  if (value.isFIFO()) return 'fifo';
+  if (value.isSocket()) return 'socket';
+  if (value.isBlockDevice()) return 'block-device';
+  if (value.isCharacterDevice()) return 'character-device';
+  return 'unknown';
+}
+
+function lstatIfPresent(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return undefined;
+    throw error;
+  }
+}
+
+function assertStat(value, mode, label, expectedType) {
+  const typeOk = expectedType === 'directory' ? value.isDirectory() : value.isFile();
+  if (value.isSymbolicLink() || !typeOk) {
+    throw new Error(`unsafe ${label} node type: expected ${expectedType}, got ${nodeType(value)}`);
+  }
+  const actual = value.mode & 0o777;
+  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
+  if (uid !== undefined && value.uid !== uid) throw new Error(`unexpected ${label} owner uid ${value.uid}; expected ${uid}`);
+}
+
+function assertPath(file, mode, label, expectedType) {
+  const value = fs.lstatSync(file);
+  assertStat(value, mode, label, expectedType);
+  return value;
+}
+
+function readKey(file, label) {
+  const before = assertPath(file, 0o600, label, 'regular-file');
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fs.constants.O_NONBLOCK === 'number' ? fs.constants.O_NONBLOCK : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    assertStat(opened, 0o600, label, 'regular-file');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new Error(`unsafe ${label} path changed while opening`);
+    }
+    return fs.readFileSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+const existingKeysDir = lstatIfPresent(keysDir);
+if (existingKeysDir) {
+  assertStat(existingKeysDir, 0o700, 'key directory', 'directory');
+} else {
+  fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(keysDir, 0o700);
+  assertPath(keysDir, 0o700, 'key directory', 'directory');
+}
+
+for (const name of names) {
+  const privatePath = path.join(keysDir, `${name}.key`);
+  const publicPath = path.join(keysDir, `${name}.pub`);
+  const previousPath = `${publicPath}.prev`;
+  const privateStat = lstatIfPresent(privatePath);
+  const publicStat = lstatIfPresent(publicPath);
+  const previousStat = lstatIfPresent(previousPath);
+  if (privateStat) assertStat(privateStat, 0o600, `${name} private key`, 'regular-file');
+  if (publicStat) assertStat(publicStat, 0o600, `${name} public key`, 'regular-file');
+  if (previousStat) assertStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+  const privateExists = Boolean(privateStat);
+  const publicExists = Boolean(publicStat);
+  if (privateExists !== publicExists) throw new Error(`refusing to replace incomplete ${name} keypair`);
+  if (!privateExists) {
+    const pair = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+  }
+  assertPath(privatePath, 0o600, `${name} private key`, 'regular-file');
+  assertPath(publicPath, 0o600, `${name} public key`, 'regular-file');
+  const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
+  const signature = crypto.sign(null, challenge, readKey(privatePath, `${name} private key`));
+  if (!crypto.verify(null, challenge, readKey(publicPath, `${name} public key`), signature)) {
+    throw new Error(`${name} public/private keys do not correspond`);
+  }
+}
+NODE
+success "Execution trust keys ready at ${METABOT_KEYS_DIR} (TOFU; outside METABOT_HOME)"
+
 # ============================================================================
 # Phase 3: Install dependencies
 # ============================================================================
 step "Phase 3: Installing dependencies"
 
 cd "$METABOT_HOME"
-# Bridge hosts only need:
+# Private bridge hosts only need:
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-# The heavy workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
-# @xvirobotics/metabot-core-web-ui (react, react-dom, react-router-dom, …) —
-# run on the central ECS, not bot hosts. Excluding them here keeps deployed
-# bot installs lean and avoids the better-sqlite3 native rebuild on hosts
-# that never query the central DB.
-info "Running npm install (bridge runtime + CLI workspaces; server/web-ui excluded)..."
-npm install --include=dev \
-  --workspace=@xvirobotics/cli \
-  --workspace=@xvirobotics/cli-core \
-  --workspace=@xvirobotics/metamemory \
-  --workspace=@xvirobotics/skill-hub \
-  --include-workspace-root
-success "npm dependencies installed (CLI workspaces, no server/web-ui)"
+#   - independent ARC MCP, Worker Runner MCP, and their MCP-wire adapter
+#     (built but not automatically started)
+# The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
+# @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
+# personal edition and excluded only from the legacy/private bridge flavor.
+if [[ "$PERSONAL_EDITION_PACKAGE" == "true" ]]; then
+  info "Running npm install for the complete personal edition..."
+  npm install --include=dev
+  success "npm dependencies installed (Bridge + Core + Web UI)"
+else
+  info "Running npm install (bridge runtime + CLI workspaces; server/web-ui excluded)..."
+  npm install --include=dev \
+    --workspace=@xvirobotics/cli \
+    --workspace=@xvirobotics/cli-core \
+    --workspace=@xvirobotics/metamemory \
+    --workspace=@xvirobotics/skill-hub \
+    --workspace=@xvirobotics/arc-mcp \
+    --workspace=@xvirobotics/arc-worker-runner-adapter \
+    --workspace=@xvirobotics/worker-runner-mcp \
+    --include-workspace-root
+  success "npm dependencies installed (CLI workspaces, no server/web-ui)"
+fi
 
 # Helper: npm install -g with sudo fallback
 npm_install_global() {
@@ -579,46 +639,6 @@ codex_config_set_feature_default() {
   mv "$tmp" "$config"
 }
 
-codex_config_set_worker_manager_mcp() {
-  local config="$1"
-  local metabot_home="$2"
-  local tmp
-  tmp="$(mktemp)"
-  awk -v home="$metabot_home" '
-    function toml_quote(s) {
-      gsub(/\\/, "\\\\", s)
-      gsub(/"/, "\\\"", s)
-      return s
-    }
-    function print_worker_manager_block() {
-      cmd = "set -a; [ -f \"$METABOT_HOME/.env\" ] && . \"$METABOT_HOME/.env\"; export METABOT_API_URL=${METABOT_API_URL:-http://localhost:${API_PORT:-9100}}; exec node \"$METABOT_HOME/dist/mcp/worker-manager-mcp.js\""
-      print "[mcp_servers.worker-manager]"
-      print "command = \"bash\""
-      print "args = [\"-lc\", \"" toml_quote(cmd) "\"]"
-      print "env = { METABOT_HOME = \"" toml_quote(home) "\" }"
-    }
-    /^[[:space:]]*\[mcp_servers\.worker-manager\][[:space:]]*$/ {
-      if (!inserted) {
-        print_worker_manager_block()
-        inserted=1
-      }
-      skip=1
-      next
-    }
-    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
-      skip=0
-    }
-    !skip { print }
-    END {
-      if (!inserted) {
-        print ""
-        print_worker_manager_block()
-      }
-    }
-  ' "$config" > "$tmp"
-  mv "$tmp" "$config"
-}
-
 ensure_codex_agent_defaults() {
   local codex_home="${CODEX_HOME:-$HOME/.codex}"
   local config="$codex_home/config.toml"
@@ -630,9 +650,8 @@ ensure_codex_agent_defaults() {
   codex_config_set_feature_default "$config" "memories" "true"
   codex_config_set_feature_default "$config" "guardian_approval" "true"
   codex_config_set_feature_default "$config" "prevent_idle_sleep" "true"
-  codex_config_set_worker_manager_mcp "$config" "$METABOT_HOME"
 
-  success "Codex agent defaults ensured in $config (features + worker-manager MCP)"
+  success "Codex agent defaults ensured in $config (multi_agent, memories, guardian_approval, prevent_idle_sleep)"
 }
 
 if ! command -v pm2 &>/dev/null; then
@@ -658,29 +677,163 @@ else
   fi
 fi
 
-# Install Kimi Code 0.27+ via npm. Used by the Kimi engine path below.
-install_kimi_code() {
-  local installed_version=""
+# Install the current Kimi Code CLI. MetaBot's Kimi adapter requires the 0.27+
+# local Server API; the retired Python kimi-cli `--wire` surface is incompatible.
+kimi_code_version() {
+  local output
+  output="$(kimi --version 2>/dev/null | head -1 || true)"
+  printf '%s' "$output" | sed -nE 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p'
+}
+
+install_kimi_cli() {
   if command -v kimi &>/dev/null; then
-    installed_version="$(kimi --version 2>/dev/null | head -n1 | sed -E 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)"
+    local installed_version
+    installed_version="$(kimi_code_version)"
     if [[ -n "$installed_version" ]] && version_at_least "$installed_version" "0.27.0"; then
       success "Kimi Code found: $(command -v kimi) (v${installed_version})"
       return 0
     fi
-    warn "Existing Kimi CLI is older than 0.27.0 or unreadable; upgrading."
+    warn "Kimi CLI at $(command -v kimi) is older than 0.27.0 or has an unreadable version; upgrading."
   fi
+
   info "Installing Kimi Code 0.27+ from npm..."
-  npm_install_global "@moonshot-ai/kimi-code@latest" || true
-  if command -v kimi &>/dev/null; then
-    installed_version="$(kimi --version 2>/dev/null | head -n1 | sed -E 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)"
+  mkdir -p "$HOME/.local"
+  if npm install -g --prefix "$HOME/.local" @moonshot-ai/kimi-code@latest 2>&1 | tail -3; then
+    export PATH="$HOME/.local/bin:$PATH"
+    hash -r
+    local installed_version=""
+    if command -v kimi &>/dev/null; then
+      installed_version="$(kimi_code_version)"
+    fi
     if [[ -n "$installed_version" ]] && version_at_least "$installed_version" "0.27.0"; then
       success "Kimi Code installed: $(command -v kimi) (v${installed_version})"
       return 0
     fi
   fi
-  warn "Kimi Code 0.27+ verification failed. Install manually with 'npm install -g @moonshot-ai/kimi-code@latest'."
+  warn "Kimi Code 0.27+ install verification failed. Install manually: npm install -g @moonshot-ai/kimi-code@latest"
   return 1
 }
+
+# Build and start the local personal Core before interactive configuration so
+# a fresh install can securely wire its one-time token into the bridge config.
+PERSONAL_LOCAL_CORE=false
+start_personal_core() {
+  local configured_url=""
+  local token_from_env_file=""
+  local health_ok=false
+  local data_dir="$HOME/.metabot-core/data"
+  local token_file="$HOME/.metabot-core/token"
+  local bootstrap_token_file="$data_dir/admin-bootstrap-token.txt"
+
+  if [[ -f "$METABOT_HOME/.env" ]]; then
+    configured_url="$(sed -n 's/^[[:space:]]*METABOT_CORE_URL=//p' "$METABOT_HOME/.env" | tail -1 | tr -d '\r')"
+    token_from_env_file="$(sed -n 's/^[[:space:]]*METABOT_CORE_TOKEN=//p' "$METABOT_HOME/.env" | tail -1 | tr -d '\r')"
+  fi
+  configured_url="${METABOT_CORE_URL:-$configured_url}"
+
+  if [[ "${METABOT_INSTALL_CORE:-1}" == "0" ]]; then
+    info "METABOT_INSTALL_CORE=0 — keeping external Core configuration"
+    return 0
+  fi
+  case "$configured_url" in
+    ""|http://localhost:9200|http://127.0.0.1:9200) ;;
+    *)
+      info "Existing external metabot-core preserved: $configured_url"
+      return 0
+      ;;
+  esac
+
+  PERSONAL_LOCAL_CORE=true
+  export METABOT_CORE_URL="${configured_url:-http://localhost:9200}"
+  mkdir -p "$data_dir" "$HOME/.metabot-core/logs"
+  chmod 700 "$HOME/.metabot-core" "$data_dir" 2>/dev/null || true
+
+  info "Building local metabot-core server..."
+  npm run build -w @xvirobotics/metabot-core-server
+  info "Building local token-authenticated Web UI..."
+  npm run build -w @xvirobotics/metabot-core-web-ui
+
+  if pm2 describe metabot-core &>/dev/null 2>&1; then
+    local existing_core_cwd=""
+    existing_core_cwd="$(pm2 jlist 2>/dev/null | node -e '
+      let raw = "";
+      process.stdin.on("data", (chunk) => { raw += chunk; });
+      process.stdin.on("end", () => {
+        try {
+          const proc = JSON.parse(raw).find((entry) => entry.name === "metabot-core");
+          process.stdout.write(proc?.pm2_env?.pm_cwd || "");
+        } catch { process.exit(2); }
+      });
+    ')"
+    if [[ -z "$existing_core_cwd" || "$existing_core_cwd" != "$METABOT_HOME" ]]; then
+      error "Refusing to replace an existing metabot-core owned by another installation."
+      error "Existing cwd: ${existing_core_cwd:-unknown}; requested cwd: $METABOT_HOME"
+      exit 1
+    fi
+    info "Removing old metabot-core PM2 process..."
+    pm2 delete metabot-core 2>/dev/null || true
+  fi
+  info "Starting local metabot-core on http://localhost:9200..."
+  METABOT_CORE_DATA_DIR="$data_dir" pm2 start ecosystem.core.config.cjs --only metabot-core
+
+  for _ in $(seq 1 30); do
+    if node -e "fetch('http://127.0.0.1:9200/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+      health_ok=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$health_ok" != "true" ]]; then
+    error "Local metabot-core did not become healthy on port 9200."
+    error "Inspect: pm2 logs metabot-core --lines 50"
+    exit 1
+  fi
+
+  if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
+    : # Explicit caller configuration wins.
+  elif [[ -n "$token_from_env_file" ]]; then
+    export METABOT_CORE_TOKEN="$token_from_env_file"
+  elif [[ -s "$token_file" ]]; then
+    METABOT_CORE_TOKEN="$(head -n 1 "$token_file" | tr -d '\r\n')"
+    export METABOT_CORE_TOKEN
+  elif [[ -s "$bootstrap_token_file" ]]; then
+    mkdir -p "$(dirname "$token_file")"
+    cp "$bootstrap_token_file" "$token_file"
+    chmod 600 "$token_file"
+    METABOT_CORE_TOKEN="$(head -n 1 "$token_file" | tr -d '\r\n')"
+    export METABOT_CORE_TOKEN
+    success "Local Core token saved to $token_file (mode 600)"
+  else
+    error "Local metabot-core is healthy but no usable token file was found."
+    exit 1
+  fi
+
+  if ! METABOT_CORE_TOKEN="$METABOT_CORE_TOKEN" node -e '
+    const token = process.env.METABOT_CORE_TOKEN;
+    Promise.all([
+      fetch("http://127.0.0.1:9200/api/agents", { headers: { Authorization: `Bearer ${token}` } }),
+      fetch("http://127.0.0.1:9200/"),
+    ]).then(async ([api, ui]) => {
+      const html = await ui.text();
+      process.exit(api.ok && ui.ok && /<html/i.test(html) ? 0 : 1);
+    }).catch(() => process.exit(1));
+  '; then
+    error "Local Core failed its authenticated API or Web UI smoke check."
+    exit 1
+  fi
+
+  if [[ -f "$METABOT_HOME/.env" && -z "$token_from_env_file" ]]; then
+    printf '\n# Local personal-edition Core token (also stored in ~/.metabot-core/token)\nMETABOT_CORE_TOKEN=%s\n' \
+      "$METABOT_CORE_TOKEN" >> "$METABOT_HOME/.env"
+    chmod 600 "$METABOT_HOME/.env"
+  fi
+
+  success "Local metabot-core is healthy; Web UI: http://localhost:9200"
+}
+
+if [[ "$PERSONAL_EDITION_PACKAGE" == "true" ]]; then
+  start_personal_core
+fi
 
 # ============================================================================
 # Phase 4: Interactive configuration
@@ -707,25 +860,25 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
   # ------ 4b: Engine selection ------
   echo ""
   echo -e "${BOLD}Agent Engine:${NC}"
-  echo "  1) Claude Code (Anthropic)"
-  echo "  2) Kimi Code (Moonshot AI — default model kimi-code/k3)"
-  echo "  3) Codex CLI (OpenAI — requires codex login, uses your ChatGPT subscription)"
+  echo "  1) Codex CLI (OpenAI — requires codex login, uses your ChatGPT subscription)"
+  echo "  2) Kimi Code (Moonshot AI — requires kimi login, uses your subscription; default model kimi-code/k3)"
+  echo "  3) Claude Code compatibility (Anthropic)"
   prompt_choice ENGINE_CHOICE "1"
 
-  BOT_ENGINE="claude"
+  BOT_ENGINE="codex"
   CLAUDE_AUTH_ENV_LINES=""
-  CLAUDE_AUTH_METHOD="subscription"
+  CLAUDE_AUTH_METHOD="codex"
 
   if [[ "$ENGINE_CHOICE" == "2" ]]; then
     BOT_ENGINE="kimi"
     CLAUDE_AUTH_METHOD="kimi"
     echo ""
     info "Installing Kimi Code..."
-    install_kimi_code || warn "Continuing despite Kimi Code install failure — you can install it later."
+    install_kimi_cli || warn "Continuing despite Kimi Code install failure — you can install it later."
     info "After install, run 'kimi login' in a separate terminal to authenticate."
     # Skip the Claude provider prompt entirely for Kimi — it has its own auth.
     AUTH_CHOICE="kimi"
-  elif [[ "$ENGINE_CHOICE" == "3" ]]; then
+  elif [[ "$ENGINE_CHOICE" == "1" ]]; then
     BOT_ENGINE="codex"
     CLAUDE_AUTH_METHOD="codex"
     echo ""
@@ -844,9 +997,14 @@ API_TIMEOUT_MS=600000"
 
   FEISHU_APP_ID=""
   FEISHU_APP_SECRET=""
+  FEISHU_DOMAIN="feishu"
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     echo ""
     echo -e "  ${BOLD}Feishu/Lark Credentials:${NC}"
+    echo "    1) Feishu (China)"
+    echo "    2) Lark (international)"
+    prompt_choice FEISHU_DOMAIN_CHOICE "1"
+    [[ "$FEISHU_DOMAIN_CHOICE" == "2" ]] && FEISHU_DOMAIN="lark"
     prompt_input FEISHU_APP_ID "App ID (e.g. cli_xxxx)"
     prompt_secret FEISHU_APP_SECRET "App Secret"
     if [[ -z "$FEISHU_APP_ID" || -z "$FEISHU_APP_SECRET" ]]; then
@@ -887,23 +1045,29 @@ API_TIMEOUT_MS=600000"
     CLAUDE_PATH="$(command -v claude)"
   fi
 
-  # ------ 4e: metabot-core central service ------
+  # ------ 4e: self-hosted metabot-core service ------
   echo ""
-  echo -e "${BOLD}metabot-core central service:${NC}"
-  echo "  MetaBot delegates MetaMemory / Skill Hub / Agents / T5T to a central"
-  echo "  metabot-core service — no local DB, no embedded server."
-  prompt_input METABOT_CORE_URL "metabot-core URL" "${METABOT_CORE_URL:-$DEFAULT_METABOT_CORE_URL}"
-
-  echo ""
-  info "Get your personal Bearer token:"
-  info "  - metabot-core generates one on first launch at ~/.metabot-core/token"
-  info "  - or open ${METABOT_CORE_URL}/cli and click 'Generate'"
-  info "  Paste the mt_... token below — or press Enter to configure later"
-  info "     (later: drop it into ${METABOT_HOME}/.env or ~/.metabot-core/token)"
-  if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
-    info "Using METABOT_CORE_TOKEN from environment."
+  echo -e "${BOLD}self-hosted metabot-core service:${NC}"
+  if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
+    METABOT_CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
+    info "Local Core and Web UI are already running at $METABOT_CORE_URL"
+    info "The installer saved the Bearer token without printing it."
   else
-    prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
+    echo "  MetaBot delegates MetaMemory / Skill Hub / Agents / T5T to your"
+    echo "  metabot-core service (local by default)."
+    prompt_input METABOT_CORE_URL "metabot-core URL" "${METABOT_CORE_URL:-http://localhost:9200}"
+
+    echo ""
+    if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
+      info "Using METABOT_CORE_TOKEN supplied by the environment (value not printed)."
+    else
+      info "Get your personal Bearer token:"
+      info "  - first launch writes ~/.metabot-core/data/admin-bootstrap-token.txt"
+      info "  - paste that token into the browser console or save it as ~/.metabot-core/token"
+      info "  Paste the mt_... token below — or press Enter to configure later"
+      info "     (later: drop it into ${METABOT_HOME}/.env or ~/.metabot-core/token)"
+      prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
+    fi
   fi
 fi
 
@@ -917,11 +1081,6 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
   {
     echo "# MetaBot Configuration (generated by install.sh)"
     echo "# $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo ""
-    echo "# MetaBot runtime directory. Every component resolves it as"
-    echo "# \$METABOT_HOME || process.cwd(), and \$METABOT_HOME/CLAUDE.md is the"
-    echo "# host-wide project rules file injected into every bot's system prompt."
-    echo "METABOT_HOME=${METABOT_HOME}"
     echo ""
     echo "# Bot config file (multi-bot mode)"
     echo "BOTS_CONFIG=./bots.json"
@@ -959,20 +1118,20 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       echo "CLAUDE_EXECUTABLE_PATH=${CLAUDE_PATH}"
     fi
     echo ""
-    echo "# metabot-core central service (MetaMemory + Skill Hub + Agents + T5T)"
+    echo "# self-hosted metabot-core service (MetaMemory + Skill Hub + Agents + T5T)"
     echo "METABOT_CORE_URL=${METABOT_CORE_URL}"
     if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
       echo "METABOT_CORE_TOKEN=${METABOT_CORE_TOKEN}"
     else
-      echo "# Token is at ~/.metabot-core/token on first launch, or ${METABOT_CORE_URL}/cli (Generate)"
-      echo "# Either paste it here OR save to ~/.metabot-core/token (chmod 600)"
+      echo "# First launch writes ~/.metabot-core/data/admin-bootstrap-token.txt"
+      echo "# Paste it here OR save it to ~/.metabot-core/token (chmod 600)"
       echo "# METABOT_CORE_TOKEN="
     fi
     echo ""
-    echo "# Internal default env injection (do not commit real secrets)"
-    echo "# Priority: real process env > project .env > internal defaults."
+    echo "# Optional local default env injection (do not commit real secrets)"
+    echo "# Priority: real process env > project .env > local defaults."
     echo "#   METABOT_DEFAULT_ENV_FILE, /etc/metabot/default.env, ~/.metabot/default.env, .env.defaults"
-    echo "# Recommended internal default.env for Feishu voice replies:"
+    echo "# Optional default.env for Feishu voice replies:"
     echo "#   VOLCENGINE_TTS_APPID=..."
     echo "#   VOLCENGINE_TTS_ACCESS_KEY=..."
     echo "#   VOLCENGINE_TTS_RESOURCE_ID=volc.service_type.10029"
@@ -994,18 +1153,19 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
 
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     FEISHU_BOTS_JSON=$(node -e "
-      const engine = process.argv[5];
+      const engine = process.argv[6];
       const bot = {
         name: process.argv[1],
+        engine,
         feishuAppId: process.argv[2],
         feishuAppSecret: process.argv[3],
-        defaultWorkingDirectory: process.argv[4],
+        feishuDomain: process.argv[4],
+        defaultWorkingDirectory: process.argv[5],
       };
-      bot.engine = engine;
       if (engine === 'kimi') { bot.kimi = { model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' }; }
       if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
-    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$WORK_DIR" "${BOT_ENGINE:-claude}")
+    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$FEISHU_DOMAIN" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
 
   if [[ "$SETUP_TELEGRAM" == "true" ]]; then
@@ -1015,10 +1175,10 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       const engine = process.argv[4];
       const bot = {
         name: process.argv[1],
+        engine,
         telegramBotToken: process.argv[2],
         defaultWorkingDirectory: process.argv[3],
       };
-      bot.engine = engine;
       if (engine === 'kimi') { bot.kimi = { model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' }; }
       if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
@@ -1033,9 +1193,9 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
       const engine = process.argv[3];
       const bot = {
         name: process.argv[1],
+        engine,
         defaultWorkingDirectory: process.argv[2],
       };
-      bot.engine = engine;
       if (engine === 'kimi') { bot.kimi = { model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' }; }
       if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
@@ -1062,35 +1222,33 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
   success "bots.json generated"
 fi
 
-# --- Ensure METABOT_HOME is recorded in .env (upgrade path) -----------------
-# A pre-existing .env makes the installer skip interactive config entirely, so
-# installs that predate the METABOT_HOME line never get one. Append it only when
-# the key is absent — never overwrite a value the user has edited by hand.
-ensure_env_metabot_home() {
-  local env_file="$METABOT_HOME/.env"
-  [[ -f "$env_file" ]] || return 0
-  if grep -qE '^[[:space:]]*METABOT_HOME=' "$env_file" 2>/dev/null; then
-    info "METABOT_HOME already set in $env_file — left untouched"
-    return 0
-  fi
-  {
-    echo ""
-    echo "# MetaBot runtime directory (added by install.sh)"
-    echo "METABOT_HOME=${METABOT_HOME}"
-  } >> "$env_file"
-  success "Recorded METABOT_HOME=$METABOT_HOME in $env_file"
-}
-ensure_env_metabot_home
-
 # ============================================================================
 # Phase 6: Install skills + workspace setup
 # ============================================================================
 step "Phase 6: Installing skills and setting up workspace"
 
 SKILLS_DIR="$HOME/.claude/skills"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-CODEX_SKILLS_DIR="$CODEX_HOME_DIR/skills"
+CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+GLOBAL_SKILL_ROOTS=("$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR")
+mkdir -p "${GLOBAL_SKILL_ROOTS[@]}"
+
+# Sanity check: bundled skill tree must exist in the checked-out repo.
+# If it's missing, the user's checkout is stale (predates the skill bundling
+# commits) — fail with a clear message instead of cryptic cp errors.
+SKILL_SENTINEL="$METABOT_HOME/packages/skills/metabot/SKILL.md"
+if [[ ! -f "$SKILL_SENTINEL" ]]; then
+  error "Bundled skill source not found at: $SKILL_SENTINEL"
+  error "Your $METABOT_HOME checkout appears to be stale or incomplete."
+  error "Try: cd $METABOT_HOME && git fetch origin && git reset --hard origin/main"
+  error "(WARNING: 'git reset --hard' discards uncommitted local changes.)"
+  exit 1
+fi
+TEAM_SKILL_SENTINEL="$METABOT_HOME/packages/skills/metabot-team/SKILL.md"
+if [[ ! -f "$TEAM_SKILL_SENTINEL" ]]; then
+  error "Bundled metabot-team skill source not found at: $TEAM_SKILL_SENTINEL"
+  exit 1
+fi
 
 # Clean up legacy metaskill skill if present — no longer installed by default.
 # Users who still want the agent-team generator can copy it back from
@@ -1109,11 +1267,32 @@ for legacy in metamemory skill-hub memory; do
   fi
 done
 
-# Deploy the bundled skills (metabot, metabot-team, metabot-todos, voice) into the three skill
-# roots via the shared, idempotent helper (also used by `metabot repair-skills`).
-# It creates each root, verifies the bundled sources exist, and fails loudly on a
-# stale/incomplete checkout instead of claiming success.
-deploy_bundled_skills "$METABOT_HOME" "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR" || exit 1
+# Install the complete MetaBot-owned Skill bundles for Claude, Codex, and the
+# shared Agent Skills location used by Kimi Code 0.27+. Copying the full bundle
+# preserves required references, scripts, and Agent metadata.
+declare -a METABOT_SKILL_NAMES=("metabot" "metabot-team" "metabot-todos")
+declare -a METABOT_SKILL_SOURCES=(
+  "$METABOT_HOME/packages/skills/metabot"
+  "$METABOT_HOME/packages/skills/metabot-team"
+  "$METABOT_HOME/packages/skills/metabot-todos"
+)
+for skill_index in "${!METABOT_SKILL_NAMES[@]}"; do
+  skill_name="${METABOT_SKILL_NAMES[$skill_index]}"
+  skill_source="${METABOT_SKILL_SOURCES[$skill_index]}"
+  info "Installing $skill_name skill..."
+  for skill_root in "${GLOBAL_SKILL_ROOTS[@]}"; do
+    metabot_install_skill_bundle "$skill_source" "$skill_root/$skill_name" "$HOME/.metabot/skill-backups"
+    success "$skill_name skill installed → $skill_root/$skill_name"
+  done
+done
+
+# The voice CLI remains available, but the standalone voice Skill is retired.
+for skill_root in "${GLOBAL_SKILL_ROOTS[@]}"; do
+  if [[ -e "$skill_root/voice" || -L "$skill_root/voice" ]]; then
+    metabot_backup_existing_skill "$skill_root/voice" "$HOME/.metabot/skill-backups"
+    info "Retired voice Skill from $skill_root"
+  fi
+done
 
 # Detect Feishu bots
 HAS_FEISHU=false
@@ -1162,10 +1341,15 @@ if [[ "$SETUP_LARK_CLI" == "true" ]]; then
   if [[ ! -f "$HOME/.lark-cli/config.json" && -f "$METABOT_HOME/bots.json" ]]; then
     FEISHU_APP_ID=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppId||'')" 2>/dev/null)
     FEISHU_APP_SECRET=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppSecret||'')" 2>/dev/null)
+    FEISHU_CLI_BRAND=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); const d=(c.feishuBots||[])[0]?.feishuDomain||'feishu'; if (!['feishu','lark'].includes(d)) process.exit(1); console.log(d)" 2>/dev/null || true)
     if [[ -n "$FEISHU_APP_ID" && -n "$FEISHU_APP_SECRET" ]]; then
-      echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand feishu 2>/dev/null && \
-        success "lark-cli configured with app $FEISHU_APP_ID" || \
-        warn "lark-cli config failed — you can run manually: lark-cli config init"
+      if ! is_lark_cli_brand "$FEISHU_CLI_BRAND"; then
+        warn "lark-cli config skipped — feishuDomain must be 'feishu' or 'lark'"
+      else
+        echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand "$FEISHU_CLI_BRAND" 2>/dev/null && \
+          success "lark-cli configured with app $FEISHU_APP_ID" || \
+          warn "lark-cli config failed — you can run manually: lark-cli config init"
+      fi
     fi
   fi
 
@@ -1200,27 +1384,38 @@ else
   fi
 fi
 
-# Deploy skills + CLAUDE.md to bot working directory
+# Retire project-level MetaBot Skill mirrors and deploy only user-selected Lark
+# mirrors. Workspace instruction files are user-owned and never changed.
 if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   SKILLS_DEST="$DEPLOY_WORK_DIR/.claude/skills"
   CODEX_SKILLS_DEST="$DEPLOY_WORK_DIR/.codex/skills"
   AGENTS_SKILLS_DEST="$DEPLOY_WORK_DIR/.agents/skills"
+  WORKSPACE_SKILL_ROOTS=("$SKILLS_DEST" "$CODEX_SKILLS_DEST" "$AGENTS_SKILLS_DEST")
+  mkdir -p "${WORKSPACE_SKILL_ROOTS[@]}"
 
   # Clean up legacy skill bundles from a previously-deployed workspace so the
   # bot doesn't load stale skills after the Phase 4 consolidation.
   for legacy in metamemory skill-hub; do
-    if [[ -d "$SKILLS_DEST/$legacy" ]]; then
-      rm -rf "$SKILLS_DEST/$legacy"
-      info "Removed legacy $legacy from $SKILLS_DEST"
-    fi
+    for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
+      if [[ -e "$skill_dest/$legacy" || -L "$skill_dest/$legacy" ]]; then
+        metabot_backup_existing_skill "$skill_dest/$legacy" "$DEPLOY_WORK_DIR/.metabot/skill-backups"
+        info "Retired legacy $legacy from $skill_dest"
+      fi
+    done
   done
 
-  # Copy skills (common + lark-cli skills if Feishu).
-  # metaskill (agent-team generator) and metaschedule (persistent server-side
-  # scheduler) are no longer installed by default — copy them from
-  # $METABOT_HOME/src/skills/ if you want them. CC native CronCreate / /loop
-  # already cover ad-hoc, session-scoped scheduling.
-  DEPLOY_SKILLS="metabot metabot-team metabot-todos voice"
+  # MetaBot-owned Skills are global-only. Preserve and retire historical
+  # project copies so stale snapshots cannot shadow newer global Skills.
+  for SKILL in metabot metabot-team metabot-todos voice; do
+    for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
+      if [[ -e "$skill_dest/$SKILL" || -L "$skill_dest/$SKILL" ]]; then
+        metabot_backup_existing_skill "$skill_dest/$SKILL" "$DEPLOY_WORK_DIR/.metabot/skill-backups"
+        info "Retired project-level $SKILL mirror from $skill_dest"
+      fi
+    done
+  done
+
+  DEPLOY_SKILLS=""
   if [[ "$SETUP_LARK_CLI" == "true" ]]; then
     for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
       [[ -d "$SKILLS_DIR/$lark_skill" ]] && DEPLOY_SKILLS="$DEPLOY_SKILLS $lark_skill"
@@ -1228,75 +1423,19 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   fi
   for SKILL in $DEPLOY_SKILLS; do
     if [[ -d "$SKILLS_DIR/$SKILL" ]]; then
-      for dest_root in "$SKILLS_DEST" "$CODEX_SKILLS_DEST" "$AGENTS_SKILLS_DEST"; do
-        mkdir -p "$dest_root/$SKILL"
-        cp -r "$SKILLS_DIR/$SKILL/." "$dest_root/$SKILL/"
-        success "Deployed $SKILL → $dest_root/$SKILL"
+      for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
+        mkdir -p "$skill_dest/$SKILL"
+        cp -R "$SKILLS_DIR/$SKILL/." "$skill_dest/$SKILL/"
+        success "Deployed $SKILL → $skill_dest/$SKILL"
       done
     fi
   done
 
-  # Deploy CLAUDE.md to working directory (+ AGENTS.md symlink for Kimi engine)
-  if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
-    if [[ -f "$DEPLOY_WORK_DIR/CLAUDE.md" ]]; then
-      info "Preserved existing CLAUDE.md at $DEPLOY_WORK_DIR/CLAUDE.md"
-    else
-      cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$DEPLOY_WORK_DIR/CLAUDE.md"
-      success "Deployed CLAUDE.md → $DEPLOY_WORK_DIR/CLAUDE.md"
-    fi
-    if [[ ! -e "$DEPLOY_WORK_DIR/AGENTS.md" ]]; then
-      (cd "$DEPLOY_WORK_DIR" && ln -s CLAUDE.md AGENTS.md 2>/dev/null) \
-        && success "Linked AGENTS.md → CLAUDE.md (for Kimi engine compatibility)" \
-        || warn "Could not create AGENTS.md symlink"
-    fi
-  fi
+  rm -f "$DEPLOY_WORK_DIR/.metabot/workspace-harness.sha256"
+
 else
-  warn "Could not determine working directory, skipping workspace deployment"
+  warn "Could not determine working directory, skipping workspace mirror cleanup"
 fi
-
-# --- Assert $METABOT_HOME/CLAUDE.md + AGENTS.md exist -----------------------
-# These two files are MetaBot's only cross-host channel for project rules
-# (MetaMemory is per-server), and the bridge injects CLAUDE.md into every bot's
-# system prompt. Both ship in the repo — CLAUDE.md as a regular file, AGENTS.md
-# as a symlink to it — but a tarball install, an export that flattened symlinks,
-# or a filesystem without symlink support can leave either one missing. Repair
-# rather than assume.
-ensure_home_instructions() {
-  local claude_md="$METABOT_HOME/CLAUDE.md"
-  local agents_md="$METABOT_HOME/AGENTS.md"
-
-  if [[ ! -f "$claude_md" ]]; then
-    # Land the bundled workspace template so the injection channel is never
-    # empty. Erroring out here would abort an otherwise-complete install over a
-    # docs file, and a partial rule set beats no rules at all.
-    if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
-      cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$claude_md"
-      warn "$claude_md was missing — seeded it from src/workspace/CLAUDE.md."
-      warn "Your checkout may be stale: cd $METABOT_HOME && git fetch origin && git status"
-    else
-      error "$claude_md is missing and no template was found at $METABOT_HOME/src/workspace/CLAUDE.md."
-      error "Your $METABOT_HOME checkout is incomplete — bots on this host will get no project rules."
-      error "Try: cd $METABOT_HOME && git fetch origin && git checkout -- CLAUDE.md AGENTS.md"
-      return 1
-    fi
-  fi
-
-  if [[ ! -e "$agents_md" ]]; then
-    # Symlink is preferred (one file, two engine entrypoints); fall back to a
-    # copy on filesystems that reject symlinks.
-    if (cd "$METABOT_HOME" && ln -s CLAUDE.md AGENTS.md 2>/dev/null); then
-      success "Linked $agents_md → CLAUDE.md"
-    elif cp "$claude_md" "$agents_md" 2>/dev/null; then
-      warn "Symlinks unavailable — copied CLAUDE.md to $agents_md (re-run install.sh after editing CLAUDE.md)"
-    else
-      error "Could not create $agents_md — Codex/Kimi engines will not see the host project rules."
-      return 1
-    fi
-  fi
-
-  success "Host instructions present: $claude_md + $agents_md"
-}
-ensure_home_instructions || warn "Host instruction files are incomplete — see the errors above."
 
 # ============================================================================
 # Phase 7: Legacy MetaMemory cleanup (embedded MetaMemory removed in Phase 4)
@@ -1393,31 +1532,23 @@ if ! echo "$PATH" | grep -q "$LOCAL_BIN"; then
 fi
 success "metabot CLI installed to $LOCAL_BIN"
 
-# Persist METABOT_HOME to the shell rc files so plain SSH sessions (which never
-# see pm2's injected env) resolve the install the same way the bridge does.
-# Done unconditionally — not just for non-default paths — because tooling that
-# reads $METABOT_HOME/CLAUDE.md needs the variable set even when the path
-# happens to equal $HOME/metabot.
-for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-  [[ -f "$rc_file" ]] || continue
-  # Drop any prior export first: re-running the installer must not stack
-  # duplicate (and possibly stale) exports.
-  if grep -q '^export METABOT_HOME=' "$rc_file" 2>/dev/null; then
-    sed_i '/^export METABOT_HOME=/d' "$rc_file"
+# Persist METABOT_HOME for non-default install paths so the CLI tool
+# (metabot) can find the install in new shell sessions. The CLI falls
+# back to $HOME/metabot, so we only need to export when it differs.
+if [[ "$METABOT_HOME" != "$DEFAULT_METABOT_HOME" ]]; then
+  for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [[ -f "$rc_file" ]] || continue
+    # Drop any prior export to keep this idempotent across re-runs.
+    if grep -q '^export METABOT_HOME=' "$rc_file" 2>/dev/null; then
+      sed_i '/^export METABOT_HOME=/d' "$rc_file"
+    fi
+  done
+  echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.bashrc"
+  if [[ -f "$HOME/.zshrc" ]]; then
+    echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.zshrc"
   fi
-done
-echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.bashrc"
-if [[ -f "$HOME/.zshrc" ]]; then
-  echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.zshrc"
+  info "Persisted METABOT_HOME=$METABOT_HOME to shell rc files"
 fi
-# LOW-1: .profile is in the delete loop above, so re-add it here too (when it
-# exists) — otherwise its export is stripped on every re-run and never restored.
-# Login shells (bash without .bash_profile, or plain /bin/sh) source .profile,
-# not .bashrc, so SSH login sessions need the export here as well.
-if [[ -f "$HOME/.profile" ]]; then
-  echo "export METABOT_HOME=\"$METABOT_HOME\"" >> "$HOME/.profile"
-fi
-info "Persisted METABOT_HOME=$METABOT_HOME to shell rc files"
 
 # ============================================================================
 # Phase 8: Build + Start MetaBot with PM2
@@ -1426,19 +1557,110 @@ step "Phase 8: Starting MetaBot"
 
 cd "$METABOT_HOME"
 
-info "Building TypeScript..."
-npm run build 2>/dev/null && success "Build complete" || warn "Build failed, will use tsx directly via PM2"
-
-# Always delete + start fresh to avoid stale/stopped process issues
-if pm2 describe metabot &>/dev/null 2>&1; then
-  info "Removing old MetaBot PM2 process..."
-  pm2 delete metabot 2>/dev/null || true
+info "Building bridge TypeScript..."
+if npm run build:bridge; then
+  success "Bridge build complete"
+else
+  error "Bridge build failed. MetaBot was not started."
+  exit 1
 fi
-info "Starting MetaBot with PM2..."
-pm2 start ecosystem.config.cjs
 
-pm2 save --force 2>/dev/null || true
-success "MetaBot is running!"
+# The metabot shell command delegates memory/t5t/skills/agents to
+# packages/cli/dist/index.js. Release tarballs intentionally contain source,
+# not dist/, so a successful install must build this workspace explicitly.
+info "Building metabot CLI..."
+if npm run build -w @xvirobotics/cli; then
+  success "CLI build complete"
+else
+  error "CLI build failed. MetaBot was not started."
+  exit 1
+fi
+
+# ARC ships both an independent stdio binary and the authenticated daemon used
+# by the PM2 lifecycle below. The daemon receives its scope and runner adapter
+# only through trusted process configuration.
+info "Building independent ARC MCP..."
+if npm run build -w @xvirobotics/arc-mcp; then
+  success "ARC MCP build complete"
+else
+  error "ARC MCP build failed. MetaBot was not started."
+  exit 1
+fi
+
+# Worker Runner ships both an independent stdio binary and the authenticated
+# PM2 daemon. The daemon receives principal scope per signed MCP connection;
+# its state directory and completion callback remain trusted process config.
+info "Building independent Worker Runner MCP..."
+if npm run build -w @xvirobotics/worker-runner-mcp; then
+  success "Worker Runner MCP build complete"
+else
+  error "Worker Runner MCP build failed. MetaBot was not started."
+  exit 1
+fi
+
+# This adapter connects the two independent services over the Worker Runner
+# MCP wire. This phase supervises the daemons; per-engine MCP materialization
+# remains a separate, opt-in integration.
+info "Building independent ARC Worker Runner adapter..."
+if npm run build -w @xvirobotics/arc-worker-runner-adapter; then
+  success "ARC Worker Runner adapter build complete"
+else
+  error "ARC Worker Runner adapter build failed. MetaBot was not started."
+  exit 1
+fi
+
+# Package refreshes never delete live PM2 registrations. Daemons are never
+# Bridge children, so an externally controlled protected deployment can update
+# them before replacing Bridge while preserving registration IDs.
+for daemon in worker arc; do
+  app="metabot-${daemon}"
+  [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
+  [[ "$daemon" == "arc" ]] && app="metabot-arcd"
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    set +e
+    METABOT_HOME="$METABOT_HOME" node --import tsx \
+      "$METABOT_HOME/src/services/local-daemon-health.ts" --busy "$daemon" >/dev/null
+    DAEMON_BUSY_STATUS=$?
+    set -e
+    if [[ "$DAEMON_BUSY_STATUS" -eq 10 ]]; then
+      warn "$app has in-flight work; package replacement may leave it recovery_required."
+    elif [[ "$DAEMON_BUSY_STATUS" -ne 0 ]]; then
+      error "Could not verify whether $app is idle. Refusing package replacement."
+      exit 1
+    fi
+  fi
+done
+EXISTING_METABOT_STATUS=""
+if pm2 describe metabot &>/dev/null 2>&1; then
+  EXISTING_METABOT_STATUS="$(pm2 jlist 2>/dev/null | node -e '
+    let input="";
+    process.stdin.on("data",c=>input+=c).on("end",()=>{
+      try {
+        const row=JSON.parse(input).find(entry=>entry.name==="metabot");
+        process.stdout.write(String(row?.pm2_env?.status||""));
+      } catch { process.exitCode=2; }
+    });
+  ')" || {
+    error "Could not inspect the existing MetaBot PM2 registration. Refusing lifecycle change."
+    exit 1
+  }
+fi
+
+if [[ "${METABOT_PACKAGE_UPDATE:-0}" == "1" && "$EXISTING_METABOT_STATUS" == "online" ]]; then
+  info "Applying package refresh through the protected no-delete runtime switch..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" deploy-runtime \
+    --runtime "$METABOT_HOME" \
+    --request-id "${METABOT_RESTART_REQUEST_ID:?package update requestId is required}" \
+    --source package-update \
+    --reason "MetaBot package update" \
+    --resume \
+    --wait \
+    --timeout 120
+else
+  info "Starting MetaBot Bridge and execution daemons with PM2..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+fi
+success "MetaBot Bridge and execution daemons are running!"
 
 # --- WeChat QR login: wait for URL and display it ---
 HAS_WECHAT_BOT=false
@@ -1479,6 +1701,8 @@ if [[ "$HAS_WECHAT_BOT" == "true" ]]; then
   else
     warn "QR URL not yet available. Check logs to get it:"
     echo "    pm2 logs metabot --lines 30"
+    echo "    pm2 logs metabot-worker-runnerd --lines 30"
+    echo "    pm2 logs metabot-arcd --lines 30"
   fi
 fi
 
@@ -1508,8 +1732,15 @@ echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
-echo "    pm2 restart metabot       # Restart MetaBot"
-echo "    pm2 stop metabot          # Stop MetaBot"
+echo "    pm2 logs metabot-worker-runnerd  # View Worker Runner daemon logs"
+echo "    pm2 logs metabot-arcd      # View ARC daemon logs"
+if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
+  echo "    pm2 logs metabot-core     # View local Core logs"
+  echo "    open http://localhost:9200 # Personal Web UI (or use your browser)"
+fi
+echo "    metabot restart           # Restart Bridge only"
+echo "    metabot restart --daemon worker  # Guarded Worker Runner restart"
+echo "    metabot stop              # Stop the whole MetaBot runtime"
 echo "    metabot memory list       # Browse central memory (delegated to metabot-core)"
 echo "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 echo "    metabot skills list       # List shared skills"
@@ -1518,8 +1749,8 @@ echo "    metabot t5t board         # T5T project board"
 echo ""
 if [[ -z "${METABOT_CORE_TOKEN:-}" ]]; then
   echo -e "  ${BOLD}metabot-core onboarding:${NC}"
-  echo "    1. Grab your token from ~/.metabot-core/token (generated on first launch)"
-  echo "       or open ${CORE_URL_DISPLAY}/cli and click 'Generate'"
+  echo "    1. Grab the first token from ~/.metabot-core/data/admin-bootstrap-token.txt"
+  echo "       and paste it into the browser login screen if you use the console"
   echo "    2. Paste it into ${METABOT_HOME}/.env as METABOT_CORE_TOKEN=mt_..."
   echo "       (or save to ~/.metabot-core/token, chmod 600)"
   echo ""

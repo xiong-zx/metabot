@@ -1,18 +1,33 @@
-import { spawn } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import type { BotConfigBase, ClaudeEffort, ClaudePermissionMode, CodexReasoningEffort } from '../../config.js';
+import type { BotConfigBase } from '../../config.js';
+import type { CodexReasoningEffort } from '../../config.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import type { ApiContext } from '../prompt-context.js';
+import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
-import { buildPmSystemPrompt } from '../pm-prompt.js';
-import { buildHomeInstructionsSection } from '../home-instructions.js';
-import { resolveClaudePath } from './resolve-executable.js';
-import { CONTEXT_WINDOW_200K, FABLE_5_MODEL_RE } from '../../utils/model-id.js';
+
+export type { ApiContext } from '../prompt-context.js';
+
+const isWindows = process.platform === 'win32';
+
+/** Resolve the Claude Code binary path at module load time. */
+function resolveClaudePath(): string {
+  if (process.env.CLAUDE_EXECUTABLE_PATH) return process.env.CLAUDE_EXECUTABLE_PATH;
+  try {
+    const cmd = isWindows ? 'where claude' : 'which claude';
+    return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
+  } catch {
+    return isWindows ? 'claude' : '/usr/local/bin/claude';
+  }
+}
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
 
@@ -49,102 +64,6 @@ const CLAUDE_ENV_PASSTHROUGH = new Set([
 const AUTH_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
 /**
- * no_proxy list written into every child Claude process env. Disable with
- * METABOT_NO_PROXY_DISABLE=true on hosts that want inherited proxy behavior.
- */
-export const NO_PROXY_LIST = [
-  'localhost', '127.0.0.1',
-  'open.feishu.cn', '*.feishu.cn', 'lark.larksuite.com', '*.larksuite.com',
-  '*.tuna.tsinghua.edu.cn', '*.aliyun.com', '*.ubuntu.com',
-  '*.npmmirror.com', 'registry.npmmirror.com',
-  '*.anaconda.com', '*.conda.io',
-  '*.github.com', 'github.com', '*.githubusercontent.com',
-  '*.pypi.org', 'pypi.org', 'files.pythonhosted.org',
-  '*.papercopilot.com', 'papercopilot.com',
-  '*.semanticscholar.org', 'api.semanticscholar.org',
-  '*.arxiv.org', 'arxiv.org',
-  '*.openreview.net', 'openreview.net',
-  '*.google.com', '*.googleapis.com',
-  '*.huggingface.co', '*.hf.co',
-].join(',');
-
-export function applyNoProxyPolicy(env: Record<string, string>): void {
-  if (process.env.METABOT_NO_PROXY_DISABLE === 'true') return;
-  env.no_proxy = NO_PROXY_LIST;
-  env.NO_PROXY = NO_PROXY_LIST;
-}
-
-/**
- * Normalize proxy variables for Claude child processes. Some HTTP stacks prefer
- * lowercase proxy vars; others prefer uppercase. The rest of MetaBot treats the
- * uppercase value as authoritative when both are present, so mirror that here
- * to avoid a stale lowercase proxy sending Claude traffic down the wrong route.
- */
-export function applyProxyPolicy(env: Record<string, string>): void {
-  if (process.env.METABOT_PROXY_NORMALIZE_DISABLE === 'true') return;
-
-  for (const [upper, lower] of [
-    ['HTTP_PROXY', 'http_proxy'],
-    ['HTTPS_PROXY', 'https_proxy'],
-    ['ALL_PROXY', 'all_proxy'],
-  ] as const) {
-    const upperValue = env[upper];
-    const lowerValue = env[lower];
-    if (upperValue) {
-      env[lower] = upperValue;
-    } else if (lowerValue) {
-      env[upper] = lowerValue;
-    }
-  }
-}
-
-export function applyClaudeChildEnvPolicy(env: Record<string, string>): void {
-  applyProxyPolicy(env);
-  applyNoProxyPolicy(env);
-}
-
-export function resolveClaudePermissionOptions(
-  configuredPermissionMode: ClaudePermissionMode | undefined,
-  isRoot: boolean = process.getuid?.() === 0,
-): { permissionMode: ClaudePermissionMode; allowDangerouslySkipPermissions?: true } {
-  const permissionMode = configuredPermissionMode ?? (isRoot ? 'auto' : 'bypassPermissions');
-  return {
-    permissionMode,
-    ...(permissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true as const } : {}),
-  };
-}
-
-export const BYTHEWAY_DISALLOWED_MCP_TOOLS = [
-  'mcp__worker-manager__worker_dispatch',
-  'mcp__worker-manager__worker_abort',
-  'mcp__worker-manager__worker_redirect',
-  'mcp__worker-manager__remind_me',
-  'mcp__worker-manager__stop_auto_remind',
-];
-
-export const BYTHEWAY_SYSTEM_NOTE = [
-  'SIDE BRANCH MODE (/bytheway).',
-  "You are in a SIDE BRANCH session that inherits the main conversation's",
-  'history but does NOT write back to it. The user is asking something on',
-  'the side; the user may later continue THIS branch with /btwc.',
-  '',
-  '## What is intentionally restricted (NOT a real outage)',
-  '- The mutating worker-manager MCP tools (worker_dispatch, worker_abort,',
-  '  worker_redirect, remind_me, stop_auto_remind) are hidden in this mode',
-  '  by design. This is the /bytheway safety policy, NOT an MCP server outage.',
-  '- The read-only worker tools `worker_list` and `worker_quick_status` ARE',
-  '  available; use them freely if you need to check worker state.',
-  '',
-  '## What is allowed',
-  '- Reading AND editing files are allowed under the bot\'s normal permissions.',
-  '',
-  '## Behavior',
-  '- Answer the side question / do the side task, then exit.',
-  '- If the task requires dispatching or controlling workers, tell the user',
-  '  to re-send it as a normal non-/bytheway message.',
-].join('\n');
-
-/**
  * Check if Claude Code has credentials.json (OAuth login).
  */
 function hasCredentialsFile(): boolean {
@@ -168,7 +87,7 @@ function hasCredentialsFile(): boolean {
  * - Merges process.env so child inherits system PATH, TEMP, etc.
  * - Optionally injects an explicit ANTHROPIC_API_KEY from bots.json config.
  */
-function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string>): (options: SpawnOptions) => SpawnedProcess {
+function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => SpawnedProcess {
   // Force-use-env mode: pass ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY /
   // ANTHROPIC_BASE_URL through to the Claude Code subprocess instead of
   // filtering them out. Triggered by either:
@@ -214,12 +133,9 @@ function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string
     if (explicitApiKey) {
       env.ANTHROPIC_API_KEY = explicitApiKey;
     }
-    for (const [key, value] of Object.entries(extraEnv ?? {})) {
-      env[key] = value;
-    }
 
     // Default-enable Claude Code Agent Teams. Without a real terminal there's
-    // no tmux/iTerm2, so Agent Team agents must run in-process (controlled via the
+    // no tmux/iTerm2, so teammates must run in-process (controlled via the
     // `teammateMode` setting passed in queryOptions). Users can disable by
     // setting CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 in MetaBot's parent env.
     if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === undefined) {
@@ -236,34 +152,15 @@ function createSpawnFn(explicitApiKey?: string, extraEnv?: Record<string, string
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
-    applyClaudeChildEnvPolicy(env);
 
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
       signal: options.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     return child as unknown as SpawnedProcess;
-  };
-}
-
-export interface ApiContext {
-  botName: string;
-  chatId: string;
-  /** Group chat member names — enables inter-bot communication prompt. */
-  groupMembers?: string[];
-  /** Group ID — used to build grouptalk chatIds for inter-bot communication. */
-  groupId?: string;
-}
-
-function apiContextEnv(apiContext: ApiContext | undefined): Record<string, string> | undefined {
-  if (!apiContext) return undefined;
-  return {
-    METABOT_BOT_NAME: apiContext.botName,
-    METABOT_CHAT_ID: apiContext.chatId,
-    ...(apiContext.groupId ? { METABOT_GROUP_ID: apiContext.groupId } : {}),
   };
 }
 
@@ -304,7 +201,8 @@ function apiContextEnv(apiContext: ApiContext | undefined): Record<string, strin
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.
  */
-export const DEFAULT_AUTO_COMPACT_WINDOW = String(CONTEXT_WINDOW_200K);
+export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
+const FABLE_5_MODEL_RE = /^claude-fable-5(?:$|\[)/;
 
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;
@@ -361,104 +259,16 @@ export interface ExecutorOptions {
   maxTurns?: number;
   /** Override model for this execution (e.g. faster model for voice calls). */
   model?: string;
-  /** Per-turn reasoning effort override. Claude maps it to SDK `effort`; Codex maps it to model_reasoning_effort. */
-  reasoningEffort?: CodexReasoningEffort | ClaudeEffort;
-  /** Per-turn Codex approval policy override. Ignored by non-Codex executors. */
-  approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
-  /** Per-turn Codex sandbox override. Ignored by non-Codex executors. */
-  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Per-turn Codex reasoning effort override. Ignored by non-Codex executors. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
-  /**
-   * /bytheway side-branch mode.
-   * - fork: inherit main session history without writing back to it.
-   * - continue: resume the remembered side-branch session.
-   */
-  oneShot?: 'fork' | 'continue';
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
-}
-
-type McpServerConfig = {
-  command?: string;
-  args?: string[];
+  /** Short-lived bridge-issued environment values scoped to this engine session. */
   env?: Record<string, string>;
-  [key: string]: unknown;
-};
-
-const EXECUTOR_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-
-function resolveWorkerManagerMcpServer(): McpServerConfig | undefined {
-  const builtCandidates = [
-    path.resolve(EXECUTOR_MODULE_DIR, '../../mcp/worker-manager-mcp.js'),
-    path.resolve(process.cwd(), 'dist/mcp/worker-manager-mcp.js'),
-  ];
-  for (const entrypoint of builtCandidates) {
-    if (fs.existsSync(entrypoint)) {
-      return {
-        command: process.execPath,
-        args: [entrypoint],
-      };
-    }
-  }
-
-  const sourceCandidates = [
-    path.resolve(EXECUTOR_MODULE_DIR, '../../mcp/worker-manager-mcp.ts'),
-    path.resolve(process.cwd(), 'src/mcp/worker-manager-mcp.ts'),
-  ];
-  for (const entrypoint of sourceCandidates) {
-    if (fs.existsSync(entrypoint)) {
-      return {
-        command: process.execPath,
-        args: ['--import', 'tsx', entrypoint],
-      };
-    }
-  }
-
-  return undefined;
-}
-
-function applyApiContextToMcpServer(server: McpServerConfig, apiContext: ApiContext): McpServerConfig {
-  const apiPort = process.env.METABOT_API_PORT || process.env.API_PORT || '9100';
-  const apiSecret = process.env.METABOT_API_SECRET || process.env.API_SECRET;
-  return {
-    ...server,
-    env: {
-      ...(server.env ?? {}),
-      METABOT_API_URL: process.env.METABOT_API_URL || `http://localhost:${apiPort}`,
-      ...(apiSecret ? { METABOT_API_SECRET: apiSecret } : {}),
-      METABOT_BOT_NAME: apiContext.botName,
-      METABOT_CHAT_ID: apiContext.chatId,
-    },
-  };
-}
-
-export function loadMcpServersWithApiContext(apiContext: ApiContext | undefined): Record<string, unknown> | undefined {
-  if (!apiContext) return undefined;
-  let configured: Record<string, McpServerConfig> = {};
-  try {
-    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      mcpServers?: Record<string, McpServerConfig>;
-    };
-    if (settings.mcpServers && typeof settings.mcpServers === 'object') {
-      configured = JSON.parse(JSON.stringify(settings.mcpServers)) as Record<string, McpServerConfig>;
-    }
-  } catch {
-    configured = {};
-  }
-
-  const defaultWorkerManager = resolveWorkerManagerMcpServer();
-  if (!configured['worker-manager'] && defaultWorkerManager) {
-    configured['worker-manager'] = defaultWorkerManager;
-  }
-
-  const names = Object.keys(configured);
-  if (names.length === 0) return undefined;
-  for (const name of names) {
-    configured[name] = applyApiContextToMcpServer(configured[name]!, apiContext);
-  }
-  return configured;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
 }
 
 export type SDKMessage = {
@@ -501,10 +311,6 @@ export type SDKMessage = {
     };
   };
   parent_tool_use_id?: string | null;
-  /** Runtime model from an assistant record, when the backend exposes it. */
-  model?: string;
-  /** Structured per-turn model provenance; PTY backend populates every turn. */
-  modelTelemetry?: import('../../types.js').ModelTelemetry;
 };
 
 export interface ExecutionHandle {
@@ -526,10 +332,19 @@ export class ClaudeExecutor {
     private logger: Logger,
   ) {}
 
-  private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
+  private buildQueryOptions(
+    cwd: string,
+    sessionId: string | undefined,
+    abortController: AbortController,
+    outputsDir?: string,
+    apiContext?: ApiContext,
+    env?: Record<string, string>,
+    mcpEntries?: readonly McpEntry[],
+  ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
-      ...resolveClaudePermissionOptions(this.config.claude.permissionMode, isRoot),
+      permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
+      ...(isRoot ? {} : { allowDangerouslySkipPermissions: true }),
       cwd,
       abortController,
       includePartialMessages: true,
@@ -540,10 +355,10 @@ export class ClaudeExecutor {
       // (>= 0.2.140) supplies the correct command in spawn options — for the
       // native Claude binary that's the binary itself; for legacy JS
       // entrypoints it's the Node executable.
-      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, apiContextEnv(apiContext)),
+      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey),
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
-      // MetaBot has no terminal — split-pane (tmux/iTerm2) Agent Team display
-      // doesn't apply. Force in-process so Agent Team agents run inside the same
+      // MetaBot has no terminal — split-pane (tmux/iTerm2) teammate display
+      // doesn't apply. Force in-process so teammates run inside the same
       // session and surface via SDK message origin / TeammateIdle hooks.
       settings: { teammateMode: 'in-process' },
       // Periodic AI summaries for foreground/background subagents. The SDK
@@ -551,15 +366,12 @@ export class ClaudeExecutor {
       // forwards task events into the card's "Background" panel, so enabling
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
+      ...(env ? { env } : {}),
+      ...(mcpEntries?.length ? { mcpServers: toSdkMcpServers(mcpEntries) } : {}),
     };
 
     // Build system prompt appendix from sections
     const appendSections: string[] = [];
-
-    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
-    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
-    const homeInstructions = buildHomeInstructionsSection({ cwd, logger: this.logger });
-    if (homeInstructions) appendSections.push(homeInstructions);
 
     if (outputsDir) {
       appendSections.push(`## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`);
@@ -569,9 +381,9 @@ export class ClaudeExecutor {
       // botName and chatId are per-session — inject into system prompt to avoid
       // race conditions when multiple chats run concurrently.
       // Port and secret are already set as METABOT_* env vars in config.ts.
-      appendSections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`
-      );
+      appendSections.push(buildMetaBotApiPromptContext(apiContext));
+
+      if (apiContext.teamContext) appendSections.push(apiContext.teamContext);
 
       // Agent Teams namespace guidance: the team config lives at
       // ~/.claude/teams/{name}/, which is shared across all bots and chats
@@ -582,7 +394,7 @@ export class ClaudeExecutor {
         [
           '## Agent Teams (experimental)',
           `When the user asks you to create an agent team, ALWAYS prefix the team name with \`${teamNs}-\` to avoid collisions with other MetaBot chats sharing this machine. For example: \`${teamNs}-research\`, \`${teamNs}-refactor\`.`,
-          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Agent Team agents show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
+          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Teammates show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
           'Clean up the team yourself when work is done so resources don\'t leak (`Clean up the team`).',
         ].join('\n')
       );
@@ -610,16 +422,6 @@ export class ClaudeExecutor {
         append: '\n\n' + appendSections.join('\n\n'),
       };
     }
-    if (this.config.pmPrompt) {
-      appendSections.push(buildPmSystemPrompt());
-      queryOptions.systemPrompt = {
-        type: 'preset',
-        preset: 'claude_code',
-        append: '\n\n' + appendSections.join('\n\n'),
-      };
-    }
-    const mcpServers = loadMcpServersWithApiContext(apiContext);
-    if (mcpServers) queryOptions.mcpServers = mcpServers;
 
     if (this.config.claude.maxTurns !== undefined) {
       queryOptions.maxTurns = this.config.claude.maxTurns;
@@ -631,10 +433,6 @@ export class ClaudeExecutor {
 
     if (this.config.claude.model) {
       queryOptions.model = this.config.claude.model;
-    }
-
-    if (this.config.claude.effort) {
-      queryOptions.effort = this.config.claude.effort;
     }
 
     if (sessionId) {
@@ -663,7 +461,15 @@ export class ClaudeExecutor {
     };
     inputQueue.enqueue(initialMessage);
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      apiContext,
+      options.env,
+      options.mcpEntries,
+    );
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }
@@ -672,26 +478,6 @@ export class ClaudeExecutor {
     }
     if (options.allowedTools !== undefined) {
       queryOptions.allowedTools = options.allowedTools;
-    }
-    if (options.reasoningEffort) {
-      queryOptions.effort = options.reasoningEffort;
-    }
-
-    if (options.oneShot) {
-      if (options.oneShot === 'fork' && sessionId) {
-        queryOptions.forkSession = true;
-      }
-      queryOptions.disallowedTools = BYTHEWAY_DISALLOWED_MCP_TOOLS;
-      const sp = queryOptions.systemPrompt as { type: string; preset: string; append?: string } | undefined;
-      if (sp && typeof sp === 'object') {
-        sp.append = (sp.append ?? '') + '\n\n' + BYTHEWAY_SYSTEM_NOTE;
-      } else {
-        queryOptions.systemPrompt = {
-          type: 'preset',
-          preset: 'claude_code',
-          append: '\n\n' + BYTHEWAY_SYSTEM_NOTE,
-        };
-      }
     }
 
     apply1MContextSettings(queryOptions);
@@ -897,7 +683,14 @@ export class ClaudeExecutor {
 
     this.logger.info({ cwd, hasSession: !!sessionId }, 'Starting Claude execution');
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      options.apiContext,
+      options.env,
+    );
 
     const stream = query({
       prompt,

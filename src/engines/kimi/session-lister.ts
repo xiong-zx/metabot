@@ -36,6 +36,8 @@ export async function listKimiSessions(opts: {
         sessionId: session.id,
         preview: truncatePreview(session.last_prompt || session.title || '', previewMaxLen) || '(no preview)',
         lastActive: Date.parse(session.updated_at) || 0,
+        // Kimi's Server API intentionally abstracts its storage layout. The
+        // picker does not need a byte size, so keep the cross-engine field at 0.
         sizeBytes: 0,
         isCurrent: session.id === currentSessionId,
       }));

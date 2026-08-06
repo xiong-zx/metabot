@@ -9,7 +9,7 @@ Commands you can send to MetaBot in Feishu or Telegram.
 | `/reset` | Clear session — starts a fresh conversation |
 | `/stop` | Abort the currently running task |
 | `/status` | Show session info (session ID, working directory) |
-| `/goal <condition>` | Set a goal the agent keeps pursuing across turns. `/goal clear` to stop. See [Goal Loops](../features/goal-loops.md) |
+| `/goal <condition>` | Set a goal the agent keeps pursuing across turns. `/goal clear` stops it. |
 | `/memory list` | Browse MetaMemory knowledge tree |
 | `/memory search <query>` | Search MetaMemory knowledge base |
 | `/sync` | Trigger MetaMemory → Feishu Wiki sync |
@@ -18,14 +18,14 @@ Commands you can send to MetaBot in Feishu or Telegram.
 | `/help` | Show available commands |
 | `/metaskill ...` | Generate agent teams, agents, or skills |
 | `/metabot` | Load Agent Bus docs (scheduling, bot management, cross-instance talk) |
-| `/metabot-todos` | Show active MetaMemory ToDos with the canonical parser; use `--id <ID>` or `--all` for other views |
+| `/metabot-todos` | Show canonical MetaMemory ToDos; completed items require `--status done` or `--include-done` |
 | `/anything` | Any unrecognized command is forwarded to Claude Code as a skill |
 
 ## Notes
 
 - In **DMs**, the bot replies to all messages
 - Commands like `/memory` and `/sync` respond quickly without spawning Claude
-- `/metaskill`, `/metabot`, and `/metabot-todos` are skills that get loaded into the agent's context on demand
+- `/metaskill`, `/metabot`, and `/metabot-todos` are skills loaded into the agent's context on demand
 
 ## Feishu Group Chat Behavior
 

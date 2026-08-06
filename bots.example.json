@@ -1,72 +1,81 @@
 {
-  "workers": {
-    "defaultModel": "gpt-5.5",
-    "maxPerPm": 8
-  },
-  "agentTeamExecutionBot": "local-web",
-  "webBots": [
+  "feishuBots": [
     {
-      "name": "local-web",
-      "description": "Local web-only bot for first-run smoke tests. It does not connect to Feishu, Telegram, or WeChat.",
-      "specialties": ["local-development", "smoke-test"],
-      "engine": "claude",
-      "pmPrompt": true,
-      "defaultWorkingDirectory": ".",
-      "model": "claude-opus-4-8",
-      "effort": "high",
-      "permissionMode": "auto"
+      "name": "project-alpha",
+      "description": "Frontend development agent for Project Alpha — React, TypeScript, CSS",
+      "specialties": ["frontend", "react", "typescript", "css"],
+      "icon": "🎨",
+      "maxConcurrentTasks": 3,
+      "budgetLimitDaily": 5.0,
+      "ttsVoice": "zh_male_rap_mars_bigtts",
+      "feishuAppId": "cli_xxx",
+      "feishuAppSecret": "secret1",
+      "defaultWorkingDirectory": "/home/user/project-alpha"
+    },
+    {
+      "name": "project-beta",
+      "description": "Backend API development agent for Project Beta",
+      "specialties": ["backend", "api", "database"],
+      "feishuAppId": "cli_yyy",
+      "feishuAppSecret": "secret2",
+      "feishuDomain": "lark",
+      "defaultWorkingDirectory": "/home/user/project-beta",
+      "maxTurns": 30,
+      "maxBudgetUsd": 0.5
+    },
+    {
+      "name": "project-gamma",
+      "description": "Kimi-powered agent (uses your Moonshot subscription)",
+      "engine": "kimi",
+      "feishuAppId": "cli_zzz",
+      "feishuAppSecret": "secret3",
+      "defaultWorkingDirectory": "/home/user/project-gamma",
+      "kimi": {
+        "model": "kimi-latest",
+        "thinking": true
+      }
+    },
+    {
+      "name": "project-delta",
+      "description": "Codex-powered agent (uses Codex CLI)",
+      "engine": "codex",
+      "feishuAppId": "cli_codex",
+      "feishuAppSecret": "secret4",
+      "defaultWorkingDirectory": "/home/user/project-delta",
+      "codex": {
+        "model": "gpt-5.5",
+        "apiKey": "sk-optional-openai-compatible-key",
+        "baseUrl": "https://api.openai.com/v1",
+        "approvalPolicy": "never",
+        "sandbox": "workspace-write"
+      }
     }
   ],
-  "feishuBots": [],
-  "telegramBots": [],
-  "wechatBots": [],
-  "agentTeams": [
+  "telegramBots": [
     {
-      "name": "research",
-      "description": "Resident internal research team. These agents are not IM-visible bots.",
-      "status": "active",
-      "agents": [
-        {
-          "name": "planner",
-          "role": "research planning",
-          "engine": "codex",
-          "model": "gpt-5.5",
-          "reasoningEffort": "high",
-          "approvalPolicy": "never",
-          "sandbox": "read-only",
-          "prompt": "Propose research ideas, algorithms, hypotheses, evaluation plans, and revisions. Do not implement code."
-        },
-        {
-          "name": "coder",
-          "role": "implementation",
-          "engine": "codex",
-          "model": "gpt-5.5",
-          "reasoningEffort": "medium",
-          "approvalPolicy": "never",
-          "sandbox": "workspace-write",
-          "prompt": "Implement scoped code, scripts, pipelines, notebooks, and tooling in the assigned workdir. Avoid touching unrelated files."
-        },
-        {
-          "name": "experiment",
-          "role": "experiments",
-          "engine": "codex",
-          "model": "gpt-5.5",
-          "reasoningEffort": "low",
-          "approvalPolicy": "never",
-          "sandbox": "danger-full-access",
-          "prompt": "Run experiments, benchmarks, ablations, and summarize reproducible metrics and artifacts."
-        },
-        {
-          "name": "reviewer",
-          "role": "review",
-          "engine": "codex",
-          "model": "gpt-5.5",
-          "reasoningEffort": "high",
-          "approvalPolicy": "never",
-          "sandbox": "read-only",
-          "prompt": "Review methods, code, evidence, claims, and reproducibility. Decide whether another iteration is needed."
-        }
-      ]
+      "name": "tg-project",
+      "description": "General purpose project assistant via Telegram",
+      "telegramBotToken": "123456:ABC-DEF...",
+      "defaultWorkingDirectory": "/home/user/project"
+    }
+  ],
+  "wechatBots": [
+    {
+      "name": "wechat-assistant",
+      "description": "WeChat AI assistant via iLink",
+      "defaultWorkingDirectory": "/home/user/project"
+    }
+  ],
+  "peers": [
+    {
+      "name": "alice",
+      "url": "http://localhost:9200",
+      "secret": "alice-api-secret"
+    },
+    {
+      "name": "remote-team",
+      "url": "http://remote-server:9100",
+      "secret": "remote-api-secret"
     }
   ]
 }

@@ -15,7 +15,6 @@
 
 import type { SDKMessage } from '../executor.js';
 import type { AdaptJsonlRecord, SynthesizeResult, RawJsonlRecord } from './contract.js';
-import { resolveContextWindow } from '../../../utils/model-id.js';
 
 /**
  * Record types that should be silently dropped — they carry no information
@@ -80,7 +79,6 @@ function adaptAssistant(
     uuid: record.uuid as string | undefined,
     session_id: sessionId,
     parent_tool_use_id: (record.parentToolUseID as string | undefined) ?? null,
-    model: typeof msg.model === 'string' ? msg.model : undefined,
     message: { content },
   };
 }
@@ -135,17 +133,11 @@ function adaptSystem(
   // System records without a meaningful subtype are noise (e.g. stop_hook_summary).
   if (!subtype) return null;
 
-  const adapted: SDKMessage & Record<string, unknown> = {
+  return {
     type: 'system',
     subtype,
     session_id: sessionId,
   };
-  if (subtype === 'model_consent_fallback') {
-    adapted.originalModel = record.originalModel;
-    adapted.fallbackModel = record.fallbackModel;
-    adapted.content = record.content;
-  }
-  return adapted;
 }
 
 // ── Content block mapper ─────────────────────────────────────────────────────
@@ -207,7 +199,6 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     result: args.resultText ?? '',
     is_error: args.isError ?? false,
     num_turns: args.numTurns,
-    modelTelemetry: args.modelTelemetry,
   };
 
   if (args.usage) {
@@ -218,19 +209,12 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     // (processResultMessage) picks the model with the highest cost and surfaces
     // that key as the displayed model name — so use the REAL model captured off
     // the assistant jsonl records, falling back to a placeholder only if unknown.
-    //
-    // contextWindow must come from the CONFIGURED model, not `args.model`: only
-    // the configured id carries the `[1m]` suffix that selects the 1M window
-    // (the API echoes back a bare id). Reading it off `args.model` would report
-    // 200K for every 1M session — the "ctx: 37.8k/200k" bug.
     if (args.usage.inputTokens !== undefined || args.usage.outputTokens !== undefined) {
-      const configuredModel =
-        args.modelTelemetry?.configuredModel || args.modelTelemetry?.spawnModel || args.model;
       msg.modelUsage = {
         [args.model || 'unknown']: {
           inputTokens: args.usage.inputTokens ?? 0,
           outputTokens: args.usage.outputTokens ?? 0,
-          contextWindow: resolveContextWindow(configuredModel),
+          contextWindow: 200000,
           costUSD: args.usage.costUSD ?? 0,
         },
       };

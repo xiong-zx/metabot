@@ -1,3 +1,5 @@
+import { clearApiToken, getApiToken } from './auth';
+
 export type ContentType = 'text/markdown' | 'text/html';
 
 export interface FolderTreeNode {
@@ -76,12 +78,7 @@ export interface Manifest {
 
 export type ProjectStatus = 'green' | 'yellow' | 'red' | 'killed' | 'unknown';
 export type WipStatus = 'queued' | 'doing' | 'done';
-export type AnomalyReason =
-  | 'no_owner'
-  | 'stale'
-  | 'kill_red'
-  | 'no_goal'
-  | 'stale_bottleneck';
+export type AnomalyReason = 'no_owner' | 'stale' | 'kill_red' | 'no_goal' | 'stale_bottleneck';
 
 export interface Evaluator {
   project: string;
@@ -236,13 +233,7 @@ export interface WhoamiResponse {
 export type ChatConversationKind = 'dm' | 'group';
 export type ChatParticipantKind = 'user' | 'agent';
 export type ChatMessageKind = 'user' | 'assistant' | 'system';
-export type ChatRunStatus =
-  | 'queued'
-  | 'running'
-  | 'waiting_user'
-  | 'completed'
-  | 'failed'
-  | 'canceled';
+export type ChatRunStatus = 'queued' | 'running' | 'waiting_user' | 'completed' | 'failed' | 'canceled';
 
 export interface ChatParticipant {
   conversationId: string;
@@ -270,10 +261,23 @@ export interface ChatRunEvent {
   id?: string;
   runId: string;
   seq: number;
-  kind?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | string;
-  type?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | string;
+  kind?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | 'canceled' | string;
+  type?: 'state' | 'question' | 'file' | 'complete' | 'error' | 'log' | 'canceled' | string;
   payload?: unknown;
   payloadJson?: unknown;
+  createdAt: string;
+}
+
+export interface ChatFile {
+  id: string;
+  conversationId: string;
+  messageId: string | null;
+  runId: string | null;
+  name: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  storageKey: string;
+  createdBy: string;
   createdAt: string;
 }
 
@@ -332,29 +336,14 @@ export interface VoiceTranscribeResponse {
   error?: string;
 }
 
-// ---- self-service web token (mirror of packages/server/src/web/web-routes.ts) ----
-
-export interface IssueTokenResponse {
-  token: string;
-  botName: string;
-  credentialId: string;
-  rotatedFrom: number;
-}
-
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, public detail?: string) {
+  constructor(
+    public status: number,
+    public code: string,
+    public detail?: string,
+  ) {
     super(`${status} ${code}${detail ? ` — ${detail}` : ''}`);
   }
-}
-
-function redirectToSignIn(): never {
-  // Auth is provided via an optional SSO proxy (session cookie). A 401
-  // means the browser has no valid session — bounce through oauth2-proxy's
-  // sign-in, preserving the deep link so the user lands back where they were.
-  const rd = encodeURIComponent(location.pathname + location.search);
-  window.location.href = `/oauth2/sign_in?rd=${rd}`;
-  // Block the calling code path until the navigation takes effect.
-  throw new ApiError(401, 'unauthenticated');
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -362,38 +351,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     Accept: 'application/json',
     ...(init?.headers as Record<string, string> | undefined),
   };
+  const token = getApiToken();
+  if (token && !headers.Authorization) headers.Authorization = `Bearer ${token}`;
   if (init?.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(path, { ...init, headers, credentials: 'include' });
+  const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   const text = await res.text();
   let body: unknown = undefined;
   if (text) {
-    try { body = JSON.parse(text); } catch { body = text; }
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
   }
 
   if (!res.ok) {
-    if (res.status === 401) redirectToSignIn();
-    const code = (body && typeof body === 'object' && 'error' in body)
-      ? String((body as { error: unknown }).error)
-      : res.statusText || 'request_failed';
+    const code =
+      body && typeof body === 'object' && 'error' in body
+        ? String((body as { error: unknown }).error)
+        : res.statusText || 'request_failed';
+    if (res.status === 401) clearApiToken(true);
     throw new ApiError(res.status, code);
   }
   return body as T;
 }
 
-// Memory routes accept either a UUID id or a slash-prefixed path. UUIDs never
-// contain `/`, so we can branch on that. Paths are encoded per-segment so the
-// `/` separators remain literal — single-segment encodeURIComponent would
-// emit `%2F`, which oauth2-proxy v7 silently decodes back to `/` upstream,
-// stripping the leading `/` and turning the lookup into an id-miss.
-//
-// `encodePathSegment` then un-encodes characters that are RFC-3986-safe in
-// path segments (pchar sub-delims + `@` + `:`). The cookie-auth chain
-// (Caddy → oauth2-proxy v7 → backend) re-encodes every `%XX` it sees to
-// `%25XX` (Caddy sends pre-escaped Path without RawPath; downstream
-// re-escapes the literal `%`). Audit-log evidence: only `%25` ever reaches
-// the backend over cookie auth, no other `%XX`. Sending literal `@` for
-// emails dodges the mangle entirely; Bearer-bypass path is unaffected.
+// Memory routes accept either a UUID id or a slash-prefixed path. Preserve
+// slash separators and RFC-3986-safe path characters so deep links remain
+// readable and work through ordinary self-hosted reverse proxies.
 function encodePathSegment(seg: string): string {
   return encodeURIComponent(seg)
     .replace(/%40/g, '@')
@@ -423,36 +409,29 @@ export const api = {
   health: () => request<{ ok: true; uptime: number; version: string }>('/health'),
 
   folderTree: () => request<FolderTreeNode>('/api/memory/folders/tree'),
-  listDocuments: (limit = 50) =>
-    request<{ documents: DocumentSummary[] }>(`/api/memory/documents?limit=${limit}`),
+  listDocuments: (limit = 50) => request<{ documents: DocumentSummary[] }>(`/api/memory/documents?limit=${limit}`),
   listDocumentsByFolder: (folderId: string, limit = 200) =>
     request<{ documents: DocumentSummary[] }>(
       `/api/memory/documents?folder_id=${encodeURIComponent(folderId)}&limit=${limit}`,
     ),
-  getDocument: (idOrPath: string) =>
-    request<DocumentFull>(`/api/memory/documents/${encodeIdOrPath(idOrPath)}`),
+  getDocument: (idOrPath: string) => request<DocumentFull>(`/api/memory/documents/${encodeIdOrPath(idOrPath)}`),
   getFolder: (idOrPath: string) =>
     request<{ id: string; name: string; path: string; parent_id: string | null }>(
       `/api/memory/folders/${encodeIdOrPath(idOrPath)}`,
     ),
   searchMemory: (q: string, limit = 20) =>
-    request<{ results: SearchResult[] }>(
-      `/api/memory/search?q=${encodeURIComponent(q)}&limit=${limit}`,
-    ),
+    request<{ results: SearchResult[] }>(`/api/memory/search?q=${encodeURIComponent(q)}&limit=${limit}`),
 
   listSkills: () => request<{ skills: SkillSummary[] }>('/api/skills'),
-  getSkill: (name: string) =>
-    request<SkillRecord>(`/api/skills/${encodeURIComponent(name)}`),
+  getSkill: (name: string) => request<SkillRecord>(`/api/skills/${encodeURIComponent(name)}`),
   searchSkills: (q: string) =>
     request<{ skills: SkillSearchResult[] }>(`/api/skills/search?q=${encodeURIComponent(q)}`),
 
   listAgents: () => request<{ agents: AgentSummary[] }>('/api/agents'),
   whoami: () => request<WhoamiResponse>('/api/whoami'),
 
-  listChatConversations: () =>
-    request<{ conversations: ChatConversation[] }>('/api/chat/conversations'),
-  getChatConversation: (id: string) =>
-    request<ChatConversation>(`/api/chat/conversations/${encodeURIComponent(id)}`),
+  listChatConversations: () => request<{ conversations: ChatConversation[] }>('/api/chat/conversations'),
+  getChatConversation: (id: string) => request<ChatConversation>(`/api/chat/conversations/${encodeURIComponent(id)}`),
   createChatConversation: (
     kind: ChatConversationKind,
     title: string | undefined,
@@ -470,26 +449,31 @@ export const api = {
       body: JSON.stringify({ botName }),
     }),
   addChatParticipant: (conversationId: string, participant: ChatParticipantInput) =>
-    request<ChatParticipant>(
-      `/api/chat/conversations/${encodeURIComponent(conversationId)}/participants`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(participant),
-      },
-    ),
+    request<ChatParticipant>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/participants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(participant),
+    }),
   searchChatParticipants: (q: string, limit = 12) =>
     request<{ participants: ChatParticipantSearchResult[] }>(
       `/api/chat/participants/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
   listChatRuns: (conversationId: string) =>
-    request<{ runs: ChatRun[] }>(
-      `/api/chat/conversations/${encodeURIComponent(conversationId)}/runs`,
-    ),
+    request<{ runs: ChatRun[] }>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/runs`),
   listChatRunEvents: (runId: string) =>
-    request<{ events: ChatRunEvent[] }>(
-      `/api/chat/runs/${encodeURIComponent(runId)}/events`,
-    ),
+    request<{ events: ChatRunEvent[] }>(`/api/chat/runs/${encodeURIComponent(runId)}/events`),
+  answerChatRun: (runId: string, toolUseId: string, answer: string) =>
+    request<{ runId: string; status: string }>(`/api/chat/runs/${encodeURIComponent(runId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ toolUseId, answer }),
+    }),
+  cancelChatRun: (runId: string) =>
+    request<{ runId: string; status: string; queued?: boolean }>(`/api/chat/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  listChatFiles: (conversationId: string) =>
+    request<{ files: ChatFile[] }>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/files`),
   listChatMessages: (conversationId: string, limit = 80) =>
     request<{ messages: ChatMessage[] }>(
       `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}`,
@@ -500,14 +484,11 @@ export const api = {
     mentionedAgentRefs: string[],
     options?: { engine?: string; model?: string },
   ) =>
-    request<PostChatMessageResponse>(
-      `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, mentionedAgentRefs, ...options }),
-      },
-    ),
+    request<PostChatMessageResponse>(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, mentionedAgentRefs, ...options }),
+    }),
   transcribeChatVoice: (audio: Blob, options?: { stt?: string; language?: string }) => {
     const qs = new URLSearchParams();
     qs.set('stt', options?.stt || 'doubao');
@@ -528,16 +509,8 @@ export const api = {
       },
     ),
 
-  issueWebToken: () =>
-    request<IssueTokenResponse>('/api/web/issue-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    }),
-
   getT5tBoard: () => request<BoardResponse>('/api/t5t/board'),
-  getT5tProject: (slug: string) =>
-    request<ProjectDetailResponse>(`/api/t5t/projects/${encodeURIComponent(slug)}`),
+  getT5tProject: (slug: string) => request<ProjectDetailResponse>(`/api/t5t/projects/${encodeURIComponent(slug)}`),
   postT5tFeedback: (body: FeedbackRequest) =>
     request<FeedbackEntry>('/api/t5t/feedback', {
       method: 'POST',

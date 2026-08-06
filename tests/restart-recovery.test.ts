@@ -1,538 +1,306 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BotRegistry } from '../src/api/bot-registry.js';
+import type { TaskScheduler } from '../src/scheduler/task-scheduler.js';
+import type { Logger } from '../src/utils/logger.js';
+import { RestartStore } from '../src/runtime/restart-store.js';
 
-const originalSessionStoreDir = process.env.SESSION_STORE_DIR;
+process.env.SESSION_STORE_DIR = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
 
-const logger = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-  child: () => logger,
-} as any;
+const {
+  clearRestartBreadcrumb,
+  loadRestartBreadcrumb,
+  writeRestartBreadcrumb,
+} = await import('../src/bridge/restart-notice.js');
+const { finalizeControlledRestartAfterStartup, validatePm2RuntimeExpectations } = await import('../src/bridge/restart-recovery.js');
 
-afterEach(() => {
-  if (originalSessionStoreDir === undefined) delete process.env.SESSION_STORE_DIR;
-  else process.env.SESSION_STORE_DIR = originalSessionStoreDir;
-  vi.resetModules();
-});
+function logger(): Logger {
+  return {
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn().mockReturnThis(),
+  } as unknown as Logger;
+}
 
-describe('restart recovery', () => {
-  it('marks a controlled restart healthy and saves PM2 only after startup health passes', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
+function recoveryFixture(chatId = 'chat-user-1', resume = true) {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-db-')), 'state.sqlite');
+  const store = new RestartStore({ dbPath });
+  const sendTextNotice = vi.fn().mockResolvedValue(undefined);
+  const bot = { sender: { sendTextNotice } };
+  const registry = { get: vi.fn().mockReturnValue(bot) } as unknown as BotRegistry;
+  const scheduledTask = { id: 'continuation-task-1' };
+  const scheduleTaskDurably = vi.fn().mockReturnValue(scheduledTask);
+  const scheduler = { scheduleTaskDurably } as unknown as TaskScheduler;
+  store.claim({
+    requestId: 'restart-recovery',
+    kind: 'restart',
+    requesterBot: 'pm',
+    requesterChat: chatId,
+    source: 'test',
+    reason: 'continue work',
+    resume,
+    targetRoot: '/srv/metabot',
+    targetApps: ['metabot'],
+    targetScripts: { metabot: '/srv/metabot/src/index.ts' },
+    now: 10,
+  });
+  store.markRestarting('restart-recovery', { oldRuntimePid: 10, now: 20 });
+  writeRestartBreadcrumb({
+    requestId: 'restart-recovery',
+    kind: 'restart',
+    botName: 'pm',
+    chatId,
+    source: 'test',
+    reason: 'continue work',
+    resume,
+    targetRoot: '/srv/metabot',
+  });
+  loadRestartBreadcrumb();
+  return { store, registry, scheduler, sendTextNotice, scheduleTaskDurably };
+}
 
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-    const restartCoordinator = await import('../src/bridge/restart-coordinator.js');
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({
-        restartedAt: Math.floor(Date.now() / 1000),
-        requestId: 'restart-health-1',
-        botName: 'admin',
-        chatId: 'oc_restart',
-      }),
-    );
-    restartCoordinator.recordServiceRestartRequest({
-      requestId: 'restart-health-1',
-      requesterBotName: 'admin',
-      request: { chatId: 'oc_restart', userId: 'u1' },
-      status: 'restarting',
+beforeEach(() => clearRestartBreadcrumb());
+
+describe('controlled restart startup finalization', () => {
+  it('rejects stale interpreter, arguments, and secret-safe environment fingerprints', () => {
+    const kit = recoveryFixture();
+    const base = kit.store.get('restart-recovery')!;
+    const expected = {
+      ...base,
+      runtimeExpectations: {
+        metabot: {
+          cwd: '/srv/metabot',
+          script: '/srv/metabot/src/index.ts',
+          interpreter: 'node',
+          interpreterArgs: ['--import', 'tsx'],
+          envHashes: {
+            HTTP_PROXY: createHash('sha256').update('http://proxy.invalid:7890').digest('hex'),
+          },
+        },
+      },
+    };
+    const row = {
+      name: 'metabot',
+      pm2_env: {
+        status: 'online',
+        pm_cwd: '/srv/metabot',
+        pm_exec_path: '/srv/metabot/src/index.ts',
+        exec_interpreter: 'node',
+        node_args: ['--import', 'tsx'],
+        env: { HTTP_PROXY: 'http://proxy.invalid:7890' },
+      },
+    };
+    expect(() => validatePm2RuntimeExpectations(expected, [row])).not.toThrow();
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, exec_interpreter: 'bash' },
+    }])).toThrow(/interpreter/);
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, node_args: ['--import', 'wrong'] },
+    }])).toThrow(/arguments/);
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, env: { HTTP_PROXY: 'http://stale.invalid:7890' } },
+    }])).toThrow(/HTTP_PROXY/);
+    kit.store.close();
+  });
+
+  it('orders startup health before PM2 save and durable healthy state, then continues exactly once', async () => {
+    const kit = recoveryFixture();
+    const events: string[] = [];
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => { events.push('health'); return { ok: true }; },
+      persistProcessList: async () => { events.push('save'); },
+      now: (() => { let value = 100; return () => ++value; })(),
     });
-    restartNotice.loadRestartBreadcrumb();
-    const persistProcessList = vi.fn().mockResolvedValue(undefined);
 
-    await recovery.finalizeControlledRestartAfterStartup({
-      logger,
-      healthCheck: vi.fn().mockResolvedValue({ ok: true, proxyReachable: true }),
-      persistProcessList,
-      now: 5_000,
-    });
-
-    expect(persistProcessList).toHaveBeenCalledTimes(1);
-    expect(restartCoordinator.getServiceRestartRequest('restart-health-1')).toMatchObject({
+    expect(events).toEqual(['health', 'save']);
+    expect(kit.store.get('restart-recovery')).toMatchObject({
       status: 'healthy',
-      healthyAt: 5_000,
-      processListSavedAt: 5_000,
-      proxyReachable: true,
-      runtimePid: process.pid,
+      reportOutcome: 'delivered',
+      recoveryOwner: 'task-scheduler',
+      continuationKey: 'restart-resume:restart-recovery',
+      continuationTaskId: 'continuation-task-1',
     });
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledWith(expect.objectContaining({
+      botName: 'pm',
+      chatId: 'chat-user-1',
+      delaySeconds: 0,
+      dedupeKey: 'restart-resume:restart-recovery',
+      prompt: expect.stringContaining('Continue the interrupted task now'),
+    }));
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(false);
+
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(1);
+    kit.store.close();
   });
 
-  it('records failed startup health and does not save the PM2 process list', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-    const restartCoordinator = await import('../src/bridge/restart-coordinator.js');
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({ restartedAt: Math.floor(Date.now() / 1000), requestId: 'restart-health-failed' }),
-    );
-    restartCoordinator.recordServiceRestartRequest({
-      requestId: 'restart-health-failed',
-      requesterBotName: 'admin',
-      request: { chatId: 'oc_restart', userId: 'u1' },
-      status: 'restarting',
+  it('retains the breadcrumb and retries after durable continuation persistence fails', async () => {
+    const kit = recoveryFixture();
+    kit.scheduleTaskDurably.mockImplementationOnce(() => {
+      throw new Error('injected scheduler persistence failure');
     });
-    restartNotice.loadRestartBreadcrumb();
-    const persistProcessList = vi.fn().mockResolvedValue(undefined);
-
-    await recovery.finalizeControlledRestartAfterStartup({
-      logger,
-      healthCheck: vi.fn().mockResolvedValue({
-        ok: false,
-        proxyReachable: false,
-        error: 'Anthropic connectivity timed out',
-      }),
-      persistProcessList,
-      now: 6_000,
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
     });
+    expect(kit.store.get('restart-recovery')).toMatchObject({ status: 'healthy' });
+    expect(kit.store.get('restart-recovery')?.continuationDecidedAt).toBeUndefined();
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(true);
 
-    expect(persistProcessList).not.toHaveBeenCalled();
-    expect(restartCoordinator.getServiceRestartRequest('restart-health-failed')).toMatchObject({
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(2);
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      recoveryOwner: 'task-scheduler',
+      continuationTaskId: 'continuation-task-1',
+    });
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(false);
+    kit.store.close();
+  });
+
+  it('audits a failed requester notice once without claiming delivery', async () => {
+    const kit = recoveryFixture();
+    kit.sendTextNotice.mockRejectedValue(new Error('injected send failure'));
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      reportOutcome: 'failed:send',
+    });
+    expect(kit.store.get('restart-recovery')?.reportedAt).toBeUndefined();
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+
+    writeRestartBreadcrumb({
+      requestId: 'restart-recovery',
+      kind: 'restart',
+      botName: 'pm',
+      chatId: 'chat-user-1',
+      source: 'test',
+      reason: 'continue work',
+      resume: true,
+      targetRoot: '/srv/metabot',
+    });
+    loadRestartBreadcrumb();
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+    kit.store.close();
+  });
+
+  it('does not save or continue when startup health fails', async () => {
+    const kit = recoveryFixture();
+    const persist = vi.fn().mockResolvedValue(undefined);
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: false, error: 'worker unhealthy' }),
+      persistProcessList: persist,
+    });
+    expect(persist).not.toHaveBeenCalled();
+    expect(kit.store.get('restart-recovery')).toMatchObject({
       status: 'failed',
-      failedAt: 6_000,
-      healthError: 'Anthropic connectivity timed out',
-      proxyReachable: false,
+      healthError: 'worker unhealthy',
+      reportOutcome: 'delivered',
+      recoveryOwner: 'none:restart-failed',
     });
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    kit.store.close();
   });
 
-  it('updates interrupted card, notifies chat, queues continuation, and clears active task', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({ restartedAt: Math.floor(Date.now() / 1000), botName: 'research-pm', chatId: 'oc_1' }),
-    );
-    recovery.recordActiveTask({
-      botName: 'research-pm',
-      chatId: 'oc_1',
-      messageId: 'msg_1',
-      lifecycleKey: 'chat:oc_1:m1',
-      userPrompt: 'Please update config and restart service.',
-      startedAt: Date.now() - 5000,
-      source: 'chat',
+  it('marks the request failed and does not continue when PM2 save fails', async () => {
+    const kit = recoveryFixture();
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => { throw new Error('injected pm2 save failure'); },
     });
-
-    restartNotice.loadRestartBreadcrumb();
-
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
-    const scheduleTask = vi.fn((input) => ({ ...input, id: 'resume-task' }));
-    const registry = {
-      get: vi.fn((name: string) => name === 'research-pm'
-        ? { sender: { updateCard, sendTextNotice } }
-        : undefined),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      status: 'failed',
+      healthError: 'injected pm2 save failure',
+      recoveryOwner: 'none:restart-failed',
     });
-
-    expect(updateCard).toHaveBeenCalledWith('msg_1', expect.objectContaining({
-      status: 'complete',
-      userPrompt: 'Please update config and restart service.',
-      lifecycleKey: 'chat:oc_1:m1',
-      lifecycleStage: 'recovering',
-    }));
-    expect(recovery.listActiveTaskRecords()).toEqual([]);
-    expect((await import('../src/bridge/card-lifecycle-store.js')).getCardLifecycleRecord('chat:oc_1:m1')).toMatchObject({
-      botName: 'research-pm',
-      chatId: 'oc_1',
-      messageId: 'msg_1',
-      source: 'restart-recovery',
-      status: 'complete',
-      lifecycleStage: 'recovering',
-    });
-    expect(sendTextNotice).toHaveBeenCalledWith(
-      'oc_1',
-      'MetaBot Restart Complete',
-      expect.stringContaining('Service restart completed'),
-      'green',
-    );
-    expect(scheduleTask).toHaveBeenCalledWith(expect.objectContaining({
-      botName: 'research-pm',
-      chatId: 'oc_1',
-      delaySeconds: 2,
-      sendCards: true,
-      label: 'restart-resume-oc_1',
-      dedupeKey: 'restart-resume:research-pm:oc_1',
-      prompt: expect.stringContaining('Do not run metabot restart or metabot update again merely to satisfy the previous interrupted request'),
-    }));
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    kit.store.close();
   });
 
-  it('queues recovery continuation for interrupted tasks on ordinary startup without a fresh breadcrumb', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const recovery = await import('../src/bridge/restart-recovery.js');
-    recovery.recordActiveTask({
-      botName: 'research-pm',
-      chatId: 'oc_1',
-      messageId: 'msg_1',
-      userPrompt: 'Still running?',
-      startedAt: Date.now() - 5000,
-      source: 'chat',
+  it('reports but does not continue when resume is disabled', async () => {
+    const kit = recoveryFixture('chat-user-1', false);
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
     });
-
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
-    const scheduleTask = vi.fn((input) => ({ ...input, id: 'resume-task' }));
-    const registry = {
-      get: vi.fn((name: string) => name === 'research-pm'
-        ? { sender: { updateCard, sendTextNotice } }
-        : undefined),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      status: 'healthy',
+      reportOutcome: 'delivered',
+      recoveryOwner: 'none:resume-disabled',
     });
-
-    expect(updateCard).toHaveBeenCalledWith('msg_1', expect.objectContaining({
-      status: 'complete',
-      userPrompt: 'Still running?',
-      lifecycleStage: 'recovering',
-      errorMessage: undefined,
-    }));
-    expect(sendTextNotice).toHaveBeenCalledWith(
-      'oc_1',
-      'MetaBot Restart Complete',
-      expect.stringContaining('without a fresh controlled-restart breadcrumb'),
-      'green',
-    );
-    expect(scheduleTask).toHaveBeenCalledWith(expect.objectContaining({
-      botName: 'research-pm',
-      chatId: 'oc_1',
-      label: 'restart-resume-oc_1',
-      dedupeKey: 'restart-resume:research-pm:oc_1',
-      prompt: expect.stringContaining('recovery continuation'),
-    }));
-    expect(recovery.listActiveTaskRecords()).toEqual([]);
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    kit.store.close();
   });
 
-  it('controlled chat restarts do not repeat the restart command when no task was active', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({
-        restartedAt: Math.floor(Date.now() / 1000),
-        botName: 'research-pm',
-        chatId: 'oc_1',
-        source: 'chat-command',
-        resume: true,
-        requestId: 'restart-123',
-      }),
-    );
-
-    restartNotice.loadRestartBreadcrumb();
-    expect(restartNotice.shouldRemindRestart('oc_1')).toBe(true);
-
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
-    const scheduleTask = vi.fn();
-    const registry = {
-      get: vi.fn((name: string) => name === 'research-pm'
-        ? { sender: { updateCard, sendTextNotice } }
-        : undefined),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
+  it.each([
+    ['team:migration:member', 'agent-team-supervisor'],
+    ['teaminst:migration:member:instance', 'agent-team-supervisor'],
+    ['worker:task-123', 'execution-daemon'],
+    ['arc:run-123', 'execution-daemon'],
+  ])('leaves internal chat %s to its durable owner', async (chatId, owner) => {
+    const kit = recoveryFixture(chatId);
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
     });
-
-    expect(updateCard).not.toHaveBeenCalled();
-    expect(sendTextNotice).toHaveBeenCalledWith(
-      'oc_1',
-      'MetaBot Restart Complete',
-      expect.stringContaining('No in-flight agent turn was recorded'),
-      'green',
-    );
-    expect(scheduleTask).not.toHaveBeenCalled();
-    expect(recovery.listActiveTaskRecords()).toEqual([]);
-  });
-
-  it('controlled chat restarts resume other chats that had active turns', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({
-        restartedAt: Math.floor(Date.now() / 1000),
-        botName: 'admin',
-        chatId: 'oc_restart',
-        source: 'chat-command',
-        resume: true,
-      }),
-    );
-    recovery.recordActiveTask({
-      botName: 'pm-codex',
-      chatId: 'oc_work',
-      messageId: 'msg_work',
-      userPrompt: 'Continue validation after restart',
-      startedAt: Date.now() - 10_000,
-      source: 'chat',
-    });
-
-    restartNotice.loadRestartBreadcrumb();
-
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
-    const scheduleTask = vi.fn((input) => ({ ...input, id: 'resume-task' }));
-    const registry = {
-      get: vi.fn((name: string) => {
-        if (name === 'pm-codex') return { sender: { updateCard, sendTextNotice } };
-        if (name === 'admin') return { sender: { updateCard, sendTextNotice } };
-        return undefined;
-      }),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
-    });
-
-    expect(updateCard).toHaveBeenCalledWith('msg_work', expect.objectContaining({
-      status: 'complete',
-      userPrompt: 'Continue validation after restart',
-    }));
-    expect(sendTextNotice).toHaveBeenCalledWith(
-      'oc_work',
-      'MetaBot Restart Complete',
-      expect.stringContaining('queued a continuation'),
-      'green',
-    );
-    expect(scheduleTask).toHaveBeenCalledWith(expect.objectContaining({
-      botName: 'pm-codex',
-      chatId: 'oc_work',
-      label: 'restart-resume-oc_work',
-      dedupeKey: 'restart-resume:pm-codex:oc_work',
-      prompt: expect.stringContaining('Continue validation after restart'),
-    }));
-  });
-
-  it('sends a post-restart readiness report to requester and blocker chats', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-    const restartCoordinator = await import('../src/bridge/restart-coordinator.js');
-
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({
-        restartedAt: Math.floor(Date.now() / 1000),
-        botName: 'admin',
-        chatId: 'oc_restart',
-        source: 'chat-command',
-        resume: true,
-        requestId: 'restart-report-1',
-      }),
-    );
-    restartCoordinator.recordServiceRestartRequest({
-      requestId: 'restart-report-1',
-      requesterBotName: 'admin',
-      request: { chatId: 'oc_restart', userId: 'u1', reason: 'deploy fixes' },
-      status: 'scheduled',
-      blockers: [{ botName: 'pm-codex', chatId: 'oc_work', messageId: 'msg_work', source: 'chat' }],
-      now: Date.now() - 5_000,
-    });
-    restartCoordinator.recordServiceRestartReadiness({
-      requestId: 'restart-report-1',
-      botName: 'pm-codex',
-      chatId: 'oc_work',
-      userId: 'u2',
-      note: 'checkpoint saved',
-      now: Date.now() - 4_000,
-    });
-    recovery.recordActiveTask({
-      botName: 'pm-codex',
-      chatId: 'oc_work',
-      messageId: 'msg_work',
-      userPrompt: 'Continue validation after restart',
-      startedAt: Date.now() - 10_000,
-      source: 'chat',
-    });
-
-    restartNotice.loadRestartBreadcrumb();
-
-    const adminNotice = vi.fn().mockResolvedValue(undefined);
-    const pmNotice = vi.fn().mockResolvedValue(undefined);
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const scheduleTask = vi.fn((input) => ({ ...input, id: 'resume-task' }));
-    const registry = {
-      get: vi.fn((name: string) => {
-        if (name === 'admin') return { sender: { updateCard, sendTextNotice: adminNotice } };
-        if (name === 'pm-codex') return { sender: { updateCard, sendTextNotice: pmNotice } };
-        return undefined;
-      }),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
-    });
-
-    expect(adminNotice).toHaveBeenCalledWith(
-      'oc_restart',
-      'MetaBot Restart Report',
-      expect.stringContaining('ready=1/1'),
-      'green',
-    );
-    expect(pmNotice).toHaveBeenCalledWith(
-      'oc_work',
-      'MetaBot Restart Recovery Report',
-      expect.stringContaining('Recovery continuations queued: 1'),
-      'green',
-    );
-    expect(restartCoordinator.getServiceRestartRequest('restart-report-1')?.reportedAt).toEqual(expect.any(Number));
-  });
-
-  it('clears expired active tasks on startup', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const recovery = await import('../src/bridge/restart-recovery.js');
-    const old = Date.now() - 25 * 60 * 60 * 1000;
-    writeFileSync(
-      join(dir, 'active-tasks.json'),
-      JSON.stringify([
-        {
-          botName: 'research-pm',
-          chatId: 'oc_1',
-          messageId: 'msg_1',
-          userPrompt: 'Old running task',
-          startedAt: old,
-          updatedAt: old,
-          source: 'chat',
-        },
-      ]),
-    );
-
-    const registry = { get: vi.fn() };
-    const scheduleTask = vi.fn();
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
-    });
-
-    expect(registry.get).not.toHaveBeenCalled();
-    expect(scheduleTask).not.toHaveBeenCalled();
-    expect(recovery.listActiveTaskRecords()).toEqual([]);
-  });
-
-  it('clears internal worker and agent active task records instead of resuming them as user chats', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-recovery-'));
-    process.env.SESSION_STORE_DIR = dir;
-    vi.resetModules();
-
-    const restartNotice = await import('../src/bridge/restart-notice.js');
-    const recovery = await import('../src/bridge/restart-recovery.js');
-
-    writeFileSync(
-      join(dir, 'last-restart.json'),
-      JSON.stringify({
-        restartedAt: Math.floor(Date.now() / 1000),
-        botName: 'admin',
-        chatId: 'oc_restart',
-        source: 'chat-command',
-        resume: true,
-      }),
-    );
-    const now = Date.now();
-    writeFileSync(
-      join(dir, 'active-tasks.json'),
-      JSON.stringify([
-        {
-          botName: 'pm-codex',
-          chatId: 'worker-abc123',
-          messageId: 'worker-msg',
-          userPrompt: 'Internal worker task',
-          startedAt: now - 5_000,
-          updatedAt: now - 4_000,
-          source: 'api',
-        },
-        {
-          botName: 'pm-codex',
-          chatId: 'team:research:reviewer',
-          messageId: 'legacy-agent-msg',
-          userPrompt: 'Legacy internal agent task',
-          startedAt: now - 5_000,
-          updatedAt: now - 4_000,
-          source: 'api',
-        },
-        {
-          botName: 'pm-codex',
-          chatId: 'teaminst:ati_chat_a:reviewer',
-          messageId: 'instance-agent-msg',
-          userPrompt: 'Instance internal agent task',
-          startedAt: now - 5_000,
-          updatedAt: now - 4_000,
-          source: 'api',
-        },
-      ]),
-    );
-
-    restartNotice.loadRestartBreadcrumb();
-
-    const updateCard = vi.fn().mockResolvedValue(true);
-    const sendTextNotice = vi.fn().mockResolvedValue(undefined);
-    const scheduleTask = vi.fn();
-    const registry = {
-      get: vi.fn((name: string) => ({ sender: { updateCard, sendTextNotice }, name })),
-    };
-
-    await recovery.recoverInterruptedTasksAfterRestart({
-      registry: registry as any,
-      scheduler: { scheduleTask } as any,
-      logger,
-    });
-
-    expect(updateCard).not.toHaveBeenCalled();
-    expect(sendTextNotice).toHaveBeenCalledTimes(1);
-    expect(sendTextNotice).toHaveBeenCalledWith(
-      'oc_restart',
-      'MetaBot Restart Complete',
-      expect.stringContaining('No in-flight agent turn was recorded'),
-      'green',
-    );
-    expect(scheduleTask).not.toHaveBeenCalled();
-    expect(recovery.listActiveTaskRecords()).toEqual([]);
+    expect(kit.store.get('restart-recovery')).toMatchObject({ status: 'healthy', recoveryOwner: owner });
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    kit.store.close();
   });
 });

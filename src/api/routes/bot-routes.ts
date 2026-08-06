@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import type * as http from 'node:http';
 import { addBot, removeBot, updateBot, getBotEntry, addPeer, removePeer } from '../bots-config-writer.js';
 import { installSkillsToWorkDir } from '../skills-installer.js';
-import { webBotFromJson } from '../../config.js';
+import { parseFeishuDomain, webBotFromJson } from '../../config.js';
 import { resolveEngineName } from '../../engines/index.js';
 import { NullSender } from '../../web/null-sender.js';
 import { MessageBridge } from '../../bridge/message-bridge.js';
@@ -154,12 +154,19 @@ export async function handleBotRoutes(
         jsonResponse(res, 400, { error: 'Feishu bot requires: feishuAppId, feishuAppSecret, defaultWorkingDirectory' });
         return true;
       }
+      let feishuDomain;
+      try {
+        feishuDomain = parseFeishuDomain(body.feishuDomain);
+      } catch (err: any) {
+        jsonResponse(res, 400, { error: err.message });
+        return true;
+      }
       entry = {
         name, ...(body.description ? { description: body.description } : {}),
         ...(body.engine ? { engine: body.engine } : {}),
         ...(body.codex ? { codex: body.codex } : {}),
         ...(body.kimi ? { kimi: body.kimi } : {}),
-        feishuAppId: appId, feishuAppSecret: appSecret, defaultWorkingDirectory: workDir,
+        feishuAppId: appId, feishuAppSecret: appSecret, feishuDomain, defaultWorkingDirectory: workDir,
         ...(body.maxTurns ? { maxTurns: body.maxTurns } : {}),
         ...(body.maxBudgetUsd ? { maxBudgetUsd: body.maxBudgetUsd } : {}),
         ...(body.model ? { model: body.model } : {}),
@@ -207,7 +214,14 @@ export async function handleBotRoutes(
       logger.info({ name, platform }, 'Bot added to config');
 
       if (body.installSkills) {
-        installSkillsToWorkDir(workDir, logger, { platform: platform as 'feishu' | 'telegram' | 'web' });
+        installSkillsToWorkDir(workDir, logger, {
+          platform: platform as 'feishu' | 'telegram' | 'web',
+          ...(platform === 'feishu' ? {
+            feishuAppId: entry.feishuAppId as string,
+            feishuAppSecret: entry.feishuAppSecret as string,
+            feishuDomain: parseFeishuDomain(entry.feishuDomain),
+          } : {}),
+        });
       }
 
       let activated = false;
@@ -247,6 +261,21 @@ export async function handleBotRoutes(
       return true;
     }
     const body = await parseJsonBody(req);
+    const current = getBotEntry(botsConfigPath, name);
+    if (Object.hasOwn(body, 'feishuDomain')) {
+      if (current && current.platform !== 'feishu') {
+        jsonResponse(res, 400, { error: 'feishuDomain can only be set on Feishu bots' });
+        return true;
+      }
+      if (current?.platform === 'feishu') {
+        try {
+          body.feishuDomain = parseFeishuDomain(body.feishuDomain);
+        } catch (err: any) {
+          jsonResponse(res, 400, { error: err.message });
+          return true;
+        }
+      }
+    }
     const updated = updateBot(botsConfigPath, name, body);
     if (!updated) {
       jsonResponse(res, 404, { error: `Bot not found: ${name}` });

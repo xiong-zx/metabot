@@ -10,7 +10,7 @@ git clone https://github.com/xvirobotics/metabot.git
 cd metabot
 
 # 2. Install dependencies
-npm install
+npm ci --include=dev
 
 # 3. Copy environment config
 cp .env.example .env
@@ -23,22 +23,20 @@ npm run build
 npm run dev
 ```
 
-**Prerequisites:** Node.js 20+, Claude Code CLI installed and authenticated.
+**Prerequisites:** Node.js >= 22.19 and Git. Install and authenticate only the
+engine needed for engine-specific work: Codex CLI, Kimi Code 0.27+, or the
+Claude Code compatibility CLI. Documentation and most unit tests do not
+require an authenticated engine.
 
 ## Development Commands
 
 ```bash
 npm run dev          # Hot-reload dev server (tsx)
-npm run typecheck    # No-emit gate for bridge + root referenced workspaces + packages/web-ui
 npm test             # Run tests (vitest)
-npm run test:cli     # Canonical root entrypoint for packages/cli Vitest
-npm run check:merge-hygiene:memory-core  # Merge-only Memory Core semantic-loss gate
 npm run lint         # ESLint check
 npm run format       # Prettier format
 npm run build        # TypeScript compile to dist/
 ```
-
-`npm run typecheck` intentionally checks `tsconfig.bridge.json`, every workspace referenced from the root solution config (`packages/cli-core`, `packages/metamemory`, `packages/skill-hub`, `packages/cli`, `packages/server`), and the supported packaged React UI in `packages/web-ui`. The legacy top-level `web/` app is not part of this no-emit gate; it is validated by `npm run build:web` and the full `npm run build`.
 
 ## How to Contribute
 

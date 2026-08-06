@@ -18,42 +18,96 @@ Installed automatically by the MetaBot installer to `~/.local/bin/metabot`.
 ## 1. Bridge process control
 
 ```bash
-metabot update                      # refresh from internal package, rebuild, update skills, restart
-metabot update --git                # developer-only: git pull + rebuild + restart
-metabot start                       # start with PM2
-metabot stop                        # stop
-metabot restart                     # restart
-metabot restart --wait              # restart current runtime and wait for durable health
-metabot deploy-runtime --runtime DIR [--request-id ID] # atomically switch runtime externally
+metabot update                                  # package install: latest GitHub Release
+metabot update --package                        # force latest GitHub Release package
+metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
+metabot update --git                            # force git pull + rebuild + restart
+metabot start                       # start Bridge + Worker Runner + ARC
+metabot stop                        # stop the whole three-app runtime
+metabot restart --wait --json       # protected Bridge-only restart
+metabot restart --request-id ID     # caller-stable idempotency key
+metabot restart --daemon worker     # guarded Worker Runner restart
+metabot restart --daemon arc        # guarded ARC restart
+metabot deploy-runtime --runtime /absolute/checkout --wait  # protected external runtime switch
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
 
-`restart` never switches `cwd` or the script target. Runtime/worktree switching
-must use `deploy-runtime` from outside the MetaBot process tree. Never run
-`pm2 delete metabot` followed by `pm2 start`: deleting the app also kills the
-Bot/Agent/Worker shell that would have issued the second command. Restart state
-is persisted by `requestId`; callers can reuse that ID to make deployment
-retries idempotent. The new process verifies bridge and Anthropic
-connectivity, saves PM2 only after health passes, and reports `healthy` or
-`failed` through restart recovery.
+For a normal package-managed personal edition, `metabot update` defaults to the
+latest GitHub Release. A source checkout is auto-detected and keeps its Git
+update path; use `--package` to force a Release overlay.
 
-`metabot update` is the recommended way to update MetaBot. It performs:
+`metabot update --package --version 1.3.0` selects the immutable v1.3.0 assets
+instead of `latest`. Package updating performs:
 
-1. Download the current internal package from `METABOT_CORE_URL/install/latest.tgz`
-2. Overlay code files into `METABOT_HOME`, preserving `.env`, `bots.json`, `logs/`, `data/`, and `.git/`
-3. `npm install && npm run build` — rebuild
-4. Copy bundled MetaBot skills into Claude/Codex skill directories
-5. If `lark-cli` or lark skills are already installed, update `@larksuite/cli` and refresh the lark AI Agent skills
-6. Sync skills into the configured bot workspace
-7. A requestId-deduplicated atomic PM2 restart; the new process saves PM2 only after health passes
+1. Download `install.sh`, `metabot-runtime.tgz`, and `SHA256SUMS` from the latest or pinned GitHub Release.
+2. Verify the runtime SHA256 before extraction.
+3. Validate the complete personal-edition manifest and its semantic version; a pinned version must match exactly.
+4. Overlay code into `METABOT_HOME`, preserving `.env`, `bots.json`, `logs/`, `data/`, and `.git/`.
+5. Preserve user/Core state under `~/.metabot/` and `~/.metabot-core/`; only package-owned `~/.metabot/default.env` may be refreshed.
+6. Install dependencies and build the Bridge, Core, Web UI, and delegated CLI.
+7. Refresh bundled/workspace Skills and existing Lark CLI Skills when present.
+8. Restart Bridge and both execution daemons, then save PM2 only after health.
 
-All in one command. Source checkouts can still use `metabot update --git`, but that is a developer-only path and requires a clean Git remote.
+Plain `restart` accepts `--request-id`, `--bot`, `--chat`, `--source`,
+`--reason`, `--resume`/`--no-resume`, `--wait`, `--timeout`, and `--json`.
+`deploy-runtime` accepts the same request metadata plus `--wait`/`--no-wait`
+and `--force`. A repeated request ID reads the existing durable result and
+does not repeat the PM2 action.
+
+The old Bridge process writes an atomic breadcrumb and a transactional SQLite
+request record, then changes only the registered `metabot` process in place.
+The new Bridge verifies its HTTP health, both execution-daemon wire probes,
+and the expected PM2 cwd, script, interpreter, interpreter arguments, and
+environment before it runs `pm2 save --force` and marks the request healthy.
+Environment values, including credentials and proxy settings, are stored in
+the restart ledger only as SHA-256 fingerprints. The breadcrumb is retained until reporting and continuation
+ownership are recorded, preventing a recovered session from starting a
+restart loop.
+
+When `--resume` has a normal user or PM bot/chat scope, startup schedules one
+durable continuation in the existing chat session so the interrupted task
+continues exactly once. The scheduler writes that task atomically before it
+arms the timer; a persistence failure retains the restart breadcrumb for the
+next startup replay. Agent Team and Worker/ARC internal chats are not
+generically resumed; their durable supervisors and daemons remain responsible
+for recovery. Restart state is under `SESSION_STORE_DIR`, `METABOT_STATE_DIR`,
+or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).
+
+Daemon restarts refuse while work is active. `--force` explicitly accepts that
+ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
+the same guard and must run outside the MetaBot process tree. It prevalidates
+the live Bridge PID and the caller ancestry; if either cannot be read, it
+refuses the switch instead of assuming the caller is external. It then
+prevalidates the target/rollback configurations, restarts Worker Runner, ARC, an optional
+checkout-owned local Core, then Bridge without deleting their PM2
+registrations, and rolls back every changed app if PM2 rejects or cannot verify
+a switch. Core stays in its separate ecosystem. It is included only when its
+current PM2 cwd/script exactly match the Bridge runtime; an external Core is
+left untouched. `uninstall.sh` uses the same ownership check. Only the healthy
+new Bridge saves the process list.
+
+Package updates of an online runtime must be launched from SSH or another
+controller outside the live Bridge process tree. The updater refuses internal
+or unverifiable callers before downloading the package, then uses the same
+request-ID-backed no-delete runtime switch. Initial or offline installation
+may start missing registrations, but never deletes an existing registration.
+
+Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
+`--version` accepts only `x.y.z` (an optional leading `v` is normalized) and
+cannot be combined with `--git`.
 
 ## 2. Bridge daemon API
 
 These commands curl the local bridge daemon at `localhost:9100`, reading
 `API_PORT` / `API_SECRET` (and optional `METABOT_URL`) from the bridge `.env`.
+Human or local management mutations require `API_SECRET`, including on
+loopback; the Bridge does not restore unauthenticated local mutation access.
+An Agent Team engine session instead forwards its short-lived scoped
+credential for only `metabot bots`, `metabot peers`, `metabot stats`, and
+`metabot metrics` outside the Team coordination API. It never forwards
+`API_SECRET` or `METABOT_API_SECRET`, and the scoped credential cannot read bot
+details/profiles or call other Bridge routes.
 
 ### Bot management
 
@@ -65,22 +119,13 @@ metabot bot <name>                  # get bot details
 ### Agent talk
 
 ```bash
-metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <prompt>      # talk to a bot (bridge /api/talk)
-metabot talk-status <taskId>        # check an async talk task with local auth
+metabot talk <bot> <chatId> <prompt>      # talk to a bot (bridge /api/talk)
 metabot talk alice/bot <chatId> <prompt>  # talk to a specific peer's bot
 ```
 
 The bot name supports [qualified names](../features/peers.md#qualified-names)
 (`peerName/botName`) for cross-instance routing. This is the bridge-local talk
 path; `metabot agents talk` is the separate central-registry P2P variant.
-`metabot talk` waits up to 25 seconds by default; if the task is still running,
-it returns a `taskId` and `statusCommand` instead of blocking indefinitely. Use
-`--sync` for the old blocking behavior, or `--async` to return immediately.
-Async talk responses include a `statusUrl` for API clients and a
-`statusCommand` such as `metabot talk-status <taskId>` for local CLI users.
-Async task status is persisted under `SESSION_STORE_DIR`; if the bridge restarts
-while a task is running, the old task id should return `failed` with
-`task_interrupted_by_restart` instead of disappearing as `Task not found`.
 
 ### Peers
 
@@ -92,38 +137,37 @@ metabot peers                       # list peers and status
 
 `metabot teams` talks to the local bridge `/api/agent-teams/*` API. It is the coordination surface for MetaBot Agent Teams: agents, mailbox messages, shared tasks, and background runs.
 
+Governed Teams add separate versioned resources without changing legacy or
+`bots.json` Teams:
+
+```bash
+metabot teams templates list
+metabot teams templates publish implementation --body '{"agents":[{"name":"coder","engine":"codex"}]}'
+metabot teams rules publish implementation-policy --scope team-template --rules '[{"text":"Keep changes focused."}]'
+metabot teams instances resolve implementation --scope project --scope-key project-a --pm-bot metabot
+metabot teams instances stop atg_0123456789abcdef
+metabot teams audit --instance atg_0123456789abcdef
+```
+
+Chat scope is the default. Global scope requires the explicit `--global`
+option. Engine sessions automatically forward a short-lived bridge-issued
+credential and do not inherit the bridge administrator secret. Persistent
+executor retirement begins before that credential expires, waits for an active
+turn to finish, and provides a fresh credential on the next turn. Callers
+cannot gain authority with body or CLI role fields.
+
 ```bash
 metabot teams list
-metabot teams create <team> [--description <text>] [--actor-role admin|user|pm]
+metabot teams create <team> [--description <text>]
 metabot teams status <team>
-metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
-metabot teams start <team> [--actor-role admin|user|pm]
-metabot teams stop <team> [--actor-role admin|user|pm]
-metabot teams delete <team> [--actor-role admin|user|pm]
-
-metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
-metabot teams activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
-metabot teams templates list [name]
-metabot teams templates export <name> [--version <n>]
-metabot teams templates diff <name> --from <n> [--to <n>]
-metabot teams templates import '<json>' [--source <name>] [--actor-role admin|user|pm]
-metabot teams proposals list [--status pending|approved|rejected]
-metabot teams proposals create [template|ruleset] '<json>' [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
-metabot teams proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
-metabot teams proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
-metabot teams instances list [--template <name>]
-metabot teams instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--actor-role admin|user|pm]
-metabot teams rules list [name]
-metabot teams rules export <name> [--version <n>]
-metabot teams rules diff <name> --from <n> [--to <n>]
-metabot teams rules import '<json>' [--source <name>] [--actor-role admin|user|pm]
-metabot teams rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--actor-role admin|user|pm]
-metabot teams rules context --ref <name[@version]> [--rule <text>]
+metabot teams start <team>
+metabot teams stop <team>
+metabot teams delete <team>
 
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
-metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
-metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents stop <team> <name>
+metabot teams agents delete <team> <name>
 
 metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
 metabot teams inbox <team> <name> [--unread] [--read]
@@ -137,14 +181,10 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]
+metabot teams runs stop <team> <runId>
 ```
 
-`runs stop` marks the run `stopped` and, when the bridge supervisor owns the in-flight run, asks the bridge to stop that agent chat task, requeues assigned in-progress tasks to `pending`, and suppresses late executor output for that stopped run.
-
-Template/rule commands are the Phase 1 control surface for versioned Agent Team templates, chat/project-scoped runtime instances, pinned RuleSet refs, versioned RuleSets, and promotion proposals. Managers or agents can create proposal records, but only a PM, user, or admin can approve or reject them; approval writes a new template or RuleSet version and does not auto-upgrade pinned instances. `instances resolve --rule-ref ...` pins extra project/runtime RuleSets at creation time, `teams config ... --rule-ref ...` updates the current instance explicitly, and `rules export/diff/import` gives RuleSets the same reviewable lifecycle as templates. Existing `<team>` arguments accept either a team name or an `instanceId`; prefer the `instanceId` returned by `instances resolve` for scoped project/chat teams. The storage schema still keeps rows under `teamName` while the runtime migrates toward first-class `instanceId` internally.
-
-For privileged CLI actions, `--actor-role` is the caller authority (`admin`, `user`, or `pm`). It is required for team lifecycle changes, binding/config updates, direct Agent creation or stop/delete, run stop, direct template/rule import or set, instance resolve, and promotion decisions. `--role` on `agents spawn` is the spawned Agent's functional role, not authority.
+`runs stop` marks the run `stopped` and, when the bridge supervisor owns the in-flight run, asks the bridge to stop that teammate chat task, requeues assigned in-progress tasks to `pending`, and suppresses late executor output for that stopped run.
 
 The same command surface is implemented in both `bin/metabot` and the TypeScript feature CLI under `packages/cli`. The bridge reads `API_PORT` / `API_SECRET` and optional `METABOT_URL` from `.env`.
 
@@ -165,7 +205,6 @@ metabot schedule cancel <id>                                   # cancel a task
 metabot stats                       # cost & usage statistics
 metabot metrics                     # Prometheus metrics
 metabot health                      # health check
-metabot doctor --json               # runtime diagnostics, including Codex sandbox namespace readiness
 ```
 
 ### Voice
@@ -185,12 +224,12 @@ metabot voice tts "Hello" --voice nova                   # use specific voice
 
 TTS flags:
 
-| Flag | Description |
-|------|-------------|
-| `--play` | Play audio after generating (macOS: afplay, Linux: mpv/ffplay/play) |
-| `-o FILE` | Save to specific file (default: `/tmp/metabot-voice-<timestamp>.mp3`) |
-| `--provider NAME` | TTS provider: `doubao`, `openai`, or `elevenlabs` |
-| `--voice ID` | Voice/speaker ID (provider-specific) |
+| Flag              | Description                                                           |
+| ----------------- | --------------------------------------------------------------------- |
+| `--play`          | Play audio after generating (macOS: afplay, Linux: mpv/ffplay/play)   |
+| `-o FILE`         | Save to specific file (default: `/tmp/metabot-voice-<timestamp>.mp3`) |
+| `--provider NAME` | TTS provider: `doubao`, `openai`, or `elevenlabs`                     |
+| `--voice ID`      | Voice/speaker ID (provider-specific)                                  |
 
 ## 3. metabot-core delegation
 
@@ -202,13 +241,7 @@ metabot t5t board                   # team standup board
 metabot agents list                 # peer-bot directory
 metabot memory search "<query>"     # shared-memory full-text search
 metabot skills list                 # central Skill Hub
-metabot skills publish my-skill --from ./my-skill
-metabot skills install my-skill --to ~/.codex/skills/my-skill
 ```
-
-`skills publish --from` uploads the complete UTF-8 skill bundle, including
-scripts and agent metadata alongside `SKILL.md`. `skills install` restores the
-same validated relative paths and rejects traversal or symlink destinations.
 
 `METABOT_CORE_URL` / `METABOT_CORE_TOKEN` are fed from the bridge `.env` when
 not already exported. Override the CLI path with

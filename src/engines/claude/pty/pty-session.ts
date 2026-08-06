@@ -16,34 +16,29 @@ import xterm from '@xterm/headless';
 const { Terminal } = xterm;
 type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
-import { applyClaudeChildEnvPolicy } from '../executor.js';
+import { stripBridgeLocalAdminCredentials } from '../../execution-env.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
-  PtyPromptSubmission,
 } from './contract.js';
-import {
-  classifyClaudeInputReadiness,
-  classifyClaudeSubmissionAcknowledgement,
-  isClaudeResumeSummaryDialog,
-} from './pty-readiness.js';
-
-export {
-  classifyClaudeInputReadiness,
-  classifyClaudeSubmissionAcknowledgement,
-  hasClaudePromptText,
-  hasClaudeRunningFooter,
-  isClaudeResumeSummaryDialog,
-} from './pty-readiness.js';
-export type { ClaudeInputReadiness } from './pty-readiness.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
-const INITIAL_READY_TIMEOUT_MS = 30_000;
-/** Bounded window for Claude's model-backed compaction after summary resume. */
-export const RESUME_SUMMARY_READY_TIMEOUT_MS = 10 * 60_000;
+
+export function buildPtyClaudeArgs(
+  opts: Pick<PtyClaudeSessionOptions, 'resume' | 'settingsPath' | 'mcpConfigPath' | 'appendSystemPrompt' | 'model'>,
+  sessionId: string,
+): string[] {
+  const args: string[] = opts.resume ? ['--resume', opts.resume] : ['--session-id', sessionId];
+  args.push('--settings', opts.settingsPath);
+  if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
+  args.push('--dangerously-skip-permissions');
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  if (opts.model) args.push('--model', opts.model);
+  return args;
+}
 
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
@@ -100,8 +95,8 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
    * Pre-accept the per-folder trust dialog for `cwd` in ~/.claude.json.
    *
    * On the FIRST interactive run in a directory, `claude` shows a blocking
-   * "Is this a project you trust?" prompt even when permission prompts are
-   * otherwise bypassed or automated. That dialog renders a `❯` menu pointer,
+   * "Is this a project you trust?" prompt — even under
+   * --dangerously-skip-permissions. That dialog renders a `❯` menu pointer,
    * which fools waitForReady()'s input-box detector: we then "type" the
    * prompt into the menu and the session is corrupted. metabot uses a fresh
    * per-chat working directory, so EVERY new chat's first turn would hit
@@ -137,34 +132,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   private spawn(): void {
     const { opts } = this;
     this.ensureFolderTrusted(opts.cwd);
-    const args: string[] = [];
-
-    if (opts.resume) {
-      args.push('--resume', opts.resume);
-    } else {
-      args.push('--session-id', this.sessionId);
-    }
-
-    args.push('--settings', opts.settingsPath);
-    // MCP servers (worker-manager: worker_dispatch / remind_me / ...). NOT
-    // --strict-mcp-config: that would suppress every other MCP source, taking
-    // the user's claude.ai connectors down with it. We want ours ON TOP of
-    // whatever else the CLI resolves.
-    if (opts.mcpConfigPath) {
-      args.push('--mcp-config', opts.mcpConfigPath);
-    }
-    if (process.getuid?.() === 0) {
-      args.push('--permission-mode', 'auto');
-    } else {
-      args.push('--dangerously-skip-permissions');
-    }
-
-    if (opts.appendSystemPrompt) {
-      args.push('--append-system-prompt', opts.appendSystemPrompt);
-    }
-    if (opts.model) {
-      args.push('--model', opts.model);
-    }
+    const args = buildPtyClaudeArgs(opts, this.sessionId);
 
     // Build the child env: process.env + caller overrides.
     const env: Record<string, string> = {};
@@ -176,40 +144,17 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
         if (v !== undefined) env[k] = v;
       }
     }
-    // A PTY session is INTERACTIVE by definition, and the parent metabot
-    // process may itself be running INSIDE a Claude Code session (e.g. the
-    // bridge was launched from a `claude` shell, or under the Agent SDK).
-    // In that case process.env carries a whole family of CLAUDE_* markers:
-    // CLAUDE_CODE_ENTRYPOINT, CLAUDECODE, CLAUDE_CODE_SESSION_ID,
-    // CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_BRIDGE_SESSION_ID,
-    // CLAUDE_AGENTS_SELECT, CLAUDE_JOB_DIR, CLAUDE_CODE_EXECPATH, ... If those
-    // leak into the child, claude treats itself as a NESTED/child session and
-    // does NOT persist its transcript jsonl to
-    // ~/.claude/projects/<escaped-cwd>/<id>.jsonl — so our scanner (which
-    // tails exactly that path) finds nothing and the turn completes with an
-    // EMPTY body. Strip every CLAUDE-prefixed var except the handful of feature
-    // toggles we intentionally pass through (mirrors createSpawnFn in the SDK
-    // backend). Dropping CLAUDE_CODE_ENTRYPOINT also lets the child adopt the
-    // interactive entrypoint marker that selects the Claude Code SUBSCRIPTION
-    // billing pool (vs the Agent-SDK credit pool) post June-2026.
-    // ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are NOT CLAUDE-prefixed and are
-    // deliberately KEPT so traffic still routes through TeamClaude for
-    // Max-account load balancing — the entrypoint marker passes through that
-    // transparent proxy.
-    const CLAUDE_ENV_PASSTHROUGH = new Set([
-      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
-      'CLAUDE_CODE_DISABLE_AGENT_VIEW',
-      'CLAUDE_CODE_SIMPLE',
-      'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
-      'CLAUDE_CODE_DISABLE_1M_CONTEXT',
-      'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-    ]);
-    for (const k of Object.keys(env)) {
-      if (k.startsWith('CLAUDE') && !CLAUDE_ENV_PASSTHROUGH.has(k)) {
-        delete env[k];
-      }
+    // A PTY session is INTERACTIVE by definition. The parent (metabot) runs
+    // under the Agent SDK, so its env carries CLAUDE_CODE_ENTRYPOINT=sdk-cli /
+    // CLAUDECODE. We MUST strip those so the spawned `claude` uses the
+    // interactive entrypoint marker — that marker is what selects the Claude
+    // Code SUBSCRIPTION billing pool (vs the Agent-SDK credit pool) post
+    // June-2026. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are deliberately
+    // KEPT so traffic still routes through TeamClaude for Max-account load
+    // balancing — the entrypoint marker passes through that transparent proxy.
+    for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
+      delete env[k];
     }
-    applyClaudeChildEnvPolicy(env);
 
     const claudePath = opts.pathToClaudeExecutable ?? 'claude';
     const cols = opts.cols ?? 120;
@@ -218,17 +163,14 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // Spawn with the SAME absolute cwd used to derive jsonlPath, so claude's
     // own jsonl-dir derivation matches ours regardless of metabot's process cwd.
     const spawnCwd = path.resolve(opts.cwd);
-    this.log.info(
-      { sessionId: this.sessionId, executable: claudePath, args, cwd: spawnCwd },
-      'pty-session: spawning claude',
-    );
+    this.log.info({ sessionId: this.sessionId, args, cwd: spawnCwd }, 'pty-session: spawning claude');
 
     this.term = pty.spawn(claudePath, args, {
       name: 'xterm-256color',
       cols,
       rows,
       cwd: spawnCwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
     });
 
     this.term.onData((data: string) => {
@@ -257,29 +199,13 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   }
 
   private async waitForReady(): Promise<void> {
+    const TIMEOUT = 30_000;
     const POLL = 150;
     const SETTLE = 2500;
-    let activeTimeoutMs = INITIAL_READY_TIMEOUT_MS;
-    let deadline = Date.now() + activeTimeoutMs;
-    let resumeSummaryAccepted = false;
+    const start = Date.now();
 
-    while (Date.now() < deadline) {
-      const screen = this.screen();
-      if (!resumeSummaryAccepted && isClaudeResumeSummaryDialog(screen)) {
-        if (!this.term || this.disposed) {
-          throw new Error('pty-session: cannot confirm resume summary — session disposed');
-        }
-        resumeSummaryAccepted = true;
-        this.log.info('pty-session: confirming recommended resume-from-summary option');
-        this.term.write('\r');
-        // Summary restoration runs a model-backed /compact. Large sessions can
-        // take minutes, so give that phase its own bounded readiness window.
-        activeTimeoutMs = RESUME_SUMMARY_READY_TIMEOUT_MS;
-        deadline = Date.now() + activeTimeoutMs;
-        await sleep(POLL);
-        continue;
-      }
-      if (classifyClaudeInputReadiness(screen).idle) {
+    while (Date.now() - start < TIMEOUT) {
+      if (/❯/.test(this.ring)) {
         this.log.info('pty-session: TUI input box detected, settling...');
         await sleep(SETTLE);
         return;
@@ -288,12 +214,12 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     }
 
     throw new Error(
-      `pty-session: timeout (${activeTimeoutMs}ms) waiting for TUI input box (❯/⏵). ` +
-        `Current screen: ${this.screen().slice(-500)}`,
+      `pty-session: timeout (${TIMEOUT}ms) waiting for TUI input box (❯). ` +
+        `Last 500 chars: ${this.ring.slice(-500)}`,
     );
   }
 
-  async typePrompt(text: string): Promise<PtyPromptSubmission> {
+  async typePrompt(text: string): Promise<void> {
     await this.ready(); // boot: wait for the TUI to first come up
     // Per-call readiness: ready() is memoized after boot, so on its own it would
     // let us type the INSTANT a turn is requested — even while claude is still
@@ -301,116 +227,67 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     // (ExitPlanMode cancel) claude is briefly settling the interrupt and is NOT
     // at a clean input box; keystrokes typed then are dropped and the prompt is
     // never submitted. Wait for the TUI to actually return to an idle input box
-    // before typing. If the idle heuristic cannot confirm a clean prompt, do
-    // not type into a potentially running/menu state: that produces zero-stream
-    // turns where Feishu stays in "thinking" forever. Try one interrupt-based
-    // recovery, then fail the turn explicitly so the caller can close the card.
-    let idle = await this.waitForIdleInput();
-    if (!idle) {
-      this.log.warn('pty-session: idle-input wait timed out — interrupting before retry');
-      await this.interrupt();
-      idle = await this.waitForIdleInput({ timeoutMs: 5_000, stableMs: 500 });
-    }
-    if (!idle) {
-      throw new Error(
-        `pty-session: cannot type prompt — Claude TUI did not return to idle input. ` +
-          `Current screen: ${this.screen().slice(-500)}`,
-      );
-    }
+    // before typing (best-effort: proceeds after a timeout so a session never
+    // wedges on a missed heuristic).
+    await this.waitForIdleInput();
     if (!this.term || this.disposed) {
       throw new Error('pty-session: cannot type — session disposed');
     }
 
     this.log.info({ len: text.length }, 'pty-session: typing prompt');
 
-    const idleScreen = this.screen();
     // Type char-by-char into the PTY (interactive input).
     for (const ch of text) {
       this.term.write(ch);
     }
 
-    const echoObserved = await this.waitForScreenChange(idleScreen, 3_000);
-    if (!echoObserved) {
-      throw new Error('pty-session: prompt input was not echoed by the Claude TUI');
-    }
-
+    await sleep(800);
     this.term.write('\r');
-    let acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
-    if (!acknowledgement) {
-      // The TUI occasionally accepts the text but leaves it in the input box
-      // until a second Enter. Retry only when the first submit had no observable
-      // effect, then require the same screen-based acknowledgement.
-      this.log.warn('pty-session: first Enter had no observable effect — retrying submit');
-      this.term.write('\r');
-      acknowledgement = await this.waitForSubmissionAcknowledgement(echoObserved, 4_000);
-    }
-    if (!acknowledgement) {
-      throw new Error('pty-session: prompt submit was not acknowledged by the Claude TUI');
-    }
-    return { submittedAt: Date.now(), acknowledgement };
-  }
-
-  private async waitForScreenChange(before: string, timeoutMs: number): Promise<string | null> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const current = this.screen();
-      if (current && current !== before) return current;
-      await sleep(50);
-    }
-    return null;
-  }
-
-  private async waitForSubmissionAcknowledgement(
-    submittedScreen: string,
-    timeoutMs: number,
-  ): Promise<PtyPromptSubmission['acknowledgement'] | null> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const current = this.screen();
-      const acknowledgement = classifyClaudeSubmissionAcknowledgement(submittedScreen, current);
-      if (acknowledgement) return acknowledgement;
-      await sleep(50);
-    }
-    return null;
+    await sleep(1500);
+    // Double-Enter safeguard: the TUI sometimes needs a second Enter to submit.
+    this.term.write('\r');
   }
 
   /**
    * Wait until the TUI is at an IDLE input box, ready to accept a new prompt.
    *
-   * Readiness is classified from the current cursor-resolved terminal screen.
-   * Historical append-log output must never satisfy this check: old prompt or
-   * running markers can remain in the ring after the live TUI has changed.
+   * The snapshot is an append-log of PTY output (not a screen buffer), so we
+   * read only the most-recent slice — the latest redraw — and key off what
+   * claude actively rewrites there:
    *   - "esc to interrupt" in the live footer ⟶ the model is generating.
    *   - a menu footer ("enter to select", "ctrl-g to edit", "shift+tab to
    *     approve") or a `❯` pointing at a numbered option ⟶ a blocking menu is up
    *     (driven separately; never type a prompt into it).
    *   - otherwise, with the `❯` input box present ⟶ idle and ready.
    * We require the idle state to hold across a couple polls so a single
-   * mid-redraw frame doesn't trip us. Callers decide how to recover if the
-   * timeout expires; this function must not type into an unconfirmed state.
+   * mid-redraw frame doesn't trip us, and cap the wait so a missed heuristic
+   * degrades to today's behaviour (type anyway) rather than wedging the turn.
    */
-  private async waitForIdleInput(opts: {
-    timeoutMs?: number;
-    pollMs?: number;
-    stableMs?: number;
-  } = {}): Promise<boolean> {
-    const TIMEOUT = opts.timeoutMs ?? 15_000;
-    const POLL = opts.pollMs ?? 200;
-    const STABLE_MS = opts.stableMs ?? 700;
+  private async waitForIdleInput(): Promise<void> {
+    const TIMEOUT = 15_000;
+    const POLL = 200;
+    const STABLE_MS = 700;
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
-      const readiness = classifyClaudeInputReadiness(this.screen());
-      if (readiness.idle) {
+      const tail = this.snapshot().slice(-700);
+      const sq = tail.toLowerCase().replace(/\s+/g, '');
+      const running = sq.includes('esctointerrupt');
+      const menuUp =
+        sq.includes('entertoselect') ||
+        sq.includes('ctrl-gtoedit') ||
+        sq.includes('shift+tabtoapprove') ||
+        /❯\d\./.test(sq); // pointer on a numbered menu option
+      const hasInputBox = tail.includes('❯');
+      if (hasInputBox && !running && !menuUp) {
         if (!idleSince) idleSince = Date.now();
-        if (Date.now() - idleSince >= STABLE_MS) return true;
+        if (Date.now() - idleSince >= STABLE_MS) return;
       } else {
         idleSince = 0;
       }
       await sleep(POLL);
     }
-    this.log.warn({ timeoutMs: TIMEOUT }, 'pty-session: idle-input wait timed out');
-    return false;
+    this.log.warn('pty-session: idle-input wait timed out — typing anyway');
   }
 
   async interrupt(): Promise<void> {

@@ -57,6 +57,11 @@ the `METABOT_CORE_UI_HOST` hostname. `deploy/install.sh` rsyncs it to
   locally or behind your own reverse proxy and protect it with the token
   in `~/.metabot-core/token` / `METABOT_CORE_TOKEN`. If a `/api/*` reply
   is 401, supply or refresh that token.
+- On first server start, the admin bootstrap token is written once to
+  `~/.metabot-core/data/admin-bootstrap-token.txt` by the default deployment.
+  Paste it into the browser login screen, then optionally save it as
+  `~/.metabot-core/token` (mode `0600`) for CLI use. The browser keeps its copy
+  in local storage and forgets it on **sign out**.
 
 ## Routes
 

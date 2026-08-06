@@ -3,7 +3,6 @@ import type {
   BackgroundEvent,
   BackgroundTaskStatus,
   CardState,
-  ModelTelemetry,
   ToolCall,
   PendingQuestion,
 } from '../../feishu/card-builder.js';
@@ -39,25 +38,22 @@ export class StreamProcessor {
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
-  private _modelTelemetry: ModelTelemetry | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
+  // Kimi/Codex snapshot adapters may repeat the same native tool id while it
+  // is running. Update that row instead of appending duplicate card entries.
+  private _nativeToolIndexes: Map<string, number> = new Map();
 
-  constructor(private userPrompt: string, initialModelTelemetry?: ModelTelemetry) {
-    this._modelTelemetry = initialModelTelemetry ? { ...initialModelTelemetry } : undefined;
-    this._model = initialModelTelemetry?.runtimeModel;
-    this.sessionId = initialModelTelemetry?.sessionId;
-  }
+  constructor(private userPrompt: string) {}
 
   processMessage(message: SDKMessage): CardState {
     // Capture session_id from any message
     if (message.session_id) {
       this.sessionId = message.session_id;
     }
-    this.observeModelTelemetry(message);
 
     switch (message.type) {
       case 'system':
@@ -101,7 +97,6 @@ export class StreamProcessor {
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       model: this._model,
-      modelTelemetry: this._modelTelemetry ? { ...this._modelTelemetry } : undefined,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       pendingQuestion: this._pendingQuestions[0] || undefined,
@@ -109,29 +104,6 @@ export class StreamProcessor {
         ? [...this._backgroundEvents.values()]
         : undefined,
     };
-  }
-
-  private observeModelTelemetry(message: SDKMessage): void {
-    if (message.modelTelemetry) {
-      this._modelTelemetry = {
-        ...this._modelTelemetry,
-        ...message.modelTelemetry,
-      };
-    }
-    if (message.session_id) {
-      this._modelTelemetry = {
-        ...this._modelTelemetry,
-        sessionId: message.session_id,
-      };
-    }
-    if (message.model) {
-      this._model = message.model;
-      this._modelTelemetry = {
-        ...this._modelTelemetry,
-        runtimeModel: message.model,
-        runtimeModelSource: 'assistant_jsonl',
-      };
-    }
   }
 
   private processSystemMessage(message: SDKMessage): void {
@@ -212,7 +184,13 @@ export class StreamProcessor {
           this.responseText = block.text;
         }
       } else if (block.type === 'tool_use' && block.name) {
-        this.addToolCall(block.name, block.input);
+        const existingIndex = block.id ? this._nativeToolIndexes.get(block.id) : undefined;
+        if (existingIndex !== undefined) {
+          this.updateToolCall(existingIndex, block.name, block.input);
+        } else {
+          const index = this.addToolCall(block.name, block.input);
+          if (block.id) this._nativeToolIndexes.set(block.id, index);
+        }
         // Detect interactive tools at top level
         if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
           if (block.name === 'AskUserQuestion' && block.id && block.input) {
@@ -290,12 +268,7 @@ export class StreamProcessor {
           (message.modelUsage![a].costUSD ?? 0) >= (message.modelUsage![b].costUSD ?? 0) ? a : b
         );
         const mu = message.modelUsage[primaryModel];
-        this._model = this._modelTelemetry?.runtimeModel ?? primaryModel;
-        this._modelTelemetry = {
-          ...this._modelTelemetry,
-          runtimeModel: this._modelTelemetry?.runtimeModel ?? primaryModel,
-          runtimeModelSource: this._modelTelemetry?.runtimeModelSource ?? 'result_model_usage',
-        };
+        this._model = primaryModel;
         this._contextWindow = mu.contextWindow;
         // Use last API call's tokens from stream events (accurate context window occupation)
         // Falls back to cumulative modelUsage input+output if stream events weren't captured
@@ -333,7 +306,6 @@ export class StreamProcessor {
         ? (message.errors?.join('; ') || `Ended with: ${message.subtype}`)
         : isApiError ? resultText : undefined,
       model: this._model,
-      modelTelemetry: this._modelTelemetry ? { ...this._modelTelemetry } : undefined,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       backgroundEvents: this._backgroundEvents.size > 0
@@ -342,13 +314,14 @@ export class StreamProcessor {
     };
   }
 
-  private addToolCall(name: string, input: unknown): void {
+  private addToolCall(name: string, input: unknown): number {
     // Complete previous tool
     this.completeCurrentTool();
 
     this.currentToolName = name;
     const detail = formatToolDetail(name, input);
     this.toolCalls.push({ name, detail, status: 'running' });
+    const index = this.toolCalls.length - 1;
 
     // Track image file paths and plan file paths from Write tool
     if (name === 'Write' && input && typeof input === 'object') {
@@ -360,6 +333,15 @@ export class StreamProcessor {
         this._planFilePath = filePath;
       }
     }
+    return index;
+  }
+
+  private updateToolCall(index: number, name: string, input: unknown): void {
+    const tool = this.toolCalls[index];
+    if (!tool) return;
+    tool.name = name;
+    const detail = formatToolDetail(name, input);
+    if (detail) tool.detail = detail;
   }
 
   private completeCurrentTool(): void {
@@ -433,7 +415,6 @@ export class StreamProcessor {
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       model: this._model,
-      modelTelemetry: this._modelTelemetry ? { ...this._modelTelemetry } : undefined,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       pendingQuestion: this._pendingQuestions[0] || undefined,
@@ -480,13 +461,13 @@ function formatToolDetail(name: string, input: unknown): string {
 
   switch (name) {
     case 'Read':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Write':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Edit':
-      return inp.file_path ? `\`${shortenPath(inp.file_path as string)}\`` : '';
+      return inp.file_path || inp.path ? `\`${shortenPath(String(inp.file_path ?? inp.path))}\`` : '';
     case 'Bash':
-      return inp.command ? `\`${truncate(inp.command as string, 60)}\`` : '';
+      return inp.command || inp.cmd ? `\`${truncate(String(inp.command ?? inp.cmd), 60)}\`` : '';
     case 'Glob':
       return inp.pattern ? `\`${inp.pattern}\`` : '';
     case 'Grep':

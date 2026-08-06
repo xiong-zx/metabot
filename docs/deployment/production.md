@@ -1,109 +1,161 @@
 # Production Deployment
 
-## Quick Start
+The signed GitHub Release installer is the supported Personal Edition
+deployment path. It installs four local services. The execution daemons are
+PM2 siblings of Bridge, not Bridge children:
+
+| Service | Default port | Purpose |
+|---|---:|---|
+| Core Console | `9200` | Web UI, Chat, Agents, Memory, Skills, T5T, Teams, CLI APIs |
+| Bridge | `9100` | IM channels, engine execution, scheduling, voice, peer routing |
+| Worker Runner | `9311` | Durable one-shot Codex, Claude, and Kimi MCP work |
+| ARC | `9312` | Durable AutoResearchClaw lifecycle over Worker Runner |
+
+MetaMemory is part of Core. There is no standalone service on port `8100`.
+
+## Install and verify
 
 ```bash
-metabot start                       # start with PM2
-metabot update                      # package refresh + rebuild + update skills + restart
-metabot restart --wait              # restart the current runtime
-metabot deploy-runtime --runtime /path/to/metabot # switch runtime from SSH
+curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash
+
+metabot status
+metabot doctor
+curl -fsS http://localhost:9200/health
 ```
 
-## PM2 Auto-Start
-
-Enable auto-start on boot:
+The installer verifies `SHA256SUMS`, validates the Personal Edition manifest,
+builds both MCP packages plus their adapter, and saves the owned PM2
+applications only after Bridge and both authenticated daemon probes pass.
+Enable boot persistence after the services are healthy:
 
 ```bash
-pm2 startup && pm2 save
+pm2 save
+pm2 startup
 ```
 
-This registers MetaBot as a system service that starts automatically after reboot.
+Run the command printed by `pm2 startup`, then run `pm2 save` again.
 
-## Manual PM2 Commands
+## No inbound port is required for chat channels
 
-Prefer the MetaBot CLI because it persists the restart request, preserves proxy
-settings, verifies health, and saves the PM2 process list only after success.
-Never issue `pm2 delete metabot` followed by `pm2 start` from a MetaBot child
-process. The delete kills that command's own process tree before start can run.
+- Feishu/Lark uses a persistent outbound WebSocket.
+- Telegram uses outbound long polling.
+- Local Web access works on loopback.
 
-```bash
-pm2 start ecosystem.config.cjs      # start
-pm2 restart metabot --update-env     # same-runtime emergency restart
-pm2 stop metabot                     # stop
-pm2 logs metabot                     # view logs
-pm2 status                           # process status
-```
+Only publish Core when remote browser access is intentional. Keep Bridge on
+loopback or a private network unless a separate authenticated API endpoint is
+required.
 
-Runtime/worktree changes use one PM2 daemon restart RPC through `metabot
-deploy-runtime`. The command resolves and verifies the target `cwd` and script
-without deleting the PM2 app entry. Run it from SSH or another supervisor
-outside the MetaBot process tree; it refuses an in-process runtime switch. The
-atomic switch keeps shared bot configuration, credential references, session
-storage, Wiki/MetaMemory state directories, and network settings from the live
-process while the target ecosystem owns runtime-specific settings such as
-`METABOT_HOME`.
+## HTTPS reverse proxy
 
-## Build for Production
+Mobile microphone access and remote browser use require a secure context. A
+minimal Caddy configuration proxies the single Core Console:
 
-```bash
-npm run build                        # TypeScript compile to dist/
-npm start                            # run compiled output (dist/index.js)
-```
-
-## No Public IP Required
-
-- **Feishu** uses WebSocket (persistent connection) — no incoming port needed
-- **Telegram** uses long polling — no incoming port needed
-
-For remote CLI access or Peers federation, do not expose the raw API ports (`9100` / `8100`) directly on the public internet. Prefer HTTPS behind Caddy, or keep the services on a private network such as Tailscale or WireGuard.
-
-## Remote CLI Access
-
-Generate a strong API secret first:
-
-```bash
-openssl rand -hex 32
-```
-
-Then configure CLI tools to connect through your HTTPS reverse proxy for internet-reachable deployments:
-
-```bash
-# In ~/.metabot/.env
-METABOT_URL=https://metabot.yourdomain.com
-META_MEMORY_URL=https://memory.yourdomain.com
-API_SECRET=your-secret
-```
-
-This allows the `metabot` bridge daemon API commands to work from any machine while keeping TLS termination at the proxy. If your servers are reachable only over a private network such as Tailscale or WireGuard, use those private addresses instead.
-
-## HTTPS with Caddy
-
-HTTPS is required for the Web UI's phone call voice mode on mobile browsers (microphone access needs a secure context), and it is also the recommended default for remote CLI access and Peers federation. [Caddy](https://caddyserver.com/) is the recommended reverse proxy — it handles Let's Encrypt certificates automatically.
-
-```bash
-# Install Caddy
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update && sudo apt-get install caddy
-
-# Configure (replace with your domain)
-sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
-metabot.yourdomain.com {
-    reverse_proxy localhost:9100
+```caddy
+metabot.example.com {
+    reverse_proxy 127.0.0.1:9200
 }
-
-memory.yourdomain.com {
-    reverse_proxy localhost:8100
-}
-EOF
-sudo systemctl restart caddy
 ```
 
-**Prerequisites:**
+Then configure remote CLI clients:
 
-- A domain with an A record pointing to your server's public IP
-- Ports 80 and 443 open for Let's Encrypt validation
+```bash
+export METABOT_CORE_URL=https://metabot.example.com
+export METABOT_CORE_TOKEN="<personal-token>"
+metabot memory health
+```
 
-Caddy automatically obtains and renews certificates. WebSocket connections (`/ws`) are proxied transparently — no additional configuration needed. Use the same HTTPS hostnames for `METABOT_URL`, `META_MEMORY_URL`, and remote peer entries in `METABOT_PEERS`.
+Use a private network such as Tailscale or WireGuard when public access is not
+needed. Never publish the raw token in a URL, shell history, or shared config.
 
-For full setup details, see the [Web UI docs](../features/web-ui.md#https-setup).
+## Bridge remote access
+
+Most users do not need this. Commands such as `metabot bots`, `schedule`,
+`teams`, `peers`, and `voice` use the Bridge API. If remote Bridge access is
+required:
+
+1. set a strong `API_SECRET`;
+2. proxy `127.0.0.1:9100` through a separate authenticated HTTPS hostname or a
+   private network;
+3. set `METABOT_URL` on the client.
+
+Do not reuse the Core token as the Bridge secret.
+
+## Update and rollback
+
+```bash
+metabot update                                  # latest verified release
+metabot update --package --version 1.3.0        # known immutable release
+metabot doctor
+```
+
+`metabot start` and `metabot stop` operate on Bridge and both execution
+daemons. Ordinary `metabot restart` is intentionally Bridge-only, so detached
+work survives it. A daemon restart is explicit and guarded:
+
+```bash
+metabot restart --request-id <stable-id> --wait --json
+metabot restart --daemon worker
+metabot restart --daemon arc
+metabot restart --daemon worker --force
+```
+
+The guarded form refuses while durable work is active. `--force` is an
+operator acknowledgement: ambiguous in-flight work can become
+`recovery_required` and is never blindly relaunched. Updates perform the same
+busy check, drain idle daemon connections, then restart both daemons so old
+code never continues against a migrated database.
+
+The protected Bridge restart never deletes its PM2 registration. It claims
+the request ID in SQLite, atomically writes `last-restart.json`, and restarts
+only Bridge in the same cwd/script. A duplicate request ID returns the durable
+record without restarting again. After startup, the new Bridge verifies its
+HTTP endpoint, both daemon wire endpoints, and PM2 identity; it saves the PM2
+list only after all checks pass. Normal user/PM chats with `--resume` receive
+one durable continuation in their existing session. Agent Team and
+Worker/ARC internal chats remain owned by their purpose-built durable recovery.
+
+Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
+state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
+smoke checks, reinstall the previously known version explicitly instead of
+editing installed package files.
+
+When rolling back to a release from before the execution daemons existed,
+remove their saved PM2 entries as well as installing the old package:
+
+```bash
+pm2 delete metabot-worker-runnerd metabot-arcd
+pm2 save
+```
+
+The Ed25519 trust keys and SQLite state under `~/.metabot/` may remain; they are
+inert when the old runtime has no matching apps. For a source runtime switch,
+run `metabot deploy-runtime --runtime /absolute/checkout` from SSH or another
+controller outside the MetaBot process tree. It refuses active work unless
+`--force`. The command prevalidates target and rollback configurations, then
+changes Worker Runner, ARC, and Bridge in place without a `pm2 delete` gap.
+Failure rolls back every app PM2 already accepted. The old controller does not
+save PM2 state; the new Bridge saves it only after full startup health. Use a
+stable `--request-id` for retryable automation and `--wait --json` for a
+durable terminal result.
+
+Personal Edition Core remains a separate PM2 ecosystem. A runtime cutover adds
+it between ARC and Bridge only when the current Core PM2 cwd and script exactly
+match the current Bridge checkout; the target must also contain the separate
+Core ecosystem and built server. A remote or separately managed Core is never
+restarted or switched. `uninstall.sh` likewise removes Core only when that
+ownership check passes, so uninstalling Bridge cannot delete an external Core.
+
+## Source deployments
+
+Source checkouts use an explicit path:
+
+```bash
+git pull --ff-only
+npm ci --include=dev
+npm test
+npm run build
+metabot update --git
+```
+
+Keep package-managed and source-managed installations separate. For the Web
+request path, see [Core Console architecture](../features/web-ui.md#architecture).

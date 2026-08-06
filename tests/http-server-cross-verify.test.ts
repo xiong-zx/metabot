@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isCrossVerifyRoute } from '../src/api/http-server.js';
+import { isCrossVerifyRoute, summarizeChannelStatuses } from '../src/api/http-server.js';
 
 describe('isCrossVerifyRoute', () => {
   it('accepts the talk RPC routes', () => {
@@ -41,5 +41,37 @@ describe('isCrossVerifyRoute', () => {
     expect(isCrossVerifyRoute('POST', '/api/schedule')).toBe(false);
     expect(isCrossVerifyRoute('GET', '/api/core-chat/runs')).toBe(false);
     expect(isCrossVerifyRoute('POST', '/api/core-chat/runs/run-123/events')).toBe(false);
+  });
+});
+
+describe('authenticated channel status aggregation', () => {
+  it('counts connected, reconnecting, idle, and failed channels', () => {
+    const items = [
+      { name: 'ready', platform: 'feishu' as const, state: 'connected' as const, reconnectAttempts: 0 },
+      { name: 'starting', platform: 'feishu' as const, state: 'connecting' as const, reconnectAttempts: 1 },
+      { name: 'retrying', platform: 'feishu' as const, state: 'reconnecting' as const, reconnectAttempts: 2 },
+      { name: 'idle', platform: 'feishu' as const, state: 'idle' as const, reconnectAttempts: 0 },
+      { name: 'failed', platform: 'feishu' as const, state: 'failed' as const, reconnectAttempts: 3 },
+    ];
+
+    expect(summarizeChannelStatuses(items)).toEqual({
+      total: 5,
+      connected: 1,
+      reconnecting: 2,
+      idle: 1,
+      failed: 1,
+      items,
+    });
+  });
+
+  it('treats a Web-only personal install as an empty healthy inventory', () => {
+    expect(summarizeChannelStatuses([])).toEqual({
+      total: 0,
+      connected: 0,
+      reconnecting: 0,
+      idle: 0,
+      failed: 0,
+      items: [],
+    });
   });
 });

@@ -17,13 +17,10 @@
  *   - tag: 'note': deprecated in v2
  */
 import type { CardState } from '../types.js';
-import { buildTeamPanelMarkdown } from './team-panel.js';
 import { parseMarkdownToBlocks, type Block } from './markdown-parser.js';
 import {
   STATUS_CONFIG,
   BG_ICON,
-  LIFECYCLE_STAGE_LABELS,
-  formatModelTelemetry,
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
@@ -117,22 +114,44 @@ export function buildCardV2(state: CardState): string {
     elements.push({ tag: 'hr' });
   }
 
-  if (state.lifecycleStage && state.lifecycleStage !== 'closed') {
-    const label = LIFECYCLE_STAGE_LABELS[state.lifecycleStage];
-    const key = state.lifecycleKey ? ` · \`${truncate(state.lifecycleKey, 48)}\`` : '';
-    elements.push({
-      tag:     'markdown',
-      content: `**State:** ${label}${key}`,
-    });
-    elements.push({ tag: 'hr' });
-  }
-
-  // Agent Teams panel — compact status only, shared with the v1 builder.
-  // Driven by Claude Code's TaskCreated / TaskCompleted / TeammateIdle hooks;
-  // removing this hides the entire Agent Teams UI from users.
-  const teamPanel = buildTeamPanelMarkdown(state.teamState);
-  if (teamPanel) {
-    elements.push({ tag: 'markdown', content: teamPanel });
+  // Agent Teams panel — teammates + shared task list. Driven by Claude
+  // Code's TaskCreated / TaskCompleted / TeammateIdle hooks. Mirrors v1
+  // builder; removing this hides the entire Agent Teams UI from users.
+  if (state.teamState && (state.teamState.teammates.length > 0 || state.teamState.tasks.length > 0)) {
+    const ts    = state.teamState;
+    const lines: string[] = [];
+    const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
+    lines.push(header);
+    if (ts.teammates.length > 0) {
+      lines.push('');
+      lines.push('**Teammates:**');
+      for (const m of ts.teammates) {
+        const icon = m.status === 'working' ? '⏳' : '💤';
+        const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
+        lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
+      }
+    }
+    if (ts.tasks.length > 0) {
+      // Show in-progress first, then the most recent completions
+      const pending    = ts.tasks.filter((t) => t.status === 'pending');
+      const inProgress = ts.tasks.filter((t) => t.status === 'in_progress');
+      const completed  = ts.tasks.filter((t) => t.status === 'completed').slice(-5);
+      lines.push('');
+      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter((t) => t.status === 'completed').length} done`);
+      for (const t of pending) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of inProgress) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
+      }
+      for (const t of completed) {
+        const owner = t.teammate ? ` (\`${t.teammate}\`)` : '';
+        lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
+      }
+    }
+    elements.push({ tag: 'markdown', content: lines.join('\n') });
     elements.push({ tag: 'hr' });
   }
 
@@ -142,7 +161,7 @@ export function buildCardV2(state: CardState): string {
   // flight so a hung run is visibly hung instead of looking like a frozen
   // card, but we hide the section completely once the turn is complete/
   // errored. Web UI keeps its own collapsible per-tool view (see
-  // web/src/components/chat/AssistantMessage.tsx); this only affects the
+  // packages/web-ui/src/routes/chat.tsx); this only affects the
   // Feishu surface.
   if (
     state.toolCalls.length > 0 &&
@@ -230,15 +249,10 @@ export function buildCardV2(state: CardState): string {
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
-    if (state.status === 'complete' || state.status === 'error' || state.status === 'agent_activity') {
+    if (state.status === 'complete' || state.status === 'error') {
       if (state.sessionCostUsd != null) parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
-      const modelLabel = formatModelTelemetry(state.modelTelemetry, state.model);
-      if (modelLabel) parts.push(modelLabel);
+      if (state.model) parts.push(state.model.replace(/^claude-/, ''));
       if (state.durationMs !== undefined) parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
-    }
-    if (state.status === 'thinking' || state.status === 'running') {
-      const modelLabel = formatModelTelemetry(state.modelTelemetry, undefined);
-      if (modelLabel) parts.push(modelLabel);
     }
     if (parts.length > 0) {
       elements.push({
@@ -294,7 +308,6 @@ export function buildCardV2(state: CardState): string {
 
   return JSON.stringify(card);
 }
-
 
 /** v2 help card */
 export function buildHelpCardV2(): string {

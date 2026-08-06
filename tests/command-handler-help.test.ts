@@ -1,7 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { CommandHandler } from '../src/bridge/command-handler.js';
 import type { IncomingMessage } from '../src/types.js';
 
@@ -23,7 +20,7 @@ interface RecordedNotice {
   color?: string;
 }
 
-function buildHandler(workdir = '/tmp') {
+function buildHandler() {
   const notices: RecordedNotice[] = [];
   const session = {
     sessionId: undefined,
@@ -50,7 +47,7 @@ function buildHandler(workdir = '/tmp') {
     {
       name: 'test-bot',
       engine: 'claude',
-      claude: { model: 'claude-fable-5', defaultWorkingDirectory: workdir },
+      claude: { model: 'claude-fable-5' },
     } as any,
     { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any,
     sender as any,
@@ -67,7 +64,6 @@ function buildHandler(workdir = '/tmp') {
     async () => {},  // releaseExecutor
     () => [],        // listSessions
     async () => {},  // applyResume
-    async () => {},  // runBytheway
   );
   return { handler, notices };
 }
@@ -97,7 +93,7 @@ describe('CommandHandler /help', () => {
     const { handler, notices } = buildHandler();
     await handler.handle(helpMessage());
     const body = notices[0].content;
-    for (const cmd of ['/reset', '/stop', '/status', '/model', '/resume', '/cat', '/ls', '/memory', '/sync', '/help']) {
+    for (const cmd of ['/reset', '/stop', '/status', '/model', '/resume', '/memory', '/sync', '/help']) {
       expect(body, `help body missing ${cmd}`).toContain(cmd);
     }
   });
@@ -118,25 +114,6 @@ describe('CommandHandler /help', () => {
     const { handler } = buildHandler();
     const handled = await handler.handle({ ...helpMessage(), text: 'hello' });
     expect(handled).toBe(false);
-  });
-
-  it('handles /cat and /ls directly against the bot working directory', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-command-'));
-    try {
-      mkdirSync(join(dir, 'subdir'));
-      writeFileSync(join(dir, 'note.txt'), 'alpha\nbeta\n');
-      const { handler, notices } = buildHandler(dir);
-
-      expect(await handler.handle({ ...helpMessage(), text: '/cat note.txt 2 2' })).toBe(true);
-      expect(notices.at(-1)?.title).toContain('note.txt');
-      expect(notices.at(-1)?.content).toContain('2 | beta');
-
-      expect(await handler.handle({ ...helpMessage(), text: '/ls .' })).toBe(true);
-      expect(notices.at(-1)?.content).toContain('[dir]  subdir/');
-      expect(notices.at(-1)?.content).toContain('[file] note.txt');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it('lists Fable 5 as the default Claude model option', async () => {

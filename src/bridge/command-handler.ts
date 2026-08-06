@@ -1,5 +1,3 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { BotConfigBase, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { IncomingMessage } from '../types.js';
@@ -10,42 +8,6 @@ import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
-import {
-  expireTimedOutServiceRestartRequests,
-  listServiceRestartRequests,
-  recordServiceRestartReadiness,
-} from './restart-coordinator.js';
-import { hasTeamCapability, type TeamActorRole } from '../agent-teams/team-store.js';
-
-export interface ServiceRestartRequest {
-  chatId: string;
-  userId: string;
-  reason?: string;
-  force?: boolean;
-}
-
-export interface ServiceRestartBlocker {
-  botName: string;
-  chatId: string;
-  messageId?: string;
-  lifecycleKey?: string;
-  source?: string;
-  startedAt?: number;
-  updatedAt?: number;
-  userPrompt?: string;
-}
-
-export interface ServiceRestartResult {
-  scheduled: boolean;
-  requestId?: string;
-  blockedBy?: ServiceRestartBlocker[];
-  forced?: boolean;
-  message?: string;
-}
-
-export interface StopTaskOptions {
-  preserveActiveTask?: boolean;
-}
 
 export class CommandHandler {
   private docSync: DocSync | null = null;
@@ -57,8 +19,8 @@ export class CommandHandler {
     private sessionManager: SessionManager,
     private memoryClient: MemoryClient,
     private audit: AuditLogger,
-    private getRunningTask: (chatId: string) => { startTime: number } | undefined,
-    private stopTask: (chatId: string, options?: StopTaskOptions) => void,
+    private getActiveTask: (chatId: string) => { startTime: number } | undefined,
+    private stopTask: (chatId: string) => void,
     /**
      * Drain the chat's queued-message buffer, returning the number of
      * messages discarded. Called from /stop so the user's "stop" intent
@@ -70,58 +32,26 @@ export class CommandHandler {
     /**
      * Release the persistent Claude process associated with this chat
      * (no-op if the persistent-executor feature flag is off or no
-     * executor exists). Called on /reset so Agent Team agents and /goal state
+     * executor exists). Called on /reset so teammates and /goal state
      * tied to the old session are torn down with the conversation.
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,
     /**
-     * List the recent sessions for this chat's active engine and working
-     * directory (newest first). Backs the direct `/resume <id>` form.
+     * List the recent sessions for this chat's active engine and working directory
+     * (newest first). Backs the direct `/resume <id>` form. Read-only.
      */
     private listSessions: (chatId: string) => SessionSummary[] | Promise<SessionSummary[]>,
     /**
-     * Swap the chat into a previous Claude session: re-point the sessionId,
+     * Swap the chat into a previous engine session: re-point the sessionId,
      * reset usage counters, release the persistent executor so the next turn
      * resumes via `claude --resume`. Backs both `/resume` forms.
      */
     private applyResume: (chatId: string, sessionId: string) => Promise<void>,
-    /**
-     * Kick off a /bytheway side query. `continueBranch` backs /btwc.
-     */
-    private runBytheway: (msg: IncomingMessage, question: string, continueBranch: boolean) => Promise<void>,
-    /**
-     * Schedule a controlled bridge restart. The implementation must return
-     * after the restart has been scheduled, because the current process will be
-     * terminated shortly after the user-facing acknowledgement is sent.
-     */
-    private restartService?: (request: ServiceRestartRequest) => Promise<void | ServiceRestartResult>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
   setDocSync(docSync: DocSync): void {
     this.docSync = docSync;
-  }
-
-  private auditCommandConfirmation(
-    command: '/reset' | '/stop',
-    chatId: string,
-    userId: string,
-    messageId: string | undefined,
-  ): void {
-    this.audit.log({
-      event: 'command_confirmation',
-      botName: this.config.name,
-      chatId,
-      userId,
-      meta: {
-        command,
-        delivered: Boolean(messageId),
-        confirmationMessageId: messageId,
-      },
-    });
-    if (!messageId) {
-      this.logger.warn({ command, chatId }, 'Command confirmation returned no auditable message ID');
-    }
   }
 
   /** Returns true if the message was handled as a command, false otherwise. */
@@ -139,9 +69,7 @@ export class CommandHandler {
         await this.sender.sendTextNotice(chatId, '📖 Help', [
           '**Bot Commands:**',
           '`/reset` - Clear session, start fresh',
-          '`/restart` or `/restart service` - Controlled MetaBot service restart',
-          '`/restart session` - Restart this chat/session without restarting service',
-          '`/stop` - Abort current running task (and any in-flight /btw)',
+          '`/stop` - Abort current running task',
           '`/status` - Show current session info',
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
@@ -149,10 +77,6 @@ export class CommandHandler {
           '`/effort low|medium|high|xhigh|max|ultra` - Set Codex reasoning effort for this chat',
           '`/resume` - List & switch to a previous Claude/Codex/Kimi session',
           '`/resume <id>` - Resume a session directly by id prefix',
-          '`/btw <q>` (alias `/bytheway`) - Run a side branch without writing back to the main session',
-          '`/btwc <q>` (alias `/bythewayc`) - Continue the previous /btw side branch',
-          '`/cat <path> [start] [end]` - Show a file or line range without starting the agent',
-          '`/ls [path]` - List a directory without starting the agent',
           '`/memory` - Memory document commands',
           '`@Bot /group-reply mention|all|status` - Feishu group reply mode (scoped to this Agent and group)',
           '`/help` - Show this help message',
@@ -180,7 +104,7 @@ export class CommandHandler {
 
       case '/reset':
         {
-          const task = this.getRunningTask(chatId);
+          const task = this.getActiveTask(chatId);
           const cleared = this.clearQueue(chatId);
           if (task) {
             this.audit.log({
@@ -212,57 +136,40 @@ export class CommandHandler {
         } catch (err) {
           this.logger.warn({ err, chatId }, 'Failed to release persistent executor on /reset');
         }
-        {
-          const confirmationMessageId = await this.sender.sendTextNotice(
-            chatId,
-            '✅ Session Reset',
-            'Conversation cleared. Working directory preserved.',
-            'green',
-          );
-          this.auditCommandConfirmation('/reset', chatId, userId, confirmationMessageId);
-        }
+        await this.sender.sendTextNotice(chatId, '✅ Session Reset', 'Conversation cleared. Working directory preserved.', 'green');
         return true;
-
-      case '/restart':
-      case '/reboot': {
-        const args = text.slice(cmd.length).trim();
-        await this.handleRestartCommand(msg, args);
-        return true;
-      }
 
       case '/stop': {
-        const task = this.getRunningTask(chatId);
+        const task = this.getActiveTask(chatId);
         // Always drain the queue first — otherwise the running task's
         // finally block immediately picks the next queued message via
         // processQueue and the user's "stop" intent silently fails.
         const cleared = this.clearQueue(chatId);
-        let confirmationMessageId: string | undefined;
         if (task) {
           this.audit.log({ event: 'task_stopped', botName: this.config.name, chatId, userId, durationMs: Date.now() - task.startTime, meta: { clearedQueue: cleared } });
           this.stopTask(chatId);
           const body = cleared > 0
             ? `Current task aborted. Discarded **${cleared}** queued message${cleared === 1 ? '' : 's'}.`
             : 'Current task has been aborted.';
-          confirmationMessageId = await this.sender.sendTextNotice(chatId, '🛑 Stopped', body, 'orange');
+          await this.sender.sendTextNotice(chatId, '🛑 Stopped', body, 'orange');
         } else if (cleared > 0) {
           // No running task but queued messages existed — clear them too.
           this.audit.log({ event: 'queue_cleared', botName: this.config.name, chatId, userId, meta: { clearedQueue: cleared } });
-          confirmationMessageId = await this.sender.sendTextNotice(
+          await this.sender.sendTextNotice(
             chatId,
             '🛑 Queue Cleared',
             `No task was running. Discarded **${cleared}** queued message${cleared === 1 ? '' : 's'}.`,
             'orange',
           );
         } else {
-          confirmationMessageId = await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
+          await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
         }
-        this.auditCommandConfirmation('/stop', chatId, userId, confirmationMessageId);
         return true;
       }
 
       case '/status': {
         const session = this.sessionManager.getSession(chatId);
-        const isRunning = !!this.getRunningTask(chatId);
+        const isRunning = !!this.getActiveTask(chatId);
         const botEngine = resolveEngineName(this.config);
         const activeEngine = session.engine ?? botEngine;
         const defaultModel = this.defaultModelForEngine(activeEngine) || '_default_';
@@ -309,339 +216,9 @@ export class CommandHandler {
         return true;
       }
 
-      case '/cat': {
-        const args = text.slice('/cat'.length).trim();
-        await this.handleCatCommand(chatId, args);
-        return true;
-      }
-
-      case '/ls': {
-        const args = text.slice('/ls'.length).trim();
-        await this.handleLsCommand(chatId, args);
-        return true;
-      }
-
-      case '/bytheway':
-      case '/btw': {
-        const question = text.slice(cmd.length).trim();
-        if (!question) {
-          await this.sender.sendTextNotice(
-            chatId,
-            '/bytheway',
-            '`/btw <question>` starts a side branch that can read the main session history but does not write back. Use `/btwc` to continue the previous side branch.',
-          );
-          return true;
-        }
-        this.audit.log({ event: 'bytheway_command', botName: this.config.name, chatId, userId, prompt: question });
-        this.runBytheway(msg, question, false).catch((err) => {
-          this.logger.error({ err, chatId }, '/bytheway: unhandled error');
-        });
-        return true;
-      }
-
-      case '/bythewayc':
-      case '/btwc': {
-        const question = text.slice(cmd.length).trim();
-        if (!question) {
-          await this.sender.sendTextNotice(
-            chatId,
-            '/btwc',
-            '`/btwc <question>` continues the previous /btw side branch. If no branch exists, it behaves like `/btw`.',
-          );
-          return true;
-        }
-        this.audit.log({ event: 'bytheway_command', botName: this.config.name, chatId, userId, prompt: question, meta: { continueBranch: true } });
-        this.runBytheway(msg, question, true).catch((err) => {
-          this.logger.error({ err, chatId }, '/bytheway: unhandled error');
-        });
-        return true;
-      }
-
       default:
         // Unrecognized /xxx commands — not handled here, pass through to Claude
         return false;
-    }
-  }
-
-  private async handleRestartCommand(msg: IncomingMessage, args: string): Promise<void> {
-    const { chatId, userId } = msg;
-    const [targetRaw, ...reasonParts] = args.split(/\s+/).filter(Boolean);
-    const target = (targetRaw || 'service').toLowerCase();
-
-    if (target === 'help' || target === '-h' || target === '--help') {
-      await this.sender.sendTextNotice(
-        chatId,
-        'Restart',
-        [
-          'Usage:',
-          '- `/restart` or `/restart service [reason]` - restart the MetaBot bridge service',
-          '- `/restart service --force [reason]` - restart even when other active turns are recorded',
-          '- `/restart session` - clear this chat session and release its engine process',
-          '- `/restart status` - show whether service restart is available',
-          '- `/restart ready <requestId> [note]` - mark this bot/chat ready for a coordinated restart',
-          '',
-          'Blocked restart requests have a bounded ready timeout. A timeout does not force restart; retry after blockers finish or use `--force` explicitly.',
-        ].join('\n'),
-      );
-      return;
-    }
-
-    if (target === 'session' || target === 'chat' || target === 'conversation' || target === 'engine') {
-      await this.handle({ ...msg, text: '/reset' });
-      return;
-    }
-
-    if (target === 'status') {
-      expireTimedOutServiceRestartRequests();
-      const recentRequests = listServiceRestartRequests()
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, 5);
-      await this.sender.sendTextNotice(
-        chatId,
-        'Restart Status',
-        [
-          this.restartService
-            ? 'Controlled service restart is available. Use `/restart service`.'
-            : 'Controlled service restart is not available in this runtime.',
-          '',
-          ...formatRestartRequests(recentRequests),
-        ].filter(Boolean).join('\n'),
-        this.restartService ? 'green' : 'orange',
-      );
-      return;
-    }
-
-    if (target === 'ready' || target === 'ack' || target === 'prepared') {
-      const [requestId, ...noteParts] = reasonParts;
-      if (!requestId) {
-        await this.sender.sendTextNotice(
-          chatId,
-          'Restart Ready',
-          'Usage: `/restart ready <requestId> [checkpoint note]`',
-          'orange',
-        );
-        return;
-      }
-      const updated = recordServiceRestartReadiness({
-        requestId,
-        botName: this.config.name,
-        chatId,
-        userId,
-        status: 'ready',
-        note: noteParts.join(' ').trim() || undefined,
-      });
-      if (!updated) {
-        await this.sender.sendTextNotice(
-          chatId,
-          'Restart Request Not Found',
-          `No restart request found for \`${requestId}\`. Use \`/restart status\` to inspect recent requests.`,
-          'red',
-        );
-        return;
-      }
-      await this.sender.sendTextNotice(
-        chatId,
-        'Restart Ready Recorded',
-        [
-          `Recorded readiness for \`${requestId}\`.`,
-          formatReadinessProgress(updated),
-        ].join('\n'),
-        'green',
-      );
-      return;
-    }
-
-    if (target !== 'service' && target !== 'metabot' && target !== 'bridge') {
-      await this.sender.sendTextNotice(
-        chatId,
-        'Invalid Restart Target',
-        'Use `/restart service`, `/restart session`, or `/restart status`.',
-        'red',
-      );
-      return;
-    }
-
-    if (!this.restartService) {
-      await this.sender.sendTextNotice(
-        chatId,
-        'Restart Unavailable',
-        'This bot runtime does not expose controlled service restart.',
-        'red',
-      );
-      return;
-    }
-
-    const actorRole = actorRoleField(msg.actorRole) ?? 'user';
-    if (!hasTeamCapability(actorRole, 'restart_service')) {
-      await this.sender.sendTextNotice(
-        chatId,
-        'Restart Not Allowed',
-        `actorRole ${actorRole} is not allowed to restart the MetaBot service. Ask a PM, user, or admin to run \`/restart service\`.`,
-        'red',
-      );
-      return;
-    }
-
-    const force = reasonParts.includes('--force') || reasonParts.includes('force');
-    const reason = reasonParts
-      .filter((part) => part !== '--force' && part !== 'force')
-      .join(' ')
-      .trim() || undefined;
-    const restartResult = await this.restartService({ chatId, userId, reason, force });
-    if (restartResult && restartResult.scheduled === false) {
-      const blockers = restartResult.blockedBy || [];
-      await this.sender.sendTextNotice(
-        chatId,
-        'MetaBot Restart Blocked',
-        [
-          restartResult.message || 'Service restart was blocked because other bot/agent turns are still active.',
-          restartResult.requestId ? `Request ID: \`${restartResult.requestId}\`` : '',
-          blockers.length > 0 ? '' : undefined,
-          ...formatRestartBlockers(blockers),
-          '',
-          'Ask those chats/agents to checkpoint or finish, then retry `/restart service`.',
-          'Use `/restart service --force <reason>` only for an explicit emergency override.',
-        ].filter((line): line is string => line !== undefined).join('\n'),
-        'red',
-      );
-      return;
-    }
-
-    const task = this.getRunningTask(chatId);
-    const cleared = this.clearQueue(chatId);
-    if (task) {
-      this.audit.log({
-        event: 'task_stopped',
-        botName: this.config.name,
-        chatId,
-        userId,
-        durationMs: Date.now() - task.startTime,
-        meta: { reason: 'restart-service', clearedQueue: cleared, preserveActiveTask: true },
-      });
-      this.stopTask(chatId, { preserveActiveTask: true });
-    } else if (cleared > 0) {
-      this.audit.log({
-        event: 'queue_cleared',
-        botName: this.config.name,
-        chatId,
-        userId,
-        meta: { reason: 'restart-service', clearedQueue: cleared },
-      });
-    }
-
-    await this.sender.sendTextNotice(
-      chatId,
-      restartResult?.forced ? 'MetaBot Restart Forced' : 'MetaBot Restart Scheduled',
-      [
-        restartResult?.forced
-          ? 'Controlled service restart has been force-scheduled despite recorded active work.'
-          : 'Controlled service restart has been scheduled.',
-        restartResult?.requestId ? `Request ID: \`${restartResult.requestId}\`` : '',
-        'The bridge will reconnect automatically and send a deterministic completion notice.',
-        'Any recorded in-flight bot turns will be queued for continuation after reconnect; the restart command itself will not be repeated.',
-        cleared > 0 ? `Discarded ${cleared} queued message${cleared === 1 ? '' : 's'} before restarting.` : '',
-      ].filter(Boolean).join('\n'),
-      restartResult?.forced ? 'red' : 'orange',
-    );
-  }
-
-  private resolveWorkdirPath(inputPath: string): string {
-    return path.isAbsolute(inputPath)
-      ? inputPath
-      : path.resolve(this.config.claude.defaultWorkingDirectory, inputPath);
-  }
-
-  private async handleCatCommand(chatId: string, args: string): Promise<void> {
-    const parts = args.split(/\s+/).filter(Boolean);
-    const filePath = parts[0];
-
-    if (!filePath) {
-      await this.sender.sendTextNotice(chatId, 'Cat', 'Usage:\n- `/cat <path>`\n- `/cat <path> <start> <end>`');
-      return;
-    }
-
-    const resolved = this.resolveWorkdirPath(filePath);
-    try {
-      const stat = fs.statSync(resolved);
-      if (stat.isDirectory()) {
-        await this.sender.sendTextNotice(chatId, 'Error', `\`${resolved}\` is a directory. Use \`/ls\` instead.`, 'orange');
-        return;
-      }
-
-      const raw = fs.readFileSync(resolved, 'utf-8');
-      const allLines = raw.split('\n');
-      const totalLines = allLines.length;
-      const startLine = parts[1] ? Math.max(1, parseInt(parts[1], 10)) : 1;
-      const endLine = parts[2] ? Math.min(totalLines, parseInt(parts[2], 10)) : totalLines;
-      const selected = allLines.slice(startLine - 1, endLine);
-      const numbered = selected.map((line, i) => `${String(startLine + i).padStart(4)} | ${line}`).join('\n');
-
-      const maxLen = 25_000;
-      const truncated = numbered.length > maxLen
-        ? `${numbered.slice(0, maxLen)}\n\n... (truncated, showing ${maxLen} chars of ${numbered.length})`
-        : numbered;
-      const range = (startLine !== 1 || endLine !== totalLines)
-        ? `lines ${startLine}-${endLine} of ${totalLines}`
-        : `${totalLines} lines, ${formatSize(stat.size)}`;
-      await this.sender.sendTextNotice(chatId, `${path.basename(resolved)} (${range})`, `\`\`\`\n${truncated}\n\`\`\``);
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'ENOENT') {
-        await this.sender.sendTextNotice(chatId, 'File Not Found', `\`${resolved}\` does not exist.`, 'red');
-      } else if (e.code === 'EACCES') {
-        await this.sender.sendTextNotice(chatId, 'Permission Denied', `Cannot read \`${resolved}\`.`, 'red');
-      } else {
-        this.logger.error({ err, filePath: resolved }, 'Cat command error');
-        await this.sender.sendTextNotice(chatId, 'Error', e.message ?? String(err), 'red');
-      }
-    }
-  }
-
-  private async handleLsCommand(chatId: string, args: string): Promise<void> {
-    const dirPath = args.trim() || this.config.claude.defaultWorkingDirectory;
-    const resolved = this.resolveWorkdirPath(dirPath);
-
-    try {
-      const stat = fs.statSync(resolved);
-      if (!stat.isDirectory()) {
-        await this.sender.sendTextNotice(chatId, 'Error', `\`${resolved}\` is not a directory. Use \`/cat\` to view files.`, 'orange');
-        return;
-      }
-
-      const entries = fs.readdirSync(resolved, { withFileTypes: true });
-      if (entries.length === 0) {
-        await this.sender.sendTextNotice(chatId, resolved, '_Empty directory_');
-        return;
-      }
-
-      entries.sort((a, b) => {
-        if (a.isDirectory() && !b.isDirectory()) return -1;
-        if (!a.isDirectory() && b.isDirectory()) return 1;
-        return a.name.localeCompare(b.name);
-      });
-
-      const lines = entries.slice(0, 100).map((entry) => {
-        if (entry.isDirectory()) return `[dir]  ${entry.name}/`;
-        try {
-          const entryStat = fs.statSync(path.join(resolved, entry.name));
-          return `[file] ${entry.name} (${formatSize(entryStat.size)})`;
-        } catch {
-          return `[file] ${entry.name}`;
-        }
-      });
-      if (entries.length > 100) {
-        lines.push(`\n... and ${entries.length - 100} more entries`);
-      }
-
-      await this.sender.sendTextNotice(chatId, resolved, `\`\`\`\n${lines.join('\n')}\n\`\`\``);
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'ENOENT') {
-        await this.sender.sendTextNotice(chatId, 'Not Found', `\`${resolved}\` does not exist.`, 'red');
-      } else {
-        this.logger.error({ err, dirPath: resolved }, 'Ls command error');
-        await this.sender.sendTextNotice(chatId, 'Error', e.message ?? String(err), 'red');
-      }
     }
   }
 
@@ -783,6 +360,16 @@ export class CommandHandler {
 
     const normalized = args.toLowerCase();
 
+    if (normalized !== 'list' && normalized !== 'ls' && this.getActiveTask(chatId)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is active. Use `/stop` first, then change the model.',
+        'orange',
+      );
+      return;
+    }
+
     // Engine switch — /model claude, /model kimi, or /model codex
     if (isEngineName(normalized)) {
       if (activeEngine === normalized) {
@@ -825,15 +412,17 @@ export class CommandHandler {
         { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: 'Fastest · 200k context' },
       ];
       const kimiModels = [
-        { id: 'kimi-code/k3', label: 'Kimi K3', note: 'Current Kimi Code default · 1M context · thinking' },
-        { id: 'kimi-code/kimi-for-coding-highspeed', label: 'Kimi Highspeed', note: 'Lower-latency coding profile' },
+        { id: 'kimi-code/k3', label: 'Kimi K3', note: 'Current Kimi Code subscription model' },
+        { id: 'kimi-code/kimi-for-coding-highspeed', label: 'Kimi for Coding Highspeed', note: 'Low-latency coding model when enabled for your account' },
       ];
       const codexModels = [
-        { id: 'gpt-5.6', label: 'GPT 5.6', note: 'Current flagship Codex-compatible model' },
-        { id: 'gpt-5.6-terra', label: 'GPT 5.6 Terra', note: 'Variant tuned for large-context planning' },
-        { id: 'gpt-5.6-luna', label: 'GPT 5.6 Luna', note: 'Variant tuned for rapid coding iteration' },
-        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Recommended fallback for ChatGPT subscription users' },
-        { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Codex coding model, when available in your Codex account' },
+        { id: 'gpt-5.6', label: 'GPT 5.6', note: 'General GPT-5.6 Codex model' },
+        { id: 'gpt-5.6-sol', label: 'GPT 5.6 Sol', note: 'Flagship GPT-5.6 capability model' },
+        { id: 'gpt-5.6-terra', label: 'GPT 5.6 Terra', note: 'Stronger speed/cost balance for Codex workers' },
+        { id: 'gpt-5.6-luna', label: 'GPT 5.6 Luna', note: 'Efficient high-volume Codex workloads' },
+        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Legacy Codex model' },
+        { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Legacy Codex coding model, when available in your account' },
+        { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
       const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : claudeModels;
       const header = activeEngine === 'kimi'
@@ -859,7 +448,7 @@ export class CommandHandler {
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
       } else {
-        lines.push('_Tip: leave unset to use the kimi-cli default (recommended for subscription users — the server picks the best available)._');
+        lines.push('_Tip: leave unset to use the Kimi Code Server default (recommended for subscription users)._');
       }
       lines.push('Use `/model <name>` to set the model for the current engine.');
       await this.sender.sendTextNotice(chatId, '🤖 Available Models', lines.join('\n'));
@@ -912,7 +501,7 @@ export class CommandHandler {
           '- `/effort high` — deeper reasoning',
           '- `/effort xhigh` — extra-high reasoning',
           '- `/effort max` — maximum reasoning depth',
-          '- `/effort ultra` — maximum reasoning with auto-delegation',
+          '- `/effort ultra` — maximum reasoning with automatic task delegation',
           '- `/effort reset` — clear session override',
         ].join('\n'),
       );
@@ -965,8 +554,8 @@ export class CommandHandler {
    * the bridge picker before reaching here; we keep a usage notice as a
    * defensive fallback.
    *
-   * Gated to the engines with durable session discovery and refused while a
-   * turn is running (the swap would race the in-flight executor).
+   * Supported for Claude, Codex, and Kimi, and refused
+   * while a turn is running (the swap would race the in-flight executor).
    */
   private async handleResumeCommand(msg: IncomingMessage, arg: string): Promise<void> {
     const { chatId } = msg;
@@ -975,14 +564,14 @@ export class CommandHandler {
     if (activeEngine !== 'claude' && activeEngine !== 'codex' && activeEngine !== 'kimi') {
       await this.sender.sendTextNotice(
         chatId,
-        '❌ /resume unsupported',
+        '❌ /resume Unsupported',
         `This chat is on the \`${activeEngine}\` engine. Session resume is available for Claude, Codex, and Kimi.`,
         'red',
       );
       return;
     }
 
-    if (this.getRunningTask(chatId)) {
+    if (this.getActiveTask(chatId)) {
       await this.sender.sendTextNotice(
         chatId,
         '⏳ Task In Progress',
@@ -1064,7 +653,7 @@ export class CommandHandler {
       case 'kimi':
         return '`kimi-code/k3`, `kimi-code/kimi-for-coding-highspeed`';
       case 'codex':
-        return '`gpt-5.6`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.5-codex`';
+        return '`gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`';
     }
   }
 
@@ -1080,91 +669,8 @@ export class CommandHandler {
   }
 }
 
-function formatRestartBlockers(blockers: ServiceRestartBlocker[]): string[] {
-  if (blockers.length === 0) return ['No blocker details were available.'];
-  const rows = blockers.slice(0, 8).map((blocker, index) => {
-    const age = blocker.startedAt ? `, age=${formatDuration(Date.now() - blocker.startedAt)}` : '';
-    const source = blocker.source ? `, source=${blocker.source}` : '';
-    const prompt = blocker.userPrompt ? `, prompt="${truncateOneLine(blocker.userPrompt, 80)}"` : '';
-    return `${index + 1}. bot=\`${blocker.botName}\`, chat=\`${blocker.chatId}\`${source}${age}${prompt}`;
-  });
-  if (blockers.length > rows.length) rows.push(`...and ${blockers.length - rows.length} more active turn(s).`);
-  return rows;
-}
-
-function formatRestartRequests(requests: ReturnType<typeof listServiceRestartRequests>): string[] {
-  if (requests.length === 0) return ['Recent restart requests: none.'];
-  return [
-    'Recent restart requests:',
-    ...requests.map((request, index) => {
-      const age = formatDuration(Date.now() - request.createdAt);
-      const blocker = request.blockers[0];
-      const blockerSummary = blocker
-        ? `, blockers=${request.blockers.length}, first=${blocker.botName}/${blocker.chatId}`
-        : '';
-      const reason = request.reason ? `, reason="${truncateOneLine(request.reason, 60)}"` : '';
-      return `${index + 1}. \`${request.requestId}\` ${request.status}${request.force ? ' force' : ''}, age=${age}, ${formatReadinessProgress(request)}${blockerSummary}${reason}`;
-    }),
-  ];
-}
-
-function formatReadinessProgress(request: ReturnType<typeof listServiceRestartRequests>[number]): string {
-  const now = Date.now();
-  const blockerKeys = new Set(request.blockers.map((blocker) => `${blocker.botName}\0${blocker.chatId}`));
-  const relevantReadiness = (request.readiness || []).filter((ack) => blockerKeys.size === 0 || blockerKeys.has(`${ack.botName}\0${ack.chatId}`));
-  const readyCount = relevantReadiness.filter((ack) => ack.status === 'ready').length;
-  const blockedCount = relevantReadiness.filter((ack) => ack.status === 'blocked').length;
-  const total = request.blockers.length || relevantReadiness.length;
-  const suffixes: string[] = [];
-  if (blockedCount > 0) suffixes.push(`blocker-acks=${blockedCount}`);
-  if (request.status === 'timed_out') {
-    suffixes.push(request.timedOutAt ? `timed_out=${formatDuration(now - request.timedOutAt)} ago` : 'timed_out');
-  } else if (request.status === 'restarting') {
-    suffixes.push(`attempt=${request.attemptCount || 1}`);
-  } else if (request.status === 'healthy') {
-    suffixes.push(request.healthyAt ? `healthy=${formatDuration(now - request.healthyAt)} ago` : 'healthy');
-    if (request.proxyReachable !== undefined) suffixes.push(`proxy=${request.proxyReachable ? 'reachable' : 'failed'}`);
-  } else if (request.status === 'failed') {
-    suffixes.push(request.failedAt ? `failed=${formatDuration(now - request.failedAt)} ago` : 'failed');
-    if (request.healthError) suffixes.push(`error="${truncateOneLine(request.healthError, 80)}"`);
-  } else if (request.status === 'blocked' && typeof request.deadlineAt === 'number') {
-    suffixes.push(request.deadlineAt > now
-      ? `timeout_in=${formatDuration(request.deadlineAt - now)}`
-      : `timeout_due=${formatDuration(now - request.deadlineAt)} ago`);
-  }
-  return `ready=${readyCount}/${total}${suffixes.length > 0 ? `, ${suffixes.join(', ')}` : ''}`;
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m${seconds ? ` ${seconds}s` : ''}`;
-  const hours = Math.floor(minutes / 60);
-  const remainderMinutes = minutes % 60;
-  return `${hours}h${remainderMinutes ? ` ${remainderMinutes}m` : ''}`;
-}
-
-function truncateOneLine(value: string, maxLength: number): string {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  if (oneLine.length <= maxLength) return oneLine;
-  return `${oneLine.slice(0, Math.max(0, maxLength - 3))}...`;
-}
-
 function isEngineName(value: string): value is EngineName {
   return value === 'claude' || value === 'kimi' || value === 'codex';
-}
-
-function actorRoleField(value: unknown): TeamActorRole | undefined {
-  return value === 'admin'
-    || value === 'user'
-    || value === 'pm'
-    || value === 'manager'
-    || value === 'agent'
-    || value === 'worker'
-    ? value
-    : undefined;
 }
 
 function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | undefined {
@@ -1177,14 +683,6 @@ function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | u
     normalized === 'xhigh' ||
     normalized === 'max' ||
     normalized === 'ultra'
-  ) {
-    return normalized;
-  }
+  ) return normalized;
   return undefined;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

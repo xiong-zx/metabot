@@ -1,36 +1,34 @@
 #!/usr/bin/env bash
 #
-# metabot bootstrap — internal-network one-line installer.
+# metabot bootstrap — package one-line installer.
 #
 # Usage:
-#   curl -fsSL http://localhost:9200/install/install.sh | bash
+#   curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash
 #   curl -fsSL ... | METABOT_HOME=/opt/metabot bash
 #   curl -fsSL ... | bash -s -- --dir /opt/metabot
 #
 # What this does:
 #   1. Resolve METABOT_HOME (--dir > env > $HOME/metabot).
-#   2. Download latest.tgz from $METABOT_CORE_URL/install/latest.tgz.
+#   2. Download the runtime tarball from METABOT_PACKAGE_TARBALL_URL, falling
+#      back to the legacy metabot-core install endpoint.
 #   3. Extract into $METABOT_HOME, overwriting code files (`bin/`, `src/`,
 #      `packages/`, `install.sh`, etc.). User state — `.env`, `bots.json`,
 #      `logs/`, `data/` — is NOT in the tarball and survives trivially.
 #      Any pre-existing `.git/` is also preserved (tarball excludes it), so
 #      developers who hand-clone can still `git pull` later if they want,
 #      but the bootstrap itself never touches a remote.
-#   4. If the internal tarball includes `.metabot-package/default.env`, copy it
+#   4. If the package includes `.metabot-package/default.env`, copy it
 #      to `~/.metabot/default.env` with chmod 600 and remove the extracted copy.
 #   5. exec install.sh with METABOT_SKIP_GIT=1 so its Phase 2 skips the
 #      clone/pull branch entirely and proceeds straight to npm install +
 #      configuration prompts + PM2 start.
 #
-# Why no .git delegation: GitHub `xvirobotics/metabot` is a selectively-
-# cherry-picked OSS mirror that lags the GitLab monorepo, and most internal
-# users lack GitLab SSH credentials. Always pulling tarball makes the refresh
-# story uniform across fresh installs, GitHub clones, and GitLab clones —
-# nobody silently runs stale code, nobody needs SSH keys.
+# Why no .git delegation: package installs are immutable release artifacts.
+# Always pulling the tarball keeps package refresh independent from source
+# checkout credentials and branch state.
 #
-# Refresh model: same as /cli/latest.tgz — always-latest, pinned by atomic
-# publish. Re-run the one-liner to refresh; regular `metabot update` reroutes
-# back here even if the target directory still has a preserved `.git/`.
+# Refresh model: stable latest-release asset names, pinned by atomic publish.
+# Re-run the one-liner or use `metabot update --package` to refresh.
 #
 set -euo pipefail
 
@@ -47,7 +45,7 @@ error()   { echo -e "${RED}[bootstrap]${NC} $*" >&2; }
 success() { echo -e "${GREEN}[bootstrap]${NC} $*"; }
 
 echo ""
-echo -e "${CYAN}  MetaBot bootstrap (internal tarball install)${NC}"
+echo -e "${CYAN}  MetaBot bootstrap (release package install)${NC}"
 echo ""
 
 # ----- 1. parse flags (only --dir / -d; everything else is forwarded) -----
@@ -88,6 +86,12 @@ if [[ "$METABOT_HOME" != /* ]]; then
 fi
 export METABOT_HOME
 
+CURRENT_PACKAGE_VERSION=""
+if [[ -f "$METABOT_HOME/.metabot-package/manifest.json" ]]; then
+  CURRENT_PACKAGE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' \
+    "$METABOT_HOME/.metabot-package/manifest.json" | head -n 1)"
+fi
+
 # ----- 3. preflight: curl + tar are mandatory; node check is install.sh's job -----
 for cmd in curl tar; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -97,31 +101,26 @@ for cmd in curl tar; do
 done
 
 # ----- 4. heads-up if we're overlaying onto an existing git checkout -----
-# We do NOT delegate to its install.sh — that would `git pull` from a stale
-# GitHub mirror (and even on a GitLab clone, we want a uniform tarball
-# refresh story regardless of remote). `.git/` is excluded from the tarball
-# so it's left intact; `git pull` still works manually for anyone who wants it.
+# We do NOT delegate to its install.sh because package refresh is independent
+# from the checkout's remote and branch state. `.git/` is excluded from the
+# tarball, so it remains available for an explicit `metabot update --git`.
 if [[ -d "$METABOT_HOME/.git" ]]; then
   info "Existing .git/ at $METABOT_HOME left intact — tarball will overlay code only."
 fi
 
 # ----- 5. download + extract tarball (always) -----
-PACKAGED_METABOT_CORE_URL="${PACKAGED_METABOT_CORE_URL:-}"
-# __METABOT_CORE_URL_INJECT__
-if [[ -z "${METABOT_CORE_URL:-}" && -n "$PACKAGED_METABOT_CORE_URL" ]]; then
-  export METABOT_CORE_URL="$PACKAGED_METABOT_CORE_URL"
-fi
 CORE_URL="${METABOT_CORE_URL:-http://localhost:9200}"
-TARBALL_URL="$CORE_URL/install/latest.tgz"
+TARBALL_URL="${METABOT_PACKAGE_TARBALL_URL:-$CORE_URL/install/latest.tgz}"
+CHECKSUMS_URL="${METABOT_PACKAGE_CHECKSUMS_URL:-}"
 TMPDIR_BOOT="$(mktemp -d -t metabot-install.XXXXXX)"
 trap 'rm -rf "$TMPDIR_BOOT"' EXIT
 TARBALL_PATH="$TMPDIR_BOOT/metabot.tgz"
 
 info "Downloading $TARBALL_URL"
 if ! curl -fsSL "$TARBALL_URL" -o "$TARBALL_PATH"; then
-  error "Download failed. Is metabot-core reachable at this URL?"
+  error "Download failed. Is the release package reachable at this URL?"
   error "  URL: $TARBALL_URL"
-  error "  Override host with: METABOT_CORE_URL=https://… curl … | bash"
+  error "  Override with: METABOT_PACKAGE_TARBALL_URL=https://… curl … | bash"
   exit 1
 fi
 
@@ -136,8 +135,54 @@ if ! tar -tzf "$TARBALL_PATH" >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ -n "$CHECKSUMS_URL" ]]; then
+  CHECKSUMS_PATH="$TMPDIR_BOOT/SHA256SUMS"
+  info "Verifying release checksum"
+  if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_PATH"; then
+    error "Checksum download failed: $CHECKSUMS_URL"
+    exit 1
+  fi
+  EXPECTED_SHA256="$(awk '$2 == "metabot-runtime.tgz" { print $1; exit }' "$CHECKSUMS_PATH")"
+  if [[ ! "$EXPECTED_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    error "SHA256SUMS does not contain a valid metabot-runtime.tgz entry"
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SHA256="$(sha256sum "$TARBALL_PATH" | awk '{print $1}')"
+  else
+    ACTUAL_SHA256="$(shasum -a 256 "$TARBALL_PATH" | awk '{print $1}')"
+  fi
+  if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+    error "Release checksum mismatch; refusing to extract"
+    exit 1
+  fi
+  success "Release checksum verified"
+fi
+
+PACKAGE_MANIFEST_STAGED="$TMPDIR_BOOT/manifest.json"
+if ! tar -xOf "$TARBALL_PATH" .metabot-package/manifest.json > "$PACKAGE_MANIFEST_STAGED" 2>/dev/null \
+  && ! tar -xOf "$TARBALL_PATH" ./.metabot-package/manifest.json > "$PACKAGE_MANIFEST_STAGED" 2>/dev/null; then
+  error "Release package manifest is missing or is not a complete MetaBot Personal Edition."
+  exit 1
+fi
+NEW_PACKAGE_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' \
+  "$PACKAGE_MANIFEST_STAGED" | head -n 1)"
+if [[ -z "$NEW_PACKAGE_VERSION" ]] \
+  || [[ ! "$NEW_PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || ! grep -Eq '"package"[[:space:]]*:[[:space:]]*"metabot-personal-edition"' "$PACKAGE_MANIFEST_STAGED" \
+  || ! grep -Eq '"includesCore"[[:space:]]*:[[:space:]]*true' "$PACKAGE_MANIFEST_STAGED" \
+  || ! grep -Eq '"includesWebUi"[[:space:]]*:[[:space:]]*true' "$PACKAGE_MANIFEST_STAGED"; then
+  error "Release package manifest is missing or is not a complete MetaBot Personal Edition."
+  exit 1
+fi
+if [[ -n "${METABOT_EXPECTED_PACKAGE_VERSION:-}" ]] \
+  && [[ "$NEW_PACKAGE_VERSION" != "${METABOT_EXPECTED_PACKAGE_VERSION#v}" ]]; then
+  error "Release version mismatch: expected ${METABOT_EXPECTED_PACKAGE_VERSION#v}, got $NEW_PACKAGE_VERSION"
+  exit 1
+fi
+
 mkdir -p "$METABOT_HOME"
-info "Extracting into $METABOT_HOME"
+info "Extracting Personal Edition v${NEW_PACKAGE_VERSION} into $METABOT_HOME"
 # Plain `tar xzf` overwrites tarball-tracked files in-place. We don't use
 # --keep-newer-files because the pack script stamps every entry with a fixed
 # `--mtime='UTC 2026-01-01'` for deterministic output — local files modified
@@ -150,13 +195,28 @@ info "Extracting into $METABOT_HOME"
 #   - node_modules/  (excluded; Phase 3 npm install reconciles)
 tar xzf "$TARBALL_PATH" -C "$METABOT_HOME"
 
+if [[ -n "$CURRENT_PACKAGE_VERSION" ]]; then
+  success "Personal Edition staged: v${CURRENT_PACKAGE_VERSION} → v${NEW_PACKAGE_VERSION}"
+else
+  success "Personal Edition v${NEW_PACKAGE_VERSION} staged"
+fi
+
+# v1.2.0 consolidated the historical Bridge Live UI into packages/web-ui.
+# Package overlays intentionally do not delete arbitrary files, so remove only
+# the known legacy application when its package identity proves ownership.
+if [[ -f "$METABOT_HOME/web/package.json" ]] \
+  && grep -Eq '"name"[[:space:]]*:[[:space:]]*"metabot-web"' "$METABOT_HOME/web/package.json"; then
+  rm -rf "$METABOT_HOME/web" "$METABOT_HOME/dist/web"
+  success "Removed the retired Bridge Web UI; Core Console is now the only browser frontend"
+fi
+
 PACKAGE_DEFAULT_ENV="$METABOT_HOME/.metabot-package/default.env"
 if [[ -f "$PACKAGE_DEFAULT_ENV" ]]; then
   mkdir -p "$HOME/.metabot"
   cp "$PACKAGE_DEFAULT_ENV" "$HOME/.metabot/default.env"
   chmod 600 "$HOME/.metabot/default.env"
-  rm -rf "$METABOT_HOME/.metabot-package"
-  success "Installed internal default env at $HOME/.metabot/default.env"
+  rm -f "$PACKAGE_DEFAULT_ENV"
+  success "Installed packaged default env at $HOME/.metabot/default.env"
 fi
 
 if [[ ! -f "$METABOT_HOME/install.sh" ]]; then

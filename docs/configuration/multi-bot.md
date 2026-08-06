@@ -1,125 +1,177 @@
 # Multi-Bot Mode
 
-Run multiple Feishu and Telegram bots in a single MetaBot process.
+Run multiple Feishu/Lark, Telegram, and WeChat bots in one MetaBot Bridge.
+Each bot has its own channel credentials, engine, workspace, sessions, and
+per-group reply settings.
 
 ## Setup
 
-Set `BOTS_CONFIG=./bots.json` in `.env` to enable multi-bot mode:
+Set `BOTS_CONFIG=./bots.json` in `.env`:
 
 ```json
 {
   "feishuBots": [
     {
-      "name": "metabot",
+      "name": "codex-dev",
+      "engine": "codex",
       "feishuAppId": "cli_xxx",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "defaultWorkingDirectory": "/home/me/project-a",
+      "codex": {
+        "reasoningEffort": "high"
+      }
     },
     {
-      "name": "backend-bot",
+      "name": "kimi-reviewer",
+      "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "feishuDomain": "lark",
+      "defaultWorkingDirectory": "/home/me/project-b",
+      "kimi": {
+        "thinking": true
+      }
     }
   ],
-  "workers": {
-    "defaultModel": "gpt-5.4",
-    "maxPerPm": 8
-  },
-  "agentTeamExecutionBot": "research-pm",
   "telegramBots": [
     {
-      "name": "tg-bot",
+      "name": "personal-codex",
+      "engine": "codex",
       "telegramBotToken": "123456:ABC...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "defaultWorkingDirectory": "/home/me/personal"
     }
   ]
 }
 ```
 
-## Bot Config Fields
+## Shared Bot Fields
 
 | Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `name` | Yes | — | Bot identifier |
-| `defaultWorkingDirectory` | Yes | — | Working directory for the agent |
-| `engine` | No | `"claude"` | Agent engine — `"claude"` or `"kimi"` |
-| `feishuAppId` / `feishuAppSecret` | Feishu | — | Feishu app credentials |
-| `telegramBotToken` | Telegram | — | Telegram bot token |
-| `maxTurns` | No | unlimited | Max turns per request |
-| `maxBudgetUsd` | No | unlimited | Max cost per request (Claude only — Kimi runs on subscription) |
-| `model` | No | SDK default | Default model ID (engine-specific) |
-| `pmPrompt` | No | `false` | Enable research-PM instructions and 1-hour worker check-in reminders |
-| `allowedTools` | No | `Read,Edit,Write,Glob,Grep,Bash` | Tool whitelist (Claude only) |
-| `outputsBaseDir` | No | `/tmp/metabot-outputs` | Output files directory |
-| `kimi` | No | — | Kimi-specific options (only when `engine: "kimi"`) — see below |
+|---|---|---|---|
+| `name` | Yes | — | Stable bot identifier |
+| `defaultWorkingDirectory` | Yes | — | Workspace available to the agent |
+| `engine` | No | `"codex"` | `"codex"`, `"kimi"`, or compatibility `"claude"` |
+| `model` | No | Engine default | Session model override |
+| `visible` | No | `true` | Register the bot for Agent Bus discovery |
+| `memoryPublic` | No | sticky/default policy | Pin the bot's default memory visibility when explicitly set |
+| `workerTools` | No | `false` | Security-relevant opt-in to mint Worker Runner capabilities for this bot's non-Team `pm`/`user` chats |
+| `arcTools` | No | `false` | Security-relevant opt-in to mint ARC capabilities for this bot's non-Team `pm`/`user` chats |
+| `maxTurns` / `maxBudgetUsd` | No | unlimited | Claude compatibility limits |
+| `outputsBaseDir` | No | temporary user directory | Files automatically returned to chat |
 
-## Global Worker / Agent Team Fields
+Channel-specific credentials:
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `workers.defaultModel` | `gpt-5.4` | Default model for background workers dispatched by PM bots |
-| `workers.maxPerPm` | `8` | Maximum concurrent running workers per PM chat |
-| `agentTeamExecutionBot` | fallback | Bridge bot used by the Agent Team supervisor to execute Agent runs; pin to `research-pm` or an internal worker rather than relying on registration order |
+| Channel | Fields |
+|---|---|
+| Feishu/Lark | `feishuAppId`, `feishuAppSecret`; optional `feishuDomain` (`feishu` by default, or `lark`) and `groupNoMention` |
+| Telegram | `telegramBotToken` |
+| WeChat | optional `wechatBotToken`; omit it for QR login |
 
-### Kimi engine options
+`feishuDomain` is strict: only `feishu` and `lark` are accepted. Existing
+entries that omit it continue to use Feishu. See [Lark domain migration](lark-domain-migration.md)
+before changing an existing bot because identifiers and Wiki mappings are tenant-scoped.
 
-When `engine: "kimi"`, the `kimi` object configures Kimi CLI behavior:
+## Codex Options
 
 ```json
 {
-  "name": "coding-bot",
+  "engine": "codex",
+  "codex": {
+    "model": "gpt-5.6-sol",
+    "profile": "personal",
+    "reasoningEffort": "high",
+    "approvalPolicy": "never",
+    "sandbox": "workspace-write"
+  }
+}
+```
+
+Common fields are `model`, `profile`, `apiKey`, `baseUrl`, `reasoningEffort`,
+`approvalPolicy`, `sandbox`, `executable`, `extraArgs`, and `env`. Normal
+subscription use only needs `codex login`.
+
+The public adapter currently runs `codex exec --json` and resumes with
+`codex exec resume`. Codex app-server and native mid-turn steering are not part
+of the current public behavior.
+
+## Kimi Code Options {#kimi-code-options}
+
+```json
+{
   "engine": "kimi",
-  "feishuAppId": "cli_xxx",
-  "feishuAppSecret": "...",
-  "defaultWorkingDirectory": "/root/workspaces",
   "kimi": {
-    "model": "kimi-for-coding",
-    "thinking": true
+    "model": "kimi-code/k3",
+    "thinking": true,
+    "permissionMode": "auto",
+    "serverUrl": "http://127.0.0.1:58627"
   }
 }
 ```
 
 | Field | Default | Description |
-|-------|---------|-------------|
-| `kimi.model` | `kimi-for-coding` | Kimi model ID |
-| `kimi.thinking` | `false` | Enable thinking mode (shows reasoning tokens) |
-| `kimi.executable` | (auto) | Override path to `kimi` CLI binary |
+|---|---|---|
+| `kimi.model` | Kimi Code config default | Model ID or configured short alias |
+| `kimi.thinking` | Kimi Code config default | Thinking override |
+| `kimi.permissionMode` | `auto` | Tool permission policy; `yolo` requires explicit trusted-workspace opt-in |
+| `kimi.executable` | `kimi` from `PATH` | Kimi Code executable |
+| `kimi.serverUrl` | `http://127.0.0.1:58627` | Existing loopback Server origin; otherwise started on demand |
+| `kimi.contextWindow` | current Kimi default | Display/context override |
 
-Kimi requires a one-time `kimi login` (run it in a separate terminal after installing `kimi-cli` via `uv tool install kimi-cli`). Authentication is shared with the Kimi CLI — no API key needed.
+Kimi requires Kimi Code 0.27+:
 
-## How It Works
-
-- Each bot gets its own Feishu/Telegram connection
-- Sessions are isolated per `chatId` — no collision between bots
-- Each bot uses its own working directory and configuration
-- Environment variables serve as defaults for any field not specified in JSON
-
-When `BOTS_CONFIG` is set, `FEISHU_APP_ID` / `FEISHU_APP_SECRET` env vars are ignored.
-
-## Peers Configuration
-
-You can also configure [Peers](../features/peers.md) in `bots.json`:
-
-```json
-{
-  "feishuBots": [{ "..." }],
-  "peers": [
-    {
-      "name": "alice",
-      "url": "http://localhost:9200",
-      "secret": "alice-api-secret"
-    }
-  ]
-}
+```bash
+npm install -g @moonshot-ai/kimi-code@latest
+kimi login
 ```
+
+MetaBot uses the official local Server API shared with Kimi's web frontend.
+It provides durable Sessions, live snapshots, questions, cancellation, usage,
+tools, subagents, and goals. Feishu mid-turn steering is not exposed in this
+release. The legacy Python `kimi-cli --wire --work-dir` protocol is not used.
+
+`permissionMode` defaults to `auto`. `yolo` is available only as an explicit
+opt-in for a workspace you trust; the personal edition never enables it by default.
+
+## Claude Code Compatibility
+
+Existing bots can set `"engine": "claude"` and continue using Claude login,
+Anthropic-compatible providers, `.claude/skills/`, and `CLAUDE.md`. New
+personal-edition bots default to Codex when `engine` is omitted.
+
+## Runtime Behavior
+
+- Each bot owns an independent channel connection and workspace.
+- Sessions are isolated per bot and `chatId`.
+- A chat can switch engine/model with `/model`; this does not rename the bot.
+- Feishu reply modes persist per bot and group.
+- Agent Teams and the Agent Bus can coordinate bots running different engines.
+- Environment variables provide defaults; explicit `bots.json` fields win.
+- `workerTools` and `arcTools` are authorization settings, not convenience
+  switches. Non-Team chats fall back to the `user` role, so the per-bot flag is
+  the effective dispatch boundary. Agent Team `manager`/`agent` chats never
+  receive these capabilities. Engine-side materialization independently
+  requires the already-minted per-turn capability and a configured loopback
+  `METABOT_WORKER_DAEMON_URL` / `METABOT_ARC_DAEMON_URL`; a missing or unsafe
+  endpoint means the tool is omitted. Codex uses invocation-local config and
+  Claude uses additive session config, so shared user MCP settings are not
+  overwritten. Kimi has no isolated per-session MCP surface and therefore
+  receives neither tool even when a flag is enabled.
+
+When `BOTS_CONFIG` is set, single-bot `FEISHU_APP_ID` and
+`FEISHU_APP_SECRET` are ignored.
 
 ## Single-Bot Mode
 
-Without `BOTS_CONFIG`, MetaBot runs in single-bot mode using environment variables:
+Without `BOTS_CONFIG`, configure one bot through environment variables:
 
 ```bash
+METABOT_ENGINE=codex
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=...
-DEFAULT_WORKING_DIRECTORY=/root/workspaces
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
 ```
+
+`CLAUDE_DEFAULT_WORKING_DIRECTORY` keeps its historical name but supplies the
+workspace for every engine.
+
+See [Environment Variables](environment-variables.md) for the full list.

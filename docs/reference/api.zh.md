@@ -46,7 +46,7 @@ Authorization: Bearer <API_SECRET>
 }
 ```
 
-`botName` 字段支持[限定名](../features/peers.md#限定名)：`peerName/botName`。
+`botName` 字段支持[限定名](../features/peers.md#qualified-names)：`peerName/botName`。
 
 !!! note "已弃用的别名"
     `POST /api/tasks` 仍可用但已弃用。请使用 `/api/talk`。

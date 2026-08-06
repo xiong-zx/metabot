@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 
 const DEFAULT_ORIGIN = 'http://127.0.0.1:58627';
 const START_TIMEOUT_MS = 15_000;
@@ -257,6 +258,9 @@ export class KimiDaemonClient {
 
   async steer(sessionId: string, text: string, options: { model?: string; thinking?: string } = {}): Promise<void> {
     const queued = await this.submitPrompt(sessionId, text, options);
+    // If the active turn ended in the submission race, Kimi starts this as a
+    // normal follow-up in the same Session. Otherwise merge the queued prompt
+    // into the active turn, matching the Kimi TUI's Ctrl+S behavior.
     if (queued.status !== 'queued') return;
     await this.request(`/sessions/${encodeURIComponent(sessionId)}/prompts:steer`, {
       prompt_ids: [queued.prompt_id],
@@ -315,6 +319,7 @@ export class KimiDaemonClient {
     );
   }
 
+  /** Resolve a configured short model name against Kimi Code's current config. */
   async resolveModel(configured?: string): Promise<{ id: string; displayName: string }> {
     const config = await this.readConfig();
     const aliases = [...config.matchAll(/^\[models\."([^"]+)"\]/gm)].map((match) => match[1]);
@@ -338,8 +343,16 @@ export class KimiDaemonClient {
     try {
       return await this.rawRequest(resource, body, query);
     } catch (error) {
+      // A transport failure means the cached readiness is stale even when the
+      // failed request cannot be retried. API validation/provider errors carry
+      // a numeric code and do not invalidate daemon readiness.
       if (!(error instanceof KimiDaemonError) || error.code !== undefined) throw error;
       this.ready = false;
+      // Recover a bodyless GET once after a daemon restart or half-open local
+      // connection. Never replay POSTs: the daemon may have accepted the
+      // operation before the response was lost, so retrying could duplicate a
+      // prompt or another side effect.
+      if (body !== undefined) throw error;
       await this.ensureRunning();
       return this.rawRequest(resource, body, query);
     }
@@ -406,7 +419,10 @@ export class KimiDaemonClient {
     }
     const args = ['server', 'run', '--port', url.port || '58627', '--keep-alive'];
     const child = spawn(this.executable, args, {
-      env: { ...process.env, ...(this.apiKey ? { KIMI_API_KEY: this.apiKey } : {}) },
+      env: stripBridgeLocalAdminCredentials({
+        ...process.env,
+        ...(this.apiKey ? { KIMI_API_KEY: this.apiKey } : {}),
+      }),
       stdio: 'ignore',
       detached: true,
     });

@@ -22,8 +22,6 @@ function config(): BotConfigBase {
       maxTurns: undefined,
       maxBudgetUsd: undefined,
       model: undefined,
-      effort: undefined,
-      permissionMode: undefined,
       apiKey: undefined,
       outputsBaseDir: '/tmp',
       downloadsDir: '/tmp',
@@ -118,6 +116,32 @@ async function collect(stream: AsyncGenerator<any>): Promise<any[]> {
 }
 
 describe('KimiExecutor Feishu parity', () => {
+  it('never copies Worker or ARC capabilities into the model-visible prompt', async () => {
+    const client = new FakeKimiClient();
+    const executor = new KimiExecutor(config(), logger, client);
+    await collect(executor.startExecution({
+      prompt: 'inspect app',
+      cwd: '/tmp',
+      abortController: new AbortController(),
+      apiContext: { botName: 'kimi-test', chatId: 'oc-kimi-capabilities' },
+      env: {
+        METABOT_TEAM_CAPABILITY: 'TEAM_CAPABILITY_SENTINEL',
+        METABOT_BOT_NAME: 'kimi-test',
+        METABOT_CHAT_ID: 'oc-kimi-capabilities',
+        METABOT_WORKER_CAPABILITY: 'WORKER_CAPABILITY_SENTINEL',
+        METABOT_ARC_CAPABILITY: 'ARC_CAPABILITY_SENTINEL',
+      },
+    }).stream);
+
+    const submittedPrompt = client.submitPrompt.mock.calls[0]?.[1] as string;
+    expect(submittedPrompt).toContain('METABOT_TEAM_CAPABILITY');
+    expect(submittedPrompt).toContain('TEAM_CAPABILITY_SENTINEL');
+    expect(submittedPrompt).not.toContain('METABOT_WORKER_CAPABILITY');
+    expect(submittedPrompt).not.toContain('WORKER_CAPABILITY_SENTINEL');
+    expect(submittedPrompt).not.toContain('METABOT_ARC_CAPABILITY');
+    expect(submittedPrompt).not.toContain('ARC_CAPABILITY_SENTINEL');
+  });
+
   it('renders Kimi Code Server tools, usage, text, and subagent activity', async () => {
     const client = new FakeKimiClient();
     client.afterSubmit = async () =>

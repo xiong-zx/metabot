@@ -1,8 +1,7 @@
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
-import { buildPmSystemPrompt } from '../pm-prompt.js';
-import { buildHomeInstructionsSection } from '../home-instructions.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import {
   KimiDaemonClient,
   type KimiPendingQuestion,
@@ -63,8 +62,10 @@ interface KimiTurnState {
 /**
  * Kimi Code 0.27 executor backed by the official local Server API.
  *
- * This preserves the bridge's Claude-shaped stream contract while replacing
- * the legacy SDK wire protocol with the durable Kimi local daemon.
+ * This is the same frontend contract used by Kimi's own web UI. It gives the
+ * Feishu bridge durable Sessions, atomic live snapshots, native prompt queue
+ * steering, questions, cancellation, usage, and subagent activity without a
+ * bespoke runner or a long-lived per-chat process.
  */
 export class KimiExecutor {
   private readonly client: KimiClientLike;
@@ -93,6 +94,8 @@ export class KimiExecutor {
       resolveReady = resolve;
       rejectReady = reject;
     });
+    // A failed launch may have no steering waiter. Mark the rejection handled
+    // while preserving it for callers that do await active.ready.
     void ready.catch(() => undefined);
     const active: ActiveKimiTurn = {
       pendingSteers: 0,
@@ -173,9 +176,9 @@ export class KimiExecutor {
 
         const fullPrompt = buildPromptWithContext(
           goal.kind === 'start' ? goal.objective : prompt,
-          cwd,
           outputsDir,
           apiContext,
+          options.env,
         );
         const submitted = await client.submitPrompt(session.id, fullPrompt, {
           model: model.id,
@@ -312,42 +315,37 @@ export class KimiExecutor {
 
   private buildPromptWithContext(
     prompt: string,
-    cwd: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
+    executionEnv?: Record<string, string>,
   ): string {
     const sections: string[] = [];
-
-    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
-    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
-    const homeInstructions = buildHomeInstructionsSection({ cwd, logger: this.logger });
-    if (homeInstructions) sections.push(homeInstructions);
-
     if (outputsDir) {
       sections.push(
-        `## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nThe bridge will automatically send files placed there to the user.`,
+        `## Output Files\nWhen producing output files for the user, copy them to: ${outputsDir}\nMetaBot will automatically send files placed there.`,
       );
     }
-
     if (apiContext) {
-      sections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
-
-      if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
-        const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
-        if (apiContext.groupId) {
-          sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
-          );
-        }
+      sections.push(buildMetaBotApiPromptContext(apiContext));
+      if (apiContext.teamContext) sections.push(apiContext.teamContext);
+      if (apiContext.groupMembers?.length) {
+        const peers = apiContext.groupMembers.filter((name) => name !== apiContext.botName);
+        if (peers.length) sections.push(`## Agent Organization\nOther Agents in this group: ${peers.join(', ')}.`);
       }
     }
-
-    if (this.config.pmPrompt) {
-      sections.push(buildPmSystemPrompt());
+    if (executionEnv?.METABOT_TEAM_CAPABILITY) {
+      const prefix = [
+        ['METABOT_TEAM_CAPABILITY', executionEnv.METABOT_TEAM_CAPABILITY],
+        ['METABOT_BOT_NAME', executionEnv.METABOT_BOT_NAME],
+        ['METABOT_CHAT_ID', executionEnv.METABOT_CHAT_ID],
+      ]
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+        .join(' ');
+      sections.push(
+        `## Agent Team execution capability\nFor every \`metabot teams\` shell command in this Kimi session, prefix the command with exactly:\n\`${prefix}\`\nThis is a short-lived signed credential. Do not reuse it outside this session.`,
+      );
     }
-
     return sections.length > 0 ? `${prompt}\n\n---\n\n${sections.join('\n\n')}` : prompt;
   }
 }
@@ -385,12 +383,7 @@ function translateSnapshot(snapshot: KimiSessionSnapshot, state: KimiTurnState):
         type: 'assistant',
         session_id: state.sessionId,
         message: {
-          content: [{
-            type: 'tool_use',
-            id,
-            name: normalizeKimiToolName(tool.name),
-            input: normalizeKimiToolInput(tool.name, tool.input),
-          }],
+          content: [{ type: 'tool_use', id, name: normalizeKimiToolName(tool.name), input: tool.input ?? {} }],
         },
       });
     }
@@ -507,6 +500,8 @@ function buildResult(state: KimiTurnState, status: KimiSessionStatus | undefined
   const snapshot = state.lastSnapshot;
   const failed = snapshot?.session.last_turn_reason === 'failed';
   const cancelled = aborted || snapshot?.session.last_turn_reason === 'cancelled';
+  // Kimi's durable session usage can lag the just-completed turn by one
+  // snapshot. The live status endpoint is authoritative for current context.
   const usage = snapshot?.session.usage;
   const outputTokens = usage?.output_tokens ?? 0;
   const inputTokens =
@@ -589,19 +584,6 @@ function normalizeKimiToolName(name: string): string {
     FetchURL: 'WebFetch',
   };
   return names[clean] ?? clean;
-}
-
-function normalizeKimiToolInput(name: string, input: unknown): unknown {
-  if (!input || typeof input !== 'object') return input ?? {};
-  const clean = name.replace(/_\d+$/, '');
-  const raw = input as Record<string, unknown>;
-  if ((clean === 'ReadFile' || clean === 'WriteFile' || clean === 'StrReplaceFile' || clean === 'ReplaceFile') && typeof raw.path === 'string') {
-    return { ...raw, file_path: raw.path };
-  }
-  if ((clean === 'Shell' || clean === 'RunShellCommand') && typeof raw.cmd === 'string' && raw.command === undefined) {
-    return { ...raw, command: raw.cmd };
-  }
-  return raw;
 }
 
 function stableValue(value: unknown): string {

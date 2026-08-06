@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as lark from '@larksuiteoapi/node-sdk';
 import { DocSync, type DocSyncConfig, type FullDocument } from '../src/sync/doc-sync.js';
 import type { FolderTreeNode } from '../src/memory/memory-client.js';
 
@@ -30,7 +31,6 @@ function createMockLarkClient() {
         },
       },
     },
-    request: vi.fn().mockResolvedValue({ data: { task_id: 'delete_task_1' } }),
     docx: {
       v1: {
         documentBlockChildren: {
@@ -56,11 +56,9 @@ function createMockMemoryClient(docs: FullDocument[] = [], tree?: FolderTreeNode
     token: 'test-token',
     secret: 'test-token',
     listFolderTree: vi.fn().mockResolvedValue(tree || defaultTree),
-    listDocuments: vi.fn().mockImplementation(async (folderId?: string) => (
-      docs
-        .filter((d) => !folderId || d.folder_id === folderId)
-        .map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at }))
-    )),
+    listDocuments: vi.fn().mockResolvedValue(
+      docs.map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at })),
+    ),
     getDocument: vi.fn().mockImplementation(async (docId: string) => docs.find((d) => d.id === docId) || null),
   } as any;
 }
@@ -95,7 +93,7 @@ describe('DocSync', () => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode, configOverrides: Partial<DocSyncConfig> = {}) {
+  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode) {
     mockClient = createMockLarkClient();
     mockMemory = createMockMemoryClient(docs, tree);
 
@@ -105,8 +103,6 @@ describe('DocSync', () => {
       databaseDir: tmpDir,
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
-      memoryRootPath: '/',
-      ...configOverrides,
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());
@@ -123,6 +119,23 @@ describe('DocSync', () => {
   it('reports not syncing initially', () => {
     setup();
     expect(docSync.isSyncing()).toBe(false);
+  });
+
+  it('creates its SDK client on the configured Lark tenant', () => {
+    mockMemory = createMockMemoryClient();
+    docSync = new DocSync({
+      feishuAppId: 'test_id',
+      feishuAppSecret: 'test_secret',
+      feishuDomain: 'lark',
+      databaseDir: tmpDir,
+    }, mockMemory, createLogger());
+
+    const expected = new lark.Client({
+      appId: 'test_id',
+      appSecret: 'test_secret',
+      domain: lark.Domain.Lark,
+    });
+    expect((docSync as any).client.domain).toBe(expected.domain);
   });
 
   it('returns empty stats when no docs synced', () => {
@@ -202,76 +215,7 @@ describe('DocSync', () => {
     expect(stats.folderCount).toBe(1);
   });
 
-  it('creates new wiki mappings when MetaMemory paths move under a server root', async () => {
-    const doc = makeSampleDoc({
-      folder_id: 'f-dev',
-      path: '/metabot/dev/git-workflow',
-      title: 'Git Workflow',
-    });
-    const tree: FolderTreeNode = {
-      id: 'root',
-      name: 'Root',
-      path: '/',
-      children: [
-        {
-          id: 'f-metabot',
-          name: 'metabot',
-          path: '/metabot',
-          children: [
-            {
-              id: 'f-dev',
-              name: 'dev',
-              path: '/metabot/dev',
-              children: [],
-              document_count: 1,
-            },
-          ],
-          document_count: 0,
-        },
-      ],
-      document_count: 0,
-    };
-
-    setup([doc], tree);
-    await docSync.syncAll();
-
-    tree.children[0].name = 'cargo1';
-    tree.children[0].path = '/cargo1';
-    tree.children[0].children[0].path = '/cargo1/dev';
-    doc.path = '/cargo1/dev/git-workflow';
-
-    const result = await docSync.syncAll();
-
-    expect(result.created).toBe(1);
-    expect(result.skipped).toBe(0);
-    expect((docSync as any).store.getFolderMapping('f-metabot')?.memoryPath).toBe('/cargo1');
-    expect((docSync as any).store.getDocMapping('doc1')?.memoryPath).toBe('/cargo1/dev/git-workflow');
-    expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledTimes(6);
-  });
-
-  it('deletes the previous wiki node when a document path changes', async () => {
-    const doc = makeSampleDoc();
-    setup([doc]);
-
-    await docSync.syncAll();
-
-    doc.path = '/renamed-test-doc';
-    const result = await docSync.syncAll();
-
-    expect(result.created).toBe(1);
-    expect(result.deleted).toBe(1);
-    expect(mockClient.request).toHaveBeenCalledWith({
-      method: 'DELETE',
-      url: '/open-apis/wiki/v2/spaces/space_123/nodes/node_1',
-      data: {
-        include_children: true,
-        obj_type: 'wiki',
-      },
-    });
-    expect((docSync as any).store.getDocMapping('doc1')?.memoryPath).toBe('/renamed-test-doc');
-  });
-
-  it('deletes stale wiki nodes for deleted documents by default', async () => {
+  it('detects and cleans up deleted documents', async () => {
     const doc = makeSampleDoc();
     setup([doc]);
 
@@ -284,30 +228,6 @@ describe('DocSync', () => {
 
     const result = await docSync.syncAll();
     expect(result.deleted).toBe(1);
-    expect(mockClient.request).toHaveBeenCalledWith({
-      method: 'DELETE',
-      url: '/open-apis/wiki/v2/spaces/space_123/nodes/node_1',
-      data: {
-        include_children: true,
-        obj_type: 'wiki',
-      },
-    });
-    expect((docSync as any).store.getDocMapping('doc1')).toBeUndefined();
-  });
-
-  it('can clean stale mappings without deleting wiki nodes', async () => {
-    const doc = makeSampleDoc();
-    setup([doc], undefined, { deleteStaleDocuments: false });
-
-    await docSync.syncAll();
-
-    (docSync as any).fetchDocument = vi.fn().mockResolvedValue(null);
-    mockMemory.listDocuments.mockResolvedValue([]);
-
-    const result = await docSync.syncAll();
-    expect(result.deleted).toBe(1);
-    expect(mockClient.request).not.toHaveBeenCalled();
-    expect((docSync as any).store.getDocMapping('doc1')).toBeUndefined();
   });
 
   it('finds existing wiki space by name', async () => {

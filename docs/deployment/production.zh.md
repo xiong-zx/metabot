@@ -1,95 +1,144 @@
 # 生产部署
 
-## 快速启动
+个人版支持的生产部署路径是带签名校验的 GitHub Release 安装器。它会安装四个本地
+服务；两个执行守护进程与 Bridge 是 PM2 同级应用，不是 Bridge 子进程：
+
+| 服务 | 默认端口 | 作用 |
+|---|---:|---|
+| Core Console | `9200` | Web UI、Chat、Agents、Memory、Skills、T5T、Teams、CLI API |
+| Bridge | `9100` | IM 渠道、引擎执行、调度、语音与 peer 路由 |
+| Worker Runner | `9311` | 持久化的一次性 Codex、Claude、Kimi MCP 工作 |
+| ARC | `9312` | 通过 Worker Runner 执行的 AutoResearchClaw 生命周期 |
+
+MetaMemory 已属于 Core，不再存在 `8100` 端口的独立服务。
+
+## 安装与验证
 
 ```bash
-metabot start                       # 用 PM2 启动
-metabot update                      # 内网包更新 + 构建 + 更新 skills + 重启
-metabot restart --wait              # 重启当前 runtime
-metabot deploy-runtime --runtime /path/to/metabot # 从 SSH 切换 runtime
+curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash
+
+metabot status
+metabot doctor
+curl -fsS http://localhost:9200/health
 ```
 
-## PM2 开机自启
+安装器会验证 `SHA256SUMS`、校验个人版 Manifest，构建两个 MCP Package 和适配器，
+并且只在 Bridge 与两个守护进程的鉴权健康检查通过后保存 PM2 应用。全部服务健康后
+再启用开机启动：
 
 ```bash
-pm2 startup && pm2 save
+pm2 save
+pm2 startup
 ```
 
-注册为系统服务，开机自动启动。
+执行 `pm2 startup` 打印的命令，然后再次运行 `pm2 save`。
 
-## 手动 PM2 命令
+## 聊天渠道不需要入站端口
 
-优先使用 MetaBot CLI：它会持久化 restart request、保留代理环境、验证健康，
-且只在成功后保存 PM2 process list。禁止从 MetaBot 子进程中先执行
-`pm2 delete metabot` 再执行 `pm2 start`；delete 会先杀死本应执行第二条
-命令的进程树。
+- 飞书/Lark 使用出站长连接 WebSocket。
+- Telegram 使用出站 long polling。
+- 本地 Web 通过 loopback 访问。
 
-```bash
-pm2 start ecosystem.config.cjs      # 启动
-pm2 restart metabot --update-env     # 同 runtime 紧急重启
-pm2 stop metabot                     # 停止
-pm2 logs metabot                     # 查看日志
-pm2 status                           # 进程状态
-```
+只有明确需要远程浏览器访问时才发布 Core。除非需要独立的鉴权 API，否则 Bridge
+应保持在 loopback 或私有网络。
 
-切换 worktree/runtime 时，通过 `metabot deploy-runtime` 向 PM2 daemon
-只提交一次 restart RPC；命令会解析并核对目标 `cwd` 和 script，不删除 PM2
-应用条目。必须从 SSH 或 MetaBot 进程树之外的 supervisor 执行，并会拒绝
-进程内 runtime 切换。原子切换会从当前进程继承共享 bot 配置、凭证引用、
-会话存储、Wiki/MetaMemory 状态目录和网络设置；`METABOT_HOME` 等运行时专属
-配置仍由目标 ecosystem 决定。
+## HTTPS 反向代理
 
-## 生产构建
+移动端麦克风和远程浏览器访问需要安全上下文。最小 Caddy 配置只代理统一 Core
+Console：
 
-```bash
-npm run build                        # TypeScript 编译到 dist/
-npm start                            # 运行编译后的 dist/index.js
-```
-
-## 不需要公网 IP
-
-- **飞书** 使用 WebSocket（长连接）— 不需要入站端口
-- **Telegram** 使用长轮询 — 不需要入站端口
-
-唯一需要可访问的端口是 API 端口（默认 `9100`），用于远程 CLI 访问或 Peers 联邦。
-
-## 远程 CLI 访问
-
-配置 CLI 工具连接远程 MetaBot 实例：
-
-```bash
-# 在 ~/.metabot/.env 中
-METABOT_URL=http://your-server:9100
-META_MEMORY_URL=http://your-server:8100
-API_SECRET=your-secret
-```
-
-这样 `metabot` 的 bridge 守护进程 API 命令可以从任何机器使用。
-
-## HTTPS（Caddy 反向代理）
-
-移动端浏览器的 Web UI 电话语音模式需要 HTTPS（麦克风需要安全上下文）。推荐 [Caddy](https://caddyserver.com/) 做反向代理 — 自动管理 Let's Encrypt 证书。
-
-```bash
-# 安装 Caddy
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update && sudo apt-get install caddy
-
-# 配置（替换为你的域名）
-sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
-metabot.yourdomain.com {
-    reverse_proxy localhost:9100
+```caddy
+metabot.example.com {
+    reverse_proxy 127.0.0.1:9200
 }
-EOF
-sudo systemctl restart caddy
 ```
 
-**前提条件：**
+然后配置远程 CLI：
 
-- 域名 A 记录指向服务器公网 IP
-- 开放 80 和 443 端口用于 Let's Encrypt 验证
+```bash
+export METABOT_CORE_URL=https://metabot.example.com
+export METABOT_CORE_TOKEN="<personal-token>"
+metabot memory health
+```
 
-Caddy 自动获取和续期证书。WebSocket 连接（`/ws`）透明代理，无需额外配置。
+不需要公网访问时优先使用 Tailscale、WireGuard 等私有网络。不要把 Token 写入 URL、
+Shell 历史或共享配置。
 
-详细设置步骤见 [Web UI 文档](../features/web-ui.md#https)。
+## Bridge 远程访问
+
+大多数用户不需要此能力。`metabot bots`、`schedule`、`teams`、`peers` 和 `voice`
+使用 Bridge API。确实需要远程访问时：
+
+1. 设置强 `API_SECRET`；
+2. 通过独立的鉴权 HTTPS 域名或私有网络代理 `127.0.0.1:9100`；
+3. 在客户端设置 `METABOT_URL`。
+
+不要复用 Core Token 作为 Bridge Secret。
+
+## 更新与回退
+
+```bash
+metabot update                                  # 最新已校验 Release
+metabot update --package --version 1.3.0        # 已知不可变 Release
+metabot doctor
+```
+
+`metabot start` 与 `metabot stop` 管理 Bridge 和两个执行守护进程。普通
+`metabot restart` 只重启 Bridge，因此脱离聊天会话的工作可以继续运行。守护进程
+重启必须明确指定：
+
+```bash
+metabot restart --request-id <稳定ID> --wait --json
+metabot restart --daemon worker
+metabot restart --daemon arc
+metabot restart --daemon worker --force
+```
+
+有活跃工作时默认拒绝重启。`--force` 表示操作者接受后果：状态不明确的工作可能变为
+`recovery_required`，系统不会盲目重新执行。
+
+受保护的 Bridge 重启不会删除 PM2 条目。它先在 SQLite 中领取 request ID，再原子
+写入 `last-restart.json`，并且只在相同运行目录和脚本上重启 Bridge。相同 request ID
+再次提交时会返回持久记录，不会再次重启。新 Bridge 启动后会验证自身 HTTP、两个
+守护进程通信端点和 PM2 身份，全部通过后才保存 PM2。普通用户或 PM chat 使用
+`--resume` 时，会在原会话里只创建一次续做任务；Agent Team、Worker 和 ARC 内部
+chat 仍由各自的持久恢复机制负责。
+
+Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
+`~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，
+应显式重装上一已知版本，不要直接修改已安装包文件。
+
+回退到尚未包含执行守护进程的版本时，还要删除已保存的 PM2 条目：
+
+```bash
+pm2 delete metabot-worker-runnerd metabot-arcd
+pm2 save
+```
+
+从源码切换运行目录时，应从 SSH 或 MetaBot 进程树之外的控制器执行
+`metabot deploy-runtime --runtime /absolute/checkout`。默认会在有活跃工作时拒绝；
+`--force` 会给出 `recovery_required` 提示。命令会先校验目标与回退配置，再按 Worker
+Runner、ARC、Bridge 顺序就地切换，不产生 `pm2 delete` 的空档；失败时回退 PM2
+已经接受的所有变更。旧控制器不会保存 PM2，只有健康的新 Bridge 才会保存。自动化
+重试应使用稳定的 `--request-id`，并用 `--wait --json` 取得持久终态。
+
+个人版 Core 仍然使用独立的 PM2 ecosystem。只有当前 Core 的 PM2 cwd 和脚本都精确
+属于当前 Bridge checkout，而且目标目录也包含独立 Core ecosystem 与已构建服务时，
+切换流程才会把 Core 放在 ARC 与 Bridge 之间。远程或单独管理的 Core 不会被重启或
+切换。`uninstall.sh` 也只会删除通过此所有权检查的 Core，因此卸载 Bridge 不会误删
+外部 Core。
+
+## 源码部署
+
+源码 checkout 使用显式路径：
+
+```bash
+git pull --ff-only
+npm ci --include=dev
+npm test
+npm run build
+metabot update --git
+```
+
+Package 管理和源码管理的安装应保持分离。Web 请求路径详见
+[Core Console 架构](../features/web-ui.md#architecture)。

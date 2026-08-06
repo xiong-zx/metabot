@@ -641,7 +641,12 @@ export class ChatStore {
       } else if (input.kind === 'question') {
         this.updateRunStatus(input.runId, 'waiting_user', now);
       } else if (input.kind === 'error') {
-        this.updateRunStatus(input.runId, 'failed', now, payloadError(input.payload));
+        this.updateRunStatus(
+          input.runId,
+          payloadStatus(input.payload) === 'canceled' ? 'canceled' : 'failed',
+          now,
+          payloadError(input.payload),
+        );
       } else if (input.kind === 'complete') {
         this.completeRun(run, input.payload, now);
       } else if (input.kind === 'file') {

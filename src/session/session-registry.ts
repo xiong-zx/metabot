@@ -68,8 +68,7 @@ export class SessionRegistry {
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_bot_name ON sessions(bot_name);
       CREATE INDEX IF NOT EXISTS idx_sessions_chat_id ON sessions(chat_id);
-      DROP INDEX IF EXISTS idx_sessions_chat_id_unique;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_bot_chat_unique ON sessions(bot_name, chat_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_chat_id_unique ON sessions(chat_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS session_links (
@@ -123,9 +122,8 @@ export class SessionRegistry {
     const platform = SessionRegistry.detectPlatform(chatId);
     const now = Date.now();
 
-    // A group chat may contain multiple bots. Keep each bot's session
-    // transcript separate even when the external chat_id is identical.
-    let session = this.findByChatId(chatId, botName);
+    // Check if session exists for this chatId
+    let session = this.findByChatId(chatId);
 
     if (session) {
       // Update existing session
@@ -137,11 +135,11 @@ export class SessionRegistry {
         params.push(claudeSessionId);
       }
 
-      params.push(session.id);
-      this.db.prepare(`UPDATE sessions SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      params.push(chatId);
+      this.db.prepare(`UPDATE sessions SET ${updates.join(', ')} WHERE chat_id = ?`).run(...params);
 
       // Also check session_links for linked chatIds
-      const linkRow = this.findLinkByChatId(chatId, botName);
+      const linkRow = this.db.prepare('SELECT session_id FROM session_links WHERE chat_id = ?').get(chatId) as any;
       if (linkRow) {
         this.db.prepare('UPDATE sessions SET updated_at = ?, claude_session_id = COALESCE(?, claude_session_id) WHERE id = ?')
           .run(now, claudeSessionId || null, linkRow.session_id);
@@ -149,7 +147,7 @@ export class SessionRegistry {
       }
     } else {
       // Check if this chatId is a linked chatId
-      const linkRow = this.findLinkByChatId(chatId, botName);
+      const linkRow = this.db.prepare('SELECT session_id FROM session_links WHERE chat_id = ?').get(chatId) as any;
       if (linkRow) {
         this.db.prepare('UPDATE sessions SET updated_at = ?, claude_session_id = COALESCE(?, claude_session_id) WHERE id = ?')
           .run(now, claudeSessionId || null, linkRow.session_id);
@@ -225,55 +223,16 @@ export class SessionRegistry {
   }
 
   /** Find a session by its chatId (primary or linked). */
-  findByChatId(chatId: string, botName?: string): SessionRecord | null {
+  findByChatId(chatId: string): SessionRecord | null {
     // Check primary chatId
-    const row = botName
-      ? this.db.prepare('SELECT * FROM sessions WHERE chat_id = ? AND bot_name = ?').get(chatId, botName) as any
-      : this.db.prepare('SELECT * FROM sessions WHERE chat_id = ? ORDER BY updated_at DESC LIMIT 1').get(chatId) as any;
+    const row = this.db.prepare('SELECT * FROM sessions WHERE chat_id = ?').get(chatId) as any;
     if (row) return this.mapRow(row);
 
     // Check linked chatIds
-    const link = this.findLinkByChatId(chatId, botName);
+    const link = this.db.prepare('SELECT session_id FROM session_links WHERE chat_id = ?').get(chatId) as any;
     if (link) return this.getSession(link.session_id);
 
     return null;
-  }
-
-  /** Clear an unsafe engine resume pointer without deleting local chat history. */
-  clearClaudeSessionId(chatId: string, botName: string): boolean {
-    const session = this.findByChatId(chatId, botName);
-    if (!session) return false;
-    const result = this.db.prepare(
-      'UPDATE sessions SET claude_session_id = NULL, updated_at = ? WHERE id = ?',
-    ).run(Date.now(), session.id);
-    if (result.changes > 0) {
-      this.logger.warn(
-        { chatId, botName, sessionId: session.id },
-        'Cleared unsafe Claude resume pointer from session registry',
-      );
-    }
-    return result.changes > 0;
-  }
-
-  private findLinkByChatId(chatId: string, botName?: string): { session_id: string } | undefined {
-    if (botName) {
-      return this.db.prepare(`
-        SELECT sl.session_id
-        FROM session_links sl
-        JOIN sessions s ON s.id = sl.session_id
-        WHERE sl.chat_id = ? AND s.bot_name = ?
-        ORDER BY s.updated_at DESC
-        LIMIT 1
-      `).get(chatId, botName) as any;
-    }
-    return this.db.prepare(`
-      SELECT sl.session_id
-      FROM session_links sl
-      JOIN sessions s ON s.id = sl.session_id
-      WHERE sl.chat_id = ?
-      ORDER BY s.updated_at DESC
-      LIMIT 1
-    `).get(chatId) as any;
   }
 
   /** Get message history for a session. */

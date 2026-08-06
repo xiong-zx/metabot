@@ -10,7 +10,7 @@
   "telegramBots": [{
     "name": "my-tg-bot",
     "telegramBotToken": "123456:ABC...",
-    "defaultWorkingDirectory": "/root/workspaces"
+    "defaultWorkingDirectory": "/home/user/project"
   }]
 }
 ```
@@ -28,7 +28,7 @@
     "name": "metabot",
     "feishuAppId": "cli_xxx",
     "feishuAppSecret": "...",
-    "defaultWorkingDirectory": "/root/workspaces"
+    "defaultWorkingDirectory": "/home/user/project"
   }]
 }
 ```

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -7,57 +8,33 @@ import { fileURLToPath } from 'node:url';
 // Smoke test for packages/server/scripts/pack-metabot.sh.
 //
 // The script reaches up from packages/server/scripts/ to the repo root, so we
-// just invoke it as-is and inspect the published artifacts. Tarball + bootstrap
-// land under packages/server/static/install/. We snapshot any pre-existing
-// outputs and restore them after the test so a developer running this against
-// a previously-built repo doesn't lose their tarball.
+// invoke it as-is but redirect outputs into a temporary directory. Packaging
+// tests must never overwrite the real publishable artifacts.
 
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const REPO_ROOT = path.resolve(PKG_DIR, '../..');
 const SCRIPT = path.join(PKG_DIR, 'scripts', 'pack-metabot.sh');
-const OUT_DIR = path.join(PKG_DIR, 'static', 'install');
+const OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-pack-test-'));
 const TARBALL_PATH = path.join(OUT_DIR, 'latest.tgz');
 const BOOTSTRAP_PATH = path.join(OUT_DIR, 'install.sh');
 
-let preExistingTarball: Buffer | undefined;
-let preExistingBootstrap: Buffer | undefined;
-let preExistingDir = false;
 let tarListing: string = '';
-let scriptRan = false;
 
 beforeAll(() => {
-  if (fs.existsSync(OUT_DIR)) {
-    preExistingDir = true;
-    if (fs.existsSync(TARBALL_PATH)) preExistingTarball = fs.readFileSync(TARBALL_PATH);
-    if (fs.existsSync(BOOTSTRAP_PATH)) preExistingBootstrap = fs.readFileSync(BOOTSTRAP_PATH);
-  }
-
-  // Run the pack script. tar / rsync / bash must be available; they are on
-  // every supported dev host (Linux + macOS) and the CI image.
   execSync(`bash ${JSON.stringify(SCRIPT)}`, {
+    env: {
+      ...process.env,
+      METABOT_PACK_OUTPUT_DIR: OUT_DIR,
+    },
     stdio: 'pipe',
     // Pack script writes a few lines to stdout; capture them for failure
     // diagnostics but don't pollute test output on success.
   });
-  scriptRan = true;
-
   tarListing = execSync(`tar tzf ${JSON.stringify(TARBALL_PATH)}`, { encoding: 'utf-8' });
 }, 60_000);
 
 afterAll(() => {
-  if (!scriptRan) return;
-  if (preExistingTarball !== undefined) {
-    fs.writeFileSync(TARBALL_PATH, preExistingTarball);
-  } else if (fs.existsSync(TARBALL_PATH)) {
-    fs.unlinkSync(TARBALL_PATH);
-  }
-  if (preExistingBootstrap !== undefined) {
-    fs.writeFileSync(BOOTSTRAP_PATH, preExistingBootstrap);
-  } else if (fs.existsSync(BOOTSTRAP_PATH)) {
-    fs.unlinkSync(BOOTSTRAP_PATH);
-  }
-  if (!preExistingDir) {
-    try { fs.rmdirSync(OUT_DIR); } catch { /* keep if non-empty */ }
-  }
+  fs.rmSync(OUT_DIR, { recursive: true, force: true });
 });
 
 describe('pack-metabot.sh', () => {
@@ -102,17 +79,117 @@ describe('pack-metabot.sh', () => {
     expect(codeOnly).not.toContain('--keep-newer-files');
   });
 
+  it('packaged install builds the bridge runtime, delegated CLI, and independent MCP packages', () => {
+    const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
+    expect(installSh).toContain('npm run build:bridge');
+    expect(installSh).toContain('npm run build -w @xvirobotics/cli');
+    expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(installSh).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
+    expect(installSh).not.toContain('npm run build --workspaces');
+  });
+
+  it('ships the complete execution-daemon lifecycle without coupling Bridge to package internals', () => {
+    const ecosystem = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} ecosystem.config.cjs`, { encoding: 'utf-8' });
+    const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
+    const uninstallSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} uninstall.sh`, { encoding: 'utf-8' });
+    const metabot = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} bin/metabot`, { encoding: 'utf-8' });
+    const daemonHealth = execSync(
+      `tar xOf ${JSON.stringify(TARBALL_PATH)} src/services/local-daemon-health.ts`,
+      { encoding: 'utf-8' },
+    );
+
+    expect(ecosystem).toContain("name: 'metabot-worker-runnerd'");
+    expect(ecosystem).toContain("name: 'metabot-arcd'");
+    expect(ecosystem).toContain('packages/worker-runner-mcp/dist/daemon-cli.js');
+    expect(ecosystem).toContain('packages/arc-mcp/dist/daemon-cli.js');
+    expect(ecosystem).toContain("'packages', 'arc-worker-runner-adapter', 'dist', 'factory.js'");
+    for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
+      expect(ecosystem).toContain(proxyName);
+    }
+    expect(installSh).toContain('Applying package refresh through the protected no-delete runtime switch');
+    expect(installSh).toContain('deploy-runtime');
+    expect(installSh).not.toContain('pm2 delete "$app"');
+    expect(installSh).toContain('package replacement may leave it recovery_required');
+    expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
+    expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstallSh).toContain('pm2_app_owned_by_runtime metabot-core');
+    expect(uninstallSh).toContain('Leaving metabot-core untouched');
+    expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
+    expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(daemonHealth).toContain('StreamableHTTPClientTransport');
+    expect(daemonHealth).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
+    expect(daemonHealth).not.toMatch(/packages\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
+  });
+
+  it('rewrites root manifests for the runtime-only workspace subset', () => {
+    const packageJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} package.json`, { encoding: 'utf-8' });
+    const pkg = JSON.parse(packageJson);
+    expect(pkg.scripts.build).toBe('npm run build:bridge');
+    expect(pkg.scripts['build:web']).toBeUndefined();
+    expect(pkg.metabotEdition).toBeUndefined();
+    expect(pkg.workspaces).toEqual([
+      'packages/cli',
+      'packages/cli-core',
+      'packages/metamemory',
+      'packages/skill-hub',
+      'packages/arc-mcp',
+      'packages/arc-worker-runner-adapter',
+      'packages/worker-runner-mcp',
+    ]);
+
+    const tsconfigJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} tsconfig.json`, { encoding: 'utf-8' });
+    const tsconfig = JSON.parse(tsconfigJson);
+    const references = tsconfig.references.map((ref: { path: string }) => ref.path);
+    expect(references).toContain('./tsconfig.bridge.json');
+    expect(references).not.toContain('./packages/server');
+    expect(references).not.toContain('./packages/web-ui');
+  });
+
+  it('embeds a non-sensitive runtime package manifest', () => {
+    expect(tarListing).toContain('.metabot-package/manifest.json');
+    const json = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} .metabot-package/manifest.json`, {
+      encoding: 'utf-8',
+    });
+    const manifest = JSON.parse(json);
+    expect(manifest).toMatchObject({
+      schemaVersion: 1,
+      package: 'metabot-runtime',
+      channel: 'install',
+    });
+    expect(manifest.version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
   it('tarball includes the bot-host runtime entrypoints', () => {
     // Phase 2 / 3 entry points the bootstrap exec's into.
     expect(tarListing).toMatch(/(^|\n)\.?\/?install\.sh\b/);
+    expect(tarListing).toMatch(/(^|\n)\.?\/?uninstall\.sh\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?ecosystem\.config\.cjs\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package-lock\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?bin\/metabot\b/);
+    expect(tarListing).toContain('scripts/pm2-protected-runtime-switch.cjs');
+    expect(tarListing).toContain('src/runtime/restart-state-cli.ts');
+    expect(tarListing).toContain('src/bridge/restart-recovery.ts');
   });
 
-  it('tarball includes the four bot-host workspaces', () => {
-    for (const ws of ['cli', 'cli-core', 'metamemory', 'skill-hub']) {
+  it('keeps the TypeScript source launcher in runtime dependencies', () => {
+    const packageJson = JSON.parse(execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} package.json`, { encoding: 'utf-8' }));
+    expect(packageJson.dependencies.tsx).toMatch(/^\^4\./);
+    expect(packageJson.devDependencies?.tsx).toBeUndefined();
+  });
+
+  it('tarball includes the seven bot-host workspaces', () => {
+    for (const ws of [
+      'cli',
+      'cli-core',
+      'metamemory',
+      'skill-hub',
+      'arc-mcp',
+      'arc-worker-runner-adapter',
+      'worker-runner-mcp',
+    ]) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);
     }
   });
@@ -121,14 +198,33 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).toContain('packages/skills/metabot/SKILL.md');
     expect(tarListing).toContain('packages/skills/metabot-team/SKILL.md');
     expect(tarListing).toContain('packages/skills/metabot-todos/SKILL.md');
+    expect(tarListing).toContain('packages/skills/metabot-todos/agents/openai.yaml');
     expect(tarListing).toContain('packages/skills/metabot-todos/scripts/todo-display.mjs');
+    for (const reference of ['memory', 'skills', 'agents', 't5t', 'runtime']) {
+      expect(tarListing).toContain(`packages/skills/metabot/references/${reference}.md`);
+    }
+    expect(tarListing).not.toContain('packages/skills/metabot/README.md');
+    expect(tarListing).not.toContain('packages/skills/metabot-team/README.md');
+    expect(tarListing).not.toContain('src/skills/metabot-team/');
   });
 
-  it('tarball includes engine sources and workspace skills', () => {
+  it('tarball includes engine sources without workspace or retired Skill mirrors', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?src\//);
-    // Voice skill is bundled inside src/skills/ — covered by the prefix match
-    // above, but call it out explicitly to guard against future src/ slimming.
-    expect(tarListing).toContain('src/skills/voice/SKILL.md');
+    expect(tarListing).not.toContain('src/skills/voice/');
+    expect(tarListing).not.toMatch(/(^|\n)\.?\/?AGENTS\.md$/m);
+    expect(tarListing).not.toMatch(/(^|\n)\.?\/?CLAUDE\.md$/m);
+    expect(tarListing).not.toContain('src/workspace/');
+  });
+
+  it('packaged MetaBot Skills contain CLI definitions without workspace policy', () => {
+    const bundle = [
+      fs.readFileSync(path.join(REPO_ROOT, 'packages/skills/metabot/SKILL.md'), 'utf-8'),
+      fs.readFileSync(path.join(REPO_ROOT, 'packages/skills/metabot-team/SKILL.md'), 'utf-8'),
+    ].join('\n');
+    expect(bundle).not.toMatch(/\b(?:subagent|spawn_agent|harness)\b/i);
+    expect(bundle).not.toMatch(/\b(?:code review|ci\/cd|pull request)\b/i);
+    expect(bundle).toContain('CLI and durable-state');
+    expect(bundle).toContain('does not define Agent execution policy');
   });
 
   it('tarball excludes central-only workspaces (server, web-ui)', () => {
@@ -153,12 +249,19 @@ describe('pack-metabot.sh', () => {
     fs.writeFileSync(secretPath, 'METABOT_VOICE_REPLY_DEFAULT_ON=true\nVOLCENGINE_TTS_APPID=test-app\n');
 
     try {
-      execSync(`METABOT_PACKAGE_DEFAULT_ENV_FILE=${JSON.stringify(secretPath)} bash ${JSON.stringify(SCRIPT)}`, {
+      execSync(`bash ${JSON.stringify(SCRIPT)}`, {
+        env: {
+          ...process.env,
+          METABOT_PACKAGE_DEFAULT_ENV_FILE: secretPath,
+          METABOT_PACK_OUTPUT_DIR: OUT_DIR,
+        },
         stdio: 'pipe',
       });
       const listing = execSync(`tar tzf ${JSON.stringify(TARBALL_PATH)}`, { encoding: 'utf-8' });
       expect(listing).toContain('.metabot-package/default.env');
-      const content = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} .metabot-package/default.env`, { encoding: 'utf-8' });
+      const content = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} .metabot-package/default.env`, {
+        encoding: 'utf-8',
+      });
       expect(content).toContain('METABOT_VOICE_REPLY_DEFAULT_ON=true');
       expect(content).toContain('VOLCENGINE_TTS_APPID=test-app');
     } finally {

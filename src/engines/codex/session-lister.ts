@@ -7,7 +7,7 @@
  * what `codex exec resume` uses for cwd-filtered resume discovery.
  */
 
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, openSync, readSync, statSync, closeSync, readdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
@@ -32,17 +32,11 @@ export function listCodexSessions(opts: {
   currentSessionId?: string;
   limit?: number;
   homeDir?: string;
-  /**
-   * The CODEX_HOME the bot actually runs Codex with. Set it whenever the bot
-   * overrides the home (`codex.env.CODEX_HOME`, or `codex.homeScope: workdir`)
-   * — otherwise the listing reads the global home and shows no threads at all.
-   */
-  codexHome?: string;
   previewMaxLen?: number;
 }): SessionSummary[] {
   const { workingDirectory, currentSessionId, limit = 10, homeDir = os.homedir(), previewMaxLen = 80 } = opts;
 
-  const codexHome = opts.codexHome || codexHomeDir(homeDir);
+  const codexHome = codexHomeDir(homeDir);
   const indexed = listCodexSessionsFromStateDb({
     codexHome,
     workingDirectory,
@@ -74,15 +68,17 @@ function listCodexSessionsFromStateDb(opts: {
   let db: Database.Database | undefined;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const rows = db.prepare(
-      `
+    const rows = db
+      .prepare(
+        `
       SELECT id, rollout_path, updated_at, updated_at_ms, title, first_user_message, preview
       FROM threads
       WHERE archived = 0 AND cwd = ?
       ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC, id DESC
       LIMIT ?
     `,
-    ).all(path.resolve(opts.workingDirectory), opts.limit) as CodexThreadRow[];
+      )
+      .all(path.resolve(opts.workingDirectory), opts.limit) as CodexThreadRow[];
 
     return rows.map((row) => {
       const filePath = row.rollout_path ? resolveRolloutPath(opts.codexHome, row.rollout_path) : undefined;
@@ -102,7 +98,7 @@ function listCodexSessionsFromStateDb(opts: {
     try {
       db?.close();
     } catch {
-      // ignore
+      /* ignore */
     }
   }
 }
@@ -224,7 +220,7 @@ function readCodexJsonlMeta(
       try {
         closeSync(fd);
       } catch {
-        // ignore
+        /* ignore */
       }
     }
   }
@@ -256,5 +252,5 @@ function extractCodexUserPreview(rec: any, previewMaxLen: number): string | unde
 
 function truncatePreview(text: string, previewMaxLen: number): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
-  return collapsed.length > previewMaxLen ? `${collapsed.slice(0, previewMaxLen)}...` : collapsed;
+  return collapsed.length > previewMaxLen ? collapsed.slice(0, previewMaxLen) + '...' : collapsed;
 }

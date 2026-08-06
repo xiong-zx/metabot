@@ -15,10 +15,11 @@ vi.mock('../src/engines/claude/persistent-executor.js', async () => {
   class MockPersistentExecutor extends EE {
     state: 'ready' | 'closed' | 'restarting' = 'ready';
     sessionId = 'mock-sess';
+    activeTurn = false;
     getState() { return this.state; }
     getSessionId() { return this.sessionId; }
     getLastActivityAt() { return Date.now(); }
-    hasActiveTurn() { return false; }
+    hasActiveTurn() { return this.activeTurn; }
     async start() { this.state = 'ready'; }
     async shutdown() { this.state = 'closed'; this.emit('closed'); }
     constructor() { super(); mockInstances.push(this); }
@@ -31,8 +32,8 @@ vi.mock('../src/engines/claude/persistent-executor.js', async () => {
  *
  * When a PersistentClaudeExecutor exhausts its in-process restart budget it
  * emits 'crashed' and then transitions to a terminal 'closed'. The registry
- * must NOT discard the pool slot in that case — doing so loses Agent Team
- * agents, in-progress tasks and conversation context. Instead the slot is
+ * must NOT discard the pool slot in that case — doing so loses Agent-Team
+ * teammates, in-progress tasks and conversation context. Instead the slot is
  * PARKED (crashed=true, last sessionId captured) and respawned on the next
  * acquire, resuming the same Claude session, with exponential backoff and a
  * respawn cap. Intentional release / LRU eviction must NOT trigger respawn.
@@ -68,6 +69,44 @@ class FakeExecutor extends EventEmitter {
 }
 
 describe('ExecutorRegistry crash resurrection (Problem A)', () => {
+  it('retires a healthy persistent executor when its execution credential rotates', async () => {
+    mockInstances.length = 0;
+    const registry = new ExecutorRegistry({ logger: mockLogger });
+    const first = await registry.acquire('cap-chat', {
+      cwd: '/tmp',
+      env: { METABOT_TEAM_CAPABILITY: 'token-one' },
+    });
+    const reused = await registry.acquire('cap-chat', {
+      cwd: '/tmp',
+      env: { METABOT_TEAM_CAPABILITY: 'token-one' },
+    });
+    expect(reused).toBe(first);
+
+    const rotated = await registry.acquire('cap-chat', {
+      cwd: '/tmp',
+      env: { METABOT_TEAM_CAPABILITY: 'token-two' },
+    });
+    expect(rotated).not.toBe(first);
+    expect(mockInstances).toHaveLength(2);
+    await registry.shutdownAll('test-complete');
+  });
+
+  it('waits for an active turn before retiring an expiring credential', async () => {
+    mockInstances.length = 0;
+    const registry = new ExecutorRegistry({ logger: mockLogger });
+    const executor = await registry.acquire('active-cap-chat', {
+      cwd: '/tmp',
+      env: { METABOT_TEAM_CAPABILITY: 'token-one' },
+    });
+    (executor as any).activeTurn = true;
+    await expect(registry.releaseIfIdle('active-cap-chat', 'credential-expiring')).resolves.toBe(false);
+    expect(registry.size()).toBe(1);
+
+    (executor as any).activeTurn = false;
+    await expect(registry.releaseIfIdle('active-cap-chat', 'credential-expiring')).resolves.toBe(true);
+    expect(registry.size()).toBe(0);
+  });
+
   it('parks a crash-exhausted executor instead of removing it (preserves session)', () => {
     const registry = new ExecutorRegistry({ logger: mockLogger }) as any;
     const opts = { cwd: '/tmp' };

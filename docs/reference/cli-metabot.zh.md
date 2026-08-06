@@ -17,35 +17,72 @@ MetaBot 安装器自动安装到 `~/.local/bin/metabot`。
 ## 1. bridge 进程控制
 
 ```bash
-metabot update                      # 内网 package refresh，重新构建，更新 skills，重启
-metabot update --git                # 开发者专用：git pull + 构建 + 重启
-metabot start                       # 启动（PM2）
-metabot stop                        # 停止
-metabot restart                     # 重启
-metabot restart --wait              # 重启当前 runtime，并等待持久化健康状态
-metabot deploy-runtime --runtime DIR [--request-id ID] # 从外部原子切换 runtime
+metabot update                                  # Package 安装：最新 GitHub Release
+metabot update --package                        # 强制使用最新 GitHub Release 包
+metabot update --package --version 1.3.0        # 固定不可变 Release v1.3.0
+metabot update --git                            # 强制 git pull + 构建 + 重启
+metabot start                       # 启动 Bridge、Worker Runner 与 ARC
+metabot stop                        # 停止整套三个 PM2 应用
+metabot restart --wait --json       # 受保护的 Bridge 单独重启
+metabot restart --request-id ID     # 调用方提供的稳定去重键
+metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
+metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
+metabot deploy-runtime --runtime /absolute/checkout --wait  # 从外部安全切换整套运行目录
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态
 ```
 
-`restart` 不会切换 `cwd` 或 script target。切换 worktree/runtime 必须从
-MetaBot 进程树之外执行 `deploy-runtime`。禁止先 `pm2 delete metabot` 再
-`pm2 start`：delete 会同时杀死原本准备执行第二条命令的 Bot/Agent/Worker
-shell。重启状态按 `requestId` 持久化，调用方可复用 ID，使部署重试保持幂等；
-新进程验证 bridge 与 Anthropic
-连通后才保存 PM2，并通过恢复报告给出 `healthy` 或 `failed`。
+普通 Package 管理的个人版执行 `metabot update` 时，默认升级到最新 GitHub
+Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--package`
+可以强制进行 Release 覆盖。
 
-`metabot update` 是推荐的更新方式。它依次执行：
+`metabot update --package --version 1.3.0` 选择不可变 v1.3.0 资源而不是
+`latest`。Package 更新依次执行：
 
-1. 从 `METABOT_CORE_URL/install/latest.tgz` 下载当前内网安装包
-2. 覆盖代码文件，保留 `.env`、`bots.json`、`logs/`、`data/` 和 `.git/`
-3. `npm install && npm run build` — 重新构建
-4. 复制 MetaBot 内置 skills 到 Claude/Codex skill 目录
-5. 如果本机已安装 `lark-cli` 或 lark skills，自动更新 `@larksuite/cli` 并刷新 lark AI Agent skills
-6. 同步 skills 到已配置的 bot 工作目录
-7. 按 requestId 去重地提交一次 PM2 原子重启；新进程健康后才保存 PM2
+1. 从最新或固定 GitHub Release 下载 `install.sh`、`metabot-runtime.tgz` 和 `SHA256SUMS`。
+2. 解压前验证 runtime SHA256。
+3. 校验完整个人版 Manifest 和语义版本；固定版本必须精确匹配。
+4. 覆盖 `METABOT_HOME` 中的代码，保留 `.env`、`bots.json`、`logs/`、`data/` 和 `.git/`。
+5. 保留 `~/.metabot/` 和 `~/.metabot-core/` 下的用户/Core 状态；只有 Package 管理的 `~/.metabot/default.env` 可能刷新。
+6. 安装依赖并构建 Bridge、Core、Web UI 和委托 CLI。
+7. 刷新内置/工作区 Skills，以及已有的 Lark CLI Skills。
+8. 重启 Bridge 与两个执行守护进程，健康检查通过后再保存 PM2 状态。
 
-一条命令搞定。源码 checkout 仍可使用 `metabot update --git`，但这是开发者路径，需要干净的 Git remote。
+普通 `restart` 支持 `--request-id`、`--bot`、`--chat`、`--source`、
+`--reason`、`--resume`/`--no-resume`、`--wait`、`--timeout` 和 `--json`。
+`deploy-runtime` 还支持 `--wait`/`--no-wait` 与 `--force`。相同 request ID
+再次提交时只读取已有的持久结果，不会重复执行 PM2 操作。
+
+旧 Bridge 会原子写入 breadcrumb（用于告诉新进程这次重启的结构化小文件）和
+SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 Bridge 依次验证
+自身 HTTP 健康、两个执行守护进程的通信健康，以及 PM2 的运行目录、脚本、解释器、
+解释器参数和环境；全部通过后才执行 `pm2 save --force` 并把请求标为健康。密钥、
+代理等环境值只以 SHA-256 指纹写入重启台账，不保存明文。完成通知和恢复归属都持久化
+之后才删除 breadcrumb，从而避免恢复后的会话再次重启。
+
+带 `--resume` 且来源是普通用户或 PM chat 时，启动流程会在原有 chat 会话中创建
+一个可去重的持久续做任务，让被中断的工作只继续一次。调度器会先原子写盘，再启动
+计时器；如果写盘失败，系统会保留 breadcrumb，供下一次启动重试。Agent Team、Worker 和 ARC
+内部 chat 不走通用恢复，而由各自的持久 supervisor 或守护进程负责。状态文件位于
+`SESSION_STORE_DIR`、`METABOT_STATE_DIR` 或 `~/.metabot/` 下，文件名为
+`restart-state.sqlite` 和 `last-restart.json`。
+
+守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
+`recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
+它会先核对当前 Bridge PID 与调用者的父进程链；任一项无法读取时会拒绝切换，
+不会把“无法判断”当成“确认来自外部”。
+它会先校验目标配置和回退配置，再按 Worker Runner、ARC、可选的本地 Core、Bridge
+顺序就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。Core 仍使用
+独立 ecosystem，只有当前 PM2 cwd 和脚本都精确属于 Bridge 运行目录时才会加入切换；
+外部 Core 完全不动。`uninstall.sh` 使用相同的所有权检查。只有健康的新 Bridge 会保存
+PM2 进程列表。
+
+在线运行目录的包更新必须从 SSH 或其他位于 Bridge 进程树之外的控制器发起。
+更新器会在下载前拒绝内部调用者或无法验证的调用者，然后使用带 request ID 的
+无删除原地切换。首次安装或服务离线时可以创建缺失的 PM2 条目，但不会删除已有条目。
+
+可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
+`x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。
 
 ## 2. bridge 守护进程 API
 
@@ -62,22 +99,13 @@ metabot bot <name>                  # 获取 Bot 详情
 ### Agent 对话
 
 ```bash
-metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <prompt>      # 与 Bot 对话（bridge /api/talk）
-metabot talk-status <taskId>        # 用本机认证查询 async talk 任务状态
+metabot talk <bot> <chatId> <prompt>      # 与 Bot 对话（bridge /api/talk）
 metabot talk alice/bot <chatId> <prompt>  # 指定 peer 的 Bot 对话
 ```
 
-Bot 名称支持[限定名](../features/peers.md#限定名)（`peerName/botName`）实现跨实例
+Bot 名称支持[限定名](../features/peers.md#qualified-names)（`peerName/botName`）实现跨实例
 路由。这是 bridge 本地的对话路径；`metabot agents talk` 是基于中心注册表的 P2P
 变体。
-`metabot talk` 默认最多等待 25 秒；如果任务没完成，会返回 `taskId` 和
-`statusCommand`，避免本地测试员一直卡在同步等待。需要旧的阻塞行为时使用
-`--sync`；需要立即后台执行时使用 `--async`。Async talk 响应会同时返回给 API
-客户端用的 `statusUrl`，以及给本机 CLI 用户用的 `statusCommand`，例如
-`metabot talk-status <taskId>`。
-Async task 状态会持久化到 `SESSION_STORE_DIR`；如果 bridge 在任务运行中重启，
-旧 taskId 应返回 `failed` 和 `task_interrupted_by_restart`，而不是直接变成
-`Task not found`。
 
 ### Peers
 
@@ -91,36 +119,16 @@ metabot peers                       # 列出 peer 及状态
 
 ```bash
 metabot teams list
-metabot teams create <team> [--description <text>] [--actor-role admin|user|pm]
+metabot teams create <team> [--description <text>]
 metabot teams status <team>
-metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
-metabot teams start <team> [--actor-role admin|user|pm]
-metabot teams stop <team> [--actor-role admin|user|pm]
-metabot teams delete <team> [--actor-role admin|user|pm]
-
-metabot teams config <team> [--chat <id,id>] [--display-chat <id,id>] [--pm-bot <name>] [--rule-ref <name[@version],...>] [--max-agents <n>] [--max-temporary-agents <n>] [--max-parallel-runs <n>] [--max-teams-per-scope <n>] [--max-queued-tasks <n>] [--max-active-runs <n>] [--actor-role admin|user|pm]
-metabot teams activity <team> [--agent <name>] [--run-id <id>] [--task-id <id>] [--chat <chatId>] [--source <name>] [--limit <n>] [--summary|--plain]
-metabot teams templates list [name]
-metabot teams templates export <name> [--version <n>]
-metabot teams templates diff <name> --from <n> [--to <n>]
-metabot teams templates import '<json>' [--source <name>] [--actor-role admin|user|pm]
-metabot teams proposals list [--status pending|approved|rejected]
-metabot teams proposals create [template|ruleset] '<json>' [--summary <text>] [--by <name>] [--role admin|user|pm|manager|agent]
-metabot teams proposals approve <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
-metabot teams proposals reject <id> [--by <name>] [--actor-role admin|user|pm] [--reason <text>]
-metabot teams instances list [--template <name>]
-metabot teams instances resolve <template> [--chat <chatId>|--project <projectId>|--global] [--pm-bot <name>] [--rule-ref <name[@version]>] [--actor-role admin|user|pm]
-metabot teams rules list [name]
-metabot teams rules export <name> [--version <n>]
-metabot teams rules diff <name> --from <n> [--to <n>]
-metabot teams rules import '<json>' [--source <name>] [--actor-role admin|user|pm]
-metabot teams rules set <name> --scope global|bot|team-template|team-instance|project|agent-role|worker|task --rule <text> [--actor-role admin|user|pm]
-metabot teams rules context --ref <name[@version]> [--rule <text>]
+metabot teams start <team>
+metabot teams stop <team>
+metabot teams delete <team>
 
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <agent-role>] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model <model>] [--reasoning-effort <level>] [--approval-policy <policy>] [--sandbox <mode>] [--timeout-ms <n>] [--idle-timeout-ms <n>] [--allowed-tools <a,b>] [--prompt <text>]
-metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
-metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents stop <team> <name>
+metabot teams agents delete <team> <name>
 
 metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
 metabot teams inbox <team> <name> [--unread] [--read]
@@ -134,14 +142,10 @@ metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
 metabot teams runs output <team> <runId>
-metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]
+metabot teams runs stop <team> <runId>
 ```
 
-`runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应 Agent chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
-
-Template/rule 命令是 Phase 1 控制面，用于 versioned Agent Team template、chat/project scoped runtime instance、pinned RuleSet refs、versioned RuleSet 和 promotion proposal。manager 或 agent 可以创建 proposal，但只有 PM、用户或 admin 可以 approve/reject；批准后写入新的 template 或 RuleSet 版本，并且不会自动升级已 pinned 的 instance。`instances resolve --rule-ref ...` 用于在创建时 pin 额外的 project/runtime RuleSet，`teams config ... --rule-ref ...` 用于显式更新当前 instance，`rules export/diff/import` 则让 RuleSet 具备和 template 对称的审查与迁移流程。现有 `<team>` 参数可以传 team name，也可以传 `instanceId`；chat/project scoped team 建议优先使用 `instances resolve` 返回的 `instanceId`。底层存储 schema 仍以 `teamName` 保存行，runtime 会继续逐步迁移到 first-class `instanceId`。
-
-对于有权限影响的 CLI 操作，`--actor-role` 表示调用者权限身份（`admin`、`user` 或 `pm`）。team 生命周期变更、绑定/config 更新、直接创建或停止/删除 Agent、停止 run、直接 import/set template 或 rules、resolve instance、批准/拒绝 proposal 都需要显式传入。`agents spawn` 的 `--role` 是被创建 Agent 的职责标签，不是权限身份。
+`runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应队友 chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
 
 同一套命令同时实现在 `bin/metabot` 和 `packages/cli` 的 TypeScript 功能 CLI 中。Bridge 从 `.env` 读取 `API_PORT` / `API_SECRET` 和可选的 `METABOT_URL`。
 
@@ -162,7 +166,6 @@ metabot schedule cancel <id>                                   # 取消
 metabot stats                       # 费用与使用统计
 metabot metrics                     # Prometheus 指标
 metabot health                      # 健康检查
-metabot doctor --json               # 运行时诊断，包含 Codex sandbox namespace 可用性
 ```
 
 ### 语音
@@ -182,12 +185,12 @@ metabot voice tts "你好" --voice nova                     # 指定声音
 
 TTS 参数：
 
-| 参数 | 说明 |
-|------|------|
-| `--play` | 生成后播放（macOS: afplay, Linux: mpv/ffplay/play） |
-| `-o FILE` | 保存到指定文件（默认: `/tmp/metabot-voice-<时间戳>.mp3`） |
-| `--provider NAME` | TTS 服务商: `doubao`、`openai`、`elevenlabs` |
-| `--voice ID` | 声音/音色 ID（各服务商不同） |
+| 参数              | 说明                                                      |
+| ----------------- | --------------------------------------------------------- |
+| `--play`          | 生成后播放（macOS: afplay, Linux: mpv/ffplay/play）       |
+| `-o FILE`         | 保存到指定文件（默认: `/tmp/metabot-voice-<时间戳>.mp3`） |
+| `--provider NAME` | TTS 服务商: `doubao`、`openai`、`elevenlabs`              |
+| `--voice ID`      | 声音/音色 ID（各服务商不同）                              |
 
 ## 3. metabot-core 转发
 
@@ -199,13 +202,7 @@ metabot t5t board                   # 团队日报看板
 metabot agents list                 # 对端 Bot 通讯录
 metabot memory search "<query>"     # 共享记忆全文搜索
 metabot skills list                 # 中心 Skill Hub
-metabot skills publish my-skill --from ./my-skill
-metabot skills install my-skill --to ~/.codex/skills/my-skill
 ```
-
-`skills publish --from` 会上传完整的 UTF-8 Skill bundle，包括 `SKILL.md`
-之外的脚本和 Agent 元数据。`skills install` 会按经过校验的相对路径恢复完整
-bundle，并拒绝目录穿越和符号链接目标。
 
 未在环境中导出时，`METABOT_CORE_URL` / `METABOT_CORE_TOKEN` 从 bridge `.env`
 读取。用 `export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot` 覆盖

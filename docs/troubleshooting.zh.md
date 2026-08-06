@@ -1,61 +1,107 @@
 # 故障排除
 
-## "Error: Claude Code process exited with code 1"
-
-Bot 启动正常，但发消息时回复此错误。
-
-**原因：** Claude CLI 未认证。SDK 以子进程启动 `claude` — 没有有效凭证时立即以 code 1 退出。
-
-**修复**（在**独立终端**中运行，不要在 Claude Code 内）：
+先确认运行时版本，并执行内置诊断：
 
 ```bash
-# 方案 A：OAuth 登录
-claude login
-
-# 方案 B：API Key — 写入 .env
-echo 'ANTHROPIC_API_KEY=sk-ant-your-key' >> /path/to/metabot/.env
+node --version                 # 必须 >= 22.19
+metabot status
+metabot doctor
+metabot health
 ```
 
-然后重启服务：
+## Core Console 无法打开
+
+个人版控制台地址是 `http://localhost:9200`；`9100` 是 Bridge API，不是第二套
+Web UI。
 
 ```bash
+metabot status
+curl -fsS http://localhost:9200/health
 metabot restart
-# 或: pkill -f "tsx src/index.ts" && cd /path/to/metabot && npm run dev
 ```
 
-!!! warning "注意"
-    不能在 Claude Code 会话内运行 `claude login` 或 `claude auth status`（不支持嵌套）。务必使用独立终端。
+使用 `~/.metabot-core/token` 中的 Token。该文件应仅允许当前用户读取：
 
-## 服务无法连接飞书
+```bash
+stat -c '%a %n' ~/.metabot-core/token   # 预期：600
+```
 
-服务启动但收不到飞书事件：
+不要把 Token 发到 Issue 或日志中。远程访问时，只能放在自有鉴权 HTTPS 反向代理
+或私有网络之后。
 
-1. 确认飞书应用事件订阅模式是 **「长连接」**（WebSocket），而非 HTTP 回调
-2. 保存事件订阅配置前**服务必须已在运行** — 飞书会验证 WebSocket 连接
-3. 检查 `im.message.receive_v1` 事件已订阅
-4. 确认应用版本已**发布并启用**
+## Codex 无法启动
 
-## Bot 在群聊中不回复
+在独立终端完成登录，然后重启 MetaBot：
 
-多人群默认使用 `mention` 模式。请确认准确 @ 了期望回复的 Bot；@ 其他 Bot
-或其他用户不会把消息路由给当前 Bot。私聊中 Bot 回复所有消息。
+```bash
+codex login
+codex --version
+metabot restart
+```
 
-**2 人群**（1 个用户 + 1 个 Bot）默认使用类私聊的 `all` 模式。群主可以用
-`@Bot /group-reply status` 查看生效模式，用 `@Bot /group-reply mention` 或
-`@Bot /group-reply all` 切换模式。
+MetaBot 使用 `codex exec --json` 与 resume。通过 `metabot logs` 查看准确的 CLI
+退出原因，并确认 Bot 工作区存在且可写。
 
-如果修改被拒绝，请检查发送者是否为群主，以及飞书/Lark 应用是否已开通
-`im:chat:readonly`。群主身份通过公开的 Lark 群信息 API 查询，并采用失败
-关闭策略，因此查询失败或权限不足时绝不会修改模式。已保存的 Bot + 群聊
-设置优先于 `groupNoMention` 和两人群默认规则。
+## Kimi Code 无法连接
 
-## 常见问题
+Kimi 支持要求 Kimi Code 0.27 或更新版本，并使用官方 loopback Server API：
 
-**需要公网 IP 吗？**
-:   不需要。飞书用 WebSocket，Telegram 用长轮询。不需要入站端口。
+```bash
+npm install -g @moonshot-ai/kimi-code@latest
+kimi login
+kimi --version
+metabot restart
+```
 
-**可以用国产模型吗？**
-:   可以。支持 Kimi、DeepSeek、GLM 等 Anthropic 兼容 API。设置 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`。
+旧 Python `kimi-cli --wire` 配置不兼容此适配器。Kimi Server 应保持在 loopback；
+MetaBot 默认拒绝非 loopback Server URL。
 
-**Agent 间通信是实时的吗？**
-:   目前是同步请求-响应模式，通过 Agent 总线。Agent 通过 `metabot talk` 或 `/api/talk` 互相对话。异步双向协议在规划中。
+## 飞书/Lark 收不到消息
+
+1. 事件订阅选择**长连接**，不要使用 HTTP 回调。
+2. 保存事件订阅前先启动 MetaBot。
+3. 订阅 `im.message.receive_v1`。
+4. 发布并启用应用版本。
+5. 确认 App ID 与 Secret 属于同一个应用。
+
+详见[飞书应用配置](getting-started/feishu-app-setup.md)。
+
+## 群 Bot 不回复
+
+群聊默认使用精确 `@Bot` 路由。@正确的 Bot 后检查当前回复模式：
+
+```text
+@Bot /group-reply status
+@Bot /group-reply mention
+@Bot /group-reply all
+```
+
+只有群主可以切换模式。应用需要 `im:chat:readonly` 来验证群主身份；查询失败时会
+保持 fail-closed，不会修改设置。
+
+## 更新失败
+
+Package 更新会在覆盖代码前验证 `SHA256SUMS` 和个人版 Manifest：
+
+```bash
+metabot update
+metabot doctor
+```
+
+需要可复现回退时，显式安装已知版本：
+
+```bash
+metabot update --package --version 1.3.0
+```
+
+更新会保留 `.env`、`bots.json`、`data/`、`logs/`、`~/.metabot/` 和
+`~/.metabot-core/`。如果 checksum 或 Manifest 不匹配，不要绕过校验；应重新从
+官方 GitHub Release 获取。
+
+## Claude Code 兼容模式
+
+Claude 仅用于已有工作区兼容。在独立终端运行 `claude login`，并为该 Bot 选择
+`"engine": "claude"`。Codex 与 Kimi Code 是个人版的主要引擎。
+
+问题仍未解决时，在 GitHub Issue 中提供 MetaBot 版本、操作系统、所选引擎、
+已移除敏感信息的 `metabot doctor` 输出，以及最小相关日志片段。

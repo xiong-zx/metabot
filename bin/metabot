@@ -34,6 +34,29 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
+_backup_skill_path() {
+  local source="$1"
+  local backup_root="$2"
+  [[ -e "$source" || -L "$source" ]] || return 0
+  mkdir -p "$backup_root"
+  local backup
+  backup="$(mktemp -d "$backup_root/$(basename "$source").XXXXXX")"
+  rmdir "$backup"
+  mv "$source" "$backup"
+}
+
+_install_skill_bundle() {
+  local source="$1"
+  local destination="$2"
+  local backup_root="$3"
+  if [[ -d "$destination" ]] && diff -qr "$source" "$destination" >/dev/null 2>&1; then
+    return 0
+  fi
+  _backup_skill_path "$destination" "$backup_root"
+  mkdir -p "$destination"
+  cp -R "$source/." "$destination/"
+}
+
 # --- Bridge daemon API config (Category 2): env vars > .env file > defaults ---
 # Read API_PORT / API_SECRET / METABOT_URL from $METABOT_HOME/.env without
 # clobbering values already exported in the environment.
@@ -45,14 +68,39 @@ _load_bridge_api_config() {
     _api_url=$(sed -n 's/^METABOT_URL=//p' "$envf" 2>/dev/null || true)
   fi
   METABOT_URL="${METABOT_URL:-${_api_url:-http://localhost:${_api_port:-9100}}}"
-  _api_secret="${API_SECRET:-${_api_secret:-changeme}}"
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    # Engine sessions authenticate Agent Team calls with their signed scoped
+    # capability. Never hand the bridge-wide local-admin secret to the child
+    # CLI, even when it is present in the parent process or .env file.
+    _api_secret="execution-capability"
+  else
+    _api_secret="${API_SECRET:-${_api_secret:-changeme}}"
+  fi
   METABOT_AUTH="Authorization: Bearer $_api_secret"
 }
 
 _json() { python3 -m json.tool 2>/dev/null || cat; }
 
+# Issue one of the four Bridge reads allowed to an Agent Team engine session.
+# Capability mode deliberately sends only the signed scoped token plus its
+# runtime bot/chat binding; bridge-wide administrator secrets are never used.
+_bridge_scoped_read() {
+  local path="$1"
+  local -a headers=(-H "$METABOT_AUTH")
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    headers+=(
+      -H "X-MetaBot-Team-Capability: $METABOT_TEAM_CAPABILITY"
+      -H "X-MetaBot-Bot-Name: ${METABOT_BOT_NAME:-}"
+      -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    )
+  fi
+  curl -s "${headers[@]}" "$METABOT_URL$path"
+}
+
 cmd_update() {
-  local update_source="${METABOT_UPDATE_SOURCE:-package}"
+  local update_source="${METABOT_UPDATE_SOURCE:-auto}"
+  local update_version="${METABOT_UPDATE_VERSION:-}"
+  local include_owned_core=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --git)
@@ -63,35 +111,88 @@ cmd_update() {
         update_source="package"
         shift
         ;;
+      --version)
+        [[ $# -ge 2 ]] || { error "--version requires x.y.z"; exit 1; }
+        update_version="$2"
+        shift 2
+        ;;
+      --version=*)
+        update_version="${1#--version=}"
+        shift
+        ;;
       *)
         error "Unknown update option: $1"
-        echo "  Usage: metabot update [--package|--git]"
+        echo "  Usage: metabot update [--package|--git] [--version x.y.z]"
         exit 1
         ;;
     esac
   done
 
+  update_version="${update_version#v}"
+  if [[ -n "$update_version" ]] && [[ ! "$update_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    error "Invalid release version: $update_version (expected x.y.z)"
+    exit 1
+  fi
+
+  if [[ "$update_source" == "auto" ]]; then
+    if [[ -f "$METABOT_HOME/.metabot-package/manifest.json" ]]; then
+      update_source="package"
+    elif [[ -d "$METABOT_HOME/.git" ]]; then
+      update_source="git"
+    else
+      update_source="package"
+    fi
+  fi
+
+  if [[ -n "$update_version" && "$update_source" == "git" ]]; then
+    error "--version selects an immutable Release package and cannot be combined with --git"
+    exit 1
+  fi
+
   if [[ "$update_source" != "git" ]]; then
-    # Company-default refresh path: re-run the metabot-core bootstrap, which
-    # downloads /install/latest.tgz and overlays the bot-host runtime. This is
-    # intentionally used even when .git exists, so GitHub/GitLab credentials are
-    # not part of the normal user update story. Developers can opt into the old
-    # source checkout workflow with `metabot update --git`.
+    _require_external_package_update_if_live || exit $?
+    local package_request_id
+    package_request_id="${METABOT_RESTART_REQUEST_ID:-$(_new_restart_request_id)}"
+    # Package installs refresh from the stable GitHub Release installer asset.
+    # METABOT_UPDATE_INSTALLER_URL allows mirrors without coupling OSS installs
+    # to an internal metabot-core endpoint.
     if [[ -f "$METABOT_HOME/install.sh" || -d "$METABOT_HOME" ]]; then
-      local core_url="${METABOT_CORE_URL:-http://localhost:9200}"
-      info "Refreshing MetaBot from internal package at $core_url/install/latest.tgz"
-      exec bash -c 'curl -fsSL "$1/install/install.sh" | METABOT_HOME="$2" bash' bash "$core_url" "$METABOT_HOME"
+      local release_base="https://github.com/xvirobotics/metabot/releases/latest/download"
+      local expected_version=""
+      if [[ -n "$update_version" ]]; then
+        release_base="https://github.com/xvirobotics/metabot/releases/download/v${update_version}"
+        expected_version="$update_version"
+      fi
+      local installer_url="${METABOT_UPDATE_INSTALLER_URL:-$release_base/install.sh}"
+      local tarball_url="${METABOT_PACKAGE_TARBALL_URL:-$release_base/metabot-runtime.tgz}"
+      local checksums_url="${METABOT_PACKAGE_CHECKSUMS_URL:-$release_base/SHA256SUMS}"
+      if [[ -n "$expected_version" ]]; then
+        info "Refreshing MetaBot from immutable GitHub Release v${expected_version}"
+      else
+        info "Refreshing MetaBot from the latest GitHub Release package"
+      fi
+      exec bash -c '
+        set -o pipefail
+        curl -fsSL "$1" |
+          METABOT_HOME="$2" \
+          METABOT_PACKAGE_TARBALL_URL="$3" \
+          METABOT_PACKAGE_CHECKSUMS_URL="$4" \
+          METABOT_EXPECTED_PACKAGE_VERSION="$5" \
+          METABOT_PACKAGE_UPDATE=1 \
+          METABOT_RESTART_REQUEST_ID="$6" \
+          bash
+      ' bash "$installer_url" "$METABOT_HOME" "$tarball_url" "$checksums_url" "$expected_version" "$package_request_id"
     fi
     error "MetaBot not found at $METABOT_HOME"
     echo "  Run the installer first:"
-    echo "    curl -fsSL http://localhost:9200/install/install.sh | bash"
+    echo "    curl -fsSL https://github.com/xvirobotics/metabot/releases/latest/download/install.sh | bash"
     exit 1
   fi
 
   if [[ ! -d "$METABOT_HOME/.git" ]]; then
     error "Git update requested, but $METABOT_HOME is not a git checkout."
-    echo "  Use the default package refresh instead:"
-    echo "    metabot update"
+    echo "  Use the release package refresh instead:"
+    echo "    metabot update --package"
     exit 1
   fi
 
@@ -118,8 +219,25 @@ cmd_update() {
   info "Installing dependencies..."
   npm install --production=false
 
-  info "Building..."
-  npm run build
+  info "Building bridge, metabot CLI, and execution daemons..."
+  npm run build:bridge
+  npm run build -w @xvirobotics/cli
+  npm run build -w @xvirobotics/worker-runner-mcp
+  npm run build -w @xvirobotics/arc-mcp
+  npm run build -w @xvirobotics/arc-worker-runner-adapter
+
+  # A personal-edition git checkout updates Core only when PM2 proves that the
+  # same exact checkout owns its cwd and script. A sibling/external Core is not
+  # pulled, built, restarted, or otherwise modified.
+  if [[ "$(node -p "require('./package.json').metabotEdition || ''")" == "personal" ]] \
+    && _local_core_owned_by_root "$METABOT_HOME"; then
+    info "Building local metabot-core and Web UI..."
+    npm run build -w @xvirobotics/metabot-core-server
+    npm run build -w @xvirobotics/metabot-core-web-ui
+    include_owned_core=true
+  elif pm2 describe metabot-core &>/dev/null 2>&1; then
+    warn "Leaving metabot-core untouched because this runtime does not own its PM2 cwd/script."
+  fi
 
   # Update CLI tools in ~/.local/bin.
   # `metabot` is the sole dispatcher (bridge process control + delegate to
@@ -149,11 +267,11 @@ cmd_update() {
     success "CLI tools updated"
   fi
 
-  # Update skills in ~/.claude/skills and ~/.codex/skills
+  # Update MetaBot-owned Skills in user-global Claude, Codex, and Kimi roots.
   SKILLS_DIR="$HOME/.claude/skills"
   CODEX_SKILLS_DIR="$HOME/.codex/skills"
   AGENTS_SKILLS_DIR="$HOME/.agents/skills"
-  mkdir -p "$SKILLS_DIR" "$CODEX_SKILLS_DIR"
+  mkdir -p "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"
   info "Updating skills..."
   local src=""
   local -a lark_skill_names=(
@@ -180,28 +298,33 @@ cmd_update() {
   # Phase 4 consolidation: `metamemory` and `skill-hub` skill bundles are
   # subsumed by the unified `metabot` skill (which delegates memory/skills/
   # agents/t5t to the metabot-core feature CLI). metabot-team is the compact
-  # Agent Teams coordination skill. metaskill / metaschedule remain opt-in;
-  # sources still ship in src/skills/* for manual copy.
-  for skill in metabot voice metabot-team metabot-todos; do
+  # Agent Teams coordination and deterministic ToDo display are packaged
+  # MetaBot Skills. metaskill / metaschedule remain opt-in; sources still ship
+  # in src/skills/* for manual copy.
+  for skill in metabot metabot-team metabot-todos; do
     case "$skill" in
-      metabot)      src="$METABOT_HOME/packages/skills/metabot" ;;
-      voice)        src="$METABOT_HOME/src/skills/voice" ;;
-      metabot-team) src="$METABOT_HOME/src/skills/metabot-team" ;;
+      metabot)       src="$METABOT_HOME/packages/skills/metabot" ;;
+      metabot-team)  src="$METABOT_HOME/packages/skills/metabot-team" ;;
       metabot-todos) src="$METABOT_HOME/packages/skills/metabot-todos" ;;
-      *)            src="" ;;
+      *)             src="" ;;
     esac
     if [[ -n "$src" && -d "$src" ]]; then
-      for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
-        mkdir -p "$dst_root/$skill"
-        cp -r "$src/." "$dst_root/$skill/"
+      for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+        _install_skill_bundle "$src" "$dst_root/$skill" "$HOME/.metabot/skill-backups"
       done
+    fi
+  done
+  for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+    if [[ -e "$dst_root/voice" || -L "$dst_root/voice" ]]; then
+      _backup_skill_path "$dst_root/voice" "$HOME/.metabot/skill-backups"
+      info "Retired voice Skill from $dst_root"
     fi
   done
   # Strip legacy skill bundles (Phase 4 consolidation).
   for legacy in metamemory skill-hub; do
-    for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
-      if [[ -d "$dst_root/$legacy" ]]; then
-        rm -rf "$dst_root/$legacy"
+    for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+      if [[ -e "$dst_root/$legacy" || -L "$dst_root/$legacy" ]]; then
+        _backup_skill_path "$dst_root/$legacy" "$HOME/.metabot/skill-backups"
         info "Removed legacy $legacy skill from $dst_root (use \`metabot ${legacy/skill-hub/skills}\` instead)"
       fi
     done
@@ -261,7 +384,7 @@ cmd_update() {
         fi
       done
       if [[ -n "$lark_src" ]]; then
-        for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+        for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
           mkdir -p "$dst_root/$lark_skill"
           # Skip when src and dst already resolve to the same inode
           # (lark-cli installs ~/.agents/skills/* and symlinks them into
@@ -287,33 +410,27 @@ cmd_update() {
     if [[ -n "$work_dir" ]]; then
       local ws_skills_dir="$work_dir/.claude/skills"
       local ws_codex_skills_dir="$work_dir/.codex/skills"
-      mkdir -p "$ws_skills_dir" "$ws_codex_skills_dir"
+      local ws_agents_skills_dir="$work_dir/.agents/skills"
+      local -a ws_skill_roots=("$ws_skills_dir" "$ws_codex_skills_dir" "$ws_agents_skills_dir")
+      mkdir -p "${ws_skill_roots[@]}"
 
-      # Copy common skills (Phase 4: metamemory/skill-hub removed).
-      for skill in metabot voice; do
-        if [[ -d "$SKILLS_DIR/$skill" ]]; then
-          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-            mkdir -p "$dst_root/$skill"
-            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
-          done
-        fi
-      done
-      # Strip legacy skill bundles from a previously-deployed workspace.
-      for legacy in metamemory skill-hub; do
-        for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-          if [[ -d "$dst_root/$legacy" ]]; then
-            rm -rf "$dst_root/$legacy"
+      # MetaBot-owned Skills are global-only. Retire historical project
+      # mirrors so stale copies cannot shadow a current global bundle.
+      for skill in metabot metabot-team metabot-todos voice; do
+        for dst_root in "${ws_skill_roots[@]}"; do
+          if [[ -e "$dst_root/$skill" || -L "$dst_root/$skill" ]]; then
+            _backup_skill_path "$dst_root/$skill" "$work_dir/.metabot/skill-backups"
+            info "Retired project-level $skill mirror from $dst_root"
           fi
         done
       done
-      # Mirror opt-in skills (metaskill / metaschedule) only when present.
-      for skill in metaskill metaschedule; do
-        if [[ -d "$SKILLS_DIR/$skill" ]]; then
-          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-            mkdir -p "$dst_root/$skill"
-            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
-          done
-        fi
+      # Strip legacy skill bundles from a previously-deployed workspace.
+      for legacy in metamemory skill-hub; do
+        for dst_root in "${ws_skill_roots[@]}"; do
+          if [[ -e "$dst_root/$legacy" || -L "$dst_root/$legacy" ]]; then
+            _backup_skill_path "$dst_root/$legacy" "$work_dir/.metabot/skill-backups"
+          fi
+        done
       done
       # Copy lark-cli skills if previously installed
       if [[ "$has_lark_skills" == "true" ]]; then
@@ -327,7 +444,7 @@ cmd_update() {
             fi
           done
           if [[ -n "$lark_src" ]]; then
-            for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+            for dst_root in "${ws_skill_roots[@]}"; do
               mkdir -p "$dst_root/$lark_skill"
               [[ "$lark_src" -ef "$dst_root/$lark_skill" ]] && continue
               cp -r "$lark_src/." "$dst_root/$lark_skill/"
@@ -342,299 +459,191 @@ cmd_update() {
       if [[ -d "$ws_codex_skills_dir/feishu-doc" ]]; then
         rm -rf "$ws_codex_skills_dir/feishu-doc"
       fi
-      # Update CLAUDE.md
-      if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
-        cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/CLAUDE.md"
-        if [[ ! -e "$work_dir/AGENTS.md" ]]; then
-          cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/AGENTS.md"
-        fi
-      fi
-      success "Workspace skills updated"
+      # Workspace instruction files are user-owned. Updates leave AGENTS.md
+      # and CLAUDE.md untouched.
+      rm -f "$work_dir/.metabot/workspace-harness.sha256"
+      success "Workspace Skill mirrors reconciled"
     fi
   fi
 
-  _update_core_workspace || true
+  info "Checking execution daemons before update restart..."
+  _prepare_execution_daemons
+  _restart_execution_daemons_for_update
 
-  info "Restarting MetaBot..."
-  cmd_restart --source update --reason "metabot update" --resume
+  info "Submitting protected MetaBot Bridge restart..."
+  local -a protected_restart_args=(
+    --source update
+    --reason "metabot update"
+    --bot "${METABOT_BOT_NAME:-}"
+    --chat "${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    --resume
+  )
+  [[ "$include_owned_core" == true ]] && protected_restart_args+=(--include-owned-core)
+  cmd_restart "${protected_restart_args[@]}"
 }
 
-# Optimization: if a sibling metabot-core checkout exists, pull + build it so
-# the delegated feature CLI (`metabot t5t/agents/memory/skills`) stays in sync
-# with the central server. Best-effort — failures don't break the bridge update.
-_update_core_workspace() {
-  local core_dir="$METABOT_HOME/../metabot-workspace/metabot-core"
-  if [[ ! -d "$core_dir/.git" || ! -f "$core_dir/package.json" ]]; then
-    return 0
-  fi
-  echo ""
-  info "Updating sibling metabot-core workspace at $core_dir ..."
-  (
-    cd "$core_dir"
-    if ! git pull --ff-only; then
-      warn "metabot-core: git pull --ff-only failed (uncommitted changes?). Skipping build."
-      exit 1
-    fi
-    info "metabot-core: installing dependencies..."
-    npm install --include=dev --silent || {
-      warn "metabot-core: npm install failed."
-      exit 1
-    }
-    info "metabot-core: building..."
-    npm run build || {
-      warn "metabot-core: build failed."
-      exit 1
-    }
-  ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
-}
-
+# Controlled restart state lives outside the checkout so a runtime switch can
+# finish from the same durable ledger. Prefer the explicit process environment,
+# then the current runtime's dotenv values, then the personal-edition default.
 _restart_state_dir() {
   if [[ -n "${SESSION_STORE_DIR:-}" ]]; then
     printf '%s\n' "$SESSION_STORE_DIR"
     return
   fi
+  if [[ -n "${METABOT_STATE_DIR:-}" ]]; then
+    printf '%s\n' "$METABOT_STATE_DIR"
+    return
+  fi
   local configured=""
   if [[ -f "$METABOT_HOME/.env" ]]; then
-    configured="$(sed -n 's/^SESSION_STORE_DIR=//p' "$METABOT_HOME/.env" 2>/dev/null | tail -1)"
-    configured="${configured%\"}"; configured="${configured#\"}"
-    configured="${configured%\'}"; configured="${configured#\'}"
+    configured="$(cd "$METABOT_HOME" && node -e '
+      const fs=require("node:fs");
+      const dotenv=require("dotenv");
+      const env=dotenv.parse(fs.readFileSync(".env"));
+      process.stdout.write((env.SESSION_STORE_DIR||env.METABOT_STATE_DIR||"").trim());
+    ' 2>/dev/null || true)"
   fi
-  if [[ -n "$configured" ]]; then
-    configured="${configured/#\~/$HOME}"
-    printf '%s\n' "$configured"
-  else
-    printf '%s\n' "$HOME/.metabot"
-  fi
+  printf '%s\n' "${configured:-$HOME/.metabot}"
 }
 
-# The bridge is launched as `node --import tsx src/index.ts`, so tsx must be
-# resolvable from METABOT_HOME at spawn time. Agent shells spawned by the
-# bridge inherit NODE_ENV=production (ecosystem.config.cjs), and a bare
-# `npm install` run in such a shell prunes devDependencies — which used to
-# remove tsx and send the next restart into a 10x crash-loop until PM2 gave
-# up ("errored"). tsx now lives in dependencies, but verify before every
-# (re)start anyway and self-heal if some other pruning path removed it.
-_ensure_runtime_deps() {
-  if (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1); then
-    return 0
-  fi
-  warn "tsx is not resolvable from $METABOT_HOME — repairing before touching PM2."
-  (cd "$METABOT_HOME" && NODE_ENV=development npm install --include=dev --no-audit --no-fund) || {
-    error "npm install failed; refusing to restart into a guaranteed crash-loop."
-    echo "  Fix dependencies first: cd $METABOT_HOME && npm install --include=dev"
-    return 1
-  }
-  (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1) || {
-    error "tsx is still missing after npm install; refusing to restart."
-    return 1
-  }
-  success "Runtime dependencies repaired."
+_restart_state() {
+  local state_root="${METABOT_RESTART_STATE_ROOT:-$METABOT_HOME}"
+  SESSION_STORE_DIR="${SESSION_STORE_DIR:?restart state directory is not set}" \
+    METABOT_HOME="$state_root" \
+    node --import tsx "$state_root/src/runtime/restart-state-cli.ts" "$@"
 }
 
-# Drop a breadcrumb so the bridge knows it was just restarted. After
-# `pm2 restart` the node process (and every Claude session) is killed and
-# respawned, so the agent that issued the restart loses all memory of having
-# done so — without this it sees "please restart" in resumed history and
-# restarts again in a loop. The bridge reads this file at boot, injects a
-# one-shot reminder, and deletes it only after startup health and recovery.
-_write_restart_breadcrumb() {
-  local dir
-  dir="$(_restart_state_dir)"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  python3 - "$dir/last-restart.json" <<'PY' 2>/dev/null || true
-import json
-import os
-import sys
-import time
-
-data = {"restartedAt": int(time.time())}
-fields = {
-    "METABOT_BOT_NAME": "botName",
-    "METABOT_CHAT_ID": "chatId",
-    "METABOT_RESTART_REASON": "reason",
-    "METABOT_RESTART_SOURCE": "source",
-    "METABOT_RESTART_REQUEST_ID": "requestId",
-}
-for env_name, json_name in fields.items():
-    value = os.environ.get(env_name, "").strip()
-    if value:
-        data[json_name] = value
-
-resume = os.environ.get("METABOT_RESTART_RESUME", "").strip().lower()
-if resume in ("0", "false", "no", "off"):
-    data["resume"] = False
-elif resume in ("1", "true", "yes", "on"):
-    data["resume"] = True
-
-with open(sys.argv[1], "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False)
-    f.write("\n")
-PY
+_json_field() {
+  local field="$1"
+  node -e '
+    let body="";
+    process.stdin.on("data",c=>body+=c).on("end",()=>{
+      try {
+        const value=process.argv[1].split(".").reduce((current,key)=>current?.[key],JSON.parse(body));
+        if (value !== undefined && value !== null) process.stdout.write(String(value));
+      } catch { process.exitCode=2; }
+    });
+  ' "$field"
 }
 
 _new_restart_request_id() {
-  python3 - <<'PY'
-import time
-import uuid
-print(f"restart-{int(time.time() * 1000)}-{str(uuid.uuid4())[:8]}")
-PY
+  node -e 'process.stdout.write(require("node:crypto").randomUUID())'
 }
 
-# Atomically claim one restart attempt for a requestId. This small standalone
-# state update must run before contacting PM2 because the current process tree
-# can disappear as soon as the daemon accepts the restart.
-_claim_restart_request() {
-  local request_id="$1"
-  local dir
-  dir="$(_restart_state_dir)"
-  mkdir -p "$dir"
-  python3 - "$dir/restart-requests.json" "$request_id" "${METABOT_BOT_NAME:-cli}" "${METABOT_CHAT_ID:-cli}" "${METABOT_RESTART_REASON:-cli restart}" "${METABOT_RESTART_SOURCE:-cli}" "$METABOT_HOME" "$METABOT_HOME/src/index.ts" <<'PY'
-import fcntl
-import json
-import os
-import sys
-import time
-
-path, request_id, bot, chat, reason, source, cwd, script = sys.argv[1:]
-lock_path = f"{path}.lock"
-now = int(time.time() * 1000)
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(lock_path, "a+", encoding="utf-8") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    try:
-        with open(path, "r", encoding="utf-8") as src:
-            rows = json.load(src)
-        if not isinstance(rows, list):
-            rows = []
-    except Exception:
-        rows = []
-    record = next((row for row in rows if row.get("requestId") == request_id), None)
-    if record and (int(record.get("attemptCount") or 0) >= 1 or record.get("status") in ("restarting", "healthy", "failed")):
-        print("duplicate")
-        raise SystemExit(0)
-    if record is None:
-        record = {
-            "requestId": request_id,
-            "requesterBotName": bot,
-            "requesterChatId": chat,
-            "userId": os.environ.get("METABOT_RESTART_USER_ID", "cli"),
-            "reason": reason,
-            "force": False,
-            "status": "scheduled",
-            "blockers": [],
-            "readiness": [],
-            "createdAt": now,
-            "updatedAt": now,
-            "scheduledAt": now,
-        }
-        rows.append(record)
-    record.update({
-        "status": "restarting",
-        "attemptCount": int(record.get("attemptCount") or 0) + 1,
-        "attemptedAt": record.get("attemptedAt") or now,
-        "updatedAt": now,
-        "targetCwd": os.path.realpath(cwd),
-        "targetScript": os.path.realpath(script),
-        "source": source,
-    })
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as dst:
-        json.dump(rows, dst, ensure_ascii=False, indent=2)
-        dst.write("\n")
-    os.replace(tmp, path)
-    print("claimed")
-PY
+_pm2_app_json() {
+  local app_name="$1"
+  pm2 jlist 2>/dev/null | node -e '
+    let input="";
+    process.stdin.on("data",c=>input+=c).on("end",()=>{
+      try {
+        const app=JSON.parse(input).find(row=>row.name===process.argv[1]);
+        if (!app) return;
+        const env=app.pm2_env||{};
+        process.stdout.write(JSON.stringify({
+          pid: app.pid||null,
+          cwd: env.pm_cwd||null,
+          script: env.pm_exec_path||null,
+          status: env.status||null,
+        }));
+      } catch { process.exitCode=2; }
+    });
+  ' "$app_name"
 }
 
-_mark_restart_request_failed() {
-  local request_id="$1"
-  local failure="$2"
-  local dir
-  dir="$(_restart_state_dir)"
-  python3 - "$dir/restart-requests.json" "$request_id" "$failure" <<'PY' 2>/dev/null || true
-import fcntl
-import json
-import os
-import sys
-import time
-
-path, request_id, failure = sys.argv[1:]
-with open(f"{path}.lock", "a+", encoding="utf-8") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    try:
-        with open(path, "r", encoding="utf-8") as src:
-            rows = json.load(src)
-    except Exception:
-        rows = []
-    now = int(time.time() * 1000)
-    for row in rows:
-        if row.get("requestId") == request_id:
-            row.update({"status": "failed", "failedAt": row.get("failedAt") or now, "updatedAt": now, "healthError": failure[:1000]})
-            break
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as dst:
-        json.dump(rows, dst, ensure_ascii=False, indent=2)
-        dst.write("\n")
-    os.replace(tmp, path)
-PY
-}
-
-_pm2_metabot_runtime() {
-  pm2 jlist 2>/dev/null | python3 -c '
-import json, sys
-try: rows=json.load(sys.stdin)
-except Exception: rows=[]
-app=next((row for row in rows if row.get("name") == "metabot"), None)
-if app:
-    env=app.get("pm2_env") or {}
-    print("\t".join([str(env.get("pm_cwd") or ""), str(env.get("pm_exec_path") or ""), str(app.get("pid") or "")]))
-'
-}
-
-_is_metabot_descendant() {
-  local runtime pid metabot_pid
-  runtime="$(_pm2_metabot_runtime || true)"
-  metabot_pid="$(printf '%s' "$runtime" | awk -F '\t' '{print $3}')"
-  [[ "$metabot_pid" =~ ^[0-9]+$ ]] || return 1
-  pid="$$"
-  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
-    [[ "$pid" == "$metabot_pid" ]] && return 0
-    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-  done
-  return 1
+_local_core_owned_by_root() {
+  local runtime_root="$1" live cwd script
+  live="$(_pm2_app_json metabot-core)"
+  [[ -n "$live" ]] || return 1
+  cwd="$(printf '%s' "$live" | _json_field cwd)"
+  script="$(printf '%s' "$live" | _json_field script)"
+  [[ -n "$cwd" && -n "$script" \
+    && "$(readlink -f "$cwd")" == "$(readlink -f "$runtime_root")" \
+    && "$(readlink -f "$script")" == "$(readlink -f "$runtime_root/packages/server/dist/index.js")" ]]
 }
 
 _wait_restart_terminal_state() {
-  local request_id="$1"
-  local timeout="${2:-60}"
-  local dir
-  dir="$(_restart_state_dir)"
-  local i state
-  for ((i=0; i<timeout; i++)); do
-    state="$(python3 - "$dir/restart-requests.json" "$request_id" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    rows=json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    rows=[]
-row=next((row for row in rows if row.get("requestId") == sys.argv[2]), {})
-print(row.get("status", ""))
-PY
-)"
-    [[ "$state" == "healthy" ]] && return 0
-    [[ "$state" == "failed" ]] && return 1
-    sleep 1
+  local request_id="$1" timeout="$2" started now state result
+  started="$(date +%s)"
+  while true; do
+    result="$(_restart_state get --request-id "$request_id")" || return 1
+    state="$(printf '%s' "$result" | _json_field record.status)"
+    case "$state" in
+      healthy) printf '%s\n' "$result"; return 0 ;;
+      failed) printf '%s\n' "$result"; return 1 ;;
+    esac
+    now="$(date +%s)"
+    if (( now - started >= timeout )); then
+      error "Timed out waiting for restart request $request_id (last state: ${state:-unknown})."
+      return 1
+    fi
+    # This is only a bounded ledger poll. Health and correctness are decided by
+    # the new Bridge process and recorded in SQLite, never by elapsed sleep.
+    sleep 0.2
   done
-  return 1
+}
+
+_protected_switch() {
+  local target="$1" apps="$2"
+  local helper="${METABOT_PROTECTED_SWITCH_HELPER:-$target/scripts/pm2-protected-runtime-switch.cjs}"
+  node "$helper" --runtime "$target" --apps "$apps"
+}
+
+_protected_switch_plan() {
+  local target="$1" apps="$2"
+  local helper="${METABOT_PROTECTED_SWITCH_HELPER:-$target/scripts/pm2-protected-runtime-switch.cjs}"
+  node "$helper" --runtime "$target" --apps "$apps" --plan-only true
+}
+
+_execution_health_script() {
+  printf '%s\n' "$METABOT_HOME/src/services/local-daemon-health.ts"
+}
+
+_ensure_runtime_artifacts() {
+  local runtime_root="${1:-$METABOT_HOME}"
+  local missing=false
+  for dependency in tsx better-sqlite3; do
+    if ! (cd "$runtime_root" && node -e "require.resolve('$dependency')" >/dev/null 2>&1); then
+      error "$dependency is not resolvable from $runtime_root; refusing to change PM2 state."
+      missing=true
+    fi
+  done
+  for artifact in \
+    src/index.ts \
+    src/runtime/restart-state-cli.ts \
+    scripts/pm2-protected-runtime-switch.cjs \
+    packages/worker-runner-mcp/dist/daemon-cli.js \
+    packages/arc-mcp/dist/daemon-cli.js \
+    packages/arc-worker-runner-adapter/dist/factory.js; do
+    if [[ ! -f "$runtime_root/$artifact" ]]; then
+      error "Missing built runtime artifact: $runtime_root/$artifact"
+      missing=true
+    fi
+  done
+  [[ "$missing" == false ]]
+}
+
+_ensure_local_core_artifacts() {
+  local runtime_root="$1" missing=false
+  for artifact in ecosystem.core.config.cjs packages/server/dist/index.js; do
+    if [[ ! -f "$runtime_root/$artifact" ]]; then
+      error "Missing local Core runtime artifact: $runtime_root/$artifact"
+      missing=true
+    fi
+  done
+  [[ "$missing" == false ]]
+}
+
+_prepare_execution_daemons() {
+  _ensure_runtime_artifacts || return 1
+  METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" --provision-arc-service >/dev/null
 }
 
 _wait_bridge_health() {
   local timeout="${1:-60}"
   _load_bridge_api_config
-  local url="${METABOT_URL%/}/api/health"
   local i
   for ((i=0; i<timeout; i++)); do
-    if command -v curl >/dev/null 2>&1 && curl -fsS --connect-timeout 1 --max-time 2 -H "$METABOT_AUTH" "$url" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 1 --max-time 2 -H "$METABOT_AUTH" "${METABOT_URL%/}/api/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -642,206 +651,439 @@ _wait_bridge_health() {
   return 1
 }
 
+_wait_daemon_health() {
+  local daemon="$1"
+  local timeout="${2:-60}"
+  local i
+  for ((i=0; i<timeout; i++)); do
+    if METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" "$daemon" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+_wait_all_runtime_health() {
+  local timeout="${1:-60}"
+  _wait_daemon_health worker "$timeout" \
+    && _wait_daemon_health arc "$timeout" \
+    && _wait_bridge_health "$timeout"
+}
+
+_pm2_app_exists() {
+  pm2 describe "$1" >/dev/null 2>&1
+}
+
+_daemon_app_name() {
+  case "$1" in
+    worker|worker-runner|worker-runnerd|metabot-worker-runnerd) printf '%s\n' 'metabot-worker-runnerd' ;;
+    arc|arcd|metabot-arcd) printf '%s\n' 'metabot-arcd' ;;
+    *) return 1 ;;
+  esac
+}
+
+_daemon_kind() {
+  [[ "$1" == "metabot-worker-runnerd" ]] && printf '%s\n' worker || printf '%s\n' arc
+}
+
+_daemon_busy() {
+  local daemon="$1"
+  set +e
+  METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" --busy "$daemon" >/dev/null
+  local status=$?
+  set -e
+  [[ "$status" -eq 10 ]] && return 0
+  [[ "$status" -eq 0 ]] && return 1
+  error "Could not verify whether the $daemon daemon is idle; refusing lifecycle change."
+  return 2
+}
+
+_restart_execution_daemons_for_update() {
+  local app daemon busy=false
+  # Complete the wire preflight before changing either process. A failed ARC
+  # probe must not leave Worker Runner already replaced by the new checkout.
+  for app in metabot-worker-runnerd metabot-arcd; do
+    _pm2_app_exists "$app" || continue
+    daemon="$(_daemon_kind "$app")"
+    if _daemon_busy "$daemon"; then
+      busy=true
+      warn "$app has in-flight work. Updating it will make ambiguous work recovery_required."
+    else
+      local status=$?
+      [[ "$status" -eq 1 ]] || return "$status"
+      info "$app is idle; its MCP sessions will drain during the controlled restart."
+    fi
+  done
+
+  for app in metabot-worker-runnerd metabot-arcd; do
+    daemon="$(_daemon_kind "$app")"
+    if _pm2_app_exists "$app"; then
+      pm2 restart "$app" --update-env
+    else
+      pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only "$app" --update-env
+    fi
+    _wait_daemon_health "$daemon" 60 || {
+      error "$app did not become healthy after update."
+      return 1
+    }
+  done
+  [[ "$busy" == false ]] || warn "Forced daemon update completed; inspect affected jobs for recovery_required before retrying."
+}
+
 cmd_start() {
-  _ensure_runtime_deps || return 1
-  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env
-  if _wait_bridge_health 60; then
+  _prepare_execution_daemons
+  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --update-env
+  if _wait_all_runtime_health 60; then
     pm2 save --force
+    success "MetaBot bridge and execution daemons are healthy."
   else
-    error "MetaBot did not become healthy; PM2 process list was not saved."
+    error "MetaBot runtime did not become healthy; PM2 process list was not saved."
     return 1
   fi
 }
-cmd_stop()    { pm2 stop metabot; }
+
+cmd_stop() {
+  local app
+  for app in metabot metabot-worker-runnerd metabot-arcd; do
+    if _pm2_app_exists "$app"; then
+      pm2 stop "$app"
+    fi
+  done
+  return 0
+}
+
 cmd_restart() {
-  local wait=false
-  local json=false
-  local wait_timeout=60
-  local reason=""
-  local bot_name=""
-  local chat_id=""
-  local source=""
-  local request_id=""
-  local resume=""
+  if [[ "${1:-}" == "--daemon" ]]; then
+    [[ $# -ge 2 ]] || { error "--daemon requires worker or arc"; return 2; }
+    local requested="$2"
+    shift 2
+    local force=false
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --force) force=true; shift ;;
+        *) error "Unknown daemon restart option: $1"; return 2 ;;
+      esac
+    done
+    local app daemon
+    app="$(_daemon_app_name "$requested")" || { error "Unknown daemon: $requested"; return 2; }
+    daemon="$(_daemon_kind "$app")"
+    _pm2_app_exists "$app" || { error "$app is not registered in PM2; run 'metabot start'."; return 1; }
+
+    if _daemon_busy "$daemon"; then
+      if [[ "$force" != true ]]; then
+        error "$app has in-flight work; restart refused. Retry after it is idle or pass --force."
+        return 4
+      fi
+      warn "Forced restart: in-flight work may become recovery_required and will not be blindly relaunched."
+    else
+      local status=$?
+      [[ "$status" -eq 1 ]] || return "$status"
+    fi
+    pm2 restart "$app" --update-env
+    if _wait_daemon_health "$daemon" 60; then
+      pm2 save --force
+    else
+      error "$app did not become healthy; PM2 process list was not saved."
+      return 1
+    fi
+    return
+  fi
+
+  local request_id="${METABOT_RESTART_REQUEST_ID:-}"
+  local requester_bot="${METABOT_BOT_NAME:-}"
+  local requester_chat="${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+  local source="cli" reason="MetaBot Bridge restart" resume=true wait=false json=false timeout=90
+  local include_owned_core=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --request-id) [[ $# -ge 2 ]] || { error "--request-id requires a value"; return 2; }; request_id="$2"; shift 2 ;;
+      --bot) [[ $# -ge 2 ]] || { error "--bot requires a value"; return 2; }; requester_bot="$2"; shift 2 ;;
+      --chat) [[ $# -ge 2 ]] || { error "--chat requires a value"; return 2; }; requester_chat="$2"; shift 2 ;;
+      --source) [[ $# -ge 2 ]] || { error "--source requires a value"; return 2; }; source="$2"; shift 2 ;;
+      --reason) [[ $# -ge 2 ]] || { error "--reason requires a value"; return 2; }; reason="$2"; shift 2 ;;
+      --resume) resume=true; shift ;;
+      --no-resume) resume=false; shift ;;
       --wait) wait=true; shift ;;
+      --timeout) [[ $# -ge 2 ]] || { error "--timeout requires seconds"; return 2; }; timeout="$2"; shift 2 ;;
       --json) json=true; shift ;;
-      --timeout)
-        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--timeout requires seconds"; return 2; fi
-        wait_timeout="$2"; shift 2
-        ;;
-      --reason)
-        if [[ $# -lt 2 ]]; then warn "--reason requires text"; return 2; fi
-        reason="$2"; shift 2
-        ;;
-      --bot|--bot-name)
-        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "$1 requires a bot name"; return 2; fi
-        bot_name="$2"; shift 2
-        ;;
-      --chat|--chat-id)
-        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "$1 requires a chat id"; return 2; fi
-        chat_id="$2"; shift 2
-        ;;
-      --source)
-        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--source requires a value"; return 2; fi
-        source="$2"; shift 2
-        ;;
-      --request-id)
-        if [[ $# -lt 2 || "${2:-}" == --* ]]; then warn "--request-id requires a value"; return 2; fi
-        request_id="$2"; shift 2
-        ;;
-      --resume) resume="1"; shift ;;
-      --no-resume) resume="0"; shift ;;
+      --include-owned-core) include_owned_core=true; shift ;;
       --help|-h)
-        echo "Usage: metabot restart [--wait] [--json] [--timeout SEC] [--reason TEXT] [--bot NAME] [--chat ID] [--source SOURCE] [--resume|--no-resume]"
+        echo "Usage: metabot restart [--request-id ID] [--bot NAME --chat ID] [--reason TEXT] [--resume|--no-resume] [--wait] [--timeout SEC] [--json]"
+        echo "       metabot restart --daemon <worker|arc> [--force]"
         return 0
         ;;
-      *)
-        warn "Unknown restart option: $1"
-        return 2
-        ;;
+      *) error "Unknown restart option: $1"; return 2 ;;
     esac
   done
+  [[ "$timeout" =~ ^[0-9]+$ && "$timeout" -gt 0 ]] || { error "--timeout must be a positive integer"; return 2; }
+  _ensure_runtime_artifacts "$METABOT_HOME" || return 1
 
-  if ! [[ "$wait_timeout" =~ ^[0-9]+$ ]] || [[ "$wait_timeout" -lt 1 ]]; then
-    warn "--timeout must be a positive integer"
-    return 2
+  local live current_root current_script current_status current_pid claim duplicate result
+  live="$(_pm2_app_json metabot)"
+  [[ -n "$live" ]] || { error "metabot is not registered in PM2; run 'metabot start'."; return 1; }
+  current_root="$(printf '%s' "$live" | _json_field cwd)"
+  current_script="$(printf '%s' "$live" | _json_field script)"
+  current_status="$(printf '%s' "$live" | _json_field status)"
+  current_pid="$(printf '%s' "$live" | _json_field pid)"
+  [[ "$current_status" == "online" \
+    && "$(readlink -f "$current_root")" == "$(readlink -f "$METABOT_HOME")" \
+    && "$(readlink -f "$current_script")" == "$(readlink -f "$METABOT_HOME/src/index.ts")" ]] || {
+    error "Same-runtime restart refused: PM2 metabot is not online on $METABOT_HOME/src/index.ts."
+    return 3
+  }
+
+  local target_apps=metabot switch_apps=metabot
+  if [[ "$include_owned_core" == true ]]; then
+    if _local_core_owned_by_root "$METABOT_HOME"; then
+      _ensure_local_core_artifacts "$METABOT_HOME" || return 1
+      target_apps=metabot-core,metabot
+      switch_apps=metabot-core,metabot
+    else
+      warn "Leaving metabot-core untouched because this runtime does not own its PM2 cwd/script."
+    fi
   fi
 
-  [[ -n "$bot_name" ]] && export METABOT_BOT_NAME="$bot_name"
-  [[ -n "$chat_id" ]] && export METABOT_CHAT_ID="$chat_id"
-  [[ -n "$reason" ]] && export METABOT_RESTART_REASON="$reason"
-  [[ -n "$source" ]] && export METABOT_RESTART_SOURCE="$source"
+  local runtime_expectations
+  runtime_expectations="$(_protected_switch_plan "$METABOT_HOME" "$switch_apps")" || {
+    error "Could not resolve the expected PM2 runtime before restart."
+    return 1
+  }
+
   request_id="${request_id:-$(_new_restart_request_id)}"
-  export METABOT_RESTART_REQUEST_ID="$request_id"
-  [[ -n "$resume" ]] && export METABOT_RESTART_RESUME="$resume"
-
-  local runtime current_cwd current_script
-  runtime="$(_pm2_metabot_runtime || true)"
-  current_cwd="$(printf '%s' "$runtime" | awk -F '\t' '{print $1}')"
-  current_script="$(printf '%s' "$runtime" | awk -F '\t' '{print $2}')"
-  if [[ -n "$current_cwd" && "$(readlink -f "$current_cwd")" != "$(readlink -f "$METABOT_HOME")" ]]; then
-    error "Refusing to switch the live runtime from inside 'metabot restart'."
-    echo "  Current cwd: $current_cwd"
-    echo "  Requested cwd: $METABOT_HOME"
-    echo "  Use 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree."
-    return 2
-  fi
-
-  local claim
-  claim="$(_claim_restart_request "$request_id")"
-  if [[ "$claim" == "duplicate" ]]; then
-    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s"}\n' "$request_id"
-    info "Restart request $request_id was already attempted; no second restart was issued."
+  SESSION_STORE_DIR="$(_restart_state_dir)"
+  export SESSION_STORE_DIR
+  local -a state_flags=(
+    --request-id "$request_id" --kind restart --target-root "$METABOT_HOME"
+    --target-apps "$target_apps" --source "$source" --reason "$reason" --resume "$resume"
+    --expectations-json "$runtime_expectations"
+  )
+  [[ -n "$requester_bot" ]] && state_flags+=(--bot "$requester_bot")
+  [[ -n "$requester_chat" ]] && state_flags+=(--chat "$requester_chat")
+  claim="$(_restart_state claim "${state_flags[@]}")" || return 1
+  duplicate="$(printf '%s' "$claim" | _json_field duplicate)"
+  if [[ "$duplicate" == "true" ]]; then
+    result="$claim"
+    if [[ "$wait" == true ]]; then
+      result="$(_wait_restart_terminal_state "$request_id" "$timeout")" || {
+        [[ "$json" == true ]] && printf '%s\n' "$result"
+        return 1
+      }
+    fi
+    [[ "$json" == true ]] && printf '%s\n' "$result" || info "Restart request $request_id is a duplicate; no PM2 action was repeated."
     return 0
   fi
 
-  if ! _ensure_runtime_deps; then
-    _mark_restart_request_failed "$request_id" "Runtime dependencies missing (tsx unresolvable) and repair failed"
-    [[ "$json" == true ]] && printf '{"ok":false,"reason":"runtime-deps-missing","requestId":"%s"}\n' "$request_id"
+  _restart_state breadcrumb "${state_flags[@]}" >/dev/null
+  _restart_state mark-restarting --request-id "$request_id" --old-pid "$current_pid" >/dev/null
+  export METABOT_RESTART_REQUEST_ID="$request_id"
+  export METABOT_RESTART_REASON="$reason"
+  export METABOT_RESTART_SOURCE="$source"
+  export METABOT_RESTART_RESUME="$resume"
+  export METABOT_BOT_NAME="$requester_bot"
+  export METABOT_CHAT_ID="$requester_chat"
+  if ! result="$(_protected_switch "$METABOT_HOME" "$switch_apps")"; then
+    _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected owned-service restart" >/dev/null || true
     return 1
   fi
-
-  _write_restart_breadcrumb
-  local restart_ok=true
-  if [[ -n "$current_cwd" ]]; then
-    pm2 restart metabot --update-env || restart_ok=false
-  else
-    pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env || restart_ok=false
-  fi
-
-  local health_ok=true
   if [[ "$wait" == true ]]; then
-    _wait_bridge_health "$wait_timeout" || health_ok=false
-    [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$request_id" "$wait_timeout" || health_ok=false
+    result="$(_wait_restart_terminal_state "$request_id" "$timeout")" || {
+      [[ "$json" == true ]] && printf '%s\n' "$result"
+      return 1
+    }
+  else
+    result="$(_restart_state get --request-id "$request_id")"
   fi
+  [[ "$json" == true ]] && printf '%s\n' "$result" || success "Protected Bridge restart submitted (requestId: $request_id)."
+}
 
-  if [[ "$restart_ok" != true ]]; then
-    _mark_restart_request_failed "$request_id" "PM2 rejected the atomic restart request"
-  elif [[ "$wait" == true && "$health_ok" != true ]]; then
-    _mark_restart_request_failed "$request_id" "Restart did not reach healthy state within ${wait_timeout}s"
+_live_metabot_pid() {
+  pm2 jlist 2>/dev/null | node -e '
+let input="";process.stdin.on("data",c=>input+=c).on("end",()=>{
+  try { const app=JSON.parse(input).find(row=>row.name==="metabot"); process.stdout.write(String(app?.pid||"")); }
+  catch { process.stdout.write(""); }
+});'
+}
+
+_inside_metabot_process_tree() {
+  local live_pid pid parent_pid
+  live_pid="$(_live_metabot_pid)"
+  [[ "$live_pid" =~ ^[0-9]+$ && "$live_pid" -gt 1 ]] || return 2
+  pid="$$"
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
+    [[ "$pid" == "$live_pid" ]] && return 0
+    parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || return 2
+    [[ "$parent_pid" =~ ^[0-9]+$ ]] || return 2
+    pid="$parent_pid"
+  done
+  [[ "$pid" == "1" ]] && return 1
+  return 2
+}
+
+_require_external_package_update_if_live() {
+  command -v pm2 >/dev/null 2>&1 || return 0
+  pm2 describe metabot >/dev/null 2>&1 || return 0
+
+  local live current_root current_status process_tree_status
+  live="$(_pm2_app_json metabot)"
+  [[ -n "$live" ]] || {
+    error "Package update refused because the registered MetaBot runtime could not be inspected."
+    return 3
+  }
+  current_root="$(printf '%s' "$live" | _json_field cwd)"
+  current_status="$(printf '%s' "$live" | _json_field status)"
+  [[ -n "$current_root" ]] || {
+    error "Package update refused because the registered MetaBot cwd is unavailable."
+    return 3
+  }
+  [[ "$current_status" == "online" ]] || return 0
+
+  if _inside_metabot_process_tree; then
+    error "Online package update is refused inside the MetaBot process tree. Run it from SSH or another external controller."
+    return 3
+  else
+    process_tree_status=$?
+    if [[ "$process_tree_status" -ne 1 ]]; then
+      error "Online package update is refused because the live MetaBot process tree could not be verified."
+      return 3
+    fi
   fi
-
-  if [[ "$json" == true ]]; then
-    printf '{"ok":%s,"healthOk":%s,"wait":%s,"timeout":%s,"requestId":"%s"}\n' \
-      "$([[ "$restart_ok" == true ]] && echo true || echo false)" \
-      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
-      "$wait" \
-      "$wait_timeout" \
-      "$request_id"
-  fi
-
-  [[ "$restart_ok" == true && "$health_ok" == true ]]
 }
 
 cmd_deploy_runtime() {
-  local target=""
-  local wait_timeout=90
-  local reason="runtime deployment"
-  local json=false
-  local request_id=""
+  local target="" timeout=90 force=false wait=true json=false
+  local request_id="${METABOT_RESTART_REQUEST_ID:-}"
+  local requester_bot="${METABOT_BOT_NAME:-}"
+  local requester_chat="${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+  local source="deploy-runtime" reason="MetaBot runtime switch" resume=true
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --runtime) target="${2:-}"; shift 2 ;;
-      --timeout) wait_timeout="${2:-}"; shift 2 ;;
-      --reason) reason="${2:-}"; shift 2 ;;
-      --request-id) request_id="${2:-}"; shift 2 ;;
+      --runtime) [[ $# -ge 2 ]] || { error "--runtime requires a directory"; return 2; }; target="$2"; shift 2 ;;
+      --timeout) [[ $# -ge 2 ]] || { error "--timeout requires seconds"; return 2; }; timeout="$2"; shift 2 ;;
+      --force) force=true; shift ;;
+      --request-id) [[ $# -ge 2 ]] || { error "--request-id requires a value"; return 2; }; request_id="$2"; shift 2 ;;
+      --bot) [[ $# -ge 2 ]] || { error "--bot requires a value"; return 2; }; requester_bot="$2"; shift 2 ;;
+      --chat) [[ $# -ge 2 ]] || { error "--chat requires a value"; return 2; }; requester_chat="$2"; shift 2 ;;
+      --source) [[ $# -ge 2 ]] || { error "--source requires a value"; return 2; }; source="$2"; shift 2 ;;
+      --reason) [[ $# -ge 2 ]] || { error "--reason requires a value"; return 2; }; reason="$2"; shift 2 ;;
+      --resume) resume=true; shift ;;
+      --no-resume) resume=false; shift ;;
+      --wait) wait=true; shift ;;
+      --no-wait) wait=false; shift ;;
       --json) json=true; shift ;;
       --help|-h)
-        echo "Usage: metabot deploy-runtime --runtime DIR [--timeout SEC] [--reason TEXT] [--request-id ID] [--json]"
-        echo "This command must run outside the MetaBot process tree (for example from SSH)."
+        echo "Usage: metabot deploy-runtime --runtime DIR [--request-id ID] [--bot NAME --chat ID] [--resume|--no-resume] [--wait|--no-wait] [--timeout SEC] [--force] [--json]"
+        echo "Run only from SSH or another controller outside the MetaBot process tree."
         return 0
         ;;
       *) error "Unknown deploy-runtime option: $1"; return 2 ;;
     esac
   done
   [[ -n "$target" ]] || { error "--runtime DIR is required"; return 2; }
+  [[ "$timeout" =~ ^[0-9]+$ && "$timeout" -gt 0 ]] || { error "--timeout must be a positive integer"; return 2; }
   target="$(readlink -f "$target")"
   [[ -f "$target/ecosystem.config.cjs" ]] || { error "No ecosystem.config.cjs at $target"; return 2; }
-  if _is_metabot_descendant; then
+  _ensure_runtime_artifacts "$target" || return 1
+  local process_tree_status
+  if _inside_metabot_process_tree; then
     error "Runtime switching is refused inside the MetaBot process tree."
-    echo "Run this command from SSH or an independent deployment controller so a failed switch cannot kill its own recovery command."
     return 3
+  else
+    process_tree_status=$?
+    if [[ "$process_tree_status" -ne 1 ]]; then
+      error "Runtime switching is refused because the live MetaBot process tree could not be verified."
+      return 3
+    fi
   fi
 
-  METABOT_HOME="$target"
-  export METABOT_HOME METABOT_RESTART_REASON="$reason" METABOT_RESTART_SOURCE="external-deploy" METABOT_RESTART_RESUME="1"
-  export METABOT_RESTART_REQUEST_ID="${request_id:-$(_new_restart_request_id)}"
-  local claim
-  claim="$(_claim_restart_request "$METABOT_RESTART_REQUEST_ID")"
-  if [[ "$claim" == "duplicate" ]]; then
-    [[ "$json" == true ]] && printf '{"ok":true,"duplicate":true,"requestId":"%s","runtime":"%s"}\n' \
-      "$METABOT_RESTART_REQUEST_ID" "$target"
-    info "Deployment request $METABOT_RESTART_REQUEST_ID was already attempted; no second runtime switch was issued."
+  local app daemon
+  for app in metabot-worker-runnerd metabot-arcd; do
+    if _pm2_app_exists "$app"; then
+      daemon="$(_daemon_kind "$app")"
+      if _daemon_busy "$daemon"; then
+        if [[ "$force" != true ]]; then
+          error "$app has in-flight work; deploy-runtime refused. Retry when idle or pass --force."
+          return 4
+        fi
+        warn "Forced runtime switch: $app in-flight work may become recovery_required."
+      else
+        local status=$?
+        [[ "$status" -eq 1 ]] || return "$status"
+      fi
+    fi
+  done
+
+  local state_root live current_root current_pid claim duplicate result
+  state_root="$(_restart_state_dir)"
+  SESSION_STORE_DIR="$state_root"
+  export SESSION_STORE_DIR
+  request_id="${request_id:-$(_new_restart_request_id)}"
+  live="$(_pm2_app_json metabot)"
+  [[ -n "$live" ]] || { error "metabot is not registered in PM2; deploy-runtime will not create an implicit replacement."; return 1; }
+  current_root="$(printf '%s' "$live" | _json_field cwd)"
+  current_pid="$(printf '%s' "$live" | _json_field pid)"
+  local target_apps=metabot-worker-runnerd,metabot-arcd,metabot
+  local switch_apps=metabot-worker-runnerd,metabot-arcd,metabot
+  if _pm2_app_exists metabot-core; then
+    if _local_core_owned_by_root "$current_root"; then
+      _ensure_local_core_artifacts "$target" || return 1
+      target_apps=metabot-worker-runnerd,metabot-arcd,metabot-core,metabot
+      switch_apps=metabot-worker-runnerd,metabot-arcd,metabot-core,metabot
+      info "Including checkout-owned metabot-core in the protected runtime switch."
+    else
+      warn "Leaving external metabot-core untouched; its PM2 cwd/script is not owned by the Bridge runtime."
+    fi
+  fi
+  local runtime_expectations
+  runtime_expectations="$(_protected_switch_plan "$target" "$switch_apps")" || {
+    error "Could not resolve the expected PM2 runtime before deployment."
+    return 1
+  }
+  local -a state_flags=(
+    --request-id "$request_id" --kind deploy --target-root "$target"
+    --target-apps "$target_apps"
+    --source "$source" --reason "$reason" --resume "$resume"
+    --expectations-json "$runtime_expectations"
+  )
+  [[ -n "$requester_bot" ]] && state_flags+=(--bot "$requester_bot")
+  [[ -n "$requester_chat" ]] && state_flags+=(--chat "$requester_chat")
+  claim="$(_restart_state claim "${state_flags[@]}")" || return 1
+  duplicate="$(printf '%s' "$claim" | _json_field duplicate)"
+  if [[ "$duplicate" == "true" ]]; then
+    result="$claim"
+    if [[ "$wait" == true ]]; then
+      result="$(_wait_restart_terminal_state "$request_id" "$timeout")" || {
+        [[ "$json" == true ]] && printf '%s\n' "$result"
+        return 1
+      }
+    fi
+    [[ "$json" == true ]] && printf '%s\n' "$result" || info "Runtime switch request $request_id is a duplicate; no PM2 action was repeated."
     return 0
   fi
-  [[ "$claim" == "claimed" ]] || { error "Could not claim deployment request"; return 1; }
-  _write_restart_breadcrumb
 
-  local switch_helper="$target/scripts/pm2-atomic-runtime-switch.cjs"
-  if [[ ! -f "$switch_helper" ]]; then
-    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Atomic runtime switch helper is missing at $switch_helper"
+  _restart_state breadcrumb "${state_flags[@]}" >/dev/null
+  _restart_state mark-restarting --request-id "$request_id" --old-pid "$current_pid" >/dev/null
+  export METABOT_RESTART_REQUEST_ID="$request_id"
+  export METABOT_RESTART_REASON="$reason"
+  export METABOT_RESTART_SOURCE="$source"
+  export METABOT_RESTART_RESUME="$resume"
+  export METABOT_BOT_NAME="$requester_bot"
+  export METABOT_CHAT_ID="$requester_chat"
+  if ! result="$(_protected_switch "$target" "$switch_apps")"; then
+    _restart_state mark-failed --request-id "$request_id" --error "PM2 rejected the protected runtime switch; changed apps were rolled back" >/dev/null || true
     return 1
   fi
-  if ! node "$switch_helper" "$target" metabot; then
-    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "PM2 rejected atomic runtime switch for $target"
-    return 1
+  if [[ "$wait" == true ]]; then
+    result="$(_wait_restart_terminal_state "$request_id" "$timeout")" || {
+      [[ "$json" == true ]] && printf '%s\n' "$result"
+      return 1
+    }
+  else
+    result="$(_restart_state get --request-id "$request_id")"
   fi
-  local health_ok=true
-  _wait_bridge_health "$wait_timeout" || health_ok=false
-  [[ "$health_ok" == true ]] && _wait_restart_terminal_state "$METABOT_RESTART_REQUEST_ID" "$wait_timeout" || health_ok=false
-  if [[ "$health_ok" != true ]]; then
-    _mark_restart_request_failed "$METABOT_RESTART_REQUEST_ID" "Deployment did not reach healthy state within ${wait_timeout}s"
-  fi
-  if [[ "$json" == true ]]; then
-    printf '{"ok":%s,"healthOk":%s,"requestId":"%s","runtime":"%s"}\n' \
-      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
-      "$([[ "$health_ok" == true ]] && echo true || echo false)" \
-      "$METABOT_RESTART_REQUEST_ID" "$target"
-  fi
-  [[ "$health_ok" == true ]]
+  [[ "$json" == true ]] && printf '%s\n' "$result" || success "Protected runtime switch submitted for $target (requestId: $request_id)."
 }
+
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
@@ -867,6 +1109,7 @@ cmd_doctor() {
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -890,27 +1133,10 @@ def load_env(path: Path):
         env[k.strip()] = v
     return env
 
-default_env_raw = os.environ.get("METABOT_DEFAULT_ENV_FILE")
-default_env_path = Path(default_env_raw).expanduser() if default_env_raw else None
-default_env_resolved_path = default_env_path.resolve() if default_env_path is not None and default_env_path.exists() else default_env_path
-home_env_path = home / ".env"
-file_env = {}
-if default_env_path is not None:
-    file_env.update(load_env(default_env_path))
-file_env.update(load_env(home_env_path))
+file_env = load_env(home / ".env")
 
 def env(name, default=None):
     return os.environ.get(name) or file_env.get(name) or default
-
-def read_first_line(path: Path):
-    try:
-        for raw in path.read_text(errors="ignore").splitlines():
-            line = raw.strip()
-            if line:
-                return line
-    except Exception:
-        return None
-    return None
 
 def run(cmd, timeout=4):
     try:
@@ -918,20 +1144,6 @@ def run(cmd, timeout=4):
         return {"ok": p.returncode == 0, "code": p.returncode, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
     except Exception as e:
         return {"ok": False, "code": None, "stdout": "", "stderr": str(e)}
-
-def read_text(path):
-    try:
-        return Path(path).read_text(errors="ignore").strip()
-    except Exception:
-        return None
-
-def proc_status_value(key):
-    status = read_text("/proc/self/status") or ""
-    prefix = f"{key}:"
-    for raw in status.splitlines():
-        if raw.startswith(prefix):
-            return raw[len(prefix):].strip()
-    return None
 
 def http_json(url, token=None, timeout=4):
     req = urllib.request.Request(url)
@@ -949,6 +1161,22 @@ def http_json(url, token=None, timeout=4):
         return {"ok": False, "status": e.code, "json": None, "bodyPreview": e.read(300).decode("utf-8", errors="replace")}
     except Exception as e:
         return {"ok": False, "status": None, "json": None, "bodyPreview": str(e)}
+
+def channel_summary(status_json):
+    if not isinstance(status_json, dict):
+        return None
+    channels = status_json.get("channels")
+    if not isinstance(channels, dict):
+        return None
+    items = channels.get("items") if isinstance(channels.get("items"), list) else []
+    return {
+        "total": int(channels.get("total") or 0),
+        "connected": int(channels.get("connected") or 0),
+        "reconnecting": int(channels.get("reconnecting") or 0),
+        "idle": int(channels.get("idle") or 0),
+        "failed": int(channels.get("failed") or 0),
+        "items": items,
+    }
 
 def check(name, ok, code=None, diagnosis="", recommendedAction="", canAutoFix=False, data=None):
     severity = "ok" if ok else "warn"
@@ -971,11 +1199,6 @@ report = {
     "schemaVersion": 1,
     "generatedAt": int(time.time()),
     "metabotHome": str(home),
-    "configFiles": {
-        "defaultEnv": str(default_env_path) if default_env_path is not None else None,
-        "defaultEnvResolved": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
-        "worktreeEnv": str(home_env_path),
-    },
     "checks": checks,
 }
 
@@ -997,74 +1220,103 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
 
-def core_cli_probe(source, entry):
-    entry = Path(entry).expanduser()
-    resolved_entry = entry.resolve() if entry.exists() else entry
-    artifact = None
-    if resolved_entry.as_posix().endswith("/packages/cli/bin/metabot"):
-        artifact = resolved_entry.parent.parent / "dist" / "index.js"
-    ready = entry.is_file() and (artifact is None or artifact.is_file())
-    return {
-        "source": source,
-        "entry": str(entry),
-        "resolvedEntry": str(resolved_entry),
-        "entryExists": entry.is_file(),
-        "artifact": str(artifact) if artifact is not None else None,
-        "artifactExists": artifact.is_file() if artifact is not None else None,
-        "ready": ready,
-    }
+keys_dir = Path(env("METABOT_KEYS_DIR", str(Path.home() / ".metabot" / "keys"))).expanduser()
+key_names = ("worker-capability", "arc-capability", "worker-callback", "arc-callback")
+current_uid = os.geteuid() if hasattr(os, "geteuid") else None
 
-def append_core_cli_candidate(candidates, seen_entries, source, entry):
-    probe = core_cli_probe(source, entry)
-    dedupe_entry = probe["resolvedEntry"]
-    if dedupe_entry in seen_entries:
-        return
-    seen_entries.add(dedupe_entry)
-    candidates.append(probe)
+def key_node_type(file_stat):
+    mode = file_stat.st_mode
+    if stat.S_ISLNK(mode): return "symbolic-link"
+    if stat.S_ISREG(mode): return "regular-file"
+    if stat.S_ISDIR(mode): return "directory"
+    if stat.S_ISFIFO(mode): return "fifo"
+    if stat.S_ISSOCK(mode): return "socket"
+    if stat.S_ISBLK(mode): return "block-device"
+    if stat.S_ISCHR(mode): return "character-device"
+    return "unknown"
 
-explicit_core_cli = os.environ.get("METABOT_CORE_CLI")
-core_cli_candidates = []
-seen_core_cli_entries = set()
-if explicit_core_cli:
-    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "explicit", explicit_core_cli)
-else:
-    append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "worktree", home / "packages/cli/bin/metabot")
-    if default_env_resolved_path is not None:
-        append_core_cli_candidate(
-            core_cli_candidates,
-            seen_core_cli_entries,
-            "default_config_root",
-            default_env_resolved_path.parent / "packages/cli/bin/metabot",
+def key_path_data(path, expected_mode, expected_type):
+    try:
+        file_stat = os.lstat(path)
+        mode = stat.S_IMODE(file_stat.st_mode)
+        is_symlink = stat.S_ISLNK(file_stat.st_mode)
+        node_type = key_node_type(file_stat)
+        node_type_ok = (not is_symlink) and (
+            stat.S_ISDIR(file_stat.st_mode) if expected_type == "directory"
+            else stat.S_ISREG(file_stat.st_mode)
         )
-    append_core_cli_candidate(
-        core_cli_candidates,
-        seen_core_cli_entries,
-        "stable_checkout",
-        Path.home() / "metabot/packages/cli/bin/metabot",
-    )
-    append_core_cli_candidate(
-        core_cli_candidates,
-        seen_core_cli_entries,
-        "sibling_workspace",
-        home / "../metabot-workspace/metabot-core/packages/cli/bin/metabot",
-    )
-    global_core_cli = shutil.which("metabot-core")
-    if global_core_cli:
-        append_core_cli_candidate(core_cli_candidates, seen_core_cli_entries, "path", global_core_cli)
+        return {
+            "path": str(path),
+            "exists": True,
+            "isSymlink": is_symlink,
+            "nodeType": node_type,
+            "nodeTypeOk": node_type_ok,
+            "mode": oct(mode),
+            "permissionsOk": mode == expected_mode,
+            "ownerUid": file_stat.st_uid,
+            "ownerMatches": current_uid is None or file_stat.st_uid == current_uid,
+        }
+    except (FileNotFoundError, NotADirectoryError):
+        return {"path": str(path), "exists": False, "nodeTypeOk": False, "permissionsOk": False, "ownerMatches": False}
+    except Exception as e:
+        return {"path": str(path), "exists": True, "nodeTypeOk": False, "permissionsOk": False, "ownerMatches": False, "error": str(e)}
 
-selected_core_cli = next((candidate for candidate in core_cli_candidates if candidate["ready"]), None)
-check("core_cli_artifact", selected_core_cli is not None,
-      "core_cli_unbuilt" if selected_core_cli is None else "ok",
-      f"Feature CLI is ready at {selected_core_cli['entry']}." if selected_core_cli else "No runnable feature CLI with its required dist artifact was found.",
-      f"Build the worktree CLI with: cd {home} && npm ci && npm run build -w @xvirobotics/cli; or set METABOT_DEFAULT_ENV_FILE to a ready checkout's .env.",
+def safe_key_path(data):
+    return all((data.get("exists"), data.get("nodeTypeOk"), data.get("permissionsOk"), data.get("ownerMatches")))
+
+key_dir_data = key_path_data(keys_dir, 0o700, "directory")
+key_pairs = []
+pair_check_source = """
+const c=require('node:crypto'),f=require('node:fs');
+const nofollow=typeof f.constants.O_NOFOLLOW==='number'?f.constants.O_NOFOLLOW:0;
+const nonblock=typeof f.constants.O_NONBLOCK==='number'?f.constants.O_NONBLOCK:0;
+function readKey(path){
+  const fd=f.openSync(path,f.constants.O_RDONLY|nofollow|nonblock);
+  try { const s=f.fstatSync(fd); if(!s.isFile()) throw new Error('unsafe key node type'); return f.readFileSync(fd); }
+  finally { f.closeSync(fd); }
+}
+const b=Buffer.from('metabot-ed25519-keypair-check-v1');
+const s=c.sign(null,b,readKey(process.argv[1]));
+process.exit(c.verify(null,b,readKey(process.argv[2]),s)?0:1);
+"""
+for key_name in key_names:
+    private_data = key_path_data(keys_dir / f"{key_name}.key", 0o600, "regular-file")
+    public_data = key_path_data(keys_dir / f"{key_name}.pub", 0o600, "regular-file")
+    previous_data = key_path_data(keys_dir / f"{key_name}.pub.prev", 0o600, "regular-file")
+    pair_result = {"ok": False, "stderr": "missing key file"}
+    if safe_key_path(key_dir_data) and safe_key_path(private_data) and safe_key_path(public_data):
+        pair_result = run([
+            "node", "-e", pair_check_source,
+            private_data["path"], public_data["path"],
+        ], timeout=3)
+    previous_ok = (not previous_data["exists"]) or safe_key_path(previous_data)
+    pair_ok = all((
+        safe_key_path(private_data), safe_key_path(public_data),
+        previous_ok, pair_result["ok"],
+    ))
+    key_pairs.append({
+        "name": key_name,
+        "ok": pair_ok,
+        "pairMatches": pair_result["ok"],
+        "privateKey": private_data,
+        "publicKey": public_data,
+        "previousPublicKey": previous_data,
+        **({"pairError": pair_result["stderr"]} if not pair_result["ok"] else {}),
+    })
+execution_keys_ok = bool(
+    safe_key_path(key_dir_data)
+    and all(pair["ok"] for pair in key_pairs)
+)
+check("execution_keys", execution_keys_ok,
+      "execution_keys_unavailable_or_unsafe" if not execution_keys_ok else "ok",
+      "All execution keypairs are present, owner-matched, mode-safe, and corresponding." if execution_keys_ok else "Execution key material is missing, unsafe, or mismatched; worker/ARC capabilities and callbacks fail closed.",
+      "Re-run install.sh to create missing TOFU keypairs; repair partial/mismatched ownership or permissions manually without replacing trusted keys.",
       False,
       {
-          "selected": selected_core_cli,
-          "candidates": core_cli_candidates,
-          "configRoot": str(default_env_resolved_path.parent) if default_env_resolved_path is not None else str(home),
-          "configuredDefaultEnv": str(default_env_path) if default_env_path is not None else None,
-          "resolvedDefaultEnv": str(default_env_resolved_path) if default_env_resolved_path is not None else None,
-          "explicitOverride": bool(explicit_core_cli),
+          "path": str(keys_dir),
+          "trustModel": "TOFU scope hygiene; not containment against arbitrary same-UID code",
+          "directory": key_dir_data,
+          "pairs": key_pairs,
       })
 
 pm2 = shutil.which("pm2")
@@ -1091,7 +1343,7 @@ if pm2:
             pm2_data["parseError"] = str(e)
 check("pm2_runtime", pm2_ok, "pm2_wrong_cwd_or_offline" if not pm2_ok else "ok",
       "PM2 metabot is online and running from METABOT_HOME." if pm2_ok else "PM2 metabot is missing, offline, or running from a different cwd.",
-      "For the same runtime use 'metabot restart --wait'. To switch runtimes, run 'metabot deploy-runtime --runtime $METABOT_HOME' from SSH or another controller outside the MetaBot process tree. Never use delete+start from a Bot/Agent/Worker.",
+      "Run from the desired runtime: pm2 delete metabot; cd $METABOT_HOME; pm2 start ecosystem.config.cjs --update-env.",
       True,
       pm2_data)
 
@@ -1105,32 +1357,24 @@ check("bridge_health", bridge_health["ok"], "bridge_health_failed" if not bridge
       False,
       {"url": metabot_url, "status": bridge_health["status"], "response": bridge_health["json"] or bridge_health["bodyPreview"]})
 
+bridge_status = http_json(f"{metabot_url.rstrip('/')}/api/status", api_secret)
+channels = channel_summary(bridge_status["json"])
+channels_ok = bool(channels is not None) and channels["failed"] == 0 and channels["reconnecting"] == 0 and channels["connected"] == channels["total"]
+check("channel_connections", channels_ok,
+      "ok" if channels_ok else ("channel_connections_unhealthy" if channels is not None else "channel_status_unavailable"),
+      "Lark/Feishu channel connections are healthy." if channels_ok else "One or more Lark/Feishu channels are disconnected, reconnecting, or unavailable.",
+      "Check the local network/proxy and configured Lark/Feishu WebSocket state in /api/status; MetaBot should reconnect automatically.",
+      False,
+      channels or {"status": bridge_status["status"]})
+
 core_url = env("METABOT_CORE_URL", "http://localhost:9200").rstrip("/")
-core_token_file = Path.home() / ".metabot-core" / "token"
-core_token = env("METABOT_CORE_TOKEN") or read_first_line(core_token_file)
-core_token_present = bool(core_token)
+core_token_present = bool(env("METABOT_CORE_TOKEN") or (Path.home() / ".metabot-core" / "token").exists())
 core_health = http_json(f"{core_url}/health")
 check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["ok"] else "ok",
       "metabot-core health endpoint is reachable." if core_health["ok"] else "metabot-core health endpoint is not reachable.",
       "Check VPN/network and METABOT_CORE_URL.",
       False,
       {"url": core_url, "status": core_health["status"], "tokenPresent": core_token_present, "response": core_health["json"] or core_health["bodyPreview"]})
-
-if core_token:
-    core_memory = http_json(f"{core_url}/api/memory/folders/tree", core_token)
-    core_memory_ok = core_memory["ok"]
-    core_memory_code = "ok" if core_memory_ok else ("core_memory_auth_failed" if core_memory["status"] in (401, 403) else "core_memory_unreachable")
-    check("metabot_core_memory", core_memory_ok, core_memory_code,
-          "MetaMemory API is reachable with the configured metabot-core token." if core_memory_ok else "MetaMemory API is not reachable with the configured metabot-core token.",
-          "Check METABOT_CORE_TOKEN, token ACL, and METABOT_CORE_URL.",
-          False,
-          {"url": f"{core_url}/api/memory/folders/tree", "status": core_memory["status"], "response": core_memory["json"] or core_memory["bodyPreview"]})
-else:
-    check("metabot_core_memory", False, "core_token_missing",
-          "No metabot-core token is configured, so MetaMemory cannot be used.",
-          f"Set METABOT_CORE_TOKEN in {home / '.env'} or write the token to {core_token_file}.",
-          False,
-          {"url": f"{core_url}/api/memory/folders/tree", "tokenFile": str(core_token_file)})
 
 bots_data = []
 bots_path = home / "bots.json"
@@ -1175,35 +1419,7 @@ check("voice_defaults", voice_ok, "voice_defaults_missing" if not voice_ok else 
       False,
       voice_default)
 
-# Mirror of resolveCodexPath() in src/engines/codex/executor.ts. doctor used to
-# consult only PATH, so a Codex the bridge runs happily from ~/.local/bin was
-# reported as `codex_missing` whenever doctor ran from a shell without that
-# directory on PATH — a false alarm that also dragged codex_agent_features down.
-CODEX_FALLBACK_CANDIDATES = (
-    "~/.local/bin/codex",
-    "/usr/local/bin/codex",
-    "/usr/bin/codex",
-    "/opt/homebrew/bin/codex",
-    "~/.npm-global/bin/codex",
-)
-
-def resolve_codex_executable(explicit=None, which=None, exists=None):
-    which = which or shutil.which
-    exists = exists or (lambda p: Path(p).exists())
-    if explicit and exists(explicit):
-        return explicit
-    found = which("codex")
-    if found:
-        return found
-    if os.name == "nt":
-        return None
-    for candidate in CODEX_FALLBACK_CANDIDATES:
-        expanded = str(Path(candidate).expanduser())
-        if exists(expanded):
-            return expanded
-    return None
-
-codex_path = resolve_codex_executable(env("CODEX_EXECUTABLE_PATH"))
+codex_path = env("CODEX_EXECUTABLE_PATH") or shutil.which("codex")
 codex_home = Path(env("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 codex_config = codex_home / "config.toml"
 
@@ -1293,67 +1509,6 @@ check("codex_agent_features", codex_agent_features_ok,
           "mcpServerCount": codex_data["mcpServerCount"],
       })
 
-bwrap_path = shutil.which("bwrap")
-bwrap_version = run([bwrap_path, "--version"], timeout=3) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
-unshare_path = shutil.which("unshare")
-unshare_user = run([unshare_path, "-Ur", "true"], timeout=3) if unshare_path else {"ok": False, "stdout": "", "stderr": "unshare not found"}
-bwrap_smoke = run([
-    bwrap_path,
-    "--unshare-user",
-    "--uid", "0",
-    "--gid", "0",
-    "--ro-bind", "/", "/",
-    "--proc", "/proc",
-    "--dev", "/dev",
-    "--tmpfs", "/tmp",
-    "/bin/sh", "-lc", "true",
-], timeout=5) if bwrap_path else {"ok": False, "stdout": "", "stderr": "bwrap not found"}
-cap_eff = proc_status_value("CapEff")
-try:
-    has_cap_sys_admin = bool(int(cap_eff or "0", 16) & (1 << 21))
-except Exception:
-    has_cap_sys_admin = None
-# bwrap file permissions: mode octal string, setuid bit, and Linux capabilities via getcap
-bwrap_filemode = None
-bwrap_setuid = None
-if bwrap_path:
-    try:
-        st = os.stat(bwrap_path)
-        bwrap_filemode = oct(st.st_mode)
-        bwrap_setuid = bool(st.st_mode & 0o4000)
-    except Exception:
-        pass
-getcap_path = shutil.which("getcap")
-bwrap_capabilities = None
-if bwrap_path and getcap_path:
-    _gc = run([getcap_path, bwrap_path], timeout=3)
-    bwrap_capabilities = (_gc["stdout"] or _gc["stderr"] or "").strip() or None
-codex_sandbox_data = {
-    "bwrap": bwrap_path,
-    "bwrapVersion": bwrap_version["stdout"] or bwrap_version["stderr"],
-    "bwrapSmokeOk": bwrap_smoke["ok"],
-    "bwrapSmokeStderr": bwrap_smoke["stderr"][:500],
-    "bwrapFileMode": bwrap_filemode,
-    "bwrapSetuid": bwrap_setuid,
-    "bwrapCapabilities": bwrap_capabilities,
-    "unshare": unshare_path,
-    "unshareUserOk": unshare_user["ok"],
-    "unshareUserStderr": unshare_user["stderr"][:500],
-    "kernelUnprivilegedUsernsClone": read_text("/proc/sys/kernel/unprivileged_userns_clone"),
-    "userMaxUserNamespaces": read_text("/proc/sys/user/max_user_namespaces"),
-    "seccomp": proc_status_value("Seccomp"),
-    "apparmor": read_text("/proc/self/attr/current"),
-    "cgroup": read_text("/proc/1/cgroup"),
-    "capEff": cap_eff,
-    "hasCapSysAdmin": has_cap_sys_admin,
-}
-check("codex_sandbox_namespaces", bwrap_smoke["ok"],
-      "ok" if bwrap_smoke["ok"] else ("bwrap_missing" if not bwrap_path else "bwrap_namespace_unavailable"),
-      "Codex read-only/workspace-write sandbox namespaces are available." if bwrap_smoke["ok"] else "Codex read-only/workspace-write sandbox namespaces are not available on this host/container.",
-      "Use Codex danger-full-access/bypass for this runtime, or run the container/host with user namespaces allowed by seccomp/AppArmor and kernel policy, then re-run metabot doctor --json.",
-      False,
-      codex_sandbox_data)
-
 team_base = None
 for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
     if candidate and "teamclaude" in candidate:
@@ -1373,92 +1528,9 @@ check("teamclaude", team_ok, "teamclaude_not_configured_or_invalid" if not team_
       False,
       team_data)
 
-# --- Bundled skill deployment (MEM-014 pillar 1) ---------------------------
-# The installer deploys four bundled skills (metabot, metabot-team,
-# metabot-todos, voice) into
-# three skill roots. A host that never ran install.sh — or whose $HOME was reset
-# — may be missing them, which silently strips the `metabot` skill from a bot.
-# `metabot repair-skills` redeploys them; flag the gap here so agents can heal it.
-try:
-    home_dir = Path.home()
-except Exception:
-    home_dir = Path(os.path.expanduser("~"))
-bundled_skill_names = ["metabot", "metabot-team", "metabot-todos", "voice"]
-required_skill = "metabot"
-required_skill_names = ["metabot", "metabot-todos"]
-skill_roots = {
-    "claude": home_dir / ".claude" / "skills",
-    "codex": codex_home / "skills",
-    "agents": home_dir / ".agents" / "skills",
-}
-skill_root_report = {}
-for label, root in skill_roots.items():
-    present = {}
-    for name in bundled_skill_names:
-        # A skill is "in place" when its SKILL.md exists under the root.
-        present[name] = (root / name / "SKILL.md").is_file()
-    skill_root_report[label] = {
-        "path": str(root),
-        "exists": root.is_dir(),
-        "skills": present,
-    }
-missing_required_roots = [
-    label for label, r in skill_root_report.items()
-    if any(not r["skills"].get(name) for name in required_skill_names)
-]
-bundled_skills_ok = not missing_required_roots
-check("bundled_skills", bundled_skills_ok,
-      "ok" if bundled_skills_ok else "bundled_skill_missing",
-      ("Required skills " + ", ".join(required_skill_names) + " are present in all skill roots (claude, codex, agents).")
-      if bundled_skills_ok else
-      ("One or more required skills (" + ", ".join(required_skill_names) + ") are missing from skill root(s): " + ", ".join(missing_required_roots) + "."),
-      "Run `metabot repair-skills` to redeploy bundled skills (metabot, metabot-team, metabot-todos, voice) into ~/.claude/skills, $CODEX_HOME/skills, and ~/.agents/skills.",
-      True,
-      {"requiredSkill": required_skill, "requiredSkills": required_skill_names, "bundledSkills": bundled_skill_names, "roots": skill_root_report})
-
-# --- Global rule files / instruction-loading model (MEM-014 pillar 5) ------
-# $METABOT_HOME/CLAUDE.md is the global rule baseline injected into every bot's
-# system prompt (see src/engines/home-instructions.ts). Report whether it — and
-# its AGENTS.md twin — exist and are readable, and describe the precedence model.
-def _readable(p):
-    try:
-        return p.is_file() and os.access(str(p), os.R_OK)
-    except Exception:
-        return False
-home_claude = home / "CLAUDE.md"
-home_agents = home / "AGENTS.md"
-home_claude_ok = _readable(home_claude)
-home_agents_ok = _readable(home_agents)
-home_instructions_ok = home_claude_ok and home_agents_ok
-_missing_home = []
-if not home_claude_ok:
-    _missing_home.append("CLAUDE.md")
-if not home_agents_ok:
-    _missing_home.append("AGENTS.md")
-check("home_instructions", home_instructions_ok,
-      "ok" if home_instructions_ok else "home_instructions_missing",
-      "Global rule files exist and are readable at $METABOT_HOME (CLAUDE.md + AGENTS.md)."
-      if home_instructions_ok else
-      ("Global rule file(s) missing or unreadable at " + str(home) + ": " + ", ".join(_missing_home) + "."),
-      "Ensure $METABOT_HOME/CLAUDE.md and AGENTS.md exist (install.sh runs ensure_home_instructions); global rules are injected into every bot from here.",
-      False,
-      {
-          "metabotHome": str(home),
-          "claudeMd": {"path": str(home_claude), "readable": home_claude_ok},
-          "agentsMd": {"path": str(home_agents), "readable": home_agents_ok},
-          "instructionModel": (
-              "Global baseline = $METABOT_HOME/CLAUDE.md (+AGENTS.md), injected into every bot's "
-              "system prompt. Local = the bot workDir's CLAUDE.md/AGENTS.md, auto-loaded by the "
-              "engine from the session cwd upward. On conflict, local (working directory) wins over global."
-          ),
-      })
-
-try:
-    report["cwd"] = os.getcwd()
-except Exception:
-    report["cwd"] = None
-
-report["ok"] = all(c.get("ok") for c in checks if c["name"] in ("metabot_home", "pm2_runtime", "bridge_health"))
+report["ok"] = all(c.get("ok") for c in checks if c["name"] in (
+    "metabot_home", "pm2_runtime", "bridge_health", "channel_connections"
+))
 report["summary"] = {
     "ok": sum(1 for c in checks if c["ok"]),
     "warn": sum(1 for c in checks if not c["ok"]),
@@ -1470,7 +1542,6 @@ if want_json:
 else:
     print(f"MetaBot doctor: {'OK' if report['ok'] else 'WARN'}")
     print(f"  METABOT_HOME: {home}")
-    print(f"  cwd: {report.get('cwd')}")
     for c in checks:
         mark = "✓" if c["ok"] else "!"
         print(f"  {mark} {c['name']}: {c['code']}")
@@ -1480,221 +1551,53 @@ else:
 PY
 }
 
-# metabot repair-skills — self-heal entry point for hosts that never ran
-# install.sh (or whose $HOME skill roots were reset). Redeploys the four bundled
-# skills (metabot, metabot-team, metabot-todos, voice) into ~/.claude/skills, $CODEX_HOME/skills,
-# and ~/.agents/skills. Idempotent. This intentionally reimplements install.sh's
-# deploy_bundled_skills (same four sources + roots + idempotent cp) so it stays
-# free of installer side effects — it NEVER restarts services or edits .env.
-# Keep the source list in sync with deploy_bundled_skills in install.sh.
-cmd_repair_skills() {
-  local dry_run=false
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run|-n) dry_run=true; shift ;;
-      --help|-h)
-        echo "Usage: metabot repair-skills [--dry-run]"
-        echo "  Redeploy bundled skills (metabot, metabot-team, metabot-todos, voice) into"
-        echo "  ~/.claude/skills, \$CODEX_HOME/skills, and ~/.agents/skills."
-        echo "  Idempotent; does not restart services or edit .env."
-        return 0
-        ;;
-      *)
-        error "Unknown repair-skills option: $1"
-        echo "  Usage: metabot repair-skills [--dry-run]"
-        return 1
-        ;;
-    esac
-  done
-
-  local skills_dir="$HOME/.claude/skills"
-  local codex_home_dir="${CODEX_HOME:-$HOME/.codex}"
-  local codex_skills_dir="$codex_home_dir/skills"
-  local agents_skills_dir="$HOME/.agents/skills"
-
-  # Sentinel: bail loudly on a stale/incomplete checkout, never a false success.
-  local sentinel="$METABOT_HOME/packages/skills/metabot/SKILL.md"
-  if [[ ! -f "$sentinel" ]]; then
-    error "Bundled skill source not found at: $sentinel"
-    error "Your $METABOT_HOME checkout appears to be stale or incomplete."
-    error "Try: cd $METABOT_HOME && git fetch origin && git reset --hard origin/main"
-    return 1
-  fi
-
-  # Keep this list in sync with deploy_bundled_skills() in install.sh.
-  local sources=(
-    "metabot:$METABOT_HOME/packages/skills/metabot"
-    "metabot-team:$METABOT_HOME/packages/skills/metabot-team"
-    "metabot-todos:$METABOT_HOME/packages/skills/metabot-todos"
-    "voice:$METABOT_HOME/src/skills/voice"
-  )
-
-  local root spec skill src
-  for root in "$skills_dir" "$codex_skills_dir" "$agents_skills_dir"; do
-    for spec in "${sources[@]}"; do
-      skill="${spec%%:*}"
-      src="${spec#*:}"
-      if [[ ! -d "$src" ]]; then
-        error "Bundled skill source missing: $src"
-        return 1
-      fi
-      if [[ "$dry_run" == true ]]; then
-        info "[dry-run] would install $skill → $root/$skill"
-        continue
-      fi
-      mkdir -p "$root/$skill"
-      if ! cp -r "$src/." "$root/$skill/"; then
-        error "Failed to copy $skill into $root/$skill"
-        return 1
-      fi
-      success "$skill installed → $root/$skill"
-    done
-  done
-
-  if [[ "$dry_run" == true ]]; then
-    info "Dry run complete — no files written. Re-run without --dry-run to apply."
-  else
-    success "Bundled skills repaired in ~/.claude/skills, \$CODEX_HOME/skills, ~/.agents/skills."
-  fi
-  return 0
-}
-
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
-# A source-tree launcher is usable only when its dist entry exists. This matters
-# when the bridge runs from a Git worktree that intentionally has not been built.
-_expand_user_path() {
-  local value="$1"
-  case "$value" in
-    "~"|"~/"*) printf '%s\n' "${HOME}${value#\~}" ;;
-    *) printf '%s\n' "$value" ;;
-  esac
-}
-
-_canonical_existing_path() {
-  local path_value
-  path_value="$(_expand_user_path "$1")"
-  if [[ -e "$path_value" || -L "$path_value" ]]; then
-    if command -v readlink &>/dev/null; then
-      readlink -f "$path_value" 2>/dev/null || printf '%s\n' "$path_value"
-    else
-      printf '%s\n' "$path_value"
-    fi
-  else
-    printf '%s\n' "$path_value"
-  fi
-}
-
-_core_cli_is_ready() {
-  local candidate="$1"
-  local expanded
-  expanded="$(_expand_user_path "$candidate")"
-  [[ -f "$expanded" ]] || return 1
-  local resolved
-  resolved="$(_canonical_existing_path "$expanded")"
-  case "$resolved" in
-    */packages/cli/bin/metabot)
-      local package_root="${resolved%/bin/metabot}"
-      [[ -f "$package_root/dist/index.js" ]] || return 1
-      ;;
-  esac
-  return 0
-}
-
-_core_cli_default_config_root() {
-  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
-  if [[ -n "$default_env" ]]; then
-    default_env="$(_canonical_existing_path "$default_env")"
-    dirname "$default_env"
-  fi
-  return 0
-}
-
-# Order: explicit override > ready in-tree CLI > ready default-config checkout
-# > ready stable checkout > sibling workspace > npm-global on PATH.
+# Order: explicit override > in-tree monorepo > sibling workspace > npm-global on PATH.
 _resolve_core_cli() {
-  local core_cli_candidates=()
-  local candidate
-  _append_core_cli_candidate() {
-    candidate="$1"
-    [[ -n "$candidate" ]] || return 0
-    candidate="$(_canonical_existing_path "$candidate")"
-    local existing
-    for existing in "${core_cli_candidates[@]}"; do
-      [[ "$existing" == "$candidate" ]] && return 0
-    done
-    core_cli_candidates+=("$candidate")
-  }
-  if [[ -n "${METABOT_CORE_CLI:-}" ]]; then
-    local explicit_core_cli
-    explicit_core_cli="$(_canonical_existing_path "$METABOT_CORE_CLI")"
-    if _core_cli_is_ready "$explicit_core_cli"; then
-      echo "$explicit_core_cli"; return 0
-    fi
-    echo "Explicit METABOT_CORE_CLI is not runnable or does not have a built dist entry: $METABOT_CORE_CLI (resolved: $explicit_core_cli)" >&2
-    return 2
+  if [[ -n "${METABOT_CORE_CLI:-}" && -x "$METABOT_CORE_CLI" ]]; then
+    echo "$METABOT_CORE_CLI"; return 0
   fi
   # In-tree (monorepo): packages/cli is shipped alongside this script.
   local intree="$METABOT_HOME/packages/cli/bin/metabot"
-  _append_core_cli_candidate "$intree"
-  # Worktree deployments commonly share an env/config file with a stable,
-  # already-built checkout. Use its CLI code without deriving backend config
-  # from that code path.
-  local config_root
-  config_root="$(_core_cli_default_config_root)"
-  local config_cli="${config_root:+$config_root/packages/cli/bin/metabot}"
-  _append_core_cli_candidate "$config_cli"
-  local stable="$HOME/metabot/packages/cli/bin/metabot"
-  _append_core_cli_candidate "$stable"
+  if [[ -f "$intree" ]]; then
+    echo "$intree"; return 0
+  fi
   # Sibling workspace (legacy two-repo layout — kept during migration).
   local ws="$METABOT_HOME/../metabot-workspace/metabot-core/packages/cli/bin/metabot"
-  _append_core_cli_candidate "$ws"
+  if [[ -f "$ws" ]]; then
+    echo "$ws"; return 0
+  fi
   # npm-linked global: a `metabot-core` bin on PATH (NOT this script).
   local g
   g="$(command -v metabot-core 2>/dev/null || true)"
-  _append_core_cli_candidate "$g"
-  for candidate in "${core_cli_candidates[@]}"; do
-    if _core_cli_is_ready "$candidate"; then
-      echo "$candidate"; return 0
-    fi
-  done
+  if [[ -n "$g" ]]; then echo "$g"; return 0; fi
   return 1
-}
-
-_load_core_cli_config() {
-  # Keep code resolution separate from backend selection. Explicit process env
-  # wins; otherwise worktree .env overrides the shared default env file.
-  local default_env="${METABOT_DEFAULT_ENV_FILE:-}"
-  default_env="$(_expand_user_path "$default_env")"
-  local worktree_env="$METABOT_HOME/.env"
-  local k
-  for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
-    [[ -n "${!k:-}" ]] && continue
-    local value=""
-    local envf
-    for envf in "$default_env" "$worktree_env"; do
-      [[ -n "$envf" && -f "$envf" ]] || continue
-      local line
-      line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
-      if [[ -n "$line" ]]; then
-        value="$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
-      fi
-    done
-    [[ -n "$value" ]] && export "${k}=$value"
-  done
-  return 0
 }
 
 cmd_delegate() {
   local core_cli
   if ! core_cli="$(_resolve_core_cli)"; then
-    error "'metabot $1' needs the metabot-core CLI, which isn't installed here." >&2
+    error "'metabot $1' needs the metabot-core CLI, which isn't installed here."
     echo "  Fix one of:" >&2
-    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npm run build -w @xvirobotics/cli" >&2
-    echo "    - Or set METABOT_DEFAULT_ENV_FILE to the .env of a ready checkout." >&2
+    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npx tsc -b" >&2
     echo "    - Or point at it:        export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot" >&2
     exit 1
   fi
-  _load_core_cli_config
+  # Feed METABOT_CORE_URL / METABOT_CORE_TOKEN from the bridge .env WITHOUT
+  # clobbering values already set in the environment.
+  local envf="$METABOT_HOME/.env"
+  if [[ -f "$envf" ]]; then
+    local k
+    for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
+      if [[ -z "${!k:-}" ]]; then
+        local line
+        line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
+        if [[ -n "$line" ]]; then
+          export "${k}=$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+        fi
+      fi
+    done
+  fi
   exec node "$core_cli" "$@"
 }
 
@@ -1704,69 +1607,28 @@ cmd_bridge_api() {
   local cmd="$1"; shift 2>/dev/null || true
   case "$cmd" in
     bots|b)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots" | _json
+      _bridge_scoped_read "/api/bots" | _json
       ;;
     bot)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
       ;;
     talk|t)
-      local async=false send_cards=true wait_ms="${METABOT_TALK_WAIT_MS:-25000}" wait_ms_set=false
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --async)
-            async=true
-            if [[ "$wait_ms_set" != true ]]; then wait_ms=""; fi
-            shift ;;
-          --sync)
-            async=false; wait_ms=""; wait_ms_set=true; shift ;;
-          --no-cards)
-            send_cards=false; shift ;;
-          --wait-ms)
-            wait_ms="${2:-}"; wait_ms_set=true; shift 2 ;;
-          --)
-            shift; break ;;
-          -*)
-            echo "Unknown metabot talk option: $1" >&2
-            echo "Usage: metabot talk [--async|--sync] [--no-cards] [--wait-ms N] [peer/]<botName> <chatId> <prompt>" >&2
-            exit 1 ;;
-          *)
-            break ;;
-        esac
-      done
-      local bot="${1:-}" chat="${2:-}"
-      if [[ $# -ge 2 ]]; then shift 2; fi
+      local bot="$1" chat="$2"; shift 2 2>/dev/null || true
       local prompt="$*"
       if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${prompt:-}" ]]; then
-        echo "Usage: metabot talk [--async|--sync] [--no-cards] [--wait-ms N] [peer/]<botName> <chatId> <prompt>"
+        echo "Usage: metabot talk [peer/]<botName> <chatId> <prompt>"
         echo "  Examples:"
         echo "    metabot talk mybot chat123 'fix the bug'"
-        echo "    metabot talk --sync mybot chat123 'wait until complete'"
-        echo "    metabot talk --async --no-cards mybot private-chat 'run privately'"
-        echo "    metabot talk --wait-ms 25000 mybot chat123 'return fast or give me a task id'"
         echo "    metabot talk alice/backend-bot chat123 'deploy to staging'"
         exit 1
       fi
       python3 -c "
 import json, sys
-payload = {'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': sys.argv[4] == 'true'}
-if sys.argv[5] == 'true':
-    payload['async'] = True
-if sys.argv[6]:
-    payload['waitMs'] = int(sys.argv[6])
-print(json.dumps(payload))
-" "$bot" "$chat" "$prompt" "$send_cards" "$async" "$wait_ms" | \
+print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': True}))
+" "$bot" "$chat" "$prompt" | \
       curl -s -X POST "$METABOT_URL/api/talk" \
         -H "$METABOT_AUTH" -H "Content-Type: application/json" \
         -d @-
-      ;;
-    talk-status|ts)
-      local task_id="${1:-}"
-      if [[ -z "$task_id" ]]; then
-        echo "Usage: metabot talk-status <taskId>"
-        exit 1
-      fi
-      curl -s --connect-timeout 10 --max-time 30 \
-        -H "$METABOT_AUTH" "$METABOT_URL/api/talk/$task_id" | _json
       ;;
     schedule|sched|sc)
       local subcmd="${1:-list}"; shift 2>/dev/null || true
@@ -1832,7 +1694,7 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys
       local subcmd="${1:-list}"; shift 2>/dev/null || true
       case "$subcmd" in
         list|ls)
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+          _bridge_scoped_read "/api/peers" | _json
           ;;
         add|a)
           local pname="$1" purl="$2" psecret="${3:-}"
@@ -1869,10 +1731,10 @@ print(json.dumps(body))
       esac
       ;;
     stats)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/stats" | _json
+      _bridge_scoped_read "/api/stats" | _json
       ;;
     metrics|m)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/metrics"
+      _bridge_scoped_read "/api/metrics"
       ;;
     voice|v)
       local subcmd="${1:-help}"; shift 2>/dev/null || true
@@ -1999,6 +1861,7 @@ print(json.dumps(body))
     teams|team)
       python3 - "$METABOT_URL" "${_api_secret:-changeme}" "$@" <<'PY'
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -2012,32 +1875,18 @@ argv = sys.argv[3:]
 def usage():
     print("""metabot teams - MetaBot Agent Teams
   metabot teams list
-  metabot teams create <team> [--description text] [--actor-role admin|user|pm]
-  metabot teams delete <team> [--actor-role admin|user|pm]
+  metabot teams create <team> [--description text]
+  metabot teams delete <team>
   metabot teams status <team> [--summary|--plain]
-  metabot teams bind <team> <chatId> [--display] [--actor-role admin|user|pm]
-  metabot teams start|stop <team> [--actor-role admin|user|pm]
-  metabot teams activity <team> [--agent name] [--run-id id] [--task-id id] [--chat chatId] [--source name] [--limit n] [--summary|--plain]
+  metabot teams bind <team> <chatId> [--display]
+  metabot teams start|stop <team>
   metabot teams dispatch <team> <agent> <subject> [--description text] [--message text] [--from name] [--plain]
   metabot teams next <team> <agent> [--read] [--summary|--plain]
   metabot teams watch <team> [--interval sec] [--count n] [--summary|--plain]
-  metabot teams templates list [name]
-  metabot teams templates export <name> [--version n]
-  metabot teams templates diff <name> --from n [--to n]
-  metabot teams templates import <json> [--source name] [--actor-role admin|user|pm]
-  metabot teams proposals list [--status pending|approved|rejected]
-  metabot teams proposals create [template|ruleset] <json> [--summary text] [--by name] [--role admin|user|pm|manager|agent]
-  metabot teams proposals approve <id> [--by name] [--actor-role admin|user|pm] [--reason text]
-  metabot teams proposals reject <id> [--by name] [--actor-role admin|user|pm] [--reason text]
-  metabot teams instances list [--template name]
-  metabot teams instances resolve <template> [--chat chatId|--project projectId|--global] [--pm-bot name] [--actor-role admin|user|pm]
-  metabot teams rules list [name]
-  metabot teams rules set <name> --scope scope --rule text [--actor-role admin|user|pm]
-  metabot teams rules context --ref name[@version] [--rule text]
   metabot teams agents list <team>
-  metabot teams agents spawn <team> <name> [--role r] [--actor-role admin|user|pm] [--engine claude|codex|kimi] [--model m] [--reasoning-effort e] [--approval-policy p] [--sandbox s] [--timeout-ms n] [--idle-timeout-ms n] [--allowed-tools a,b] [--prompt p]
-  metabot teams agents stop <team> <name> [--actor-role admin|user|pm]
-  metabot teams agents delete <team> <name> [--actor-role admin|user|pm]
+  metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--prompt p]
+  metabot teams agents stop <team> <name>
+  metabot teams agents delete <team> <name>
   metabot teams send <team> <to> <message> [--from name] [--summary text]
   metabot teams inbox <team> <name> [--unread] [--read] [--summary|--plain]
   metabot teams tasks list <team> [--summary|--plain]
@@ -2051,8 +1900,15 @@ def usage():
   metabot teams runs list <team> [--summary|--plain]
   metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
   metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
-  metabot teams runs output <team> <runId>
-  metabot teams runs stop <team> <runId> [--actor-role admin|user|pm]""")
+  metabot teams runs output|stop <team> <runId>
+  metabot teams templates list [name]
+  metabot teams templates publish <name> --body <json>
+  metabot teams rules list [name]
+  metabot teams rules publish <name> --scope <scope> --rules <json>
+  metabot teams instances list
+  metabot teams instances resolve <template> [--version n] [--scope chat|project|global] [--scope-key key] [--global] [--pm-bot bot]
+  metabot teams instances start|stop|delete <instanceId>
+  metabot teams audit [--instance instanceId] [--limit n]""")
 
 def parse(args):
     pos, flags, i = [], {}, 0
@@ -2078,15 +1934,18 @@ def parse(args):
             i += 1
     return pos, flags
 
-def actor_role(flags):
-    return flags.get("actor-role") or flags.get("as-role") or flags.get("role")
-
 def req_data(method, path, body=None):
     if isinstance(body, dict):
         keep_null = set(body.pop("__keepNull", []))
         body = {k: v for k, v in body.items() if v is not None or k in keep_null}
     data = None if body is None else json.dumps(body).encode()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    capability_headers = {
+        "X-MetaBot-Team-Capability": os.environ.get("METABOT_TEAM_CAPABILITY"),
+        "X-MetaBot-Bot-Name": os.environ.get("METABOT_BOT_NAME"),
+        "X-MetaBot-Chat-Id": os.environ.get("METABOT_CHAT_ID") or os.environ.get("METABOT_CHAT"),
+    }
+    headers.update({k: v for k, v in capability_headers.items() if v})
     if body is not None:
         headers["Content-Type"] = "application/json"
     r = urllib.request.Request(base + path, data=data, headers=headers, method=method)
@@ -2134,23 +1993,6 @@ def parse_number_list(value):
         if num > 0:
             nums.append(num)
     return nums or None
-
-def array_flag(flags, name):
-    value = flags.get(name)
-    if not isinstance(value, str):
-        return []
-    return [part.strip() for part in value.split(",") if part.strip()]
-
-def parse_rule_ref(value):
-    name, _, version_raw = value.partition("@")
-    ref = {"name": name}
-    try:
-        version = int(version_raw) if version_raw else None
-    except Exception:
-        version = None
-    if version and version > 0:
-        ref["version"] = version
-    return ref
 
 def default_agent_name():
     import os
@@ -2205,24 +2047,6 @@ def format_runs(body):
     lines.extend(f"- {run_line(run)}" for run in runs[:12])
     if len(runs) > 12:
         lines.append(f"... {len(runs) - 12} more")
-    return "\n".join(lines)
-
-def activity_line(item):
-    agent = f" @{item.get('agentName')}" if item.get("agentName") else ""
-    run = f" run={item.get('runId')}" if item.get("runId") else ""
-    tasks = ""
-    if item.get("taskIds"):
-        tasks = " tasks=#" + ",#".join(str(x) for x in item.get("taskIds"))
-    stage = f"/{item.get('lifecycleStage')}" if item.get("lifecycleStage") else ""
-    preview = f" - {compact(item.get('responsePreview'), 100)}" if item.get("responsePreview") else ""
-    return f"{item.get('lifecycleKey')} {item.get('status')}{stage}{agent}{run}{tasks}{preview}"
-
-def format_activity(body):
-    activity = body.get("activity", []) if isinstance(body, dict) else []
-    lines = [f"Activity: {len(activity)} records"]
-    lines.extend(f"- {activity_line(item)}" for item in activity[:20])
-    if len(activity) > 20:
-        lines.append(f"... {len(activity) - 20} more")
     return "\n".join(lines)
 
 def format_inbox(body):
@@ -2282,11 +2106,10 @@ if cmd == "list":
 elif cmd == "create":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams create <team>")
-    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description"), "actorRole": actor_role(flags)})
+    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description")})
 elif cmd == "delete":
-    pos, flags = parse(rest)
-    if not pos: raise SystemExit("Usage: metabot teams delete <team>")
-    req("DELETE", f"/api/agent-teams/{enc(pos[0])}", {"actorRole": actor_role(flags)})
+    if not rest: raise SystemExit("Usage: metabot teams delete <team>")
+    req("DELETE", f"/api/agent-teams/{enc(rest[0])}")
 elif cmd == "status":
     pos, flags = parse(rest)
     if not pos: raise SystemExit("Usage: metabot teams status <team>")
@@ -2305,33 +2128,10 @@ elif cmd == "bind":
     req("PATCH", f"/api/agent-teams/{enc(pos[0])}", {
         "chatIds": chat_ids,
         "displayChatIds": display_chat_ids,
-        "actorRole": actor_role(flags),
     })
 elif cmd in ("start", "stop"):
-    pos, flags = parse(rest)
-    if not pos: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
-    req("POST", f"/api/agent-teams/{enc(pos[0])}/{cmd}", {"actorRole": actor_role(flags)})
-elif cmd == "activity":
-    pos, flags = parse(rest)
-    if not pos:
-        raise SystemExit("Usage: metabot teams activity <team>")
-    params = {}
-    for flag_name, query_name in (
-        ("agent", "agent"),
-        ("run-id", "runId"),
-        ("run", "runId"),
-        ("task-id", "taskId"),
-        ("task", "taskId"),
-        ("chat", "chatId"),
-        ("chat-id", "chatId"),
-        ("source", "source"),
-        ("limit", "limit"),
-    ):
-        if flags.get(flag_name):
-            params[query_name] = str(flags.get(flag_name))
-    query = ("?" + urllib.parse.urlencode(params)) if params else ""
-    body = req_data("GET", f"/api/agent-teams/{enc(pos[0])}/activity{query}")
-    emit(format_activity(body) if wants_summary(flags) else body)
+    if not rest: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
+    req("POST", f"/api/agent-teams/{enc(rest[0])}/{cmd}", {})
 elif cmd == "dispatch":
     pos, flags = parse(rest)
     if len(pos) < 3: raise SystemExit("Usage: metabot teams dispatch <team> <agent> <subject>")
@@ -2392,118 +2192,6 @@ elif cmd == "watch":
         emit(format_status(status) if wants_summary(flags) else status)
         if i < count - 1:
             time.sleep(interval)
-elif cmd == "templates":
-    sub, args = (rest[0] if rest else ""), rest[1:]
-    if sub == "list":
-        name = args[0] if args else None
-        req("GET", "/api/agent-teams/templates" + (f"/{enc(name)}" if name else ""))
-    elif sub == "export":
-        pos, flags = parse(args)
-        name = pos[0] if pos else None
-        if not name: raise SystemExit("Usage: metabot teams templates export <name> [--version n]")
-        version = flags.get("version")
-        req("GET", f"/api/agent-teams/templates/{enc(name)}/export" + (f"?version={enc(version)}" if version else ""))
-    elif sub == "diff":
-        pos, flags = parse(args)
-        name = pos[0] if pos else None
-        from_version = flags.get("from")
-        if not name or not from_version: raise SystemExit("Usage: metabot teams templates diff <name> --from n [--to n]")
-        query = f"?from={enc(from_version)}"
-        if flags.get("to"):
-            query += f"&to={enc(flags.get('to'))}"
-        req("GET", f"/api/agent-teams/templates/{enc(name)}/diff{query}")
-    elif sub == "import":
-        pos, flags = parse(args)
-        raw = " ".join(pos)
-        if not raw: raise SystemExit("Usage: metabot teams templates import <json> [--source name]")
-        req("POST", "/api/agent-teams/templates", {
-            "template": json.loads(raw),
-            "source": flags.get("source") or "cli",
-            "actorRole": actor_role(flags),
-        })
-    else:
-        raise SystemExit("Usage: metabot teams templates list|export|diff|import ...")
-elif cmd == "proposals":
-    sub, args = (rest[0] if rest else ""), rest[1:]
-    if sub == "list":
-        pos, flags = parse(args)
-        status = flags.get("status")
-        req("GET", "/api/agent-teams/proposals" + (f"?status={enc(status)}" if status else ""))
-    elif sub == "create":
-        pos, flags = parse(args)
-        explicit_kind = pos[0] if pos and pos[0] in ("template", "ruleset") else None
-        if explicit_kind:
-            pos = pos[1:]
-        raw = " ".join(pos)
-        if not raw:
-            raise SystemExit("Usage: metabot teams proposals create [template|ruleset] <json>")
-        parsed = json.loads(raw)
-        body = {"kind": explicit_kind, "body": parsed} if explicit_kind else parsed
-        if flags.get("summary"):
-            body["summary"] = flags.get("summary")
-        if flags.get("by"):
-            body["requestedBy"] = flags.get("by")
-        if flags.get("role"):
-            body["requestedByRole"] = flags.get("role")
-        req("POST", "/api/agent-teams/proposals", body)
-    elif sub in ("approve", "reject"):
-        pos, flags = parse(args)
-        if not pos:
-            raise SystemExit(f"Usage: metabot teams proposals {sub} <id>")
-        req("POST", f"/api/agent-teams/proposals/{enc(pos[0])}/{sub}", {
-            "actorRole": actor_role(flags),
-            "decidedBy": flags.get("by"),
-            "reason": flags.get("reason"),
-        })
-    else:
-        raise SystemExit("Usage: metabot teams proposals list|create|approve|reject ...")
-elif cmd == "instances":
-    sub, args = (rest[0] if rest else ""), rest[1:]
-    if sub == "list":
-        pos, flags = parse(args)
-        template = flags.get("template")
-        req("GET", "/api/agent-teams/instances" + (f"?template={enc(template)}" if template else ""))
-    elif sub == "resolve":
-        pos, flags = parse(args)
-        if not pos: raise SystemExit("Usage: metabot teams instances resolve <template> [--chat id|--project id|--global]")
-        scope_type = "global" if flags.get("global") else ("project" if flags.get("project") else "chat")
-        req("POST", "/api/agent-teams/instances/resolve", {
-            "templateName": pos[0],
-            "scopeType": scope_type,
-            "chatId": flags.get("chat"),
-            "projectId": flags.get("project"),
-            "pmBot": flags.get("pm-bot"),
-            "createIfMissing": True,
-            "allowGlobal": bool(flags.get("global")),
-            "actorRole": actor_role(flags),
-        })
-    else:
-        raise SystemExit("Usage: metabot teams instances list|resolve ...")
-elif cmd == "rules":
-    sub, args = (rest[0] if rest else ""), rest[1:]
-    if sub == "list":
-        name = args[0] if args else None
-        req("GET", "/api/agent-teams/rules" + (f"/{enc(name)}" if name else ""))
-    elif sub == "set":
-        pos, flags = parse(args)
-        rules = [{"text": rule} for rule in array_flag(flags, "rule")]
-        if not pos or not flags.get("scope") or not rules:
-            raise SystemExit("Usage: metabot teams rules set <name> --scope scope --rule text")
-        req("POST", "/api/agent-teams/rules", {
-            "name": pos[0],
-            "scope": flags.get("scope"),
-            "rules": rules,
-            "source": "cli",
-            "actorRole": actor_role(flags),
-        })
-    elif sub == "context":
-        pos, flags = parse(args)
-        req("POST", "/api/agent-teams/rules/context", {
-            "refs": [parse_rule_ref(ref) for ref in array_flag(flags, "ref")],
-            "inlineRules": [{"text": rule} for rule in array_flag(flags, "rule")],
-        })
-    else:
-        raise SystemExit("Usage: metabot teams rules list|set|context ...")
 elif cmd == "agents":
     sub, args = (rest[0] if rest else ""), rest[1:]
     if sub == "list":
@@ -2513,27 +2201,14 @@ elif cmd == "agents":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams agents spawn <team> <name>")
         req("POST", f"/api/agent-teams/{enc(pos[0])}/agents", {
-            "name": pos[1],
-            "role": flags.get("role"),
-            "engine": flags.get("engine") or "codex",
-            "model": flags.get("model"),
-            "reasoningEffort": flags.get("reasoning-effort"),
-            "approvalPolicy": flags.get("approval-policy"),
-            "sandbox": flags.get("sandbox"),
-            "timeoutMs": int(flags["timeout-ms"]) if str(flags.get("timeout-ms") or "").isdigit() else None,
-            "idleTimeoutMs": int(flags["idle-timeout-ms"]) if str(flags.get("idle-timeout-ms") or "").isdigit() else None,
-            "allowedTools": array_flag(flags, "allowed-tools"),
-            "prompt": flags.get("prompt"),
-            "actorRole": flags.get("actor-role") or flags.get("as-role"),
+            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine") or "codex", "prompt": flags.get("prompt")
         })
     elif sub == "stop":
-        pos, flags = parse(args)
-        if len(pos) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
-        req("POST", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
+        if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
+        req("POST", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}/stop", {})
     elif sub in ("delete", "remove"):
-        pos, flags = parse(args)
-        if len(pos) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
-        req("DELETE", f"/api/agent-teams/{enc(pos[0])}/agents/{enc(pos[1])}", {"actorRole": actor_role(flags)})
+        if len(args) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
+        req("DELETE", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}")
     else:
         raise SystemExit("Usage: metabot teams agents list|spawn|stop|delete ...")
 elif cmd == "send":
@@ -2639,10 +2314,73 @@ elif cmd == "runs":
         if sub == "output":
             req("GET", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/output")
         else:
-            pos, flags = parse(args)
-            req("POST", f"/api/agent-teams/{enc(pos[0])}/runs/{enc(pos[1])}/stop", {"actorRole": actor_role(flags)})
+            req("POST", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/stop", {})
     else:
         raise SystemExit("Usage: metabot teams runs list|create|update|output|stop ...")
+elif cmd == "templates":
+    if not rest: raise SystemExit("Usage: metabot teams templates list|publish ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        path = "/api/agent-team-governance/templates"
+        if pos: path += "?name=" + enc(pos[0])
+        req("GET", path)
+    elif sub == "publish":
+        if not pos or not flags.get("body"): raise SystemExit("Usage: metabot teams templates publish <name> --body <json>")
+        try: body = json.loads(flags["body"])
+        except Exception: raise SystemExit("--body must be valid JSON")
+        req("POST", "/api/agent-team-governance/templates", {"name": pos[0], "body": body})
+    else:
+        raise SystemExit("Usage: metabot teams templates list|publish ...")
+elif cmd == "rules":
+    if not rest: raise SystemExit("Usage: metabot teams rules list|publish ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        path = "/api/agent-team-governance/rules"
+        if pos: path += "?name=" + enc(pos[0])
+        req("GET", path)
+    elif sub == "publish":
+        if not pos or not flags.get("scope") or not flags.get("rules"):
+            raise SystemExit("Usage: metabot teams rules publish <name> --scope <scope> --rules <json>")
+        try: rules = json.loads(flags["rules"])
+        except Exception: raise SystemExit("--rules must be valid JSON")
+        req("POST", "/api/agent-team-governance/rules", {
+            "name": pos[0], "scope": flags["scope"], "rules": rules,
+        })
+    else:
+        raise SystemExit("Usage: metabot teams rules list|publish ...")
+elif cmd == "instances":
+    if not rest: raise SystemExit("Usage: metabot teams instances list|resolve|start|stop|delete ...")
+    sub, args = rest[0], rest[1:]
+    pos, flags = parse(args)
+    if sub == "list":
+        req("GET", "/api/agent-team-governance/instances")
+    elif sub == "resolve":
+        if not pos: raise SystemExit("Usage: metabot teams instances resolve <template> ...")
+        version = None
+        try: version = int(flags["version"]) if flags.get("version") else None
+        except Exception: raise SystemExit("--version must be an integer")
+        scope = flags.get("scope") or ("global" if bool_flag(flags, "global") else "chat")
+        req("POST", "/api/agent-team-governance/instances", {
+            "templateName": pos[0], "templateVersion": version, "scopeType": scope,
+            "scopeKey": flags.get("scope-key"),
+            "chatId": flags.get("chat") or os.environ.get("METABOT_CHAT_ID") or os.environ.get("METABOT_CHAT"),
+            "projectId": flags.get("project"), "allowGlobal": bool_flag(flags, "global"),
+            "pmBot": flags.get("pm-bot"),
+        })
+    elif sub in ("start", "stop", "delete"):
+        if not pos: raise SystemExit(f"Usage: metabot teams instances {sub} <instanceId>")
+        suffix = "" if sub == "delete" else f"/{sub}"
+        req("DELETE" if sub == "delete" else "POST", f"/api/agent-team-governance/instances/{enc(pos[0])}{suffix}", {} if sub != "delete" else None)
+    else:
+        raise SystemExit("Usage: metabot teams instances list|resolve|start|stop|delete ...")
+elif cmd == "audit":
+    _, flags = parse(rest)
+    query = []
+    if flags.get("instance"): query.append("instanceId=" + enc(flags["instance"]))
+    if flags.get("limit"): query.append("limit=" + enc(flags["limit"]))
+    req("GET", "/api/agent-team-governance/audit" + (("?" + "&".join(query)) if query else ""))
 else:
     raise SystemExit(f"Unknown metabot teams command: {cmd}")
 PY
@@ -2657,22 +2395,23 @@ print_help() {
   echo -e "${BOLD}metabot${NC} - MetaBot CLI"
   echo ""
   echo "  Process control:"
-  echo "    metabot update        Refresh from internal package, rebuild, and restart"
-  echo "    metabot update --git  Developer-only: git pull, rebuild, and restart"
+  echo "    metabot update            Auto: git checkout pulls; package install downloads release"
+  echo "    metabot update --package  Refresh from the latest GitHub Release package"
+  echo "    metabot update --package --version 1.3.0  Install one immutable release"
+  echo "    metabot update --git      Git pull, rebuild, and restart"
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
-  echo "    metabot restart    Restart MetaBot"
-  echo "    metabot deploy-runtime --runtime DIR  Atomically switch runtime from an external controller"
+  echo "    metabot restart    Restart Bridge only; execution daemons survive"
+  echo "    metabot restart --daemon <worker|arc> [--force]  Guarded daemon restart"
+  echo "    metabot deploy-runtime --runtime DIR [--force]  Switch all sibling apps externally"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
-  echo "    metabot repair-skills  Redeploy bundled skills into ~/.claude, \$CODEX_HOME, ~/.agents (idempotent)"
   echo ""
   echo "  Bridge daemon API (localhost:9100):"
   echo "    metabot bots                       List all bots (local + peer)"
   echo "    metabot bot <name>                 Get bot details"
-  echo "    metabot talk [--async|--sync] [--no-cards] [--wait-ms N] <bot> <chatId> <msg>  Talk to a bot (defaults to bounded wait, then task status)"
-  echo "    metabot talk-status <taskId>       Check an async talk task with local auth"
+  echo "    metabot talk <bot> <chatId> <msg>  Talk to a bot (bridge /api/talk)"
   echo "    metabot schedule …                 Task scheduling (list/add/cron/pause/resume/cancel)"
   echo "    metabot teams …                    MetaBot Agent Teams (agents/tasks/messages/runs)"
   echo "    metabot peers                      List peers and their status"
@@ -2694,8 +2433,7 @@ case "${1:-}" in
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;
-  repair-skills) shift; cmd_repair_skills "$@" ;;
-  bots|b|bot|talk|t|talk-status|ts|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
+  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
   *)            cmd_delegate "$@" ;;

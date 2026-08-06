@@ -24,11 +24,6 @@ export const createJsonlScanner: CreateJsonlScanner = ({
   let stopped = false;
   let offset = 0;
   let partialLine = '';
-  // Records read in one filesystem poll but not yet handed to the async
-  // consumer. Keeping this queue on the scanner object (rather than in the
-  // generator's local `records` array) lets drainPending() form a real ordering
-  // barrier before a synthesized result.
-  const pendingRecords: RawJsonlRecord[] = [];
 
   function stop(): void {
     stopped = true;
@@ -54,72 +49,47 @@ export const createJsonlScanner: CreateJsonlScanner = ({
   /**
    * Read newly appended bytes starting from `offset`, split into lines,
    * parse each complete line as JSON, and yield the records.
-   *
-   * When `includePartial` is true, a trailing line WITHOUT a terminating
-   * newline is also emitted — provided it already parses as a complete JSON
-   * record. This is used at end-of-turn (Stop hook) to recover claude's final
-   * assistant line before its `\n` has been flushed to disk, so the real answer
-   * is ordered ahead of the synthetic `result` instead of being stranded after
-   * it. The partial is consumed (offset already at EOF, `partialLine` cleared)
-   * so the later poll that sees the real newline does NOT re-emit a duplicate.
    */
-  function readNewRecords(includePartial = false): RawJsonlRecord[] {
+  function readNewRecords(): RawJsonlRecord[] {
     const size = fileSize();
     if (size < offset) {
       offset = startAtEnd ? size : 0;
       partialLine = '';
     }
+    if (size <= offset) return [];
+
+    const bytesToRead = size - offset;
+    const buf = Buffer.alloc(bytesToRead);
+
+    let fd: number | undefined;
+    try {
+      fd = openSync(jsonlPath, 'r');
+      readSync(fd, buf, 0, bytesToRead, offset);
+    } catch (err) {
+      logger.warn({ err, jsonlPath }, 'jsonl-scanner: read error');
+      return [];
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+
+    offset = size;
+    const chunk = buf.toString('utf8');
+    const raw = partialLine + chunk;
+    const lines = raw.split('\n');
+
+    // Last element is either '' (chunk ended with \n) or an incomplete line.
+    partialLine = lines.pop() ?? '';
 
     const records: RawJsonlRecord[] = [];
-
-    if (size > offset) {
-      const bytesToRead = size - offset;
-      const buf = Buffer.alloc(bytesToRead);
-
-      let fd: number | undefined;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
       try {
-        fd = openSync(jsonlPath, 'r');
-        readSync(fd, buf, 0, bytesToRead, offset);
-      } catch (err) {
-        logger.warn({ err, jsonlPath }, 'jsonl-scanner: read error');
-        return records;
-      } finally {
-        if (fd !== undefined) closeSync(fd);
-      }
-
-      offset = size;
-      const chunk = buf.toString('utf8');
-      const raw = partialLine + chunk;
-      const lines = raw.split('\n');
-
-      // Last element is either '' (chunk ended with \n) or an incomplete line.
-      partialLine = lines.pop() ?? '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          records.push(JSON.parse(trimmed) as RawJsonlRecord);
-        } catch {
-          logger.warn({ line: trimmed.slice(0, 120) }, 'jsonl-scanner: malformed JSON line, skipping');
-        }
+        records.push(JSON.parse(trimmed) as RawJsonlRecord);
+      } catch {
+        logger.warn({ line: trimmed.slice(0, 120) }, 'jsonl-scanner: malformed JSON line, skipping');
       }
     }
-
-    // End-of-turn final flush: emit a complete-but-unterminated trailing record
-    // ONCE, then consume it so the newline-terminated re-read is a no-op.
-    if (includePartial) {
-      const trimmed = partialLine.trim();
-      if (trimmed) {
-        try {
-          records.push(JSON.parse(trimmed) as RawJsonlRecord);
-          partialLine = '';
-        } catch {
-          // Not a complete record yet — leave it buffered for the next poll.
-        }
-      }
-    }
-
     return records;
   }
 
@@ -136,9 +106,9 @@ export const createJsonlScanner: CreateJsonlScanner = ({
 
     // Main poll loop.
     while (!stopped) {
-      pendingRecords.push(...readNewRecords(false));
-      while (pendingRecords.length > 0) {
-        yield pendingRecords.shift()!;
+      const records = readNewRecords();
+      for (const rec of records) {
+        yield rec;
         if (stopped) return;
       }
       await sleep(pollMs);
@@ -147,11 +117,6 @@ export const createJsonlScanner: CreateJsonlScanner = ({
 
   const scanner: JsonlScanner = {
     stop,
-    drainPending(includePartial = false): RawJsonlRecord[] {
-      const records = pendingRecords.splice(0, pendingRecords.length);
-      records.push(...readNewRecords(includePartial));
-      return records;
-    },
     [Symbol.asyncIterator]() {
       return iterate();
     },

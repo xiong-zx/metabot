@@ -1,125 +1,171 @@
 # 多 Bot 模式
 
-在单个 MetaBot 进程中运行多个飞书和 Telegram Bot。
+在一个 MetaBot Bridge 中运行多个飞书/Lark、Telegram 和微信 Bot。每个 Bot
+拥有独立的渠道凭证、引擎、工作区、会话和群回复设置。
 
 ## 配置
 
-在 `.env` 中设置 `BOTS_CONFIG=./bots.json` 启用多 Bot 模式：
+在 `.env` 中设置 `BOTS_CONFIG=./bots.json`：
 
 ```json
 {
   "feishuBots": [
     {
-      "name": "metabot",
+      "name": "codex-dev",
+      "engine": "codex",
       "feishuAppId": "cli_xxx",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "defaultWorkingDirectory": "/home/me/project-a",
+      "codex": {
+        "reasoningEffort": "high"
+      }
     },
     {
-      "name": "backend-bot",
+      "name": "kimi-reviewer",
+      "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "feishuDomain": "lark",
+      "defaultWorkingDirectory": "/home/me/project-b",
+      "kimi": {
+        "thinking": true
+      }
     }
   ],
-  "workers": {
-    "defaultModel": "gpt-5.4",
-    "maxPerPm": 8
-  },
-  "agentTeamExecutionBot": "research-pm",
   "telegramBots": [
     {
-      "name": "tg-bot",
+      "name": "personal-codex",
+      "engine": "codex",
       "telegramBotToken": "123456:ABC...",
-      "defaultWorkingDirectory": "/root/workspaces"
+      "defaultWorkingDirectory": "/home/me/personal"
     }
   ]
 }
 ```
 
-## Bot 配置字段
+## 通用 Bot 字段
 
 | 字段 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | 是 | — | Bot 标识名 |
-| `defaultWorkingDirectory` | 是 | — | Agent 工作目录 |
-| `engine` | 否 | `"claude"` | Agent 引擎 — `"claude"` 或 `"kimi"` |
-| `feishuAppId` / `feishuAppSecret` | 飞书 | — | 飞书应用凭证 |
-| `telegramBotToken` | Telegram | — | Telegram Bot Token |
-| `maxTurns` | 否 | 不限 | 每次请求最大轮次 |
-| `maxBudgetUsd` | 否 | 不限 | 每次请求费用上限（仅 Claude — Kimi 走订阅） |
-| `model` | 否 | SDK 默认 | 默认模型 ID（引擎相关） |
-| `pmPrompt` | 否 | `false` | 启用研究 PM 指令和 1 小时 worker 巡检提醒 |
-| `allowedTools` | 否 | `Read,Edit,Write,Glob,Grep,Bash` | 工具白名单（仅 Claude） |
-| `outputsBaseDir` | 否 | `/tmp/metabot-outputs` | 输出文件目录 |
-| `kimi` | 否 | — | Kimi 专用配置（仅当 `engine: "kimi"` 时） — 见下方 |
+|---|---|---|---|
+| `name` | 是 | — | 稳定的 Bot 标识 |
+| `defaultWorkingDirectory` | 是 | — | Agent 可访问的工作区 |
+| `engine` | 否 | `"codex"` | `"codex"`、`"kimi"` 或兼容引擎 `"claude"` |
+| `model` | 否 | 引擎默认 | Session 模型覆盖 |
+| `visible` | 否 | `true` | 是否注册到 Agent Bus 供发现 |
+| `memoryPublic` | 否 | 粘性/默认策略 | 显式设置时固定 Bot 的默认 Memory 可见性 |
+| `workerTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 Worker Runner 凭证 |
+| `arcTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 ARC 凭证 |
+| `maxTurns` / `maxBudgetUsd` | 否 | 不限制 | Claude 兼容限制 |
+| `outputsBaseDir` | 否 | 用户临时目录 | 自动回传到聊天的文件目录 |
 
-## 全局 Worker / Agent Team 字段
+渠道凭证字段：
 
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| `workers.defaultModel` | `gpt-5.4` | PM bot 派发后台 worker 时的默认模型 |
-| `workers.maxPerPm` | `8` | 每个 PM chat 最多同时 running 的 worker 数 |
-| `agentTeamExecutionBot` | 自动回退 | Agent Team supervisor 执行 Agent run 时使用的 bridge bot；建议固定到 `research-pm` 或内部 worker，不要依赖注册顺序 |
+| 渠道 | 字段 |
+|---|---|
+| 飞书/Lark | `feishuAppId`、`feishuAppSecret`；可选 `feishuDomain`（默认 `feishu`，国际版用 `lark`）和 `groupNoMention` |
+| Telegram | `telegramBotToken` |
+| 微信 | 可选 `wechatBotToken`；省略时扫码登录 |
 
-### Kimi 引擎选项
+`feishuDomain` 只接受 `feishu` 和 `lark`。旧配置不写该字段时仍使用飞书。
+修改已有 Bot 前请阅读 [Lark 域名迁移](lark-domain-migration.md)，因为 ID 和 Wiki
+映射都只在各自租户内有效。
 
-当 `engine: "kimi"` 时，`kimi` 对象用于配置 Kimi CLI 行为：
+## Codex 配置
 
 ```json
 {
-  "name": "coding-bot",
+  "engine": "codex",
+  "codex": {
+    "model": "gpt-5.6-sol",
+    "profile": "personal",
+    "reasoningEffort": "high",
+    "approvalPolicy": "never",
+    "sandbox": "workspace-write"
+  }
+}
+```
+
+常用字段包括 `model`、`profile`、`apiKey`、`baseUrl`、
+`reasoningEffort`、`approvalPolicy`、`sandbox`、`executable`、`extraArgs`
+和 `env`。普通订阅场景只需执行 `codex login`。
+
+公开版当前运行 `codex exec --json`，通过 `codex exec resume` 续接。Codex
+app-server 和原生执行中 steering 不属于当前公开行为。
+
+## Kimi Code 配置 {#kimi-code-options}
+
+```json
+{
   "engine": "kimi",
-  "feishuAppId": "cli_xxx",
-  "feishuAppSecret": "...",
-  "defaultWorkingDirectory": "/root/workspaces",
   "kimi": {
-    "model": "kimi-for-coding",
-    "thinking": true
+    "model": "kimi-code/k3",
+    "thinking": true,
+    "permissionMode": "auto",
+    "serverUrl": "http://127.0.0.1:58627"
   }
 }
 ```
 
 | 字段 | 默认值 | 说明 |
-|------|--------|------|
-| `kimi.model` | `kimi-for-coding` | Kimi 模型 ID |
-| `kimi.thinking` | `false` | 启用思考模式（展示推理过程） |
-| `kimi.executable` | (自动) | 覆盖 `kimi` CLI 二进制路径 |
+|---|---|---|
+| `kimi.model` | Kimi Code 配置默认 | 模型 ID 或已配置的短别名 |
+| `kimi.thinking` | Kimi Code 配置默认 | Thinking 覆盖 |
+| `kimi.permissionMode` | `auto` | 工具权限策略；`yolo` 仅限可信工作区显式启用 |
+| `kimi.executable` | `PATH` 中的 `kimi` | Kimi Code 可执行文件 |
+| `kimi.serverUrl` | `http://127.0.0.1:58627` | 已有 loopback Server 地址；否则按需启动 |
+| `kimi.contextWindow` | 当前 Kimi 默认 | 展示/上下文覆盖 |
 
-Kimi 需要先执行一次 `kimi login`（安装 `uv tool install kimi-cli` 后，在另外的终端运行）。授权与 Kimi CLI 共享 — 无需 API Key。
+Kimi 需要 Kimi Code 0.27+：
 
-## 工作原理
-
-- 每个 Bot 拥有独立的飞书/Telegram 连接
-- 会话按 `chatId` 隔离 — Bot 之间无冲突
-- 每个 Bot 使用各自的工作目录和配置
-- 环境变量作为 JSON 中未指定字段的默认值
-
-设置 `BOTS_CONFIG` 后，`FEISHU_APP_ID` / `FEISHU_APP_SECRET` 环境变量被忽略。
-
-## Peers 配置
-
-也可以在 `bots.json` 中配置 [Peers](../features/peers.md)：
-
-```json
-{
-  "feishuBots": [{ "..." }],
-  "peers": [
-    {
-      "name": "alice",
-      "url": "http://localhost:9200",
-      "secret": "alice-api-secret"
-    }
-  ]
-}
+```bash
+npm install -g @moonshot-ai/kimi-code@latest
+kimi login
 ```
+
+MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久 Session、
+原子快照、问题交互、停止、用量、工具、子 Agent 和 Goal。本版本暂不开放
+飞书执行中 steering，也不再使用旧 Python `kimi-cli --wire --work-dir` 协议。
+
+`permissionMode` 默认是 `auto`。只有在完全可信的工作区中才应显式选择
+`yolo`；个人版不会默认开启该模式。
+
+## Claude Code 兼容
+
+现有 Bot 可以设置 `"engine": "claude"`，继续使用 Claude 登录、Anthropic
+兼容 Provider、`.claude/skills/` 和 `CLAUDE.md`。个人版新 Bot 省略
+`engine` 时默认为 Codex。
+
+## 运行行为
+
+- 每个 Bot 拥有独立渠道连接和工作区。
+- 会话按 Bot 和 `chatId` 隔离。
+- Chat 可以使用 `/model` 切换引擎/模型，不会改变 Bot 身份。
+- 飞书群回复模式按 Bot 和群持久化。
+- Agent Teams 和 Agent Bus 可以协调不同引擎的 Bot。
+- 环境变量提供默认值；显式 `bots.json` 字段优先。
+- `workerTools` 和 `arcTools` 是授权设置，不是普通便利开关。非团队会话
+  默认会得到 `user` 角色，因此每个 Bot 的开关才是真正的派发边界。Agent
+  Team 的 `manager`/`agent` 会话永远拿不到这些凭证。引擎侧还会同时检查
+  本轮已经签发的凭证，以及仅监听本机的 `METABOT_WORKER_DAEMON_URL` /
+  `METABOT_ARC_DAEMON_URL`；端点缺失或不安全时不会安装对应工具。Codex
+  使用单次调用配置，Claude 使用追加式会话配置，都不会覆盖用户共享的
+  MCP 设置。Kimi 目前没有隔离的单会话 MCP 配置入口，因此即使开关已启用
+  也不会获得这两个工具。
+
+设置 `BOTS_CONFIG` 后，单 Bot 的 `FEISHU_APP_ID` 和
+`FEISHU_APP_SECRET` 会被忽略。
 
 ## 单 Bot 模式
 
-不设 `BOTS_CONFIG` 时，MetaBot 使用环境变量运行单个 Bot：
+未设置 `BOTS_CONFIG` 时，通过环境变量配置一个 Bot：
 
 ```bash
+METABOT_ENGINE=codex
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=...
-DEFAULT_WORKING_DIRECTORY=/root/workspaces
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
 ```
+
+`CLAUDE_DEFAULT_WORKING_DIRECTORY` 保留了历史名称，但会为所有引擎提供工作区。
+
+完整列表见[环境变量](environment-variables.md)。

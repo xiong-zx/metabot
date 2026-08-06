@@ -5,6 +5,7 @@ import {
   ApiError,
   type AgentSummary,
   type ChatConversation,
+  type ChatFile,
   type ChatMessage,
   type ChatParticipant,
   type ChatParticipantInput,
@@ -14,8 +15,9 @@ import {
   type ChatRunStatus,
 } from '../lib/api';
 import { formatAbsolute, formatRelative } from '../lib/format';
+import { renderMarkdown } from '../lib/render-markdown';
 
-const REFRESH_MS = 4_000;
+const REFRESH_MS = 1_200;
 type ChatEngine = 'claude' | 'kimi' | 'codex';
 
 const ENGINE_OPTIONS: Array<{ value: ChatEngine; label: string; defaultModel: string }> = [
@@ -42,6 +44,24 @@ interface TimelineRun {
   latestText: string;
   events: ChatRunEvent[];
   localOnly?: boolean;
+}
+
+interface LiveToolCall {
+  name: string;
+  detail: string;
+  status: string;
+}
+
+interface LiveQuestionOption {
+  label: string;
+  description: string;
+}
+
+interface LiveQuestion {
+  toolUseId: string;
+  header: string;
+  question: string;
+  options: LiveQuestionOption[];
 }
 
 function participantLabel(p: ChatParticipant): string {
@@ -174,37 +194,90 @@ function eventPayloadText(event: ChatRunEvent): string {
   return eventType(event);
 }
 
-function eventToolLabels(event: ChatRunEvent): string[] {
+function eventObject(event: ChatRunEvent): Record<string, unknown> {
   const payload = event.payload ?? event.payloadJson;
-  if (!payload || typeof payload !== 'object') return [];
-  const obj = payload as Record<string, unknown>;
-  const state = obj.state && typeof obj.state === 'object'
-    ? obj.state as Record<string, unknown>
-    : obj;
-  const rawTools = Array.isArray(state.toolCalls) ? state.toolCalls : [];
-  return rawTools
-    .map((tool) => {
-      if (!tool || typeof tool !== 'object') return '';
-      const t = tool as Record<string, unknown>;
-      const name = typeof t.name === 'string'
-        ? t.name
-        : typeof t.tool === 'string'
-          ? t.tool
-          : typeof t.toolName === 'string'
-            ? t.toolName
-            : 'tool';
-      const status = typeof t.status === 'string' ? t.status : undefined;
-      return status ? `${name} · ${status}` : name;
-    })
-    .filter(Boolean);
+  return payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {};
 }
 
-function runToolLabels(run: TimelineRun): string[] {
-  const labels = new Set<string>();
-  for (const event of run.events) {
-    for (const label of eventToolLabels(event)) labels.add(label);
+function latestRunState(run: TimelineRun): Record<string, unknown> | null {
+  for (let i = run.events.length - 1; i >= 0; i--) {
+    const payload = eventObject(run.events[i]);
+    if (payload.state && typeof payload.state === 'object' && !Array.isArray(payload.state)) {
+      return payload.state as Record<string, unknown>;
+    }
   }
-  return [...labels].slice(0, 12);
+  return null;
+}
+
+function liveRunText(run: TimelineRun): string {
+  const state = latestRunState(run);
+  if (state && typeof state.responseText === 'string' && state.responseText.trim()) {
+    return state.responseText.trim();
+  }
+  return run.latestText === 'running' ? '' : run.latestText;
+}
+
+function liveRunTools(run: TimelineRun): LiveToolCall[] {
+  const state = latestRunState(run);
+  const raw = state && Array.isArray(state.toolCalls) ? state.toolCalls : [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const tool = item as Record<string, unknown>;
+    const name = typeof tool.name === 'string'
+      ? tool.name
+      : typeof tool.toolName === 'string' ? tool.toolName : 'tool';
+    return [{
+      name,
+      detail: typeof tool.detail === 'string' ? tool.detail : '',
+      status: typeof tool.status === 'string' ? tool.status : 'running',
+    }];
+  });
+}
+
+function pendingRunQuestions(run: TimelineRun): LiveQuestion[] {
+  if (run.status !== 'waiting_user') return [];
+  const event = [...run.events].reverse().find((item) => eventType(item) === 'question');
+  if (!event) return [];
+  const payload = eventObject(event);
+  const questionRoot = payload.question && typeof payload.question === 'object'
+    ? payload.question as Record<string, unknown>
+    : payload;
+  const toolUseId = typeof questionRoot.toolUseId === 'string'
+    ? questionRoot.toolUseId
+    : typeof payload.toolUseId === 'string' ? payload.toolUseId : '';
+  const questions = Array.isArray(questionRoot.questions) ? questionRoot.questions : [];
+  return questions.flatMap((item) => {
+    if (!toolUseId || !item || typeof item !== 'object') return [];
+    const question = item as Record<string, unknown>;
+    const text = typeof question.question === 'string' ? question.question : '';
+    if (!text) return [];
+    const options = Array.isArray(question.options)
+      ? question.options.flatMap((raw) => {
+          if (!raw || typeof raw !== 'object') return [];
+          const option = raw as Record<string, unknown>;
+          const label = typeof option.label === 'string' ? option.label : '';
+          return label ? [{
+            label,
+            description: typeof option.description === 'string' ? option.description : '',
+          }] : [];
+        })
+      : [];
+    return [{
+      toolUseId,
+      header: typeof question.header === 'string' ? question.header : 'Agent needs your input',
+      question: text,
+      options,
+    }];
+  });
+}
+
+function formatFileSize(size: number | null): string {
+  if (size === null || !Number.isFinite(size)) return 'output file';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function normalizeRun(input: ChatRun, fallbackTriggerMessageId: string): TimelineRun {
@@ -322,52 +395,199 @@ function ConversationRow({
   );
 }
 
-function RunStatePanel({ runs }: { runs: TimelineRun[] }) {
-  if (runs.length === 0) return null;
+function LiveQuestionCard({
+  question,
+  disabled,
+  onAnswer,
+}: {
+  question: LiveQuestion;
+  disabled: boolean;
+  onAnswer: (answer: string) => void;
+}) {
+  const [customAnswer, setCustomAnswer] = useState('');
   return (
-    <div className="chat-run-list">
-      {runs.map((run) => (
-        <div
-          key={run.id}
-          className={`chat-run-card ${run.status}${run.localOnly ? ' local' : ''}${runIsActive(run) ? ' active-run' : ''}`}
-        >
-          <div className="chat-run-head">
-            <span>{runIsActive(run) ? 'executing' : runStatusLabel(run.status)}</span>
-            <strong>@{run.targetAgentRef}</strong>
-          </div>
-          {run.latestText && <div className="chat-run-body">{run.latestText}</div>}
-          {runToolLabels(run).length > 0 && (
-            <details className="chat-tool-details">
-              <summary>tools · {runToolLabels(run).length}</summary>
-              <div className="chat-tool-list">
-                {runToolLabels(run).map((label) => <span key={label}>{label}</span>)}
-              </div>
-            </details>
-          )}
+    <div className="chat-live-question">
+      <small>{question.header}</small>
+      <p>{question.question}</p>
+      {question.options.length > 0 && (
+        <div>
+          {question.options.map((option) => (
+            <button type="button" key={option.label} disabled={disabled} onClick={() => onAnswer(option.label)}>
+              <strong>{option.label}</strong>
+              {option.description && <span>{option.description}</span>}
+            </button>
+          ))}
         </div>
-      ))}
+      )}
+      <form
+        className="chat-live-question-custom"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (customAnswer.trim()) onAnswer(customAnswer.trim());
+        }}
+      >
+        <input
+          value={customAnswer}
+          disabled={disabled}
+          onChange={(event) => setCustomAnswer(event.target.value)}
+          placeholder="Type another answer"
+        />
+        <button type="submit" disabled={disabled || !customAnswer.trim()}>Answer</button>
+      </form>
     </div>
   );
 }
 
-function MessageBubble({ msg, runs }: { msg: ChatMessage; runs: TimelineRun[] }) {
+function LiveRunCard({
+  run,
+  files,
+  onAnswer,
+  onCancel,
+}: {
+  run: TimelineRun;
+  files: ChatFile[];
+  onAnswer: (runId: string, toolUseId: string, answer: string) => Promise<void>;
+  onCancel: (runId: string) => Promise<void>;
+}) {
+  const [controlBusy, setControlBusy] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const tools = liveRunTools(run);
+  const questions = pendingRunQuestions(run);
+  const text = liveRunText(run);
+
+  const control = async (action: () => Promise<void>) => {
+    setControlBusy(true);
+    setControlError(null);
+    try {
+      await action();
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : 'control failed');
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
   return (
-    <div className={`chat-message ${msg.kind} ${msg.senderKind}`}>
-      <div className="chat-message-head">
-        <span>{msg.senderDisplayName}</span>
-        <time title={formatAbsolute(msg.createdAt)}>{formatRelative(msg.createdAt)}</time>
+    <div className={`chat-live-run ${run.status}${runIsActive(run) ? ' active' : ''}`}>
+      <div className="chat-live-run-head">
+        <span className="chat-live-status-dot" aria-hidden="true" />
+        <strong>@{run.targetAgentRef}</strong>
+        <span>{runStatusLabel(run.status)}</span>
+        {(run.engine || run.model) && (
+          <small>{[run.engine, run.model].filter(Boolean).join(' · ')}</small>
+        )}
+        {runIsActive(run) && !run.localOnly && (
+          <button type="button" disabled={controlBusy} onClick={() => void control(() => onCancel(run.id))}>
+            Stop
+          </button>
+        )}
       </div>
-      <div className="chat-message-body">{msg.content}</div>
-      {msg.mentionedAgentRefs.length > 0 && (
-        <div className="chat-message-triggers">
-          {msg.mentionedAgentRefs.map((ref) => <span key={ref}>@{ref}</span>)}
+      {text && run.status !== 'completed' && (
+        <div className="chat-live-response chat-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+      )}
+      {tools.length > 0 && (
+        <details className="chat-live-tools" open={tools.some((tool) => tool.status === 'running')}>
+          <summary>{tools.some((tool) => tool.status === 'running') ? `Running ${tools.at(-1)?.name}` : `${tools.length} tools used`}</summary>
+          <div>
+            {tools.map((tool, index) => (
+              <span key={`${tool.name}-${index}`} className={tool.status}>
+                <i aria-hidden="true" />
+                <strong>{tool.name}</strong>
+                {tool.detail && <small>{tool.detail}</small>}
+              </span>
+            ))}
+          </div>
+        </details>
+      )}
+      {questions.map((question) => (
+        <LiveQuestionCard
+          key={`${question.toolUseId}:${question.question}`}
+          question={question}
+          disabled={controlBusy}
+          onAnswer={(answer) => void control(() => onAnswer(run.id, question.toolUseId, answer))}
+        />
+      ))}
+      {files.length > 0 && (
+        <div className="chat-live-files">
+          {files.map((file) => (
+            <div key={file.id} className="chat-live-file">
+              <span aria-hidden="true">↧</span>
+              <div><strong>{file.name}</strong><small>{file.mimeType} · {formatFileSize(file.sizeBytes)}</small></div>
+            </div>
+          ))}
         </div>
       )}
-      <RunStatePanel runs={runs} />
-      {runs.length === 0 && msg.kind === 'assistant' && msg.runId && (
-        <div className="chat-message-run-link">run {msg.runId} completed</div>
-      )}
+      {controlError && <div className="chat-live-control-error">{controlError}</div>}
     </div>
+  );
+}
+
+function RunStatePanel({
+  runs,
+  files,
+  onAnswer,
+  onCancel,
+}: {
+  runs: TimelineRun[];
+  files: ChatFile[];
+  onAnswer: (runId: string, toolUseId: string, answer: string) => Promise<void>;
+  onCancel: (runId: string) => Promise<void>;
+}) {
+  if (runs.length === 0) return null;
+  return (
+    <div className="chat-run-list">
+      {runs.map((run) => <LiveRunCard
+        key={run.id}
+        run={run}
+        files={files.filter((file) => file.runId === run.id)}
+        onAnswer={onAnswer}
+        onCancel={onCancel}
+      />)}
+    </div>
+  );
+}
+
+function MessageBubble({
+  msg,
+  runs,
+  files,
+  onAnswer,
+  onCancel,
+}: {
+  msg: ChatMessage;
+  runs: TimelineRun[];
+  files: ChatFile[];
+  onAnswer: (runId: string, toolUseId: string, answer: string) => Promise<void>;
+  onCancel: (runId: string) => Promise<void>;
+}) {
+  return (
+    <>
+      <div className={`chat-message ${msg.kind} ${msg.senderKind}`}>
+        <div className="chat-message-head">
+          <span>{msg.senderDisplayName}</span>
+          <time title={formatAbsolute(msg.createdAt)}>{formatRelative(msg.createdAt)}</time>
+        </div>
+        {msg.kind === 'assistant' ? (
+          <div className="chat-message-body chat-markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+        ) : (
+          <div className="chat-message-body">{msg.content}</div>
+        )}
+        {msg.mentionedAgentRefs.length > 0 && (
+          <div className="chat-message-triggers">
+            {msg.mentionedAgentRefs.map((ref) => <span key={ref}>@{ref}</span>)}
+          </div>
+        )}
+        {runs.length === 0 && msg.kind === 'assistant' && msg.runId && (
+          <div className="chat-message-run-link">run {msg.runId} completed</div>
+        )}
+      </div>
+      {runs.length > 0 && (
+        <div className="chat-message assistant agent chat-live-message">
+          <div className="chat-message-head"><span>Agent run</span></div>
+          <RunStatePanel runs={runs} files={files} onAnswer={onAnswer} onCancel={onCancel} />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -928,6 +1148,7 @@ export function Chat() {
   const [availableAgents, setAvailableAgents] = useState<AgentSummary[]>([]);
   const [selected, setSelected] = useState<ChatConversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[] | null>(null);
+  const [files, setFiles] = useState<ChatFile[]>([]);
   const [runsByMessageId, setRunsByMessageId] = useState<Record<string, TimelineRun[]>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
@@ -969,9 +1190,10 @@ export function Chat() {
   ) => {
     if (options.showRefreshing) setRefreshing(true);
     try {
-      const [{ messages: rows }, { runs }, list] = await Promise.all([
+      const [{ messages: rows }, { runs }, { files: fileRows }, list] = await Promise.all([
         api.listChatMessages(conversationId),
         api.listChatRuns(conversationId),
+        api.listChatFiles(conversationId),
         refreshConversations(),
       ]);
       const runsWithEvents = await Promise.all(
@@ -988,6 +1210,7 @@ export function Chat() {
         nextRunsByMessageId[run.triggerMessageId] = bucket;
       }
       setMessages((cur) => (sameMessageList(cur, rows) ? cur : rows));
+      setFiles(fileRows);
       setRunsByMessageId(applyCompletedRunMessages(nextRunsByMessageId, rows));
       setSelected((cur) => list.find((c) => c.id === conversationId) || cur);
       setLastRefreshAt(new Date().toISOString());
@@ -1030,6 +1253,7 @@ export function Chat() {
   useEffect(() => {
     if (!selected) {
       setMessages([]);
+      setFiles([]);
       setRunsByMessageId({});
       return undefined;
     }
@@ -1125,14 +1349,18 @@ export function Chat() {
         for (const runs of Object.values(cur)) {
           for (const run of runs) byRun.set(run.id, run);
         }
-        for (const event of res.runEvents || []) {
+          for (const event of res.runEvents || []) {
           const run = byRun.get(event.runId);
           if (!run) continue;
           const events = [...run.events.filter((e) => e.seq !== event.seq), event]
             .sort((a, b) => a.seq - b.seq);
           byRun.set(run.id, {
             ...run,
-            status: eventType(event) === 'complete' ? 'completed' : eventType(event) === 'error' ? 'failed' : run.status,
+            status: eventType(event) === 'complete'
+              ? 'completed'
+              : eventType(event) === 'error'
+                ? 'failed'
+                : eventType(event) === 'canceled' ? 'canceled' : run.status,
             latestText: eventPayloadText(event),
             updatedAt: event.createdAt,
             events,
@@ -1153,6 +1381,16 @@ export function Chat() {
     const list = await refreshConversations();
     setSelected(list.find((c) => c.id === selected.id) || selected);
     void refreshActiveConversation(selected.id, { showRefreshing: true });
+  };
+
+  const answerRun = async (runId: string, toolUseId: string, answer: string) => {
+    await api.answerChatRun(runId, toolUseId, answer);
+    if (selected) await refreshActiveConversation(selected.id, { showRefreshing: true, markRead: false });
+  };
+
+  const cancelRun = async (runId: string) => {
+    await api.cancelChatRun(runId);
+    if (selected) await refreshActiveConversation(selected.id, { showRefreshing: true, markRead: false });
   };
 
   const agents = agentRefs(selected);
@@ -1268,7 +1506,14 @@ export function Chat() {
                 </div>
               )}
               {messages?.map((msg) => (
-                <MessageBubble key={msg.id} msg={msg} runs={runsByMessageId[msg.id] || []} />
+                <MessageBubble
+                  key={msg.id}
+                  msg={msg}
+                  runs={runsByMessageId[msg.id] || []}
+                  files={files}
+                  onAnswer={answerRun}
+                  onCancel={cancelRun}
+                />
               ))}
               <div ref={endRef} />
             </div>

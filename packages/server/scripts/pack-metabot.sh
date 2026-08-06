@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pack the metabot bot-host runtime into a tarball + publish the bootstrap
+# Pack the metabot runtime into a tarball + publish the bootstrap
 # installer script. Output lands under `packages/server/static/install/`,
 # which is published to the server's static dir at install time.
 # The tarball + script are served anonymously at
@@ -7,14 +7,20 @@
 #
 # What ships in the tarball:
 #   - bin/, install.sh, ecosystem.config.cjs, tsconfig*.json
-#   - package.json + package-lock.json (root workspace manifests)
+#   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
-#   - packages/cli, cli-core, metamemory, skill-hub  (4 bot-host workspaces)
+#   - packages/cli, cli-core, metamemory, skill-hub, arc-mcp,
+#     arc-worker-runner-adapter, worker-runner-mcp (7 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
-# What does NOT ship (central-only / build artifacts / user state):
+# What does NOT ship in the default bridge flavor (central-only):
 #   - packages/server, packages/web-ui
+#
+# The public GitHub Release sets METABOT_PACKAGE_FLAVOR=personal. That flavor
+# adds the local Core server + Web UI sources so the same one-line installer
+# produces a complete self-hosted personal edition instead of a bridge that
+# points at a Core service the user does not have.
 #   - node_modules, dist, *.tsbuildinfo, coverage
 #   - .git, .github, .codex
 #   - .env, bots.json, logs/, data/   (never committed — naturally absent)
@@ -38,14 +44,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SERVER_PKG_DIR/../.." && pwd)"
-SERVER_STATIC_DIR="$SERVER_PKG_DIR/static/install"
+SERVER_STATIC_DIR="${METABOT_PACK_OUTPUT_DIR:-$SERVER_PKG_DIR/static/install}"
 BOOTSTRAP_SRC="$SERVER_PKG_DIR/install/bootstrap.sh"
 PACKAGE_DEFAULT_ENV_FILE="${METABOT_PACKAGE_DEFAULT_ENV_FILE:-${METABOT_INTERNAL_DEFAULT_ENV_FILE:-}}"
+PACKAGE_FLAVOR="${METABOT_PACKAGE_FLAVOR:-bridge}"
+
+case "$PACKAGE_FLAVOR" in
+  bridge|personal) ;;
+  *)
+    echo "error: unsupported METABOT_PACKAGE_FLAVOR: $PACKAGE_FLAVOR" >&2
+    exit 1
+    ;;
+esac
 
 TARBALL_NAME="latest.tgz"
 BOOTSTRAP_NAME="install.sh"
 
 VERSION="$(node -e "process.stdout.write(require('$REPO_ROOT/package.json').version)")"
+RELEASE_VERSION="${METABOT_RELEASE_VERSION:-$VERSION}"
 
 # Patterns excluded from every recursive include. Mirrors what rsync staging
 # used to skip; tar applies these globally regardless of which include path
@@ -58,6 +74,10 @@ TAR_EXCLUDES=(
   '--exclude=dist'
   '--exclude=*.tsbuildinfo'
   '--exclude=coverage'
+  '--exclude=packages/server/static'
+  '--exclude=src/workspace'
+  '--exclude=src/skills/metabot-team'
+  '--exclude=src/skills/voice'
   '--exclude=.DS_Store'
   '--exclude=*.log'
 )
@@ -65,26 +85,36 @@ TAR_EXCLUDES=(
 # Explicit include list — only these paths get into the tarball.
 # packages/server + packages/web-ui are intentionally OMITTED (central-only).
 # packages/skills/metabot/ is required for Phase 6 SKILL_SENTINEL check.
-# packages/skills/metabot-team/ and packages/skills/metabot-todos/ keep the
-# Agent Teams and canonical ToDo workflows installable from the packaged path.
+# packages/skills/metabot-team/ keeps the Codex Agent Teams workflow installable
+# from the packaged Skill Hub path.
 INCLUDES=(
   'bin'
   'install.sh'
+  'uninstall.sh'
   'ecosystem.config.cjs'
-  'package.json'
+  'scripts/pm2-protected-runtime-switch.cjs'
   'package-lock.json'
-  'tsconfig.json'
   'tsconfig.bridge.json'
   'src'
   'packages/cli'
   'packages/cli-core'
   'packages/metamemory'
   'packages/skill-hub'
+  'packages/arc-mcp'
+  'packages/arc-worker-runner-adapter'
+  'packages/worker-runner-mcp'
   'packages/skills'
-  'CLAUDE.md'
   'LICENSE'
   'README.md'
 )
+
+if [[ "$PACKAGE_FLAVOR" == "personal" ]]; then
+  INCLUDES+=(
+    'ecosystem.core.config.cjs'
+    'packages/server'
+    'packages/web-ui'
+  )
+fi
 
 # Filter to paths that actually exist. tar would error on a missing positional
 # argument, and a missing optional file (e.g. LICENSE not yet checked in)
@@ -103,24 +133,31 @@ done
 # bot host. Fail loud here instead.
 for required in \
   'install.sh' \
+  'uninstall.sh' \
   'packages/skills/metabot/SKILL.md' \
   'packages/skills/metabot-team/SKILL.md' \
   'packages/skills/metabot-todos/SKILL.md' \
-  'packages/skills/metabot-todos/scripts/todo-display.mjs'; do
+  'packages/skills/metabot-todos/agents/openai.yaml' \
+  'packages/skills/metabot-todos/scripts/todo-display.mjs' \
+  'packages/arc-mcp/package.json' \
+  'packages/arc-worker-runner-adapter/package.json' \
+  'packages/worker-runner-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
   fi
 done
 
+if [[ ! -f "$REPO_ROOT/scripts/pm2-protected-runtime-switch.cjs" ]]; then
+  echo "error: required protected restart helper is missing" >&2
+  exit 1
+fi
+
 mkdir -p "$SERVER_STATIC_DIR"
 
-EXTRA_TAR_ARGS=()
-TMP_EXTRA_DIR=""
+TMP_EXTRA_DIR="$(mktemp -d -t metabot-pack-extra.XXXXXX)"
 cleanup() {
-  if [[ -n "$TMP_EXTRA_DIR" ]]; then
-    rm -rf "$TMP_EXTRA_DIR"
-  fi
+  rm -rf "$TMP_EXTRA_DIR"
 }
 trap cleanup EXIT
 
@@ -129,12 +166,73 @@ if [[ -n "$PACKAGE_DEFAULT_ENV_FILE" ]]; then
     echo "error: METABOT_PACKAGE_DEFAULT_ENV_FILE does not exist: $PACKAGE_DEFAULT_ENV_FILE" >&2
     exit 1
   fi
-  TMP_EXTRA_DIR="$(mktemp -d -t metabot-pack-extra.XXXXXX)"
   mkdir -p "$TMP_EXTRA_DIR/.metabot-package"
   cp "$PACKAGE_DEFAULT_ENV_FILE" "$TMP_EXTRA_DIR/.metabot-package/default.env"
   chmod 600 "$TMP_EXTRA_DIR/.metabot-package/default.env"
   EXTRA_TAR_ARGS=(-C "$TMP_EXTRA_DIR" '.metabot-package/default.env')
   echo "==> Embedding packaged default env from $PACKAGE_DEFAULT_ENV_FILE"
+fi
+
+echo "==> Writing $PACKAGE_FLAVOR package manifests"
+node - "$REPO_ROOT/package.json" "$TMP_EXTRA_DIR/package.json" "$RELEASE_VERSION" "$PACKAGE_FLAVOR" <<'NODE'
+const fs = require('node:fs');
+const [src, dest, releaseVersion, flavor] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(src, 'utf8'));
+pkg.version = releaseVersion;
+if (flavor === 'bridge') {
+  delete pkg.metabotEdition;
+  pkg.workspaces = [
+    'packages/cli',
+    'packages/cli-core',
+    'packages/metamemory',
+    'packages/skill-hub',
+    'packages/arc-mcp',
+    'packages/arc-worker-runner-adapter',
+    'packages/worker-runner-mcp',
+  ];
+  pkg.scripts = {
+    ...pkg.scripts,
+    build: 'npm run build:bridge',
+    'build:packages': 'npm run build --workspaces --if-present',
+    test: 'vitest run',
+  };
+  delete pkg.scripts['build:web'];
+}
+fs.writeFileSync(dest, `${JSON.stringify(pkg, null, 2)}\n`);
+NODE
+
+node - "$REPO_ROOT/tsconfig.json" "$TMP_EXTRA_DIR/tsconfig.json" "$PACKAGE_FLAVOR" <<'NODE'
+const fs = require('node:fs');
+const [src, dest, flavor] = process.argv.slice(2);
+const tsconfig = JSON.parse(fs.readFileSync(src, 'utf8'));
+if (flavor === 'bridge') {
+  tsconfig.references = (tsconfig.references || []).filter((ref) =>
+    !['./packages/server', './packages/web-ui'].includes(ref.path),
+  );
+}
+fs.writeFileSync(dest, `${JSON.stringify(tsconfig, null, 2)}\n`);
+NODE
+
+mkdir -p "$TMP_EXTRA_DIR/.metabot-package"
+node - "$REPO_ROOT/package.json" "$TMP_EXTRA_DIR/.metabot-package/manifest.json" "$RELEASE_VERSION" "$PACKAGE_FLAVOR" <<'NODE'
+const fs = require('node:fs');
+const [pkgPath, dest, releaseVersion, flavor] = process.argv.slice(2);
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+const manifest = {
+  schemaVersion: 1,
+  package: flavor === 'personal' ? 'metabot-personal-edition' : 'metabot-runtime',
+  version: releaseVersion,
+  sourcePackageVersion: pkg.version,
+  channel: 'install',
+  includesCore: flavor === 'personal',
+  includesWebUi: flavor === 'personal',
+};
+fs.writeFileSync(dest, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+
+EXTRA_TAR_ARGS=(-C "$TMP_EXTRA_DIR" 'package.json' 'tsconfig.json' '.metabot-package/manifest.json')
+if [[ -f "$TMP_EXTRA_DIR/.metabot-package/default.env" ]]; then
+  EXTRA_TAR_ARGS+=(-C "$TMP_EXTRA_DIR" '.metabot-package/default.env')
 fi
 
 echo "==> Writing $SERVER_STATIC_DIR/$TARBALL_NAME (atomic)"
@@ -169,13 +267,18 @@ if ! grep -Eq '^(\./)?packages/skills/metabot-team/SKILL\.md$' <<<"$TARBALL_LIST
   rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
   exit 1
 fi
-if ! grep -Eq '^(\./)?packages/skills/metabot-todos/SKILL\.md$' <<<"$TARBALL_LISTING"; then
-  echo "error: packed tarball is missing packages/skills/metabot-todos/SKILL.md" >&2
-  rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
-  exit 1
-fi
-if ! grep -Eq '^(\./)?packages/skills/metabot-todos/scripts/todo-display\.mjs$' <<<"$TARBALL_LISTING"; then
-  echo "error: packed tarball is missing packages/skills/metabot-todos/scripts/todo-display.mjs" >&2
+for required in \
+  'packages/skills/metabot-todos/SKILL.md' \
+  'packages/skills/metabot-todos/agents/openai.yaml' \
+  'packages/skills/metabot-todos/scripts/todo-display.mjs'; do
+  if ! grep -Eq "^(\\./)?${required//./\\.}$" <<<"$TARBALL_LISTING"; then
+    echo "error: packed tarball is missing $required" >&2
+    rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
+    exit 1
+  fi
+done
+if [[ "$PACKAGE_FLAVOR" == "personal" ]] && grep -Eq '^(\./)?packages/server/static(/|$)' <<<"$TARBALL_LISTING"; then
+  echo "error: personal package contains prebuilt/stale packages/server/static content" >&2
   rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
   exit 1
 fi
@@ -192,4 +295,4 @@ chmod +x "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME.new"
 mv "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME.new" "$SERVER_STATIC_DIR/$BOOTSTRAP_NAME"
 
 SIZE="$(ls -lh "$SERVER_STATIC_DIR/$TARBALL_NAME" | awk '{print $5}')"
-echo "==> Done. metabot bot-host runtime v$VERSION → $SERVER_STATIC_DIR/$TARBALL_NAME ($SIZE)"
+echo "==> Done. metabot $PACKAGE_FLAVOR package v$RELEASE_VERSION → $SERVER_STATIC_DIR/$TARBALL_NAME ($SIZE)"

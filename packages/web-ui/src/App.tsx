@@ -11,13 +11,16 @@ import { AgentsList } from './routes/agents';
 import { Chat } from './routes/chat';
 import { UsersMemory } from './routes/users-memory';
 import { CliAccess } from './routes/cli-access';
+import { TokenLogin } from './components/token-login';
+import { api } from './lib/api';
+import { AUTH_REQUIRED_EVENT, clearApiToken, getApiToken } from './lib/auth';
 
 function Brand() {
   return (
     <div className="brand">
       <span className="glyph" />
-      <span className="name">metabot-core</span>
-      <span className="tag">archive console</span>
+      <span className="name">metabot</span>
+      <span className="tag">personal console</span>
     </div>
   );
 }
@@ -39,9 +42,11 @@ function readSidebarCollapsed(): boolean {
   // content — not the nav tree — owns the first screen on mobile. Desktop keeps
   // the sidebar open. Once the user toggles it, their choice is remembered.
   try {
-    return typeof window !== 'undefined'
-      && typeof window.matchMedia === 'function'
-      && window.matchMedia('(max-width: 640px)').matches;
+    return (
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 640px)').matches
+    );
   } catch {
     return false;
   }
@@ -119,14 +124,18 @@ function SearchBar() {
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children, onSignOut }: { children: React.ReactNode; onSignOut: () => void }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readSidebarCollapsed);
   const [theme, setTheme] = useState<Theme>(readTheme);
 
   const toggleSidebar = () => {
     setSidebarCollapsed((cur) => {
       const next = !cur;
-      try { localStorage.setItem(SIDEBAR_STATE_KEY, next ? '1' : '0'); } catch { /* ignore */ }
+      try {
+        localStorage.setItem(SIDEBAR_STATE_KEY, next ? '1' : '0');
+      } catch {
+        /* ignore */
+      }
       return next;
     });
   };
@@ -134,7 +143,11 @@ function Shell({ children }: { children: React.ReactNode }) {
   const toggleTheme = () => {
     setTheme((cur) => {
       const next: Theme = cur === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem(THEME_STATE_KEY, next); } catch { /* ignore */ }
+      try {
+        localStorage.setItem(THEME_STATE_KEY, next);
+      } catch {
+        /* ignore */
+      }
       return next;
     });
   };
@@ -153,7 +166,11 @@ function Shell({ children }: { children: React.ReactNode }) {
       const inField = tag === 'INPUT' || tag === 'TEXTAREA';
       if (e.key === '/' && !inField) {
         const el = document.querySelector<HTMLInputElement>('.search-bar input');
-        if (el) { e.preventDefault(); el.focus(); el.select(); }
+        if (el) {
+          e.preventDefault();
+          el.focus();
+          el.select();
+        }
       } else if (e.key === '[' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         toggleSidebar();
@@ -175,7 +192,9 @@ function Shell({ children }: { children: React.ReactNode }) {
         </div>
         <SearchBar />
         <nav className="actions">
-          <NavLink to="/" end>memory</NavLink>
+          <NavLink to="/" end>
+            memory
+          </NavLink>
           <NavLink to="/users">users</NavLink>
           <NavLink to="/skills">skills</NavLink>
           <NavLink to="/t5t">t5t</NavLink>
@@ -183,12 +202,9 @@ function Shell({ children }: { children: React.ReactNode }) {
           <NavLink to="/chat">chat</NavLink>
           <NavLink to="/cli">cli</NavLink>
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          {/* Sign-out targets the standard oauth2-proxy endpoint; only
-              meaningful when you front the server with an SSO proxy. In
-              pure local-token mode there is no session to end. */}
-          <a className="signout" href="/oauth2/sign_out" title="end SSO session (if behind an SSO proxy)">
+          <button className="signout" type="button" onClick={onSignOut} title="forget this browser token">
             sign out
-          </a>
+          </button>
         </nav>
       </header>
       {children}
@@ -197,8 +213,40 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const [authState, setAuthState] = useState<'checking' | 'required' | 'authenticated'>(
+    getApiToken() ? 'checking' : 'required',
+  );
+
+  useEffect(() => {
+    const requireAuth = () => setAuthState('required');
+    window.addEventListener(AUTH_REQUIRED_EVENT, requireAuth);
+    if (authState === 'checking') {
+      void api
+        .whoami()
+        .then(() => setAuthState('authenticated'))
+        .catch(() => setAuthState('required'));
+    }
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, requireAuth);
+  }, [authState]);
+
+  if (authState === 'checking') {
+    return (
+      <div className="login">
+        <div className="state">checking token…</div>
+      </div>
+    );
+  }
+  if (authState === 'required') {
+    return <TokenLogin onAuthenticated={() => setAuthState('authenticated')} />;
+  }
+
+  const signOut = () => {
+    clearApiToken();
+    setAuthState('required');
+  };
+
   return (
-    <Shell>
+    <Shell onSignOut={signOut}>
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/memory/*" element={<MemoryPath />} />

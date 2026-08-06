@@ -38,7 +38,8 @@ export interface ServerOptions {
    * If set, GET requests whose Host header matches this value fall through to
    * static file serving from `packages/server/static/` (SPA Web UI). Other
    * Host values continue to behave as a pure API server (404 for non-API
-   * paths). Default unset → SPA serving is disabled entirely.
+   * paths). Default unset serves the SPA on any Host; the server still binds
+   * to 127.0.0.1 by default, so a fresh personal install remains local-only.
    */
   uiHost?: string;
   /**
@@ -188,76 +189,6 @@ function serveStaticFile(
   return true;
 }
 
-function serveInstallScript(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  absPath: string,
-  method: string = 'GET',
-): boolean {
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(absPath);
-  } catch {
-    return false;
-  }
-  if (!stat.isFile()) return false;
-
-  const raw = fs.readFileSync(absPath, 'utf-8');
-  const body = raw.replace(
-    '# __METABOT_CORE_URL_INJECT__',
-    `PACKAGED_METABOT_CORE_URL=${shellSingleQuote(distributionCoreBaseUrl(req))}`,
-  );
-  const buf = Buffer.from(body);
-  res.writeHead(200, {
-    'Content-Type': 'text/x-shellscript; charset=utf-8',
-    'Content-Length': buf.length,
-    'Cache-Control': 'no-cache',
-  });
-  if (method === 'HEAD') {
-    res.end();
-    return true;
-  }
-  res.end(buf);
-  return true;
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function firstHeaderValue(value: string | string[] | undefined): string | undefined {
-  const raw = Array.isArray(value) ? value[0] : value;
-  return raw?.split(',')[0]?.trim() || undefined;
-}
-
-function normalizeBaseUrl(raw: string): string | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  try {
-    const url = new URL(trimmed);
-    url.search = '';
-    url.hash = '';
-    return url.toString().replace(/\/+$/, '');
-  } catch {
-    return undefined;
-  }
-}
-
-function distributionCoreBaseUrl(req: http.IncomingMessage): string {
-  const configured = normalizeBaseUrl(process.env.METABOT_CORE_PUBLIC_URL || '')
-    || normalizeBaseUrl(process.env.METABOT_CORE_URL || '');
-  if (configured) return configured;
-
-  const host = firstHeaderValue(req.headers['x-forwarded-host']) || firstHeaderValue(req.headers.host);
-  const proto = firstHeaderValue(req.headers['x-forwarded-proto'])
-    || ((req.socket as unknown as { encrypted?: boolean }).encrypted ? 'https' : 'http');
-  if (host) {
-    const inferred = normalizeBaseUrl(`${proto}://${host}`);
-    if (inferred) return inferred;
-  }
-  return 'http://localhost:9200';
-}
-
 /**
  * Try to serve a static file (or SPA fallback to index.html) from STATIC_DIR.
  * Returns true if a response was sent (including a 404 when index.html is
@@ -310,7 +241,7 @@ function tryServeStatic(
 }
 
 function corePublicBaseUrl(): string {
-  const raw = process.env.METABOT_CORE_PUBLIC_URL || process.env.METABOT_CORE_URL || 'http://localhost:9200';
+  const raw = process.env.METABOT_CORE_URL || 'http://localhost:9200';
   return raw.replace(/\/+$/, '');
 }
 
@@ -362,6 +293,35 @@ async function deliverChatRunToAgent(
   }
 }
 
+function deliverChatControlToAgent(
+  inboxStore: InboxStore,
+  logger: Logger,
+  control: {
+    runId: string;
+    targetAgentRef: string;
+    action: 'answer' | 'cancel';
+    toolUseId?: string;
+    answer?: string;
+  },
+): void {
+  try {
+    const message = inboxStore.enqueue({
+      targetBot: control.targetAgentRef,
+      chatId: `core-chat-control:${control.runId}`,
+      fromBot: null,
+      fromOwner: 'metabot-core',
+      fromCredentialId: 'metabot-core-system',
+      content: JSON.stringify({ type: 'core-chat-control', ...control }),
+    });
+    logger.info(
+      { runId: control.runId, action: control.action, targetAgentRef: control.targetAgentRef, inboxMessageId: message.id },
+      'chat control enqueued for bridge relay',
+    );
+  } catch (err) {
+    logger.warn({ err, runId: control.runId, action: control.action }, 'chat control delivery failed');
+  }
+}
+
 /**
  * Structural read-only fork for web-identity (browser SSO) credentials.
  * Returns true only for the explicitly enumerated GETs in the allowlist
@@ -409,6 +369,7 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
   if (/^\/api\/chat\/conversations\/[^/]+\/(messages|participants|read)$/.test(pathname) && method === 'POST') {
     return true;
   }
+  if (/^\/api\/chat\/runs\/[^/]+\/(answer|cancel)$/.test(pathname) && method === 'POST') return true;
   // Project kill (soft-kill via append-only doc) — owner-auth enforced at the
   // route layer. Matches the shape `POST /api/t5t/projects/:slug/kill`.
   if (
@@ -566,8 +527,7 @@ export function startServer(options: ServerOptions): ServerHandle {
   const tokenFile = path.join(dataDir, 'admin-bootstrap-token.txt');
   const bootstrapToken = credentialsStore.bootstrapAdmin(tokenFile);
   if (bootstrapToken) {
-    logger.warn({ tokenFile }, 'ADMIN TOKEN BOOTSTRAPPED — SAVE IT NOW; this is the only time it is displayed');
-    logger.warn({ token: bootstrapToken }, 'metabot-core admin token (one-time)');
+    logger.warn({ tokenFile }, 'ADMIN TOKEN BOOTSTRAPPED — stored in the protected token file; token value is not logged');
   }
 
   const startedAt = Date.now();
@@ -585,6 +545,13 @@ export function startServer(options: ServerOptions): ServerHandle {
     }) => {
       void deliverChatRunToAgent(agentStore, inboxStore, logger, run);
     },
+    deliverControl: (control: {
+      runId: string;
+      targetAgentRef: string;
+      action: 'answer' | 'cancel';
+      toolUseId?: string;
+      answer?: string;
+    }) => deliverChatControlToAgent(inboxStore, logger, control),
   };
 
   const server = http.createServer(async (req, res) => {
@@ -666,10 +633,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      const served = distPath === '/cli/install.sh'
-        ? serveInstallScript(req, res, abs, method)
-        : serveStaticFile(res, abs, false, method);
-      if (!served) {
+      if (!serveStaticFile(res, abs, false, method)) {
         jsonResponse(res, 404, { error: 'cli_not_installed' });
       }
       return;
@@ -699,10 +663,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         jsonResponse(res, 400, { error: 'bad_path' });
         return;
       }
-      const served = distPath === '/install/install.sh'
-        ? serveInstallScript(req, res, abs, method)
-        : serveStaticFile(res, abs, false, method);
-      if (!served) {
+      if (!serveStaticFile(res, abs, false, method)) {
         jsonResponse(res, 404, { error: 'install_not_built' });
       }
       return;
@@ -713,7 +674,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     // /health and /api/manifest stay accessible on the UI host (handled below).
     const uiHost = options.uiHost;
     const reqHost = (req.headers.host || '').split(':')[0].toLowerCase();
-    const isUiHost = !!uiHost && reqHost === uiHost;
+    const isUiHost = !uiHost || reqHost === uiHost;
 
     if (
       isUiHost
@@ -838,11 +799,6 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname.startsWith('/api/memory/folders/') && method === 'GET') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.getFolder(memoryStore, idOrPath, cred));
-      }
-      if (pathname.startsWith('/api/memory/folders/') && (method === 'PATCH' || method === 'PUT')) {
-        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
-        const body = await parseJsonBody(req);
-        return jsonResult(res, memoryRoutes.updateFolder(memoryStore, idOrPath, body, cred));
       }
       if (pathname.startsWith('/api/memory/folders/') && method === 'DELETE') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
@@ -982,7 +938,7 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, inboxRoutes.clearInbox(inboxStore, agentStore, botName, query, cred));
       }
 
-      // ---- Chat routes (browser SSO only) ----
+      // ---- Chat routes (Bearer-authenticated personal console) ----
       if (pathname === '/api/chat/participants/search' && method === 'GET') {
         return jsonResult(res, chatRoutes.searchParticipants(chatDeps, query, cred));
       }
@@ -1075,6 +1031,17 @@ export function startServer(options: ServerOptions): ServerHandle {
         const runId = decodeURIComponent(chatRunEventsMatch[1]);
         const body = await parseJsonBody(req);
         return jsonResult(res, chatRoutes.postRunEvent(chatDeps, runId, body, cred));
+      }
+      const chatRunAnswerMatch = pathname.match(/^\/api\/chat\/runs\/([^/]+)\/answer$/);
+      if (chatRunAnswerMatch && method === 'POST') {
+        const runId = decodeURIComponent(chatRunAnswerMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, chatRoutes.answerRun(chatDeps, runId, body, cred));
+      }
+      const chatRunCancelMatch = pathname.match(/^\/api\/chat\/runs\/([^/]+)\/cancel$/);
+      if (chatRunCancelMatch && method === 'POST') {
+        const runId = decodeURIComponent(chatRunCancelMatch[1]);
+        return jsonResult(res, chatRoutes.cancelRun(chatDeps, runId, cred));
       }
       const chatConversationMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)$/);
       if (chatConversationMatch && method === 'GET') {

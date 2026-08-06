@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "remote": "upstream",
+    "repository": "https://github.com/xvirobotics/metabot.git",
+    "branch": "main"
+  },
+  "features": [
+    {
+      "id": "lark-domain",
+      "status": "required",
+      "roots": ["src/feishu/domain.ts", "src/feishu/client-factory.ts"]
+    },
+    {
+      "id": "metabot-todos",
+      "status": "required",
+      "roots": ["packages/skills/metabot-todos"]
+    },
+    {
+      "id": "agent-team-governance",
+      "status": "required",
+      "roots": ["src/agent-teams/governance-extension.ts"]
+    },
+    {
+      "id": "arc-mcp",
+      "status": "required",
+      "roots": ["packages/arc-mcp"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/mcp/worker-manager",
+        "src/workers",
+        "src/api/routes/research-memory",
+        "src/engines",
+        "src/bridge",
+        "@xvirobotics/worker-runner-mcp"
+      ]
+    },
+    {
+      "id": "worker-runner-mcp",
+      "status": "required",
+      "roots": ["packages/worker-runner-mcp"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "src/agent-teams/team-store",
+        "src/bridge",
+        "@xvirobotics/arc-mcp"
+      ]
+    },
+    {
+      "id": "arc-worker-runner-adapter",
+      "status": "required",
+      "roots": ["packages/arc-worker-runner-adapter"],
+      "importRoots": ["packages/arc-worker-runner-adapter/src"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "better-sqlite3",
+        "@xvirobotics/worker-runner-mcp"
+      ]
+    }
+  ],
+  "reverseBoundaries": [
+    {
+      "id": "upstream-runtime-isolation",
+      "roots": ["src"],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter"
+      ]
+    }
+  ],
+  "forbiddenPaths": [
+    "src/memory-core",
+    "src/api/routes/research-memory-routes.ts",
+    "src/mcp/worker-manager-mcp.ts",
+    "src/workers/worker-manager.ts",
+    "src/engines/home-instructions.ts",
+    "src/workspace",
+    "web"
+  ]
+}

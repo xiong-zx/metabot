@@ -10,12 +10,6 @@ export type AuditEvent =
   | 'task_queued'
   | 'queue_cleared'
   | 'command'
-  | 'command_confirmation'
-  | 'bytheway_command'
-  | 'bytheway_start'
-  | 'bytheway_complete'
-  | 'bytheway_error'
-  | 'bytheway_timeout'
   | 'auth_denied'
   | 'api_task_start'
   | 'api_task_complete';

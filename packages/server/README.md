@@ -33,7 +33,7 @@ Save it — it is never displayed again.
 | `METABOT_PUBLIC_DISTRIBUTION` | _unset_ | `/cli/*` + `/install/*` install endpoints are token-gated by default; set `1`/`true` to serve them anonymously. Only when you self-distribute and your build embeds no secrets. |
 | `METABOT_CORE_AUDIT_ENABLED` | `true` | Set `false` to disable audit writes. |
 | `METABOT_CORE_INSTANCE_NAME` | _pkg name_ | Surfaced in `/api/manifest`. |
-| `METABOT_CORE_UI_HOST` | _unset_ | Hostname that triggers the SPA Web UI fall-through. See "Web UI" below. Unset → API-only. |
+| `METABOT_CORE_UI_HOST` | _unset_ | Optional hostname restriction for the SPA Web UI. Unset serves the SPA on any Host; the default `127.0.0.1` bind keeps it local-only. |
 | `METABOT_CORE_UI_ALLOWED_EMAILS` | _unset_ | Optional comma-separated email whitelist for the proxy-header web-identity path (`X-Forwarded-Email`), only relevant if you put your own SSO proxy in front. Lowercased + trimmed. Unset/empty → web-identity disabled (token-only). See "Optional proxy-header identity" below. |
 | `LOG_FORMAT` | _auto_ | `json` for prod; defaults to `pino-pretty` on a TTY. |
 | `LOG_LEVEL` | `info` | pino level. |
@@ -109,20 +109,18 @@ HTML markup — acceptable for v1; not in scope to fix here.
 
 ## Web UI (host-based dispatch)
 
-The server can also serve a single-page Web UI built from a sibling repo
-(scaffolded separately; assets land in `packages/server/static/`). Serving
-is **opt-in and host-gated**:
+The server can also serve the personal-edition single-page Web UI from
+`packages/server/static/`. Serving is enabled by default on the loopback-bound
+server and can optionally be host-gated:
 
-- Set `METABOT_CORE_UI_HOST=<hostname>` (e.g. `localhost` for a local
-  setup, or `your-metabot-host.example.com` for a remote box). The check is
-  case-insensitive and ignores port.
-- Only `GET` requests whose `Host` header matches `METABOT_CORE_UI_HOST`
-  fall through to `packages/server/static/`. POST/PATCH/DELETE/etc. on
-  non-API paths still return `404` even on the UI host — static-serve never
-  accepts uploads.
-- Requests on any other host (including the API host) continue to behave
-  as a pure API server (`404 not_found` for paths outside `/api/*` and
-  `/admin/*`).
+- With `METABOT_CORE_UI_HOST` unset, `GET` requests on non-API paths fall
+  through to the SPA for any Host header; the default bind remains
+  `127.0.0.1`.
+- Set `METABOT_CORE_UI_HOST=<hostname>` to restrict SPA serving to one host.
+  The check is case-insensitive and ignores port. Requests on any other host
+  behave as a pure API server.
+- POST/PATCH/DELETE/etc. on non-API paths still return `404` — static-serve
+  never accepts uploads.
 - `/health` and `/api/manifest` stay reachable on the UI host so the SPA
   can self-bootstrap.
 - Assets under `/assets/*` are served with
@@ -137,11 +135,9 @@ is **opt-in and host-gated**:
   (`.html`, `.js`, `.css`, `.svg`, `.ico`, `.map`, `.png`, `.jpg`, `.jpeg`,
   `.woff2`, `.json`); anything else falls back to `application/octet-stream`.
 
-Default unset → the SPA path is dormant and the server behaves as an API-
-only server. To enable it, set `METABOT_CORE_UI_HOST` (in your service's
-env file or shell) to the hostname you reach the server on and restart
-`metabot-core`. If you front it with a reverse proxy, point the proxy at
-this hostname.
+Default unset → the SPA is enabled for the local personal edition. If you
+front it with a reverse proxy, set `METABOT_CORE_UI_HOST` to the public
+hostname and restart `metabot-core`.
 
 ## Optional proxy-header identity (web-identity)
 

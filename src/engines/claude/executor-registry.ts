@@ -15,7 +15,7 @@
  *   The executor self-restarts on transient SDK/PTY stream errors (capped, see
  *   PersistentClaudeExecutor.maybeRestart). When that budget is exhausted it
  *   ends in 'closed' having emitted 'crashed' first. Rather than discard the
- *   pool slot immediately — which would lose all Agent Team agents and any
+ *   pool slot immediately — which would lose all Agent-Team teammates and any
  *   in-progress work, and route the next acquire to a vanilla fresh executor —
  *   the registry KEEPS the crashed entry parked in the pool (its last sessionId
  *   captured for resume) and respawns it on the next acquire / between-turn
@@ -26,8 +26,8 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
-import type { ClaudeEffort, ClaudePermissionMode } from '../../config.js';
 import type { TeamEvent, ApiContext } from './executor.js';
+import type { McpEntry } from '../mcp-entries.js';
 import {
   PersistentClaudeExecutor,
   type PersistentExecutorOptions,
@@ -54,16 +54,10 @@ export interface RegistryOptions {
   idleTimeoutMs?: number;
   /** Default model for new executors. Per-acquire option overrides this. */
   defaultModel?: string;
-  /** Default reasoning effort for new executors. */
-  defaultEffort?: ClaudeEffort;
-  /** Default Claude Code permission mode for new executors. */
-  defaultPermissionMode?: ClaudePermissionMode;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
   backend?: 'sdk' | 'pty';
-  /** Append the research-PM behavior contract to new persistent executors. */
-  pmPrompt?: boolean;
   /**
    * Max registry-level respawns of a crashed executor before its pool slot is
    * truly removed. Distinct from the executor's own in-process restart cap.
@@ -87,6 +81,14 @@ export interface AcquireOptions {
   apiContext?: ApiContext;
   /** Stable per-chat outputs directory. */
   outputsDir?: string;
+  /** Short-lived bridge-issued environment values scoped to this chat executor. */
+  env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
+  /** Private Claude PTY MCP config path. */
+  mcpConfigPath?: string;
+  /** Releases the materialized file leases if this executor owns them. */
+  mcpCleanup?: () => void;
 }
 
 interface PoolEntry {
@@ -110,7 +112,7 @@ interface PoolEntry {
    * True once the executor has emitted 'crashed' and its in-process restart
    * budget is exhausted (terminal 'closed' after a crash). A crashed entry is
    * KEPT in the pool (not deleted) so the next acquire can respawn it with the
-   * last sessionId, preserving Agent Team agents / in-progress work.
+   * last sessionId, preserving teammates / in-progress work.
    */
   crashed: boolean;
   /**
@@ -178,10 +180,17 @@ export class ExecutorRegistry extends EventEmitter {
     if (existing) {
       const state = existing.executor.getState();
       const healthy = state === 'ready' || state === 'restarting' || state === 'starting';
-      if (healthy && existing.model === effectiveModel) {
+      const sameExecutionEnv = equalStringRecords(existing.acquireOpts.env, opts.env);
+      const sameMcp =
+        equalMcpEntries(existing.acquireOpts.mcpEntries, opts.mcpEntries) &&
+        existing.acquireOpts.mcpConfigPath === opts.mcpConfigPath;
+      if (healthy && existing.model === effectiveModel && sameExecutionEnv && sameMcp) {
         // Healthy + same model — bump LRU position
         this.executors.delete(chatId);
         this.executors.set(chatId, existing);
+        // The existing executor already owns an equivalent lease. Release the
+        // duplicate lease created by this turn's idempotent materialization.
+        opts.mcpCleanup?.();
         return existing.executor;
       }
       if (healthy) {
@@ -189,14 +198,19 @@ export class ExecutorRegistry extends EventEmitter {
         // reusing this executor would keep the OLD model. Release + respawn —
         // the new executor RESUMES the same session (opts.resumeSessionId), so
         // the conversation is preserved, just continued on the new model.
+        const reason = existing.model !== effectiveModel
+          ? 'model-change'
+          : sameExecutionEnv
+            ? 'execution-mcp-change'
+            : 'execution-credential-rotation';
         this.opts.logger.info(
-          { chatId, from: existing.model, to: effectiveModel },
-          'ExecutorRegistry: model changed — respawning executor',
+          { chatId, from: existing.model, to: effectiveModel, executionEnvChanged: !sameExecutionEnv, mcpChanged: !sameMcp },
+          `ExecutorRegistry: ${reason} — respawning executor`,
         );
-        await this.release(chatId, 'model-change');
+        await this.release(chatId, reason);
       } else if (existing.crashed && existing.model === effectiveModel) {
         // Crashed slot — respawn in place (resuming the captured session) so
-        // Agent Team agents / in-progress work survive. Honors backoff + respawn cap;
+        // teammates / in-progress work survive. Honors backoff + respawn cap;
         // returns the live executor on success, or undefined once the budget
         // is exhausted (slot removed) — fall through to fresh create then.
         const respawned = await this.respawnCrashed(chatId, existing, opts);
@@ -241,7 +255,12 @@ export class ExecutorRegistry extends EventEmitter {
       healthySince: Date.now(),
     };
     const executor = this.buildExecutor(chatId, entry, opts, effectiveModel, opts.resumeSessionId);
-    await executor.start();
+    try {
+      await executor.start();
+    } catch (error) {
+      opts.mcpCleanup?.();
+      throw error;
+    }
     entry.executor = executor;
     entry.healthySince = Date.now();
     this.executors.set(chatId, entry);
@@ -268,15 +287,16 @@ export class ExecutorRegistry extends EventEmitter {
       resumeSessionId,
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
-      effort: this.opts.defaultEffort,
-      permissionMode: this.opts.defaultPermissionMode,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
+      env: opts.env,
+      mcpEntries: opts.mcpEntries,
+      mcpConfigPath: opts.mcpConfigPath,
+      mcpCleanup: opts.mcpCleanup,
       backend: this.opts.backend,
-      pmPrompt: this.opts.pmPrompt,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Remember the last live sessionId so a crash-respawn can resume it even
@@ -346,7 +366,7 @@ export class ExecutorRegistry extends EventEmitter {
 
   /**
    * Respawn a parked crashed entry in place, resuming its captured sessionId so
-   * Agent Team agents / in-progress work survive. Returns the live executor on success,
+   * teammates / in-progress work survive. Returns the live executor on success,
    * or undefined when the respawn budget is exhausted / backoff not yet elapsed
    * with no budget left — in which case the slot is removed and the caller
    * falls back to a fresh create.
@@ -398,7 +418,9 @@ export class ExecutorRegistry extends EventEmitter {
       await executor.start();
     } catch (err) {
       this.opts.logger.error({ err, chatId }, 'ExecutorRegistry: crash respawn start() failed');
-      // Re-park (or remove if now exhausted) and let the caller fall back.
+      // Re-park (or remove if now exhausted) and let acquire() fall through to
+      // a fresh create with the SAME materialized lease. The fresh-create path
+      // becomes its owner and will clean it if that start also fails.
       if (entry.respawnAttempts >= maxRespawn) {
         this.executors.delete(chatId);
         this.emit('executor-removed', chatId);
@@ -425,7 +447,7 @@ export class ExecutorRegistry extends EventEmitter {
 
   /**
    * Force-release the executor for chatId (graceful shutdown). Used by
-   * /reset to discard any Agent Team agents / background tasks tied to the old
+   * /reset to discard any teammates / background tasks tied to the old
    * session before starting fresh.
    *
    * Emits 'executor-removed' eagerly (before the underlying shutdown
@@ -469,6 +491,15 @@ export class ExecutorRegistry extends EventEmitter {
     }
   }
 
+  /** Retire a credential-bound executor without interrupting an active turn. */
+  async releaseIfIdle(chatId: string, reason: string): Promise<boolean> {
+    const entry = this.executors.get(chatId);
+    if (!entry) return true;
+    if (entry.executor.hasActiveTurn()) return false;
+    await this.release(chatId, reason);
+    return true;
+  }
+
   /** Shut down all executors (call on bot shutdown). */
   async shutdownAll(reason: string = 'registry-shutdown'): Promise<void> {
     if (this.shuttingDown) return;
@@ -497,4 +528,18 @@ export class ExecutorRegistry extends EventEmitter {
   }
 
   size(): number { return this.executors.size; }
+}
+
+function equalStringRecords(left?: Record<string, string>, right?: Record<string, string>): boolean {
+  if (left === right) return true;
+  const leftEntries = Object.entries(left ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    leftEntries.length === rightEntries.length &&
+    leftEntries.every(([key, value], index) => key === rightEntries[index]?.[0] && value === rightEntries[index]?.[1])
+  );
+}
+
+function equalMcpEntries(left?: readonly McpEntry[], right?: readonly McpEntry[]): boolean {
+  return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
 }

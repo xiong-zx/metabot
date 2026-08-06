@@ -50,48 +50,45 @@ describe('buildCardV2', () => {
     expect(goal.content).toContain('Ship the persistent executor PR');
   });
 
-  it('renders a compact working count and per-working-agent activity (AT-006)', () => {
+  it('renders 🧑‍🤝‍🧑 Team panel with teammates and tasks (regression)', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'investigate',
       responseText: '',
       toolCalls:    [],
       teamState: {
-        name: 'feishu-ux-review@chat:oc_abcdef',
-        agents: [
+        name: 'feishu-ux-review',
+        teammates: [
           { name: 'ux-researcher',  status: 'working', lastSubject: 'auditing card UX' },
           { name: 'arch-reviewer',  status: 'idle' },
-          { name: 'scribe',         status: 'idle' },
         ],
         tasks: [
-          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', agent: 'ux-researcher' },
-          { taskId: 't2', subject: 'Arch review', status: 'completed',  agent: 'arch-reviewer' },
+          { taskId: 't1', subject: 'UX audit',  status: 'in_progress', teammate: 'ux-researcher' },
+          { taskId: 't2', subject: 'Arch review', status: 'completed',  teammate: 'arch-reviewer' },
         ],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content) && /Teammates/.test(e.content),
     );
     expect(team).toBeDefined();
-    // Compact working count instead of one line per agent.
-    expect(team.content).toContain('1/3 working');
-    // Team id is shortened — no chat-scoped suffix in the header.
+    // Team name
     expect(team.content).toContain('feishu-ux-review');
-    expect(team.content).not.toContain('oc_abcdef');
-    // Working agent + what it is doing.
+    // Teammates with both statuses
     expect(team.content).toContain('ux-researcher');
-    expect(team.content).toContain('auditing card UX');
-    // Idle agents are collapsed away entirely.
-    expect(team.content).not.toContain('arch-reviewer');
-    expect(team.content).not.toContain('scribe');
-    // Task counts stay, completed task subjects do not.
+    expect(team.content).toContain('arch-reviewer');
+    expect(team.content).toContain('⏳');                  // working icon
+    expect(team.content).toContain('💤');                  // idle icon
+    expect(team.content).toContain('auditing card UX');     // lastSubject
+    // Tasks summary line
     expect(team.content).toContain('1 in progress');
     expect(team.content).toContain('1 done');
-    expect(team.content).not.toContain('Arch review');
+    expect(team.content).toContain('UX audit');
+    expect(team.content).toContain('Arch review');
   });
 
-  it('collapses an all-idle team to a single compact line', () => {
+  it('renders pending Agent Team tasks', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'x',
@@ -99,30 +96,8 @@ describe('buildCardV2', () => {
       toolCalls:    [],
       teamState: {
         name: 'demo',
-        agents: [{ name: 'lead', status: 'idle' }, { name: 'reviewer', status: 'idle' }],
-        tasks: [],
-      },
-    };
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
-    );
-    expect(team).toBeDefined();
-    expect(team.content.split('\n')).toHaveLength(1);
-    expect(team.content).toContain('idle (2 agents)');
-    expect(team.content).not.toContain('lead');
-  });
-
-  it('summarizes pending Agent Team tasks when nobody is working', () => {
-    const state: CardState = {
-      status:       'running',
-      userPrompt:   'x',
-      responseText: '',
-      toolCalls:    [],
-      teamState: {
-        name: 'demo',
-        agents: [{ name: 'lead', status: 'idle' }],
-        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', agent: 'lead' }],
+        teammates: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
       },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
@@ -134,40 +109,19 @@ describe('buildCardV2', () => {
     expect(team?.content).toContain('Plan work');
   });
 
-  it('omits Team panel when teamState has no agents and no tasks', () => {
+  it('omits Team panel when teamState has no teammates and no tasks', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'x',
       responseText: '',
       toolCalls:    [],
-      teamState:    { agents: [], tasks: [] },
+      teamState:    { teammates: [], tasks: [] },
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
     );
     expect(team).toBeUndefined();
-  });
-
-  it('renders legacy teammate card state for persisted compatibility', () => {
-    const state = {
-      status:       'running',
-      userPrompt:   'x',
-      responseText: '',
-      toolCalls:    [],
-      teamState: {
-        name: 'legacy',
-        teammates: [{ name: 'reviewer', status: 'working', lastSubject: 'reviewing legacy card' }],
-        tasks: [{ taskId: '1', subject: 'Review legacy card', status: 'pending', teammate: 'reviewer' }],
-      },
-    } as CardState;
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /🧑‍🤝‍🧑 \*\*Team\*\*/.test(e.content),
-    );
-    expect(team?.content).toContain('1/1 working');
-    expect(team?.content).toContain('reviewer');
-    expect(team?.content).toContain('reviewing legacy card');
   });
 
   // Cards from flushSpontaneous (between-turn agent activity) get the
@@ -305,40 +259,6 @@ describe('buildCardV2', () => {
     expect(cardStr).not.toContain('answer_question');
   });
 
-  it('renders non-closed lifecycle state and key', () => {
-    const state: CardState = {
-      status:         'running',
-      userPrompt:     'restart recovery',
-      responseText:   '',
-      toolCalls:      [],
-      lifecycleStage: 'recovering',
-      lifecycleKey:   'teaminst:abc:manager:run-123',
-    };
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const lifecycle = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
-    );
-    expect(lifecycle).toBeDefined();
-    expect(lifecycle.content).toContain('Recovering');
-    expect(lifecycle.content).toContain('teaminst:abc:manager:run-123');
-  });
-
-  it('hides closed lifecycle state', () => {
-    const state: CardState = {
-      status:         'complete',
-      userPrompt:     'done',
-      responseText:   'Done.',
-      toolCalls:      [],
-      lifecycleStage: 'closed',
-      lifecycleKey:   'chat:done',
-    };
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const lifecycle = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('State:'),
-    );
-    expect(lifecycle).toBeUndefined();
-  });
-
   it('shows stats footer with cost/duration/model on complete', () => {
     const state: CardState = {
       status:        'complete',
@@ -359,74 +279,6 @@ describe('buildCardV2', () => {
     expect(inner).toContain('$0.03');
     expect(inner).toContain('opus-4-7');                 // claude- prefix stripped
     expect(inner).toContain('ctx:');
-  });
-
-  it('shows configured to runtime fallback provenance on complete and agent activity', () => {
-    for (const status of ['complete', 'agent_activity'] as const) {
-      const state: CardState = {
-        status,
-        userPrompt: 'task',
-        responseText: 'done',
-        toolCalls: [],
-        model: 'claude-sonnet-5',
-        modelTelemetry: {
-          configuredModel: 'claude-fable-5',
-          spawnModel: 'claude-fable-5',
-          runtimeModel: 'claude-sonnet-5',
-          runtimeModelSource: 'assistant_jsonl',
-          fallbackOriginalModel: 'claude-fable-5',
-          fallbackModel: 'claude-sonnet-5',
-        },
-      };
-      const elements = findElements(JSON.parse(buildCardV2(state)));
-      const footer = elements.find((e) => e.tag === 'column_set');
-      const text = JSON.stringify(footer);
-      expect(text).toContain('model: fable-5');
-      expect(text).toContain('sonnet-5');
-      expect(text).toContain('fallback');
-    }
-  });
-
-  /**
-   * The `a → b` arrow means the model actually changed. The `[1m]` suffix is a
-   * Claude Code local flag that the API strips from the id it echoes back, so
-   * configured `claude-opus-4-8[1m]` vs runtime `claude-opus-4-8` is the SAME
-   * model — rendering an arrow there falsely reports a fallback.
-   */
-  it('does not report a fallback when only the [1m] suffix differs', () => {
-    const state: CardState = {
-      status: 'complete',
-      userPrompt: 'task',
-      responseText: 'done',
-      toolCalls: [],
-      model: 'claude-opus-4-8',
-      modelTelemetry: {
-        configuredModel: 'claude-opus-4-8[1m]',
-        spawnModel: 'claude-opus-4-8[1m]',
-        runtimeModel: 'claude-opus-4-8',
-        runtimeModelSource: 'assistant_jsonl',
-      },
-    };
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
-    expect(text).not.toContain('→');
-    expect(text).not.toContain('fallback');
-    expect(text).toContain('opus-4-8[1m]');            // keeps the 1M marker visible
-  });
-
-  it('reports the full context window for a 1M session', () => {
-    const state: CardState = {
-      status: 'complete',
-      userPrompt: 'task',
-      responseText: 'done',
-      toolCalls: [],
-      model: 'claude-opus-4-8',
-      totalTokens: 37_800,
-      contextWindow: 1_000_000,
-    };
-    const elements = findElements(JSON.parse(buildCardV2(state)));
-    const text = JSON.stringify(elements.find((e) => e.tag === 'column_set'));
-    expect(text).toContain('ctx: 37.8k/1000k (4%)');
   });
 
   it('truncates long content', () => {

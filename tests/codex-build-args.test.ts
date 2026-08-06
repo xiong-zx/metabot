@@ -1,23 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyCodexRuntimeOverrides, buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
-import {
-  resetCodexSandboxSupportForTests,
-  setCodexSandboxSupportForTests,
-} from '../src/engines/codex/sandbox-support.js';
+import { buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
+import type { McpEntry } from '../src/engines/mcp-entries.js';
 import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/config.js';
-
-// The default sandbox is probed at runtime (see codex-sandbox-support.test.ts).
-// Pin a namespace-capable host so these argv assertions describe the code, not
-// the machine the suite happens to run on.
-beforeEach(() => {
-  setCodexSandboxSupportForTests({ available: true, probe: 'bwrap' });
-});
-afterEach(() => {
-  resetCodexSandboxSupportForTests();
-});
 
 describe('buildCodexArgs', () => {
   const cwd = '/work/proj';
@@ -49,16 +36,6 @@ describe('buildCodexArgs', () => {
     expect(args[0]).toBe('--dangerously-bypass-approvals-and-sandbox');
     expect(args).not.toContain('-a');
     expect(args).not.toContain('--sandbox');
-  });
-
-  it('lets per-call policy/sandbox overrides disable bot-level bypass', () => {
-    const cfg = applyCodexRuntimeOverrides(
-      { dangerouslyBypassApprovalsAndSandbox: true },
-      { approvalPolicy: 'on-request', sandbox: 'workspace-write' },
-    );
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
-    expect(args.slice(0, 4)).toEqual(['-a', 'on-request', '--sandbox', 'workspace-write']);
-    expect(args).not.toContain('--dangerously-bypass-approvals-and-sandbox');
   });
 
   it('passes model and profile when provided', () => {
@@ -98,47 +75,49 @@ describe('buildCodexArgs', () => {
     expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'ultra')).toContain('model_reasoning_effort="ultra"');
   });
 
-  it('lets extraArgs override per-turn reasoning effort', () => {
-    const args = buildCodexArgs({ extraArgs: ['-c', 'model_reasoning_effort="medium"'] }, cwd, prompt, undefined, undefined, 'high');
-    expect(args).toContain('model_reasoning_effort="medium"');
-    expect(args).not.toContain('model_reasoning_effort="high"');
-  });
-
-  it('injects verified context profiles for known Codex models', () => {
-    const gpt54 = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.4').join(' ');
-    expect(gpt54).toContain('-c model_context_window=1000000');
-    expect(gpt54).toContain('-c model_auto_compact_token_limit=820000');
-    expect(gpt54).toContain('-c model_max_output_tokens=192000');
-
-    const gpt55 = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5').join(' ');
-    expect(gpt55).toContain('-c model_context_window=272000');
-    expect(gpt55).toContain('-c model_auto_compact_token_limit=258400');
-    expect(gpt55).toContain('-c model_max_output_tokens=128000');
-    expect(gpt55).not.toContain('1000000');
-  });
-
-  it('does not inject profile keys already supplied in extraArgs', () => {
-    const args = buildCodexArgs({ extraArgs: ['-c', 'model_context_window=500000'] }, cwd, prompt, undefined, 'gpt-5.4').join(' ');
-    expect(args).toContain('model_context_window=500000');
-    expect(args).not.toContain('model_context_window=1000000');
-    expect(args).toContain('model_auto_compact_token_limit=820000');
-  });
-
-  it('passes developer_instructions as a quoted config override', () => {
-    const instructions = '## MetaBot API\nYou are bot "x" in chat "y".';
-    const args = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5', undefined, instructions);
-    const idx = args.findIndex((a) => a.startsWith('developer_instructions='));
-    expect(idx).toBeGreaterThan(-1);
-    expect(args[idx - 1]).toBe('-c');
-    expect(args[idx]).toBe(`developer_instructions=${JSON.stringify(instructions)}`);
-    expect(idx).toBeLessThan(args.indexOf('exec'));
-  });
-
   it('appends extraArgs verbatim between global flags and the exec subcommand', () => {
     const cfg: CodexBotConfig = { extraArgs: ['--foo', 'bar baz', '--qux'] };
     const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
     const execIdx = args.indexOf('exec');
     expect(args.slice(execIdx - 3, execIdx)).toEqual(['--foo', 'bar baz', '--qux']);
+  });
+
+  it('adds per-invocation MCP overrides before operator extraArgs without token bytes', () => {
+    const entries: McpEntry[] = [
+      {
+        name: 'metabot-worker',
+        command: '/runtime with spaces/node_modules/.bin/metabot-"worker"',
+        args: ['--path', 'C:\\private files\\proxy'],
+        env: {
+          METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
+          METABOT_WORKER_PROXY_CAPABILITY_FILE: '/private/token file',
+        },
+      },
+    ];
+    const args = buildCodexArgs(
+      { extraArgs: ['--operator-override'] },
+      cwd,
+      prompt,
+      undefined,
+      undefined,
+      undefined,
+      entries,
+    );
+    const joined = args.join('\n');
+
+    expect(joined).toContain('mcp_servers.metabot-worker.command="/runtime with spaces/node_modules/.bin/metabot-\\"worker\\""');
+    expect(joined).toContain('mcp_servers.metabot-worker.args=["--path","C:\\\\private files\\\\proxy"]');
+    expect(joined).toContain(
+      'mcp_servers.metabot-worker.env.METABOT_WORKER_PROXY_CAPABILITY_FILE="/private/token file"',
+    );
+    expect(joined).not.toContain('CAPABILITY_TOKEN_SENTINEL');
+    expect(args.indexOf('--operator-override')).toBeGreaterThan(args.findIndex((arg) => arg.includes('mcp_servers.')));
+    expect(args.indexOf('--operator-override')).toBeLessThan(args.indexOf('exec'));
+  });
+
+  it('keeps argv byte-identical when no MCP entries are materialized', () => {
+    const existing = buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high');
+    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high', [])).toEqual(existing);
   });
 
   it('uses `exec resume <sessionId>` when a session id is provided', () => {
@@ -179,26 +158,6 @@ describe('buildCodexArgs', () => {
         model: 'gpt-test',
         contextWindow: 123456,
       });
-    } finally {
-      if (priorCodexHome === undefined) delete process.env.CODEX_HOME;
-      else process.env.CODEX_HOME = priorCodexHome;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('uses model profiles and config.toml context before cache fallback', () => {
-    const priorCodexHome = process.env.CODEX_HOME;
-    const dir = mkdtempSync(join(tmpdir(), 'metabot-codex-'));
-    try {
-      process.env.CODEX_HOME = dir;
-      writeFileSync(join(dir, 'config.toml'), 'model_context_window = 654321\n');
-      writeFileSync(join(dir, 'models_cache.json'), JSON.stringify({
-        models: [{ slug: 'gpt-5.4', context_window: 272000, max_context_window: 1000000 }],
-      }));
-
-      expect(resolveCodexModelMetadata({}, 'gpt-5.4').contextWindow).toBe(1000000);
-      expect(resolveCodexModelMetadata({ contextWindow: 42 }, 'gpt-5.4').contextWindow).toBe(42);
-      expect(resolveCodexModelMetadata({}, 'gpt-custom').contextWindow).toBe(654321);
     } finally {
       if (priorCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = priorCodexHome;
@@ -267,19 +226,22 @@ describe('buildCodexEnv', () => {
     expect(env.PATH).toBe('/bin');
   });
 
-  it('inherits the deployment proxy contract into Codex child env', () => {
+  it('strips bridge local-admin credentials but preserves the scoped Team capability', () => {
     const env = buildCodexEnv(
-      {},
+      { env: { METABOT_API_SECRET: 'config-spoof' } },
       {
-        HTTP_PROXY: 'http://127.0.0.1:7890',
-        HTTPS_PROXY: 'http://127.0.0.1:7890',
-        NO_PROXY: 'localhost,127.0.0.1',
+        API_SECRET: 'bridge-admin',
+        METABOT_API_SECRET: 'bridge-admin-alias',
+        METABOT_AUTH: 'Authorization: Bearer bridge-admin',
+        METABOT_TEAM_CAPABILITY: 'signed-scoped-token',
+        METABOT_BOT_NAME: 'pm-codex',
+        METABOT_CHAT_ID: 'teaminst:one:coder',
       },
     );
-    expect(env).toMatchObject({
-      HTTP_PROXY: 'http://127.0.0.1:7890',
-      HTTPS_PROXY: 'http://127.0.0.1:7890',
-      NO_PROXY: 'localhost,127.0.0.1',
-    });
+    expect(env.API_SECRET).toBeUndefined();
+    expect(env.METABOT_API_SECRET).toBeUndefined();
+    expect(env.METABOT_AUTH).toBeUndefined();
+    expect(env.METABOT_TEAM_CAPABILITY).toBe('signed-scoped-token');
+    expect(env.METABOT_BOT_NAME).toBe('pm-codex');
   });
 });

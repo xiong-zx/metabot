@@ -31,14 +31,9 @@ ios/AuthKey*.p8
 .claude/skills/
 .codex/
 
-# Per-engine project instructions are tracked as shared config:
-#   CLAUDE.md is canonical; AGENTS.md is the codex-engine mirror. Both are versioned.
+# Repository instructions are tracked at the root; generated per-engine skill
+# mirrors remain ignored above.
 
 # Parallel local projects living alongside metabot (not part of this repo)
 naruto-finance-agents/
 bots.test-trunks.json
-
-# Local generated runtime/worktree artifacts
-.metabot-memory/
-tmp/
-worktrees/

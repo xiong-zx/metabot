@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import type { Server, IncomingMessage, ServerResponse } from 'node:http';
+import type { Server, IncomingMessage } from 'node:http';
 import type { BotRegistry, BotInfo } from '../api/bot-registry.js';
 import type { Logger } from '../utils/logger.js';
 import type { CardState, PendingQuestion } from '../types.js';
@@ -74,26 +74,6 @@ type ServerMessage =
   | { type: 'asr_error'; error: string }
   | { type: 'asr_stopped' }
   | { type: 'pong' };
-
-// ─── MIME types for static file serving ────────────────────────────────────
-
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.eot': 'application/vnd.ms-fontobject',
-  '.map': 'application/json',
-};
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -761,91 +741,4 @@ function sendMessage(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
-}
-
-// ─── Static file serving ──────────────────────────────────────────────────
-
-/**
- * Serve static files from the `dist/web/` directory for `/web/*` requests.
- * Returns true if the request was handled, false otherwise.
- */
-export function serveStaticFiles(
-  req: IncomingMessage,
-  res: ServerResponse,
-  url: string,
-): boolean {
-  // Only handle GET /web/*
-  if (req.method !== 'GET') return false;
-
-  // Redirect /web to /web/
-  if (url === '/web') {
-    res.writeHead(301, { Location: '/web/' });
-    res.end();
-    return true;
-  }
-
-  if (!url.startsWith('/web/')) return false;
-
-  // Strip query string for file path resolution
-  const cleanUrl = url.includes('?') ? url.slice(0, url.indexOf('?')) : url;
-
-  // Resolve the file path relative to dist/web/
-  const webRoot = path.resolve(process.cwd(), 'dist', 'web');
-  let filePath = cleanUrl.slice('/web/'.length);
-
-  // Default to index.html for root
-  if (!filePath || filePath === '') {
-    filePath = 'index.html';
-  }
-
-  const fullPath = path.resolve(webRoot, filePath);
-
-  // Security: prevent directory traversal
-  if (!fullPath.startsWith(webRoot)) {
-    res.writeHead(403, { 'Content-Type': 'text/plain' });
-    res.end('Forbidden');
-    return true;
-  }
-
-  // Try to serve the file
-  try {
-    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-      const ext = path.extname(fullPath).toLowerCase();
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-      const content = fs.readFileSync(fullPath);
-      // Hashed assets get long cache; index.html gets no-cache
-      const isHashed = filePath.startsWith('assets/') && /-[a-zA-Z0-9]{8,}\./.test(filePath);
-      const cacheControl = isHashed ? 'public, max-age=31536000, immutable' : 'no-cache';
-      res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cacheControl });
-      res.end(content);
-      return true;
-    }
-  } catch {
-    // Fall through to SPA fallback
-  }
-
-  // Asset files that don't exist should 404 (not SPA fallback)
-  if (filePath.startsWith('assets/')) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not found');
-    return true;
-  }
-
-  // SPA fallback: serve index.html for any unmatched non-asset path
-  const indexPath = path.resolve(webRoot, 'index.html');
-  try {
-    if (fs.existsSync(indexPath)) {
-      const content = fs.readFileSync(indexPath);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(content);
-      return true;
-    }
-  } catch {
-    // index.html not found
-  }
-
-  // dist/web/ doesn't exist yet
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('Web UI not found. Build the web frontend first.');
-  return true;
 }

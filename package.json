@@ -1,41 +1,43 @@
 {
   "name": "metabot",
-  "version": "1.0.0",
-  "description": "MetaBot — Bridge service connecting IM bots (Feishu/Lark, Telegram) to Claude Code Agent SDK",
+  "version": "1.3.0",
+  "metabotEdition": "personal",
+  "description": "MetaBot Personal Edition — use Codex and Kimi Code from IM channels and the local Web UI",
   "main": "dist/index.js",
   "type": "module",
   "workspaces": [
+    "packages/arc-mcp",
+    "packages/arc-worker-runner-adapter",
     "packages/cli",
     "packages/cli-core",
     "packages/metamemory",
     "packages/skill-hub",
+    "packages/worker-runner-mcp",
     "packages/server",
     "packages/web-ui"
   ],
   "scripts": {
-    "build": "npm run build:web && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
+    "build": "tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
     "build:bridge": "tsc -p tsconfig.bridge.json",
-    "build:web": "cd web && npm install --include=dev && ./node_modules/.bin/vite build",
     "build:packages": "npm run build --workspaces --if-present",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "typecheck": "tsx scripts/typecheck-root.ts",
     "test": "vitest run && npm run test --workspaces --if-present",
     "test:bridge": "vitest run",
-    "test:cli": "vitest run --config packages/cli/vitest.config.ts",
     "test:packages": "npm run test --workspaces --if-present",
-    "check:merge-hygiene:memory-core": "tsx scripts/check-memory-core-merge-hygiene.ts",
+    "check:downstream-boundaries": "node scripts/check-downstream-boundaries.mjs",
+    "check:downstream-boundaries:release": "node scripts/check-downstream-boundaries.mjs --release",
     "lint": "eslint src/ tests/ && npm run lint --workspaces --if-present",
     "lint:fix": "eslint src/ tests/ --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts'",
+    "pack:github": "bash scripts/pack-github-release.sh",
     "update-cli": "cp bin/metabot ~/.local/bin/metabot && chmod +x ~/.local/bin/metabot && echo \"Updated: metabot\" && rm -f ~/.local/bin/mb ~/.local/bin/mm ~/.local/bin/mh"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.215",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.154",
     "@anthropic-ai/sdk": "^0.100.0",
-    "@larksuiteoapi/node-sdk": "^1.58.0",
-    "@moonshot-ai/kimi-agent-sdk": "^0.1.8",
+    "@larksuiteoapi/node-sdk": "^1.64.0",
     "@types/ws": "^8.18.0",
     "@volcengine/openapi": "^1.36.0",
     "@xterm/headless": "^6.0.0",
@@ -52,9 +54,9 @@
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
     "tsx": "^4.21.0",
-    "undici": "^7.24.5",
-    "ws": "^8.19.0",
-    "xlsx": "^0.18.5"
+    "undici": "^7.28.0",
+    "ws": "^8.21.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -67,6 +69,14 @@
     "vitest": "^3.2.4"
   },
   "overrides": {
-    "buffer": "^6.0.3"
+    "axios": "^1.15.2",
+    "buffer": "^6.0.3",
+    "form-data": "^4.0.6",
+    "hono": "^4.12.25",
+    "protobufjs": "^7.6.3",
+    "uuid": "^11.1.1"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

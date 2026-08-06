@@ -35,6 +35,9 @@ Step-by-step procedure to configure a Feishu bot for MetaBot.
     - **`im:chat:readonly`** — Read chat info (needed for 2-member group detection)
 4. Click **"Add Scopes"**
 
+!!! note "Reply context requires message read access"
+    The **`im:message:readonly`** scope lets MetaBot retrieve the exact parent selected by Feishu/Lark's **Reply** action. In mention-only groups, an unmentioned message or attachment does not enter model context by itself; reply to that message and @mention the intended bot. MetaBot supports replied text, rich-text posts, images, files, and interactive cards. Same-chat card text is preserved regardless of author, cross-chat references are rejected, and extracted text is capped at 16,000 characters. A later bare mention does not attach unrelated cached media. Grant the same scope on Lark apps configured with `feishuDomain: "lark"`.
+
 !!! note "Optional permissions for advanced features"
     For wiki sync and document reading, also add:
 
@@ -57,16 +60,6 @@ Step-by-step procedure to configure a Feishu bot for MetaBot.
 7. Check **"Message received"** (`im.message.receive_v1`)
 8. Click **Confirm**
 9. When prompted for suggested scopes, click **"Add Scopes"**
-
-### Group Mentions And File Messages
-
-- `im:message.group_msg` delivers every user-message event from a group containing the bot. It enables the “send a file, then reply to that file and @mention the bot” workflow, but it does not decide which events should enter model context.
-- With the default `groupNoMention=false`, MetaBot drops ordinary group text that does not mention the current bot, so it never starts a model turn or consumes inference tokens. When the user explicitly replies to that message and mentions the bot, MetaBot retrieves the message named by Feishu's `parent_id` and adds its text or attachment to that bot's context. Referenced text is capped at 16,000 characters.
-- Replies to a bot's interactive answer card are supported as well. MetaBot extracts visible Markdown, text, and table content while excluding footer metadata and interactive control values. Extraction is deliberately tolerant of several card read-back shapes (schema v1/v2, `card` / `i18n_elements` wrappers, and the legacy nested-array layout) because Feishu does not contractually guarantee the envelope returned by the message-read API. Replying to **any** card in the **same chat** injects its visible text as reply context regardless of author (the mentioned bot's own card, another bot's card, or a card the user is looking at); only cross-chat references are rejected, and the 16,000-character cap still applies.
-- For files and images, use **Reply** on the attachment message and mention the intended bot. MetaBot retrieves the original message on demand and keeps a five-minute in-memory media fallback. A later bare mention does not attach unrelated cached files.
-- `groupNoMention=true` processes every delivered group user message and should only be used when a chat has one explicitly designated bot.
-- `im:message.group_at_msg.include_bot:readonly` allows other bots to mention the current bot. MetaBot ignores bot senders by default; use the Agent Bus for bot-to-bot coordination instead of a Feishu message loop.
-- Feishu can redeliver the same event. MetaBot deduplicates by `message_id` to avoid starting the same model turn twice.
 
 ## Step 6: Publish the App
 

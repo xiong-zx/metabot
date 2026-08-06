@@ -7,8 +7,11 @@ import { createEventDispatcher } from './feishu/event-handler.js';
 import { FeishuGroupReplyModeStore } from './feishu/group-reply-mode-store.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
+import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
+import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-factory.js';
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
+import { finalizeControlledRestartAfterStartup } from './bridge/restart-recovery.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -17,17 +20,9 @@ import { BotRegistry } from './api/bot-registry.js';
 import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
-import { WorkerManager } from './workers/worker-manager.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
-import { WikiAutoSync } from './sync/auto-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
-import { checkMetabotCoreMemoryConnection } from './memory/core-connection.js';
-import {
-  finalizeControlledRestartAfterStartup,
-  recoverInterruptedTasksAfterRestart,
-} from './bridge/restart-recovery.js';
-import { cleanupStaleBridgeDirs } from './engines/claude/pty/hook-bridge.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -38,39 +33,6 @@ interface FeishuBotHandle {
   config: BotConfigBase;
   sender: IMessageSender;
   feishuClient: lark.Client;
-  lastEventAt: { value: number };
-  dispatcher: lark.EventDispatcher;
-  feishuCreds: { appId: string; appSecret: string };
-}
-
-function envFlag(name: string, defaultValue: boolean): boolean {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return defaultValue;
-  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
-  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
-  return defaultValue;
-}
-
-function envPositiveInt(name: string, defaultValue: number, logger: Logger): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return defaultValue;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    logger.warn({ name, value: raw, defaultValue }, 'Invalid positive integer env value; using default');
-    return defaultValue;
-  }
-  return parsed;
-}
-
-function envNonNegativeInt(name: string, defaultValue: number, logger: Logger): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return defaultValue;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    logger.warn({ name, value: raw, defaultValue }, 'Invalid non-negative integer env value; using default');
-    return defaultValue;
-  }
-  return parsed;
 }
 
 /**
@@ -118,7 +80,7 @@ async function startFeishuBot(
   botLogger.info('Starting Feishu bot...');
 
   // Create Feishu API client
-  const client = new lark.Client({
+  const client = createFeishuRestClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     disableTokenCache: false,
@@ -142,7 +104,6 @@ async function startFeishuBot(
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
   const bridge = new MessageBridge(botConfig, botLogger, sender);
-  const lastEventAt = { value: Date.now() };
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -160,42 +121,42 @@ async function startFeishuBot(
         botLogger.error({ err, event }, 'Unhandled error in card action handler');
       });
     },
-    () => { lastEventAt.value = Date.now(); },
     groupReplyModeStore,
-    async (chatId, title, content, color) => {
-      await sender.sendTextNotice(chatId, title, content, color);
-    },
+    (chatId, title, content, color) => sender.sendTextNotice(chatId, title, content, color),
   );
 
-  // Create WebSocket client
-  const wsClient = new lark.WSClient({
+  // Create WebSocket client with bounded liveness/reconnect controls.
+  const wsRecovery = resolveFeishuWsRecoveryOptions();
+  const wsClient = createFeishuWsClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     loggerLevel: lark.LoggerLevel.info,
     agent: localAgent,
+    ...wsRecovery,
+    onReady: () => botLogger.info('Feishu WebSocket connected'),
+    onReconnecting: () => botLogger.warn('Feishu WebSocket disconnected; reconnecting'),
+    onReconnected: () => botLogger.info('Feishu WebSocket reconnected'),
+    onError: (err) => botLogger.error({ err: err.message }, 'Feishu WebSocket recovery failed'),
   });
+  botLogger.info(
+    {
+      pingTimeoutSec: wsRecovery.wsConfig.pingTimeout,
+      handshakeTimeoutMs: wsRecovery.handshakeTimeoutMs,
+    },
+    'Feishu WebSocket recovery enabled',
+  );
 
   // Start WebSocket connection with event dispatcher
   await wsClient.start({ eventDispatcher: dispatcher });
 
-  botLogger.info('Feishu bot is running');
+  botLogger.info('Feishu bot channel initialized');
   botLogger.info({
     defaultWorkingDirectory: botConfig.claude.defaultWorkingDirectory,
     maxTurns: botConfig.claude.maxTurns ?? 'unlimited',
     maxBudgetUsd: botConfig.claude.maxBudgetUsd ?? 'unlimited',
   }, 'Configuration');
 
-  return {
-    name: botConfig.name,
-    bridge,
-    wsClient,
-    config: botConfig,
-    sender,
-    feishuClient: client,
-    lastEventAt,
-    dispatcher,
-    feishuCreds: { appId: botConfig.feishu.appId, appSecret: botConfig.feishu.appSecret },
-  };
+  return { name: botConfig.name, bridge, wsClient, config: botConfig, sender, feishuClient: client };
 }
 
 /**
@@ -251,20 +212,10 @@ async function main() {
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
 
-  // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
-  // so the first turn in each chat after a restart can be reminded not to
-  // restart again. Must run before any message can be handled.
+  // Load but retain the restart breadcrumb. The new process clears it only
+  // after startup health, PM2 persistence, reporting, and continuation
+  // ownership have all reached a durable decision.
   loadRestartBreadcrumb();
-
-  // Orphaned PTY hook-bridge temp dirs (`/tmp/metabot-pty-*`) accumulate
-  // across crashes/restarts because dispose() only runs on normal teardown.
-  // Safe to sweep unconditionally here: this process hasn't created any
-  // bridges yet, so everything matching the pattern belongs to a prior run.
-  // Must stay before any bot starts (claude-engine bots create bridges).
-  const staleBridgeDirs = cleanupStaleBridgeDirs(logger);
-  if (staleBridgeDirs > 0) {
-    logger.info({ count: staleBridgeDirs }, 'Cleaned up stale PTY hook-bridge temp dirs from a previous run');
-  }
 
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;
@@ -277,6 +228,7 @@ async function main() {
   // Must run before ANY lark.Client makes a request (token fetches included)
   // so no Feishu socket ever goes out the default route.
   const feishuLocalAgent = setupFeishuLocalAddress(logger);
+  // Avoid creating Feishu-specific state for Telegram/WeChat/Web-only installs.
   const groupReplyModeStore = feishuCount > 0
     ? new FeishuGroupReplyModeStore(logger)
     : undefined;
@@ -310,67 +262,6 @@ async function main() {
     )
     : [];
 
-  const wsWatchdogStaleMs = process.env.METABOT_WS_WATCHDOG_STALE_MS
-    ? parseInt(process.env.METABOT_WS_WATCHDOG_STALE_MS, 10)
-    : 7 * 60 * 1000;
-  if (feishuHandles.length > 0 && wsWatchdogStaleMs > 0) {
-    const tappedSockets = new WeakSet<object>();
-    const rebuildingBots = new Set<string>();
-    const tapFrames = (handle: FeishuBotHandle) => {
-      try {
-        const inst = (handle.wsClient as unknown as {
-          wsConfig?: { getWSInstance?: () => { on: (ev: string, fn: () => void) => void } | undefined };
-        }).wsConfig?.getWSInstance?.();
-        if (inst && !tappedSockets.has(inst)) {
-          tappedSockets.add(inst);
-          inst.on('message', () => { handle.lastEventAt.value = Date.now(); });
-        }
-      } catch {
-        // SDK internals shifted; dispatcher-level liveness still applies.
-      }
-    };
-    for (const handle of feishuHandles) tapFrames(handle);
-
-    const rebuildWsClient = async (handle: FeishuBotHandle, silentMs: number) => {
-      logger.warn({ bot: handle.name, silentSec: Math.round(silentMs / 1000) }, 'WS watchdog: no Feishu frames; rebuilding wsClient');
-      handle.lastEventAt.value = Date.now();
-      rebuildingBots.add(handle.name);
-      const old = handle.wsClient;
-      try {
-        const fresh = new lark.WSClient({
-          appId: handle.feishuCreds.appId,
-          appSecret: handle.feishuCreds.appSecret,
-          loggerLevel: lark.LoggerLevel.info,
-          agent: feishuLocalAgent,
-        });
-        await fresh.start({ eventDispatcher: handle.dispatcher });
-        handle.wsClient = fresh;
-        tapFrames(handle);
-        try {
-          old.close({ force: true });
-        } catch (err) {
-          logger.warn({ err, bot: handle.name }, 'WS watchdog: stale wsClient close failed');
-        }
-        logger.info({ bot: handle.name }, 'WS watchdog: wsClient rebuilt');
-      } catch (err) {
-        logger.error({ err, bot: handle.name }, 'WS watchdog: wsClient rebuild failed');
-      } finally {
-        rebuildingBots.delete(handle.name);
-      }
-    };
-
-    setInterval(() => {
-      for (const handle of feishuHandles) {
-        tapFrames(handle);
-        const silentMs = Date.now() - handle.lastEventAt.value;
-        if (silentMs < wsWatchdogStaleMs) continue;
-        if (rebuildingBots.has(handle.name)) continue;
-        void rebuildWsClient(handle, silentMs);
-      }
-    }, 60 * 1000).unref();
-    logger.info({ staleMs: wsWatchdogStaleMs }, 'Feishu WS watchdog armed');
-  }
-
   // Register all bots in the registry
   for (const handle of feishuHandles) {
     registry.register({
@@ -380,6 +271,7 @@ async function main() {
       bridge: handle.bridge,
       sender: handle.sender,
       feishuClient: handle.feishuClient,
+      connectionStatus: () => handle.wsClient.getConnectionStatus(),
     });
   }
 
@@ -422,40 +314,6 @@ async function main() {
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);
 
-  const workerManager = new WorkerManager(registry, logger, {
-    defaultModel: appConfig.workers.defaultModel,
-    maxPerPm: appConfig.workers.maxPerPm,
-  });
-  for (const info of registry.list()) {
-    const bot = registry.get(info.name);
-    if (!bot) continue;
-    bot.bridge.setScheduler(scheduler);
-    bot.bridge.setWorkerManager(workerManager);
-  }
-  logger.info(
-    { defaultModel: appConfig.workers.defaultModel, maxPerPm: appConfig.workers.maxPerPm },
-    'Worker manager initialized',
-  );
-  const memoryCheck = await checkMetabotCoreMemoryConnection({ timeoutMs: 4_000 });
-  if (memoryCheck.ok) {
-    logger.info({
-      baseUrl: memoryCheck.baseUrl,
-      tokenSource: memoryCheck.tokenSource,
-      folderCount: memoryCheck.folderCount,
-      documentCount: memoryCheck.documentCount,
-      durationMs: memoryCheck.durationMs,
-    }, 'MetaMemory connected via metabot-core');
-  } else {
-    logger.warn({
-      baseUrl: memoryCheck.baseUrl,
-      tokenPresent: memoryCheck.tokenPresent,
-      tokenSource: memoryCheck.tokenSource,
-      status: memoryCheck.status,
-      error: memoryCheck.error,
-      durationMs: memoryCheck.durationMs,
-    }, 'MetaMemory is not reachable; memory features will fail until METABOT_CORE_URL/METABOT_CORE_TOKEN are fixed');
-  }
-
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the
   // central server URL) lets the bridge boot peerManager even with zero
@@ -485,7 +343,7 @@ async function main() {
   // Create a dedicated Feishu service client for wiki sync & doc reader
   let feishuServiceClient: lark.Client | undefined;
   if (appConfig.feishuService) {
-    feishuServiceClient = new lark.Client({
+    feishuServiceClient = createFeishuRestClient(appConfig.feishuService.domain, {
       appId: appConfig.feishuService.appId,
       appSecret: appConfig.feishuService.appSecret,
       disableTokenCache: false,
@@ -495,8 +353,7 @@ async function main() {
 
   // Initialize wiki sync service (uses dedicated service app credentials)
   let docSync: DocSync | undefined;
-  let wikiAutoSync: WikiAutoSync | undefined;
-  if (appConfig.feishuService && envFlag('WIKI_SYNC_ENABLED', true)) {
+  if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
     const syncMemoryClient = new MemoryClient(logger);
     const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
       ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
@@ -505,11 +362,11 @@ async function main() {
       {
         feishuAppId: appConfig.feishuService.appId,
         feishuAppSecret: appConfig.feishuService.appSecret,
+        feishuDomain: appConfig.feishuService.domain,
         databaseDir: syncStateDir,
         wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
         wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
         throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
-        deleteStaleDocuments: envFlag('WIKI_SYNC_DELETE_STALE_DOCS', true),
       },
       syncMemoryClient,
       logger,
@@ -518,29 +375,7 @@ async function main() {
     for (const handle of feishuHandles) {
       handle.bridge.setDocSync(docSync);
     }
-    const autoSyncEnabled = envFlag('WIKI_AUTO_SYNC', true);
-    if (autoSyncEnabled) {
-      const autoSyncPollMs = envPositiveInt('WIKI_AUTO_SYNC_POLL_MS', 60_000, logger);
-      const autoSyncDebounceMs = envNonNegativeInt('WIKI_AUTO_SYNC_DEBOUNCE_MS', 5_000, logger);
-      const autoSyncOnStart = envFlag('WIKI_AUTO_SYNC_ON_START', true);
-      wikiAutoSync = new WikiAutoSync(
-        {
-          pollMs: autoSyncPollMs,
-          debounceMs: autoSyncDebounceMs,
-          syncOnStart: autoSyncOnStart,
-        },
-        docSync,
-        syncMemoryClient,
-        logger,
-      );
-      wikiAutoSync.start();
-      logger.info({
-        pollMs: autoSyncPollMs,
-        debounceMs: autoSyncDebounceMs,
-        syncOnStart: autoSyncOnStart,
-      }, 'Wiki auto-sync service initialized');
-    }
-    logger.info({ autoSyncEnabled }, 'Wiki sync service initialized');
+    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
   }
 
   // Initialize cross-platform session registry
@@ -569,16 +404,14 @@ async function main() {
     peerManager,
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
-    agentTeamExecutionBot: appConfig.agentTeamExecutionBot,
-    workerManager,
   });
 
-  // The old process can only submit the atomic PM2 operation; it cannot run
-  // post-restart commands because PM2 kills its whole descendant tree. The new
-  // process owns health verification, durable PM2 save, recovery reporting,
-  // and breadcrumb cleanup after the API endpoint is listening.
-  await finalizeControlledRestartAfterStartup({ logger });
-  await recoverInterruptedTasksAfterRestart({ registry, scheduler, logger });
+  await finalizeControlledRestartAfterStartup({
+    registry,
+    scheduler,
+    logger,
+    apiServer,
+  });
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -589,7 +422,6 @@ async function main() {
     }
     apiServer.close();
     if (docSync) {
-      wikiAutoSync?.destroy();
       docSync.destroy();
     }
     sessionRegistry.close();

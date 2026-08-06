@@ -160,16 +160,16 @@ describe('UI host dispatch — uiHost set', () => {
   });
 });
 
-describe('UI host dispatch — uiHost unset (default off)', () => {
+describe('UI host dispatch — uiHost unset (personal edition default)', () => {
   beforeEach(async () => {
     kit = await startTestServer('ui-host-off');
   });
 
-  it('GET / returns 404 even with matching-looking Host header', async () => {
+  it('GET / serves the local personal Web UI for any Host header', async () => {
     const res = await rawRequest(kit!.port, 'GET', '/', { Host: 'test-ui.local' });
-    expect(res.status).toBe(404);
-    const body = JSON.parse(res.body);
-    expect(body.error).toBe('not_found');
+    expect(res.status).toBe(200);
+    expect(String(res.headers['content-type'])).toContain('text/html');
+    expect(res.body).toBe(INDEX_HTML);
   });
 
   it('GET /api/manifest still works (default-off does not break API)', async () => {

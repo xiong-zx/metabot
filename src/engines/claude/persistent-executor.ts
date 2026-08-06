@@ -3,7 +3,7 @@
  *
  * PersistentClaudeExecutor — keeps a single Claude Code SDK `query()` call
  * alive across many user "turns", so that:
- *   - Agent Team agents survive between user messages
+ *   - Agent Teams teammates survive between user messages
  *   - /goal multi-turn auto-drive can fire its Stop hook and start the next turn
  *   - /background tasks and agentProgressSummaries actually work
  *   - Subagent processes don't die when one user turn ends
@@ -25,7 +25,7 @@
  *   - Multi-turn overlap (still one in-flight turn at a time)
  */
 
-import { spawn } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,21 +33,32 @@ import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from '../../utils/logger.js';
-import type { ClaudeEffort, ClaudePermissionMode } from '../../config.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
-import { apply1MContextSettings, applyClaudeChildEnvPolicy, loadMcpServersWithApiContext, resolveClaudePermissionOptions } from './executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
+import { apply1MContextSettings } from './executor.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
-import { buildPmSystemPrompt } from '../pm-prompt.js';
-import { buildHomeInstructionsSection } from '../home-instructions.js';
 import { ptyQuery } from './pty/pty-query.js';
-import { resolveClaudePath } from './resolve-executable.js';
 import type {
   PtyQueryOptions,
   PtyPromptSource,
   PtyInteractiveTool,
   PtyInteractiveResponse,
 } from './pty/contract.js';
+
+const isWindows = process.platform === 'win32';
+
+function resolveClaudePath(): string {
+  if (process.env.CLAUDE_EXECUTABLE_PATH) return process.env.CLAUDE_EXECUTABLE_PATH;
+  try {
+    const cmd = isWindows ? 'where claude' : 'which claude';
+    return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
+  } catch {
+    return isWindows ? 'claude' : '/usr/local/bin/claude';
+  }
+}
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
 
@@ -105,23 +116,13 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     if (env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === undefined) {
       env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '0';
     }
-    applyClaudeChildEnvPolicy(env);
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
       signal: options.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return child as unknown as SpawnedProcess;
-  };
-}
-
-function apiContextEnv(apiContext: ApiContext | undefined): Record<string, string> | undefined {
-  if (!apiContext) return undefined;
-  return {
-    METABOT_BOT_NAME: apiContext.botName,
-    METABOT_CHAT_ID: apiContext.chatId,
-    ...(apiContext.groupId ? { METABOT_GROUP_ID: apiContext.groupId } : {}),
   };
 }
 
@@ -138,10 +139,6 @@ export interface PersistentExecutorOptions {
   /** Optional explicit API key, otherwise OAuth credentials file is used. */
   apiKey?: string;
   model?: string;
-  /** Reasoning effort forwarded to the SDK. */
-  effort?: ClaudeEffort;
-  /** Claude Code permission mode for tool execution. */
-  permissionMode?: ClaudePermissionMode;
   logger: Logger;
   /**
    * MetaBot bot/chat context. Stable for the lifetime of the executor
@@ -155,8 +152,14 @@ export interface PersistentExecutorOptions {
    * The bridge scans this dir for new files at turn end.
    */
   outputsDir?: string;
-  /** Append the research-PM behavior contract to this persistent session. */
-  pmPrompt?: boolean;
+  /** Short-lived bridge-issued environment values scoped to this chat executor. */
+  env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
+  /** Private per-session Claude CLI MCP config for the PTY backend. */
+  mcpConfigPath?: string;
+  /** Releases capability/config file leases when this executor closes. */
+  mcpCleanup?: () => void;
   /** Auto-shutdown after this many ms of silence (no turn, no spontaneous msg). 0 disables. Default 30 min. */
   idleTimeoutMs?: number;
   /** Max consecutive restart attempts before giving up. Default 3. */
@@ -214,7 +217,7 @@ export interface TurnHandle {
    * the caller can immediately call nextTurn() afterwards without polluting
    * the next turn with this turn's straggling messages.
    *
-   * Agent Team agents / subagents spawned during this turn keep running — the
+   * Teammates / subagents spawned during this turn keep running — the
    * persistent process stays alive. To kill the process entirely, call
    * PersistentClaudeExecutor.shutdown().
    */
@@ -251,7 +254,7 @@ interface ActiveTurn {
    *   - normal turns → executeQuery rendering (already handled by the bridge
    *     awaiting nextTurn's TurnHandle)
    *   - continuation turns → fresh-card rendering via 'continuation-turn' event
-   * Spontaneous events (Agent Team agents / /goal Stop hooks) DON'T get a turn — they
+   * Spontaneous events (teammates / /goal Stop hooks) DON'T get a turn — they
    * still flow through the spontaneous coalesce buffer.
    */
   continuation?: boolean;
@@ -270,7 +273,7 @@ interface ActiveTurn {
  *     MAIN-LINE work, so the bridge should render it as a fresh user-style
  *     turn card (blue → green), not a coalesced "agent activity" card.
  *   - 'spontaneous' — anything else that arrives outside an active turn:
- *     Agent Team `SendMessage` injections, `/goal` Stop-hook user messages,
+ *     teammate `SendMessage` injections, `/goal` Stop-hook user messages,
  *     status/progress system messages, etc. These get the existing
  *     coalesce-into-one-card treatment.
  *
@@ -393,6 +396,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
   private turnCounter = 0;
   /** Resolved when consumeLoop exits (cleanly or due to crash). */
   private consumePromise?: Promise<void>;
+  private mcpCleaned = false;
 
   constructor(private options: PersistentExecutorOptions) {
     super();
@@ -420,9 +424,9 @@ export class PersistentClaudeExecutor extends EventEmitter {
     }
 
     const isRoot = process.getuid?.() === 0;
-    const runtimeEnv = apiContextEnv(this.options.apiContext);
     const queryOptions: Record<string, unknown> = {
-      ...resolveClaudePermissionOptions(this.options.permissionMode, isRoot),
+      permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
+      ...(isRoot ? {} : { allowDangerouslySkipPermissions: true }),
       cwd: this.options.cwd,
       includePartialMessages: true,
       settingSources: ['user', 'project'],
@@ -430,44 +434,20 @@ export class PersistentClaudeExecutor extends EventEmitter {
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
       settings: { teammateMode: 'in-process' },
       agentProgressSummaries: true,
-      ...(runtimeEnv ? { env: runtimeEnv } : {}),
+      ...(this.options.env ? { env: this.options.env } : {}),
+      ...(this.options.mcpEntries?.length ? { mcpServers: toSdkMcpServers(this.options.mcpEntries) } : {}),
     };
     if (this.options.model) queryOptions.model = this.options.model;
-    if (this.options.effort) queryOptions.effort = this.options.effort;
     // resume: prefer the most-recent observed sessionId; fall back to the
     // one supplied at construction. This way, a restart picks up the live
     // session even if the SDK forked sessionId mid-life.
-    let resume = this.sessionId ?? this.options.resumeSessionId;
-    // Guard against a stored session id whose transcript no longer exists: if
-    // an earlier turn died before persisting (or ~/.claude was cleaned), a
-    // `claude --resume <id>` prints "No conversation found with session ID" and
-    // exits immediately — the PTY driver then hangs 30s in waitForReady and the
-    // turn fails with "claude process exited before the turn completed". Claude
-    // derives the transcript path from cwd: ~/.claude/projects/<escaped-cwd>/<id>.jsonl
-    // (every '/' in the absolute cwd replaced by '-'). If that file is missing,
-    // drop the resume and start a fresh session instead of a doomed one.
-    if (resume) {
-      const escaped = path.resolve(this.options.cwd).replace(/\//g, '-');
-      const transcript = path.join(os.homedir(), '.claude', 'projects', escaped, `${resume}.jsonl`);
-      if (!fs.existsSync(transcript)) {
-        const warn = this.options.logger?.warn?.bind(this.options.logger) ?? console.warn.bind(console);
-        warn(
-          { resume, transcript },
-          'persistent-executor: stored session transcript missing — starting a fresh session (no --resume)',
-        );
-        resume = undefined;
-      }
-    }
+    const resume = this.sessionId ?? this.options.resumeSessionId;
     if (resume) queryOptions.resume = resume;
 
     // System prompt: bake in MetaBot context + outputs dir + team namespace
     // guidance. Stable for the lifetime of this executor (this differs from
     // the legacy executor which rebuilds per turn).
     const appendSections: string[] = [];
-    // $METABOT_HOME/CLAUDE.md — applies to every bot, not just PM ones, and is
-    // skipped when cwd already sits inside METABOT_HOME (engine auto-load covers it).
-    const homeInstructions = buildHomeInstructionsSection({ cwd: this.options.cwd, logger: this.options.logger });
-    if (homeInstructions) appendSections.push(homeInstructions);
     if (this.options.outputsDir) {
       appendSections.push(
         `## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${this.options.outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`,
@@ -475,9 +455,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
     }
     if (this.options.apiContext) {
       const ctx = this.options.apiContext;
-      appendSections.push(
-        `## MetaBot API\nYou are running as bot "${ctx.botName}" in chat "${ctx.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
+      appendSections.push(buildMetaBotApiPromptContext(ctx));
+      if (ctx.teamContext) appendSections.push(ctx.teamContext);
       if (ctx.groupMembers && ctx.groupMembers.length > 0) {
         const others = ctx.groupMembers.filter((m) => m !== ctx.botName);
         if (ctx.groupId) {
@@ -495,16 +474,13 @@ export class PersistentClaudeExecutor extends EventEmitter {
         [
           '## Agent Teams (experimental)',
           `When the user asks you to create an agent team, ALWAYS prefix the team name with \`${teamNs}-\` to avoid collisions with other MetaBot chats sharing this machine. For example: \`${teamNs}-research\`, \`${teamNs}-refactor\`.`,
-          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Agent Team agents show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
+          'Display mode is forced to `in-process` (no tmux/iTerm2 in MetaBot). Teammates show up in the user\'s Feishu card via TeammateIdle / TaskCreated / TaskCompleted events — you don\'t need to walk the user through Shift+Down navigation.',
           'Clean up the team yourself when work is done so resources don\'t leak (`Clean up the team`).',
           '',
           '## Persistent Session',
-          'You are running inside a LONG-LIVED Claude Code session: this same process serves all the user\'s turns in this chat. Agent Team agents, /goal multi-turn loops, and background tasks survive across user messages — feel free to leave work running between user prompts. The session is only torn down on /reset or after 30 minutes of total silence.',
+          'You are running inside a LONG-LIVED Claude Code session: this same process serves all the user\'s turns in this chat. Teammates, /goal multi-turn loops, and background tasks survive across user messages — feel free to leave work running between user prompts. The session is only torn down on /reset or after 30 minutes of total silence.',
         ].join('\n'),
       );
-    }
-    if (this.options.pmPrompt) {
-      appendSections.push(buildPmSystemPrompt());
     }
     if (appendSections.length > 0) {
       queryOptions.systemPrompt = {
@@ -513,8 +489,6 @@ export class PersistentClaudeExecutor extends EventEmitter {
         append: '\n\n' + appendSections.join('\n\n'),
       };
     }
-    const mcpServers = loadMcpServersWithApiContext(this.options.apiContext);
-    if (mcpServers) queryOptions.mcpServers = mcpServers;
     apply1MContextSettings(queryOptions);
 
     // Hooks: AskUserQuestion (mirrored from legacy executor — required so
@@ -546,13 +520,9 @@ export class PersistentClaudeExecutor extends EventEmitter {
         systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
         logger: this.options.logger,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
-        env: queryOptions.env as NodeJS.ProcessEnv | undefined,
-        // ptyOptions is built field-by-field (PtyQueryOptions is a subset of
-        // the SDK options), so anything not named here is dropped. mcpServers
-        // was being dropped: the SDK branch below gets it via queryOptions,
-        // the PTY branch got nothing.
-        mcpServers: mcpServers as Record<string, unknown> | undefined,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
+        env: this.options.env,
+        mcpConfigPath: this.options.mcpConfigPath,
       };
       const stream = ptyQuery({
         prompt: this.inputQueue as unknown as PtyPromptSource,
@@ -674,7 +644,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       finish: () => {
         // Turn-level finish in the persistent model = abort the current turn.
         // Fire-and-forget so it stays sync like the legacy API; the executor
-        // (and any Agent Team agents spawned in this turn) keeps running.
+        // (and any teammates spawned in this turn) keeps running.
         void abort();
       },
     };
@@ -791,6 +761,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
     this.options.logger.debug({ from: prev, to: next }, 'PersistentExecutor: state');
     this.emit('state-changed', prev, next);
     if (next === 'closed') this.emit('closed');
+    if (next === 'closed' && !this.mcpCleaned) {
+      this.mcpCleaned = true;
+      this.options.mcpCleanup?.();
+    }
     if (next === 'ready' && prev === 'restarting') this.emit('restarted', this.sessionId);
   }
 
@@ -874,7 +848,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // then return them as updatedInput so the SDK auto-allows.
     //
     // Between-turn fire: if the hook trips while no activeTurn is in flight
-    // (Agent Team / `/goal` / continuation-burst follow-up), we additionally
+    // (teammate / `/goal` / continuation-burst follow-up), we additionally
     // emit `between-turn-question` so the bridge can mount a dedicated
     // question card on the chat. Without this side-channel the question text
     // only lands in the coalesced "Agent activity" card body and the user's
@@ -957,7 +931,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
   /**
    * Inject a synthesized tool_result into the conversation. Used as a
    * fallback for tool answers that the SDK isn't auto-handling, and for
-   * Agent Team messages routed through the bridge.
+   * teammate-style messages routed through the bridge.
    */
   sendAnswer(toolUseId: string, answerText: string): void {
     const msg: SDKUserMessage = {
@@ -1088,7 +1062,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
    *     The opening user message goes into the turn's queue too, so the
    *     bridge has the full burst to render. Subsequent messages flow
    *     through the active-turn path until `result`.
-   *   - `spontaneous` → Agent Team agents, /goal Stop-hook user prompts, etc.
+   *   - `spontaneous` → teammates, /goal Stop-hook user prompts, etc.
    *     Buffered into the coalesced "Agent activity between turns" card.
    */
   private async consumeLoop(): Promise<void> {

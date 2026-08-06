@@ -229,7 +229,7 @@ describe('handleCoreChatRoutes', () => {
     });
   });
 
-  it('reports questions and auto-answers when core answers are not implemented', async () => {
+  it('reports questions and resumes the run with a Core Console answer', async () => {
     const executeApiTask = vi.fn(async ({ onQuestion }: any) => {
       const answer = await onQuestion({ toolUseId: 'tool-1', questions: [] });
       return { success: true, responseText: answer };
@@ -238,18 +238,29 @@ describe('handleCoreChatRoutes', () => {
 
     await handleCoreChatRoutes(makeCtx({ executeApiTask, stopChatTask: vi.fn() }), makeReq(runBody()), res, 'POST', '/api/core-chat/runs');
 
-    await eventually(() => {
-      expect(fetch).toHaveBeenCalledTimes(3);
-    });
-    const events = vi.mocked(fetch).mock.calls.map((call) => JSON.parse(call[1]?.body as string));
-    expect(events[0].type).toBe('state');
-    expect(events[1]).toMatchObject({
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(2));
+    const beforeAnswer = vi.mocked(fetch).mock.calls.map((call) => JSON.parse(call[1]?.body as string));
+    expect(beforeAnswer[0].type).toBe('state');
+    expect(beforeAnswer[1]).toMatchObject({
       seq: 2,
       type: 'question',
-      payload: { toolUseId: 'tool-1', autoAnswer: true },
+      payload: { toolUseId: 'tool-1', autoAnswer: false },
     });
+
+    const answerRes = makeRes();
+    await handleCoreChatRoutes(
+      makeCtx({ executeApiTask, stopChatTask: vi.fn() }),
+      makeReq({ toolUseId: 'tool-1', answer: 'Use option A' }),
+      answerRes,
+      'POST',
+      '/api/core-chat/runs/run-1/answer',
+    );
+    expect(answerRes.json()).toMatchObject({ status: 'answered', answered: true });
+
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(3));
+    const events = vi.mocked(fetch).mock.calls.map((call) => JSON.parse(call[1]?.body as string));
     expect(events[2].type).toBe('complete');
-    expect(events[2].payload.result.responseText).toContain('Core chat question answers are not available yet');
+    expect(events[2].payload.result.responseText).toContain('Use option A');
   });
 
   it('terminalizes API errors that arrive as non-final state updates', async () => {

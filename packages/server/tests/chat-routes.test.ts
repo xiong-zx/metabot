@@ -11,7 +11,11 @@ afterEach(async () => {
 const ALICE = 'alice@xvirobotics.com';
 const BOB = 'bob@xvirobotics.com';
 
-async function issueMember(k: ServerKit, botName: string, ownerName = botName): Promise<{
+async function issueMember(
+  k: ServerKit,
+  botName: string,
+  ownerName = botName,
+): Promise<{
   token: string;
   credentialId: string;
 }> {
@@ -27,19 +31,31 @@ async function issueMember(k: ServerKit, botName: string, ownerName = botName): 
   };
 }
 
-function webJson(
+const bearerTokens = new WeakMap<ServerKit, Map<string, string>>();
+
+async function webJson(
   k: ServerKit,
   method: string,
   pathname: string,
   email: string,
   body?: unknown,
-) {
+): Promise<Awaited<ReturnType<typeof rawRequest>>> {
+  let tokens = bearerTokens.get(k);
+  if (!tokens) {
+    tokens = new Map();
+    bearerTokens.set(k, tokens);
+  }
+  let token = tokens.get(email);
+  if (!token) {
+    token = (await issueMember(k, email, email)).token;
+    tokens.set(email, token);
+  }
   return rawRequest(
     k.port,
     method,
     pathname,
     {
-      'X-Forwarded-Email': email,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body === undefined ? undefined : JSON.stringify(body),
@@ -47,15 +63,15 @@ function webJson(
 }
 
 describe('chat routes', () => {
-  it('are SSO web-only; bearer callers cannot write chat', async () => {
+  it('accepts the personal-edition Bearer token', async () => {
     kit = await startTestServer('chat-web-only', { uiAllowedEmails: ['@xvirobotics.com'] });
     const res = await call(kit.baseUrl, 'POST', '/api/chat/conversations', kit.adminToken, {
       kind: 'group',
-      title: 'nope',
+      title: 'local room',
     });
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe('web_identity_required');
+    expect(res.status).toBe(201);
+    expect(res.body.title).toBe('local room');
   });
 
   it('creates an idempotent agent DM for a visible agent', async () => {
@@ -74,8 +90,10 @@ describe('chat routes', () => {
     expect(first.status).toBe(200);
     const firstBody = JSON.parse(first.body);
     expect(firstBody.kind).toBe('dm');
-    expect(firstBody.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort())
-      .toEqual(['agent:metabot', `user:${ALICE}`]);
+    expect(firstBody.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort()).toEqual([
+      'agent:metabot',
+      `user:${ALICE}`,
+    ]);
 
     const second = await webJson(kit, 'POST', '/api/chat/conversations/agent-dm', ALICE, {
       botName: 'metabot',
@@ -84,7 +102,7 @@ describe('chat routes', () => {
     expect(JSON.parse(second.body).id).toBe(firstBody.id);
   });
 
-  it('creates an idempotent user DM with lowercase SSO email semantics', async () => {
+  it('creates an idempotent user DM with lowercase user identity semantics', async () => {
     kit = await startTestServer('chat-user-dm', { uiAllowedEmails: ['@xvirobotics.com'] });
 
     const first = await webJson(kit, 'POST', '/api/chat/conversations/user-dm', ALICE, {
@@ -94,8 +112,10 @@ describe('chat routes', () => {
     expect(first.status).toBe(200);
     const firstBody = JSON.parse(first.body);
     expect(firstBody.kind).toBe('dm');
-    expect(firstBody.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort())
-      .toEqual([`user:${ALICE}`, `user:${BOB}`]);
+    expect(firstBody.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort()).toEqual([
+      `user:${ALICE}`,
+      `user:${BOB}`,
+    ]);
 
     const second = await webJson(kit, 'POST', '/api/chat/conversations/user-dm', ALICE, {
       userRef: BOB,
@@ -141,12 +161,7 @@ describe('chat routes', () => {
     });
     expect(created.status).toBe(201);
 
-    const exact = await webJson(
-      kit,
-      'GET',
-      '/api/chat/participants/search?q=Eve%40xvirobotics.com',
-      ALICE,
-    );
+    const exact = await webJson(kit, 'GET', '/api/chat/participants/search?q=Eve%40xvirobotics.com', ALICE);
     expect(exact.status).toBe(200);
     expect(JSON.parse(exact.body).participants).toContainEqual({
       kind: 'user',
@@ -166,7 +181,9 @@ describe('chat routes', () => {
 
     const agents = await webJson(kit, 'GET', '/api/chat/participants/search?q=bot', ALICE);
     expect(agents.status).toBe(200);
-    const agentRefs = JSON.parse(agents.body).participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`);
+    const agentRefs = JSON.parse(agents.body).participants.map(
+      (p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`,
+    );
     expect(agentRefs).toContain('agent:metabot');
     expect(agentRefs).toContain('agent:publicbot');
     expect(agentRefs).not.toContain('agent:hiddenbot');
@@ -329,13 +346,10 @@ describe('chat routes', () => {
       userRef: BOB,
     });
     expect(dm.status).toBe(200);
-    const add = await webJson(
-      kit,
-      'POST',
-      `/api/chat/conversations/${JSON.parse(dm.body).id}/participants`,
-      ALICE,
-      { kind: 'user', ref: 'eve@xvirobotics.com' },
-    );
+    const add = await webJson(kit, 'POST', `/api/chat/conversations/${JSON.parse(dm.body).id}/participants`, ALICE, {
+      kind: 'user',
+      ref: 'eve@xvirobotics.com',
+    });
     expect(add.status).toBe(409);
     expect(JSON.parse(add.body).error).toBe('dm_participants_immutable');
   });
@@ -349,8 +363,10 @@ describe('chat routes', () => {
     });
     expect(created.status).toBe(201);
     const body = JSON.parse(created.body);
-    expect(body.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort())
-      .toEqual([`user:${ALICE}`, `user:${BOB}`]);
+    expect(body.participants.map((p: { kind: string; ref: string }) => `${p.kind}:${p.ref}`).sort()).toEqual([
+      `user:${ALICE}`,
+      `user:${BOB}`,
+    ]);
 
     const bobRead = await webJson(kit, 'GET', `/api/chat/conversations/${body.id}`, BOB);
     expect(bobRead.status).toBe(200);
@@ -431,58 +447,46 @@ describe('chat routes', () => {
     });
     const runId = JSON.parse(msg.body).runs[0].id as string;
 
-    const forbidden = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      stranger.token,
-      { seq: 1, kind: 'state', payload: { status: 'running' } },
-    );
+    const forbidden = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, stranger.token, {
+      seq: 1,
+      kind: 'state',
+      payload: { status: 'running' },
+    });
     expect(forbidden.status).toBe(403);
     expect(forbidden.body.error).toBe('callback_agent_owner_required');
 
-    const state = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      { seq: 1, kind: 'state', payload: { status: 'running', text: 'working' } },
-    );
+    const state = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 1,
+      kind: 'state',
+      payload: { status: 'running', text: 'working' },
+    });
     expect(state.status).toBe(200);
-    const duplicate = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      { seq: 1, kind: 'state', payload: { status: 'running', text: 'working' } },
-    );
+    const duplicate = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 1,
+      kind: 'state',
+      payload: { status: 'running', text: 'working' },
+    });
     expect(duplicate.status).toBe(200);
     expect(duplicate.body.id).toBe(state.body.id);
-    const conflict = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      { seq: 1, kind: 'state', payload: { status: 'running', text: 'conflict' } },
-    );
+    const conflict = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 1,
+      kind: 'state',
+      payload: { status: 'running', text: 'conflict' },
+    });
     expect(conflict.status).toBe(409);
     expect(conflict.body.error).toBe('run_event_seq_conflict');
 
-    const complete = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      { seq: 2, kind: 'complete', payload: { content: 'done' } },
-    );
+    const complete = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 2,
+      kind: 'complete',
+      payload: { content: 'done' },
+    });
     expect(complete.status).toBe(200);
-    const terminalOverwrite = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      { seq: 3, kind: 'state', payload: { status: 'running' } },
-    );
+    const terminalOverwrite = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 3,
+      kind: 'state',
+      payload: { status: 'running' },
+    });
     expect(terminalOverwrite.status).toBe(409);
     expect(terminalOverwrite.body.error).toBe('run_terminal');
 
@@ -491,11 +495,13 @@ describe('chat routes', () => {
     expect(JSON.parse(events.body).events.map((e: { seq: number }) => e.seq)).toEqual([1, 2]);
 
     const messages = await webJson(kit, 'GET', `/api/chat/conversations/${conversationId}/messages`, ALICE);
-    expect(JSON.parse(messages.body).messages.map((m: { kind: string; content: string; runId: string | null }) => [
-      m.kind,
-      m.content,
-      m.runId,
-    ])).toEqual([
+    expect(
+      JSON.parse(messages.body).messages.map((m: { kind: string; content: string; runId: string | null }) => [
+        m.kind,
+        m.content,
+        m.runId,
+      ]),
+    ).toEqual([
       ['user', 'please run', null],
       ['assistant', 'done', runId],
     ]);
@@ -503,6 +509,59 @@ describe('chat routes', () => {
     const bobEvents = await webJson(kit, 'GET', `/api/chat/runs/${runId}/events`, BOB);
     expect(bobEvents.status).toBe(403);
     expect(JSON.parse(bobEvents.body).error).toBe('chat_participant_required');
+  });
+
+  it('queues interactive answers and cancellation for the owning Bridge run', async () => {
+    kit = await startTestServer('chat-run-controls', { uiAllowedEmails: ['@xvirobotics.com'] });
+    const bridge = await issueMember(kit, 'bridge-cred', ALICE);
+    kit.handle.agentStore.register({
+      botName: 'metabot',
+      url: 'http://127.0.0.1:3000',
+      visible: true,
+      ownerCredentialId: bridge.credentialId,
+      ownerName: ALICE,
+    });
+    const dm = await webJson(kit, 'POST', '/api/chat/conversations/agent-dm', ALICE, { botName: 'metabot' });
+    const conversationId = JSON.parse(dm.body).id as string;
+    const msg = await webJson(kit, 'POST', `/api/chat/conversations/${conversationId}/messages`, ALICE, {
+      content: 'ask me first',
+    });
+    const runId = JSON.parse(msg.body).runs[0].id as string;
+
+    const question = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 1,
+      kind: 'question',
+      payload: { toolUseId: 'tool-1', question: { toolUseId: 'tool-1', questions: [] } },
+    });
+    expect(question.status).toBe(200);
+
+    const answer = await webJson(kit, 'POST', `/api/chat/runs/${runId}/answer`, ALICE, {
+      toolUseId: 'tool-1',
+      answer: 'Use the safe option',
+    });
+    expect(answer.status).toBe(202);
+    expect(JSON.parse(answer.body)).toMatchObject({ runId, status: 'answer_queued' });
+
+    const cancel = await webJson(kit, 'POST', `/api/chat/runs/${runId}/cancel`, ALICE, {});
+    expect(cancel.status).toBe(202);
+    expect(JSON.parse(cancel.body)).toMatchObject({ runId, status: 'cancel_queued', queued: true });
+
+    const controls = kit.handle.inboxStore.peek('metabot', undefined, 10)
+      .map((message) => JSON.parse(message.content))
+      .filter((message) => message.type === 'core-chat-control');
+    expect(controls).toMatchObject([
+      { action: 'answer', runId, targetAgentRef: 'metabot', toolUseId: 'tool-1', answer: 'Use the safe option' },
+      { action: 'cancel', runId, targetAgentRef: 'metabot' },
+    ]);
+
+    const canceled = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 2,
+      kind: 'error',
+      payload: { status: 'canceled', error: 'Canceled by user' },
+    });
+    expect(canceled.status).toBe(200);
+    const runs = await webJson(kit, 'GET', `/api/chat/conversations/${conversationId}/runs`, ALICE);
+    expect(JSON.parse(runs.body).runs[0].status).toBe('canceled');
   });
 
   it('records run file events and exposes file metadata under participant ACL', async () => {
@@ -524,19 +583,13 @@ describe('chat routes', () => {
     });
     const runId = JSON.parse(msg.body).runs[0].id as string;
 
-    const file = await call(
-      kit.baseUrl,
-      'POST',
-      `/api/chat/runs/${runId}/events`,
-      bridge.token,
-      {
-        seq: 1,
-        kind: 'file',
-        payload: {
-          files: [{ name: 'out.txt', mimeType: 'text/plain', sizeBytes: 5, storageKey: 'runs/out.txt' }],
-        },
+    const file = await call(kit.baseUrl, 'POST', `/api/chat/runs/${runId}/events`, bridge.token, {
+      seq: 1,
+      kind: 'file',
+      payload: {
+        files: [{ name: 'out.txt', mimeType: 'text/plain', sizeBytes: 5, storageKey: 'runs/out.txt' }],
       },
-    );
+    });
     expect(file.status).toBe(200);
 
     const files = await webJson(kit, 'GET', `/api/chat/conversations/${conversationId}/files`, ALICE);

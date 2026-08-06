@@ -2,6 +2,8 @@ export { handleVoiceRoutes } from './voice-routes.js';
 export { handleFileRoutes } from './file-routes.js';
 export {
   acceptCoreChatRun,
+  answerCoreChatRun,
+  cancelCoreChatRun,
   handleCoreChatRoutes,
   parseCoreChatRunRequest,
 } from './core-chat-routes.js';
@@ -14,8 +16,7 @@ export { handleRtcRoutes } from './rtc-routes.js';
 export { handleSessionRoutes } from './session-routes.js';
 export { handleExecutorRoutes } from './executor-routes.js';
 export { handleAgentTeamRoutes } from './agent-team-routes.js';
-export { handleWorkerRoutes } from './worker-routes.js';
-export { handleResearchMemoryRoutes } from './research-memory-routes.js';
-export { handleMetaMemoryProxyRoutes } from './metamemory-proxy-routes.js';
+export { handleAgentTeamGovernanceRoutes } from './agent-team-governance-routes.js';
+export { handleWorkerEventsRoutes } from './worker-events-routes.js';
 export { jsonResponse, readBody, parseJsonBody } from './helpers.js';
 export type { RouteContext, RouteHandler } from './types.js';

@@ -9,7 +9,7 @@
 | `/reset` | 清除会话 — 开始全新对话 |
 | `/stop` | 中止当前任务 |
 | `/status` | 查看会话信息（会话 ID、工作目录） |
-| `/goal <条件>` | 设置目标，Agent 跨多轮持续推进直到达成。`/goal clear` 停止。参见 [目标循环](../features/goal-loops.md) |
+| `/goal <条件>` | 设置目标，Agent 跨多轮持续推进直到达成。`/goal clear` 停止。 |
 | `/memory list` | 浏览 MetaMemory 知识库目录 |
 | `/memory search 关键词` | 搜索 MetaMemory 知识库 |
 | `/sync` | 触发 MetaMemory → 飞书知识库同步 |
@@ -18,7 +18,7 @@
 | `/help` | 显示可用命令 |
 | `/metaskill ...` | 生成 Agent 团队、Agent 或 Skill |
 | `/metabot` | 加载 Agent 总线文档（调度、Bot 管理、跨实例对话） |
-| `/metabot-todos` | 使用规范解析器展示 MetaMemory 中的活跃 ToDo；可用 `--id <ID>` 或 `--all` 切换视图 |
+| `/metabot-todos` | 展示规范的 MetaMemory ToDo；查看已完成项目需用 `--status done` 或 `--include-done` |
 | `/任意命令` | 非内置命令自动转发给 Claude Code 作为 skill |
 
 ## 说明
