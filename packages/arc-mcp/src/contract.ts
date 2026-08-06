@@ -5,10 +5,33 @@ import { ArcError } from './errors.js';
 export const ARC_INPUT_CONTRACT_VERSION = 'autoresearchclaw.input.v1' as const;
 export const ARC_OUTPUT_CONTRACT_VERSION = 'autoresearchclaw.output.v2' as const;
 export const ARC_RUN_CONTRACT_VERSION = 'autoresearchclaw.run.v1' as const;
+export const ARC_MAX_OBJECTIVE_BYTES = 16 * 1024;
+export const ARC_MAX_PARAMETERS_BYTES = 64 * 1024;
 
 const nonEmpty = z.string().trim().min(1);
 const identifier = nonEmpty.max(200);
 const timestamp = z.string().datetime({ offset: true });
+
+function boundedUtf8(schema: z.ZodString, maxBytes: number, label: string): z.ZodString {
+  return schema.refine((value) => Buffer.byteLength(value, 'utf8') <= maxBytes, {
+    message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+  });
+}
+
+export const arcObjectiveSchema = boundedUtf8(nonEmpty, ARC_MAX_OBJECTIVE_BYTES, 'objective');
+
+export const arcParametersSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {
+  try {
+    if (Buffer.byteLength(JSON.stringify(value), 'utf8') > ARC_MAX_PARAMETERS_BYTES) {
+      context.addIssue({
+        code: 'custom',
+        message: `parameters exceed ${ARC_MAX_PARAMETERS_BYTES} JSON bytes`,
+      });
+    }
+  } catch {
+    context.addIssue({ code: 'custom', message: 'parameters must be JSON-serializable' });
+  }
+});
 
 export const arcRunStatusSchema = z.enum([
   'queued',
@@ -34,11 +57,11 @@ export const arcExecutionInputSchema = z
     contract_version: z.literal(ARC_INPUT_CONTRACT_VERSION),
     project_id: identifier,
     run_id: identifier,
-    objective: nonEmpty,
-    project_root: nonEmpty,
+    objective: arcObjectiveSchema,
+    project_root: nonEmpty.max(4096),
     artifact_path: nonEmpty,
     requested_at: timestamp,
-    parameters: z.record(z.string(), z.unknown()).optional(),
+    parameters: arcParametersSchema.optional(),
   })
   .strict();
 
@@ -156,7 +179,90 @@ export const arcOutputSchema = z
     pivots: z.array(pivotSchema).optional(),
     memory_event_candidates: z.array(z.unknown()).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((output, context) => {
+    const uniqueIds = <T extends { id: string }>(items: T[], field: string): Set<string> => {
+      const ids = new Set<string>();
+      items.forEach((item, index) => {
+        if (ids.has(item.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: [field, index, 'id'],
+            message: `duplicate ${field} id: ${item.id}`,
+          });
+        }
+        ids.add(item.id);
+      });
+      return ids;
+    };
+    const uniqueReferences = (values: string[], path: Array<string | number>): void => {
+      const seen = new Set<string>();
+      values.forEach((value, index) => {
+        if (seen.has(value)) {
+          context.addIssue({
+            code: 'custom',
+            path: [...path, index],
+            message: `duplicate reference: ${value}`,
+          });
+        }
+        seen.add(value);
+      });
+    };
+    const requireReferences = (
+      values: string[],
+      valid: ReadonlySet<string>,
+      path: Array<string | number>,
+      target: string,
+    ): void => {
+      values.forEach((value, index) => {
+        if (!valid.has(value)) {
+          context.addIssue({
+            code: 'custom',
+            path: [...path, index],
+            message: `unknown ${target} reference: ${value}`,
+          });
+        }
+      });
+    };
+
+    const hypotheses = uniqueIds(output.hypotheses, 'hypotheses');
+    const experiments = uniqueIds(output.experiments, 'experiments');
+    const findings = uniqueIds(output.findings, 'findings');
+    uniqueIds(output.negative_results, 'negative_results');
+    uniqueIds(output.decisions, 'decisions');
+    const artifacts = uniqueIds(output.artifacts, 'artifacts');
+    uniqueIds(output.open_questions, 'open_questions');
+    uniqueIds(
+      [
+        ...output.findings.flatMap((finding) => finding.evidence),
+        ...output.negative_results.flatMap((result) => result.evidence ?? []),
+      ],
+      'evidence',
+    );
+
+    output.experiments.forEach((experiment, index) => {
+      uniqueReferences(experiment.hypothesis_ids, ['experiments', index, 'hypothesis_ids']);
+      requireReferences(experiment.hypothesis_ids, hypotheses, ['experiments', index, 'hypothesis_ids'], 'hypothesis');
+      if (experiment.artifact_ids) {
+        uniqueReferences(experiment.artifact_ids, ['experiments', index, 'artifact_ids']);
+        requireReferences(experiment.artifact_ids, artifacts, ['experiments', index, 'artifact_ids'], 'artifact');
+      }
+    });
+    output.negative_results.forEach((result, index) => {
+      if (result.experiment_id && !experiments.has(result.experiment_id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['negative_results', index, 'experiment_id'],
+          message: `unknown experiment reference: ${result.experiment_id}`,
+        });
+      }
+    });
+    output.decisions.forEach((decision, index) => {
+      if (!decision.related_finding_ids) return;
+      uniqueReferences(decision.related_finding_ids, ['decisions', index, 'related_finding_ids']);
+      requireReferences(decision.related_finding_ids, findings, ['decisions', index, 'related_finding_ids'], 'finding');
+    });
+  });
 
 export const arcRunErrorSchema = z
   .object({
@@ -171,7 +277,7 @@ export const arcRunRecordSchema = z
     run_id: identifier,
     project_id: identifier,
     project_root: nonEmpty,
-    objective: nonEmpty,
+    objective: arcObjectiveSchema,
     idempotency_key: identifier,
     request_fingerprint: nonEmpty,
     status: arcRunStatusSchema,

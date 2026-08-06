@@ -1,6 +1,7 @@
 export type ArcErrorCode =
   | 'artifact_invalid'
   | 'artifact_missing'
+  | 'data_dir_locked'
   | 'invalid_contract'
   | 'invalid_transition'
   | 'path_outside_project'
@@ -9,6 +10,8 @@ export type ArcErrorCode =
   | 'run_not_found'
   | 'runner_failure'
   | 'runner_unconfigured'
+  | 'scope_denied'
+  | 'scope_not_configured'
   | 'symlink_not_allowed';
 
 export class ArcError extends Error {

@@ -4,6 +4,7 @@ import { ArcArtifactStore } from '../src/artifact-store.js';
 import { ArcCoordinator } from '../src/coordinator.js';
 import type { ArcRunRecord } from '../src/contract.js';
 import { ArcRunStore } from '../src/run-store.js';
+import { ArcProjectScope } from '../src/scope-policy.js';
 import { FakeArcRunner } from './fake-runner.js';
 import { projectDirectory, removeDirectory, temporaryDirectory, validOutput } from './helpers.js';
 
@@ -29,9 +30,14 @@ function setup(options: { artifactWaitTimeoutMs?: number } = {}): {
   const projectRoot = projectDirectory(temporary);
   const store = new ArcRunStore(`${temporary}/state`);
   const runner = new FakeArcRunner();
-  const coordinator = new ArcCoordinator(store, new ArcArtifactStore(), runner, {
+  const artifacts = new ArcArtifactStore();
+  const coordinator = new ArcCoordinator(store, artifacts, runner, {
     artifactPollIntervalMs: 5,
     artifactWaitTimeoutMs: options.artifactWaitTimeoutMs ?? 100,
+    scope: new ArcProjectScope(artifacts, {
+      allowedProjectRoots: [projectRoot],
+      fixedProjectId: 'project-1',
+    }),
   });
   cleanupStores.push(store);
   cleanupCoordinators.push(coordinator);
@@ -53,8 +59,7 @@ describe('ArcCoordinator lifecycle', () => {
       idempotency_key: 'request-1',
       run_id: 'run-1',
     };
-    const first = await coordinator.start(request);
-    const repeated = await coordinator.start(request);
+    const [first, repeated] = await Promise.all([coordinator.start(request), coordinator.start(request)]);
     expect(repeated.run_id).toBe(first.run_id);
     expect(runner.startCalls).toHaveLength(1);
 
@@ -88,13 +93,18 @@ describe('ArcCoordinator lifecycle', () => {
     cleanupStores.splice(cleanupStores.indexOf(store), 1);
 
     const recoveredStore = new ArcRunStore(`${temporary}/state`);
-    const recovered = new ArcCoordinator(recoveredStore, new ArcArtifactStore(), runner, {
-      recoverInterrupted: true,
+    const artifacts = new ArcArtifactStore();
+    const recovered = new ArcCoordinator(recoveredStore, artifacts, runner, {
       artifactPollIntervalMs: 5,
       artifactWaitTimeoutMs: 100,
+      scope: new ArcProjectScope(artifacts, {
+        allowedProjectRoots: [projectRoot],
+        fixedProjectId: 'project-1',
+      }),
     });
     cleanupStores.push(recoveredStore);
     cleanupCoordinators.push(recovered);
+    await recovered.recover();
 
     const resumed = await recovered.resume({ run_id: started.run_id });
     expect(resumed).toMatchObject({ status: 'running', recovery_generation: 1 });
@@ -121,27 +131,33 @@ describe('ArcCoordinator lifecycle', () => {
     cleanupStores.splice(cleanupStores.indexOf(store), 1);
 
     const recoveredStore = new ArcRunStore(`${temporary}/state`);
-    const recovered = new ArcCoordinator(recoveredStore, new ArcArtifactStore(), runner, {
-      recoverInterrupted: true,
+    const artifacts = new ArcArtifactStore();
+    const recovered = new ArcCoordinator(recoveredStore, artifacts, runner, {
       artifactPollIntervalMs: 5,
       artifactWaitTimeoutMs: 100,
+      scope: new ArcProjectScope(artifacts, {
+        allowedProjectRoots: [projectRoot],
+        fixedProjectId: 'project-1',
+      }),
     });
     cleanupStores.push(recoveredStore);
     cleanupCoordinators.push(recovered);
+    await recovered.recover();
     expect(recovered.get({ run_id: started.run_id })).toMatchObject({
       status: 'paused',
       phase: 'restart_recovered',
     });
+    expect(runner.pauseCalls).toContainEqual(started.runner_handle);
 
     await recovered.resume({ run_id: started.run_id });
     runner.finish(handleId(started), validOutput('project-1', started.run_id));
     await expect(recovered.waitForTerminal(started.run_id)).resolves.toMatchObject({
       status: 'completed',
-      recovery_generation: 1,
+      recovery_generation: 2,
     });
   });
 
-  it('cancels idempotently and rejects mutation of another terminal state', async () => {
+  it('cancels idempotently and returns the actual state after another terminal result', async () => {
     const { coordinator, projectRoot, runner } = setup();
     const cancelledRun = await coordinator.start({
       project_id: 'project-1',
@@ -165,8 +181,8 @@ describe('ArcCoordinator lifecycle', () => {
     });
     runner.finish(handleId(completedRun), validOutput('project-1', completedRun.run_id));
     await coordinator.waitForTerminal(completedRun.run_id);
-    await expect(coordinator.cancel({ run_id: completedRun.run_id })).rejects.toMatchObject({
-      code: 'invalid_transition',
+    await expect(coordinator.cancel({ run_id: completedRun.run_id })).resolves.toMatchObject({
+      status: 'completed',
     });
   });
 
@@ -218,7 +234,7 @@ describe('ArcCoordinator lifecycle', () => {
     });
   });
 
-  it('keeps concurrent runs independent and rejects a global run-id collision', async () => {
+  it('keeps concurrent runs independent and denies a cross-project start', async () => {
     const { coordinator, projectRoot, runner, temporary } = setup();
     const secondProject = projectDirectory(temporary, 'project-2');
     const first = await coordinator.start({
@@ -244,7 +260,7 @@ describe('ArcCoordinator lifecycle', () => {
         idempotency_key: 'request-c',
         run_id: 'run-a',
       }),
-    ).rejects.toMatchObject({ code: 'run_conflict' });
+    ).rejects.toMatchObject({ code: 'scope_denied' });
 
     runner.finish(handleId(second), validOutput('project-1', second.run_id, { status: 'partial' }));
     runner.finish(handleId(first), validOutput('project-1', first.run_id));
@@ -254,6 +270,7 @@ describe('ArcCoordinator lifecycle', () => {
     });
     await expect(coordinator.waitForTerminal(second.run_id)).resolves.toMatchObject({
       status: 'partial',
+      phase: 'partial',
       artifact_path: '.metabot-arc/runs/run-b/output.json',
     });
   });

@@ -34,6 +34,8 @@ describe('ARC stdio MCP server', () => {
       env: {
         ...getDefaultEnvironment(),
         METABOT_ARC_DATA_DIR: path.join(temporary, 'state'),
+        METABOT_ARC_PROJECT_ID: 'stdio-project',
+        METABOT_ARC_PROJECT_ROOTS: JSON.stringify([projectRoot]),
         METABOT_ARC_RUNNER_MODULE: runnerModule,
       },
       stderr: 'pipe',
@@ -50,6 +52,20 @@ describe('ARC stdio MCP server', () => {
         'arc_run_pause',
         'arc_run_resume',
         'arc_run_start',
+      ]);
+
+      const denied = await client.callTool({
+        name: 'arc_run_start',
+        arguments: {
+          project_id: 'other-project',
+          project_root: projectRoot,
+          objective: 'Must fail through the MCP error result.',
+          idempotency_key: 'stdio-denied',
+        },
+      });
+      expect(denied.isError).toBe(true);
+      expect(denied.content).toEqual([
+        expect.objectContaining({ type: 'text', text: expect.stringContaining('scope_denied') }),
       ]);
 
       const started = await client.callTool({

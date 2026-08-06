@@ -3,13 +3,16 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
+import { ArcDataDirLock } from './data-dir-lock.js';
 import {
   ARC_RUN_CONTRACT_VERSION,
   type ArcExecutionHandle,
+  type ArcExecutionInput,
   type ArcResultStatus,
   type ArcRunError,
   type ArcRunRecord,
   type ArcRunStatus,
+  validateArcExecutionInput,
   validateArcRunRecord,
 } from './contract.js';
 import { ArcError } from './errors.js';
@@ -20,6 +23,7 @@ interface RunRow {
   project_root: string;
   objective: string;
   idempotency_key: string;
+  execution_input_json: string | null;
   request_fingerprint: string;
   status: string;
   phase: string;
@@ -45,13 +49,16 @@ export interface CreateArcRunInput {
   idempotencyKey: string;
   requestFingerprint: string;
   artifactPath: string;
+  executionInput: ArcExecutionInput;
   now: string;
 }
 
 export interface ArcRunListOptions {
   limit?: number;
   projectId?: string;
+  projectRoots?: readonly string[];
   status?: ArcRunStatus;
+  statuses?: readonly ArcRunStatus[];
 }
 
 export interface ArcRunPatch {
@@ -71,7 +78,9 @@ export interface ArcRunPatch {
 export class ArcRunStore {
   readonly dataDir: string;
   readonly databasePath: string;
+  readonly lock: ArcDataDirLock;
   private readonly db: Database.Database;
+  private closed = false;
 
   constructor(dataDir: string) {
     if (!dataDir.trim()) throw new ArcError('invalid_contract', 'ARC data directory is required');
@@ -80,13 +89,29 @@ export class ArcRunStore {
       throw new ArcError('invalid_contract', 'ARC data directory cannot be a filesystem root');
     }
     mkdirSync(resolved, { recursive: true, mode: 0o700 });
-    this.dataDir = realpathSync.native(resolved);
+    const canonicalDataDir = realpathSync.native(resolved);
+    if (canonicalDataDir === path.parse(canonicalDataDir).root) {
+      throw new ArcError('invalid_contract', 'ARC data directory cannot resolve to a filesystem root');
+    }
+    this.dataDir = canonicalDataDir;
     this.databasePath = path.join(this.dataDir, 'arc-runs.sqlite');
-    this.db = new Database(this.databasePath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('busy_timeout = 5000');
-    this.migrate();
+    this.lock = ArcDataDirLock.acquire(this.dataDir);
+    try {
+      this.db = new Database(this.databasePath);
+    } catch (error) {
+      this.lock.release();
+      throw error;
+    }
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('busy_timeout = 5000');
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      this.lock.release();
+      throw error;
+    }
   }
 
   createRun(input: CreateArcRunInput): { created: boolean; run: ArcRunRecord } {
@@ -101,11 +126,11 @@ export class ArcRunStore {
       this.db
         .prepare(
           `INSERT INTO arc_runs (
-            run_id, project_id, project_root, objective, idempotency_key,
+            run_id, project_id, project_root, objective, idempotency_key, execution_input_json,
             request_fingerprint, status, phase, progress, artifact_path,
             output_status, runner_handle_json, error_code, error_message,
             recovery_generation, created_at, updated_at, started_at, finished_at, version
-          ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, NULL, NULL, NULL, NULL, 0, ?, ?, NULL, NULL, 0)`,
         )
         .run(
           input.runId,
@@ -113,6 +138,7 @@ export class ArcRunStore {
           input.projectRoot,
           input.objective,
           input.idempotencyKey,
+          JSON.stringify(input.executionInput),
           input.requestFingerprint,
           input.artifactPath,
           input.now,
@@ -135,6 +161,21 @@ export class ArcRunStore {
     return run;
   }
 
+  getExecutionInput(runId: string): ArcExecutionInput | undefined {
+    const row = this.db.prepare('SELECT execution_input_json FROM arc_runs WHERE run_id = ?').get(runId) as
+      | { execution_input_json: string | null }
+      | undefined;
+    if (!row?.execution_input_json) return undefined;
+    try {
+      return validateArcExecutionInput(JSON.parse(row.execution_input_json));
+    } catch (error) {
+      throw new ArcError('invalid_contract', 'Stored ARC execution input is not valid JSON', {
+        cause: error,
+        details: { runId },
+      });
+    }
+  }
+
   listRuns(options: ArcRunListOptions = {}): ArcRunRecord[] {
     const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
     const clauses: string[] = [];
@@ -146,6 +187,15 @@ export class ArcRunStore {
     if (options.status) {
       clauses.push('status = ?');
       parameters.push(options.status);
+    }
+    if (options.statuses && options.statuses.length > 0) {
+      clauses.push(`status IN (${options.statuses.map(() => '?').join(', ')})`);
+      parameters.push(...options.statuses);
+    }
+    if (options.projectRoots) {
+      if (options.projectRoots.length === 0) return [];
+      clauses.push(`project_root IN (${options.projectRoots.map(() => '?').join(', ')})`);
+      parameters.push(...options.projectRoots);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
@@ -209,32 +259,29 @@ export class ArcRunStore {
     })();
   }
 
-  recoverInterruptedRuns(now: string): ArcRunRecord[] {
-    const interrupted = this.listByStatuses(['queued', 'running']);
-    return interrupted.map((run) => {
-      if (run.status === 'running' && run.runner_handle) {
-        return this.transition(run.run_id, ['running'], {
-          status: 'paused',
-          phase: 'restart_recovered',
-          error: null,
-          updatedAt: now,
-        });
-      }
-      return this.transition(run.run_id, [run.status], {
-        status: 'failed',
-        phase: 'failed',
-        error: {
-          code: 'restart_without_handle',
-          message: 'Run could not be recovered because no durable runner handle was stored',
-        },
-        finishedAt: now,
-        updatedAt: now,
-      });
-    });
+  listRecoverableRuns(options: Pick<ArcRunListOptions, 'projectId' | 'projectRoots'>): ArcRunRecord[] {
+    const clauses = ["status IN ('queued', 'running')"];
+    const parameters: string[] = [];
+    if (options.projectId) {
+      clauses.push('project_id = ?');
+      parameters.push(options.projectId);
+    }
+    if (options.projectRoots) {
+      if (options.projectRoots.length === 0) return [];
+      clauses.push(`project_root IN (${options.projectRoots.map(() => '?').join(', ')})`);
+      parameters.push(...options.projectRoots);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM arc_runs WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC`)
+      .all(...parameters) as RunRow[];
+    return rows.map((row) => this.rowToRecord(row));
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
+    this.lock.release();
   }
 
   private getByIdempotencyKey(projectId: string, key: string): ArcRunRecord | undefined {
@@ -242,14 +289,6 @@ export class ArcRunStore {
       .prepare('SELECT * FROM arc_runs WHERE project_id = ? AND idempotency_key = ?')
       .get(projectId, key) as RunRow | undefined;
     return row ? this.rowToRecord(row) : undefined;
-  }
-
-  private listByStatuses(statuses: ArcRunStatus[]): ArcRunRecord[] {
-    const placeholders = statuses.map(() => '?').join(', ');
-    const rows = this.db
-      .prepare(`SELECT * FROM arc_runs WHERE status IN (${placeholders}) ORDER BY created_at ASC`)
-      .all(...statuses) as RunRow[];
-    return rows.map((row) => this.rowToRecord(row));
   }
 
   private rowToRecord(row: RunRow): ArcRunRecord {
@@ -296,6 +335,7 @@ export class ArcRunStore {
         project_root TEXT NOT NULL,
         objective TEXT NOT NULL,
         idempotency_key TEXT NOT NULL,
+        execution_input_json TEXT,
         request_fingerprint TEXT NOT NULL,
         status TEXT NOT NULL CHECK (
           status IN ('queued', 'running', 'paused', 'completed', 'partial', 'failed', 'cancelled')
@@ -318,5 +358,13 @@ export class ArcRunStore {
       CREATE INDEX IF NOT EXISTS idx_arc_runs_project_status_created
         ON arc_runs(project_id, status, created_at DESC);
     `);
+    this.addColumnIfMissing('arc_runs', 'execution_input_json', 'TEXT');
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 }

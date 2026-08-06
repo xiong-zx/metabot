@@ -6,8 +6,9 @@ import { ArcArtifactStore } from './artifact-store.js';
 import {
   ARC_INPUT_CONTRACT_VERSION,
   arcExecutionHandleSchema,
+  arcObjectiveSchema,
+  arcParametersSchema,
   arcRunStatusSchema,
-  type ArcExecutionHandle,
   type ArcExecutionInput,
   type ArcOutput,
   type ArcRunRecord,
@@ -15,19 +16,21 @@ import {
   validateArcExecutionInput,
 } from './contract.js';
 import { ArcError, asArcError } from './errors.js';
-import type { ArcRunner } from './runner.js';
-import { ArcRunStore, type ArcRunListOptions } from './run-store.js';
+import type { ArcRunner, ArcRunnerResult } from './runner.js';
+import { validateArcRunnerResult } from './runner.js';
+import { ArcRunStore, type ArcRunListOptions, type ArcRunPatch } from './run-store.js';
+import { ArcProjectScope } from './scope-policy.js';
 
 const nonEmpty = z.string().trim().min(1);
 
 export const arcStartRequestSchema = z
   .object({
     project_id: nonEmpty.max(200),
-    project_root: nonEmpty,
-    objective: nonEmpty,
+    project_root: nonEmpty.max(4096),
+    objective: arcObjectiveSchema,
     idempotency_key: nonEmpty.max(200),
     run_id: nonEmpty.max(200).optional(),
-    parameters: z.record(z.string(), z.unknown()).optional(),
+    parameters: arcParametersSchema.optional(),
   })
   .strict();
 
@@ -47,8 +50,8 @@ export type ArcListRequest = z.infer<typeof arcListRequestSchema>;
 export interface ArcCoordinatorOptions {
   artifactPollIntervalMs?: number;
   artifactWaitTimeoutMs?: number;
-  recoverInterrupted?: boolean;
   now?: () => string;
+  scope: ArcProjectScope;
 }
 
 const TERMINAL_STATUSES = new Set<ArcRunStatus>(['completed', 'partial', 'failed', 'cancelled']);
@@ -85,26 +88,34 @@ function parsedRequest<T>(schema: z.ZodType<T>, value: unknown, kind: string): T
 
 export class ArcCoordinator {
   private readonly collections = new Map<string, Promise<void>>();
+  private readonly launches = new Map<string, Promise<ArcRunRecord>>();
   private readonly artifactPollIntervalMs: number;
   private readonly artifactWaitTimeoutMs: number;
   private readonly now: () => string;
+  private readonly scope: ArcProjectScope;
+  private recoveryPromise?: Promise<ArcRunRecord[]>;
   private disposed = false;
 
   constructor(
     readonly store: ArcRunStore,
     readonly artifacts: ArcArtifactStore,
     readonly runner: ArcRunner,
-    options: ArcCoordinatorOptions = {},
+    options: ArcCoordinatorOptions,
   ) {
     this.artifactPollIntervalMs = options.artifactPollIntervalMs ?? 25;
     this.artifactWaitTimeoutMs = options.artifactWaitTimeoutMs ?? 2_000;
     this.now = options.now ?? (() => new Date().toISOString());
-    if (options.recoverInterrupted) this.store.recoverInterruptedRuns(this.now());
+    this.scope = options.scope;
+  }
+
+  async recover(): Promise<ArcRunRecord[]> {
+    if (!this.recoveryPromise) this.recoveryPromise = this.performRecovery();
+    return this.recoveryPromise;
   }
 
   async start(value: unknown): Promise<ArcRunRecord> {
     const request = parsedRequest(arcStartRequestSchema, value, 'ARC start');
-    const projectRoot = this.artifacts.canonicalProjectRoot(request.project_root);
+    const projectRoot = this.scope.authorizeStart(request.project_id, request.project_root, this.artifacts);
     const runId = request.run_id ?? randomUUID();
     const artifactPath = this.artifacts.outputRelativePath(runId);
     const requestFingerprint = fingerprint({
@@ -133,115 +144,105 @@ export class ArcCoordinator {
       idempotencyKey: request.idempotency_key,
       requestFingerprint,
       artifactPath,
+      executionInput,
       now: requestedAt,
     });
-    if (!created.created) {
-      if (created.run.request_fingerprint !== requestFingerprint) {
-        throw new ArcError('run_conflict', 'Idempotency key was already used for a different request', {
-          details: { runId: created.run.run_id, projectId: request.project_id },
-        });
-      }
-      return created.run;
-    }
-
-    let handle: ArcExecutionHandle;
-    try {
-      handle = arcExecutionHandleSchema.parse(await this.runner.start(executionInput));
-    } catch (error) {
-      const failure = asArcError(error);
-      return this.store.transition(runId, ['queued'], {
-        status: 'failed',
-        phase: 'failed',
-        error: { code: failure.code, message: failure.message },
-        finishedAt: this.now(),
-        updatedAt: this.now(),
+    const scopedRun = this.scope.authorizeRun(created.run);
+    if (!created.created && scopedRun.request_fingerprint !== requestFingerprint) {
+      throw new ArcError('run_conflict', 'Idempotency key was already used for a different request', {
+        details: { runId: scopedRun.run_id, projectId: request.project_id },
       });
     }
-    const running = this.store.transition(runId, ['queued'], {
-      status: 'running',
-      phase: 'executing',
-      progress: 0.05,
-      runnerHandle: handle,
-      startedAt: this.now(),
-      updatedAt: this.now(),
-    });
-    this.collect(running);
-    return running;
+    if (scopedRun.status === 'queued') {
+      const storedInput = this.store.getExecutionInput(scopedRun.run_id) ?? executionInput;
+      return this.launchQueued(scopedRun, storedInput, false);
+    }
+    if (scopedRun.status === 'running') this.ensureCollection(scopedRun);
+    return scopedRun;
   }
 
   get(value: unknown): ArcRunRecord {
     const request = parsedRequest(arcRunIdRequestSchema, value, 'ARC get');
-    return this.store.requireRun(request.run_id);
+    return this.requireScopedRun(request.run_id);
   }
 
   list(value: unknown = {}): ArcRunRecord[] {
     const request = parsedRequest(arcListRequestSchema, value, 'ARC list');
+    const projectId = this.scope.authorizeRequestedProjectId(request.project_id);
     const options: ArcRunListOptions = {
-      ...(request.project_id ? { projectId: request.project_id } : {}),
+      projectRoots: this.scope.allowedProjectRoots,
+      ...(projectId ? { projectId } : {}),
       ...(request.status ? { status: request.status } : {}),
       ...(request.limit ? { limit: request.limit } : {}),
     };
-    return this.store.listRuns(options);
+    return this.store.listRuns(options).map((run) => this.scope.authorizeRun(run));
   }
 
   async pause(value: unknown): Promise<ArcRunRecord> {
     const request = parsedRequest(arcRunIdRequestSchema, value, 'ARC pause');
-    const current = this.store.requireRun(request.run_id);
-    if (current.status === 'paused') return current;
+    const current = this.requireScopedRun(request.run_id);
+    if (TERMINAL_STATUSES.has(current.status) || current.status === 'paused') return current;
     if (current.status !== 'running' || !current.runner_handle) {
       throw new ArcError('invalid_transition', `Cannot pause ARC run from ${current.status}`, {
         details: { runId: current.run_id, phase: current.phase },
       });
     }
-    await this.runner.pause(current.runner_handle);
-    return this.store.transition(current.run_id, ['running'], {
-      status: 'paused',
-      phase: 'paused',
-      updatedAt: this.now(),
-    });
+    let result: ArcRunnerResult;
+    try {
+      result = validateArcRunnerResult(await this.runner.pause(current.runner_handle), 'pause');
+    } catch (error) {
+      const latest = this.requireScopedRun(current.run_id);
+      if (TERMINAL_STATUSES.has(latest.status) || latest.status === 'paused') return latest;
+      throw error;
+    }
+    return this.synchronizeRunnerState(current.run_id, result, 'pause');
   }
 
   async resume(value: unknown): Promise<ArcRunRecord> {
     const request = parsedRequest(arcRunIdRequestSchema, value, 'ARC resume');
-    const current = this.store.requireRun(request.run_id);
-    if (current.status === 'running') return current;
+    const current = this.requireScopedRun(request.run_id);
+    if (TERMINAL_STATUSES.has(current.status) || current.status === 'running') return current;
     if (current.status !== 'paused' || !current.runner_handle) {
       throw new ArcError('invalid_transition', `Cannot resume ARC run from ${current.status}`, {
         details: { runId: current.run_id, phase: current.phase },
       });
     }
-    await this.runner.resume(current.runner_handle);
-    const running = this.store.transition(current.run_id, ['paused'], {
-      status: 'running',
-      phase: 'executing',
-      error: null,
-      recoveryGeneration: current.recovery_generation + 1,
-      updatedAt: this.now(),
-    });
-    this.collect(running);
-    return running;
+    let result: ArcRunnerResult;
+    try {
+      result = validateArcRunnerResult(await this.runner.resume(current.runner_handle), 'resume');
+    } catch (error) {
+      const latest = this.requireScopedRun(current.run_id);
+      if (TERMINAL_STATUSES.has(latest.status) || latest.status === 'running') return latest;
+      throw error;
+    }
+    return this.synchronizeRunnerState(current.run_id, result, 'resume');
   }
 
   async cancel(value: unknown): Promise<ArcRunRecord> {
     const request = parsedRequest(arcRunIdRequestSchema, value, 'ARC cancel');
-    const current = this.store.requireRun(request.run_id);
-    if (current.status === 'cancelled') return current;
-    if (TERMINAL_STATUSES.has(current.status)) {
-      throw new ArcError('invalid_transition', `Cannot cancel ARC run from ${current.status}`, {
-        details: { runId: current.run_id },
+    const current = this.requireScopedRun(request.run_id);
+    if (TERMINAL_STATUSES.has(current.status)) return current;
+    if (!current.runner_handle) {
+      return this.transitionConverged(current.run_id, [current.status], {
+        status: 'cancelled',
+        phase: 'cancelled',
+        finishedAt: this.now(),
+        updatedAt: this.now(),
       });
     }
-    if (current.runner_handle) await this.runner.cancel(current.runner_handle);
-    return this.store.transition(current.run_id, [current.status], {
-      status: 'cancelled',
-      phase: 'cancelled',
-      finishedAt: this.now(),
-      updatedAt: this.now(),
-    });
+    let result: ArcRunnerResult;
+    try {
+      result = validateArcRunnerResult(await this.runner.cancel(current.runner_handle), 'cancel');
+    } catch (error) {
+      const latest = this.requireScopedRun(current.run_id);
+      if (TERMINAL_STATUSES.has(latest.status)) return latest;
+      throw error;
+    }
+    return this.synchronizeRunnerState(current.run_id, result, 'cancel');
   }
 
   readOutput(runId: string): ArcOutput {
-    const run = this.store.requireRun(runId);
+    const run = this.requireScopedRun(runId);
     return this.artifacts.readOutput({
       projectId: run.project_id,
       projectRoot: run.project_root,
@@ -252,7 +253,7 @@ export class ArcCoordinator {
   async waitForTerminal(runId: string, timeoutMs = 5_000): Promise<ArcRunRecord> {
     const deadline = Date.now() + timeoutMs;
     while (true) {
-      const run = this.store.requireRun(runId);
+      const run = this.requireScopedRun(runId);
       if (TERMINAL_STATUSES.has(run.status)) return run;
       if (Date.now() >= deadline) {
         throw new ArcError('runner_failure', 'Timed out waiting for ARC run to finish', {
@@ -267,31 +268,197 @@ export class ArcCoordinator {
     this.disposed = true;
   }
 
-  private collect(run: ArcRunRecord): void {
-    if (!run.runner_handle || this.collections.has(run.run_id)) return;
-    const promise = this.settle(run, run.runner_handle).finally(() => {
+  private async performRecovery(): Promise<ArcRunRecord[]> {
+    const runs = this.store.listRecoverableRuns({
+      projectId: this.scope.fixedProjectId,
+      projectRoots: this.scope.allowedProjectRoots,
+    });
+    const recovered: ArcRunRecord[] = [];
+    for (const candidate of runs) {
+      const run = this.scope.authorizeRun(candidate);
+      if (run.status === 'queued') {
+        const input = this.store.getExecutionInput(run.run_id);
+        if (!input) {
+          recovered.push(
+            this.recordOperationalFailure(
+              run.run_id,
+              ['queued'],
+              'recovery_failed',
+              new ArcError('runner_failure', 'Queued run has no durable execution input'),
+            ),
+          );
+          continue;
+        }
+        recovered.push(await this.launchQueued(run, input, true));
+        continue;
+      }
+      recovered.push(await this.recoverRunning(run));
+    }
+    return recovered;
+  }
+
+  private launchQueued(run: ArcRunRecord, input: ArcExecutionInput, recovery: boolean): Promise<ArcRunRecord> {
+    const existing = this.launches.get(run.run_id);
+    if (existing) return existing;
+    const promise = this.startQueued(run, input, recovery).finally(() => {
+      this.launches.delete(run.run_id);
+    });
+    this.launches.set(run.run_id, promise);
+    return promise;
+  }
+
+  private async startQueued(run: ArcRunRecord, input: ArcExecutionInput, recovery: boolean): Promise<ArcRunRecord> {
+    try {
+      const handle = arcExecutionHandleSchema.parse(await this.runner.start(input));
+      const latest = this.requireScopedRun(run.run_id);
+      if (latest.status !== 'queued') return latest;
+      const running = this.transitionConverged(run.run_id, ['queued'], {
+        status: 'running',
+        phase: recovery ? 'recovered_executing' : 'executing',
+        progress: Math.max(latest.progress, 0.05),
+        runnerHandle: handle,
+        error: null,
+        recoveryGeneration: recovery ? latest.recovery_generation + 1 : latest.recovery_generation,
+        startedAt: latest.started_at ?? this.now(),
+        updatedAt: this.now(),
+      });
+      this.ensureCollection(running);
+      return running;
+    } catch (error) {
+      const latest = this.requireScopedRun(run.run_id);
+      if (latest.status !== 'queued') return latest;
+      return this.recordOperationalFailure(
+        run.run_id,
+        ['queued'],
+        recovery ? 'recovery_failed' : 'start_failed',
+        error,
+      );
+    }
+  }
+
+  private async recoverRunning(run: ArcRunRecord): Promise<ArcRunRecord> {
+    if (!run.runner_handle) {
+      return this.recordOperationalFailure(
+        run.run_id,
+        ['running'],
+        'recovery_failed',
+        new ArcError('runner_failure', 'Running run has no durable runner handle'),
+      );
+    }
+    try {
+      const result = validateArcRunnerResult(await this.runner.pause(run.runner_handle), 'recovery pause');
+      return this.synchronizeRunnerState(run.run_id, result, 'recovery');
+    } catch (error) {
+      const latest = this.requireScopedRun(run.run_id);
+      if (TERMINAL_STATUSES.has(latest.status)) return latest;
+      const failed = this.recordOperationalFailure(run.run_id, ['running'], 'recovery_failed', error);
+      this.ensureCollection(failed);
+      return failed;
+    }
+  }
+
+  private async synchronizeRunnerState(
+    runId: string,
+    result: ArcRunnerResult,
+    operation: 'pause' | 'resume' | 'cancel' | 'collect' | 'recovery',
+  ): Promise<ArcRunRecord> {
+    const current = this.requireScopedRun(runId);
+    if (TERMINAL_STATUSES.has(current.status)) return current;
+    if (result.state === 'finished') return this.finalizeFinished(runId);
+    if (result.state === 'cancelled') {
+      return this.transitionConverged(runId, [current.status], {
+        status: 'cancelled',
+        phase: 'cancelled',
+        finishedAt: this.now(),
+        updatedAt: this.now(),
+      });
+    }
+    if (result.state === 'paused') {
+      if (current.status === 'paused') return current;
+      if (current.status !== 'running') return current;
+      return this.transitionConverged(runId, ['running'], {
+        status: 'paused',
+        phase: operation === 'recovery' ? 'restart_recovered' : 'paused',
+        error: null,
+        recoveryGeneration: operation === 'recovery' ? current.recovery_generation + 1 : current.recovery_generation,
+        updatedAt: this.now(),
+      });
+    }
+    if (result.state === 'running') {
+      if (operation === 'recovery' && current.status === 'running') {
+        const failed = this.recordOperationalFailure(
+          runId,
+          ['running'],
+          'recovery_failed',
+          new ArcError('runner_failure', 'Runner did not pause during restart recovery'),
+        );
+        this.ensureCollection(failed);
+        return failed;
+      }
+      let running = current;
+      if (current.status === 'paused') {
+        running = this.transitionConverged(runId, ['paused'], {
+          status: 'running',
+          phase: 'executing',
+          error: null,
+          recoveryGeneration: operation === 'resume' ? current.recovery_generation + 1 : current.recovery_generation,
+          updatedAt: this.now(),
+        });
+      }
+      this.ensureCollection(running);
+      return running;
+    }
+    return current;
+  }
+
+  private ensureCollection(run: ArcRunRecord): void {
+    if (!run.runner_handle || run.status !== 'running' || this.collections.has(run.run_id) || this.disposed) {
+      return;
+    }
+    const promise = this.settle(run).finally(() => {
       this.collections.delete(run.run_id);
     });
     this.collections.set(run.run_id, promise);
   }
 
-  private async settle(run: ArcRunRecord, handle: ArcExecutionHandle): Promise<void> {
+  private async settle(run: ArcRunRecord): Promise<void> {
     try {
-      await this.runner.collect(handle);
+      const result = validateArcRunnerResult(await this.runner.collect(run.runner_handle!), 'collect');
       if (this.disposed) return;
+      if (result.state !== 'finished' && result.state !== 'cancelled') {
+        throw new ArcError('runner_failure', 'ARC runner collect returned before terminal state');
+      }
+      await this.synchronizeRunnerState(run.run_id, result, 'collect');
+    } catch (error) {
+      if (this.disposed) return;
+      const current = this.store.getRun(run.run_id);
+      if (!current) return;
+      try {
+        this.scope.authorizeRun(current);
+      } catch {
+        return;
+      }
+      if (TERMINAL_STATUSES.has(current.status) || current.status === 'paused') return;
+      this.recordOperationalFailure(run.run_id, ['running'], 'collect_failed', error);
+    }
+  }
+
+  private async finalizeFinished(runId: string): Promise<ArcRunRecord> {
+    const current = this.requireScopedRun(runId);
+    if (TERMINAL_STATUSES.has(current.status)) return current;
+    try {
       const output = await this.artifacts.waitForOutput({
-        projectId: run.project_id,
-        projectRoot: run.project_root,
-        runId: run.run_id,
+        projectId: current.project_id,
+        projectRoot: current.project_root,
+        runId: current.run_id,
         timeoutMs: this.artifactWaitTimeoutMs,
         pollIntervalMs: this.artifactPollIntervalMs,
       });
-      if (this.disposed) return;
-      const current = this.store.requireRun(run.run_id);
-      if (current.status !== 'running') return;
-      this.store.transition(run.run_id, ['running'], {
+      const latest = this.requireScopedRun(runId);
+      if (TERMINAL_STATUSES.has(latest.status)) return latest;
+      return this.transitionConverged(runId, [latest.status], {
         status: output.status,
-        phase: output.status === 'failed' ? 'failed' : 'completed',
+        phase: output.status,
         progress: 1,
         outputStatus: output.status,
         error: null,
@@ -299,11 +466,10 @@ export class ArcCoordinator {
         updatedAt: this.now(),
       });
     } catch (error) {
-      if (this.disposed) return;
+      const latest = this.requireScopedRun(runId);
+      if (TERMINAL_STATUSES.has(latest.status)) return latest;
       const failure = asArcError(error);
-      const current = this.store.getRun(run.run_id);
-      if (!current || current.status !== 'running') return;
-      this.store.transition(run.run_id, ['running'], {
+      return this.transitionConverged(runId, [latest.status], {
         status: 'failed',
         phase: 'failed',
         error: { code: failure.code, message: failure.message },
@@ -311,5 +477,34 @@ export class ArcCoordinator {
         updatedAt: this.now(),
       });
     }
+  }
+
+  private recordOperationalFailure(
+    runId: string,
+    expectedStatuses: ArcRunStatus[],
+    phase: string,
+    error: unknown,
+  ): ArcRunRecord {
+    const failure = asArcError(error);
+    return this.transitionConverged(runId, expectedStatuses, {
+      phase,
+      error: { code: failure.code, message: failure.message },
+      updatedAt: this.now(),
+    });
+  }
+
+  private transitionConverged(runId: string, expectedStatuses: ArcRunStatus[], patch: ArcRunPatch): ArcRunRecord {
+    try {
+      return this.scope.authorizeRun(this.store.transition(runId, expectedStatuses, patch));
+    } catch (error) {
+      if (error instanceof ArcError && (error.code === 'invalid_transition' || error.code === 'run_conflict')) {
+        return this.requireScopedRun(runId);
+      }
+      throw error;
+    }
+  }
+
+  private requireScopedRun(runId: string): ArcRunRecord {
+    return this.scope.authorizeRun(this.store.requireRun(runId));
   }
 }

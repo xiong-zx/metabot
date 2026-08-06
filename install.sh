@@ -406,7 +406,7 @@ fi
 success "MetaBot code ready at ${METABOT_HOME}"
 
 # GitHub Releases ship the complete self-hosted personal edition. Private or
-# legacy bridge packages retain the smaller four-workspace layout.
+# legacy bridge packages retain the smaller five-workspace layout.
 PERSONAL_EDITION_PACKAGE=false
 PACKAGE_MANIFEST="$METABOT_HOME/.metabot-package/manifest.json"
 if node -e '
@@ -436,6 +436,7 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
+#   - independent @xvirobotics/arc-mcp (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
 # personal edition and excluded only from the legacy/private bridge flavor.
@@ -450,6 +451,7 @@ else
     --workspace=@xvirobotics/cli-core \
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
+    --workspace=@xvirobotics/arc-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
 fi
@@ -1441,6 +1443,17 @@ if npm run build -w @xvirobotics/cli; then
   success "CLI build complete"
 else
   error "CLI build failed. MetaBot was not started."
+  exit 1
+fi
+
+# ARC MCP is shipped as an independent stdio binary. Installation only builds
+# it; a trusted runtime must explicitly configure its project scope and runner
+# adapter before starting it.
+info "Building independent ARC MCP..."
+if npm run build -w @xvirobotics/arc-mcp; then
+  success "ARC MCP build complete"
+else
+  error "ARC MCP build failed. MetaBot was not started."
   exit 1
 fi
 

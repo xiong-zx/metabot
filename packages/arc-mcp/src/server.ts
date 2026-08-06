@@ -113,6 +113,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
 }
 
 export async function connectArcStdioServer(coordinator: ArcCoordinator): Promise<McpServer> {
+  await coordinator.recover();
   const server = createArcMcpServer(coordinator);
   await server.connect(new StdioServerTransport());
   return server;
