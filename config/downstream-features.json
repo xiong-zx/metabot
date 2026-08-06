@@ -18,7 +18,7 @@
     },
     {
       "id": "agent-team-governance",
-      "status": "planned",
+      "status": "required",
       "roots": ["src/agent-teams/governance-extension.ts"]
     },
     {
