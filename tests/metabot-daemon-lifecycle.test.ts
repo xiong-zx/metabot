@@ -50,6 +50,7 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     '#!/usr/bin/env bash',
     'printf "%s\\n" "$*" >> "$PM2_LOG"',
     'if [[ "${1:-}" == "jlist" ]]; then',
+    '  if [[ "${FAKE_PM2_JLIST_FAIL:-}" == "true" ]]; then exit 1; fi',
     '  core=""',
     '  if [[ -n "${FAKE_CORE_RUNTIME:-}" ]]; then core=",{\\"name\\":\\"metabot-core\\",\\"pid\\":104,\\"pm2_env\\":{\\"status\\":\\"online\\",\\"pm_cwd\\":\\"$FAKE_CORE_RUNTIME\\",\\"pm_exec_path\\":\\"$FAKE_CORE_RUNTIME/packages/server/dist/index.js\\"}}"; fi',
     '  printf \'[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}},{"name":"metabot-worker-runnerd","pid":102,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/worker-runner-mcp/dist/daemon-cli.js"}},{"name":"metabot-arcd","pid":103,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/arc-mcp/dist/daemon-cli.js"}}%s]\\n\' "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$core"',
@@ -60,6 +61,11 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'if [[ "$*" == *"--busy ${FAKE_BUSY_DAEMON:-__none__}"* ]]; then exit 10; fi',
     'if [[ "$*" == *"local-daemon-health.ts"* ]]; then exit 0; fi',
     'exec "$REAL_NODE" "$@"',
+  ]);
+  writeExecutable(join(fakeBin, 'ps'), [
+    '#!/usr/bin/env bash',
+    'if [[ "${FAKE_PS_FAIL:-}" == "true" ]]; then exit 1; fi',
+    'exec /usr/bin/ps "$@"',
   ]);
   writeExecutable(join(fakeBin, 'curl'), ['#!/usr/bin/env bash', 'exit 0']);
   return {
@@ -165,6 +171,26 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(log).not.toContain('delete ');
     expect(log).not.toContain('start ');
     expect(log).not.toContain('save --force');
+  });
+
+  it('fails closed when the live PM2 process tree cannot be verified', () => {
+    const missingLivePid = fixture();
+    const targetForMissingPid = fixture();
+    expect(() => run(
+      missingLivePid,
+      ['deploy-runtime', '--runtime', targetForMissingPid.runtime, '--no-wait'],
+      { FAKE_PM2_JLIST_FAIL: 'true' },
+    )).toThrow(/process tree could not be verified/);
+    expect(readFileSync(missingLivePid.log, 'utf8')).not.toContain('protected-switch ');
+
+    const unreadableAncestry = fixture();
+    const targetForUnreadableAncestry = fixture();
+    expect(() => run(
+      unreadableAncestry,
+      ['deploy-runtime', '--runtime', targetForUnreadableAncestry.runtime, '--no-wait'],
+      { FAKE_PS_FAIL: 'true' },
+    )).toThrow(/process tree could not be verified/);
+    expect(readFileSync(unreadableAncestry.log, 'utf8')).not.toContain('protected-switch ');
   });
 
   it('includes only a checkout-owned Core in a protected runtime cutover', () => {

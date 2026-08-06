@@ -73,7 +73,9 @@ or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).
 Daemon restarts refuse while work is active. `--force` explicitly accepts that
 ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
 the same guard and must run outside the MetaBot process tree. It prevalidates
-the target/rollback configurations, restarts Worker Runner, ARC, an optional
+the live Bridge PID and the caller ancestry; if either cannot be read, it
+refuses the switch instead of assuming the caller is external. It then
+prevalidates the target/rollback configurations, restarts Worker Runner, ARC, an optional
 checkout-owned local Core, then Bridge without deleting their PM2
 registrations, and rolls back every changed app if PM2 rejects or cannot verify
 a switch. Core stays in its separate ecosystem. It is included only when its

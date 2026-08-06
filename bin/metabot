@@ -888,15 +888,18 @@ let input="";process.stdin.on("data",c=>input+=c).on("end",()=>{
 }
 
 _inside_metabot_process_tree() {
-  local live_pid pid
+  local live_pid pid parent_pid
   live_pid="$(_live_metabot_pid)"
-  [[ "$live_pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$live_pid" =~ ^[0-9]+$ && "$live_pid" -gt 1 ]] || return 2
   pid="$$"
   while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
     [[ "$pid" == "$live_pid" ]] && return 0
-    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || return 2
+    [[ "$parent_pid" =~ ^[0-9]+$ ]] || return 2
+    pid="$parent_pid"
   done
-  return 1
+  [[ "$pid" == "1" ]] && return 1
+  return 2
 }
 
 cmd_deploy_runtime() {
@@ -933,9 +936,16 @@ cmd_deploy_runtime() {
   target="$(readlink -f "$target")"
   [[ -f "$target/ecosystem.config.cjs" ]] || { error "No ecosystem.config.cjs at $target"; return 2; }
   _ensure_runtime_artifacts "$target" || return 1
+  local process_tree_status
   if _inside_metabot_process_tree; then
     error "Runtime switching is refused inside the MetaBot process tree."
     return 3
+  else
+    process_tree_status=$?
+    if [[ "$process_tree_status" -ne 1 ]]; then
+      error "Runtime switching is refused because the live MetaBot process tree could not be verified."
+      return 3
+    fi
   fi
 
   local app daemon

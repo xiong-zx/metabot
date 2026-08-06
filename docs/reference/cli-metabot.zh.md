@@ -67,6 +67,8 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 
 守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
 `recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
+它会先核对当前 Bridge PID 与调用者的父进程链；任一项无法读取时会拒绝切换，
+不会把“无法判断”当成“确认来自外部”。
 它会先校验目标配置和回退配置，再按 Worker Runner、ARC、可选的本地 Core、Bridge
 顺序就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。Core 仍使用
 独立 ecosystem，只有当前 PM2 cwd 和脚本都精确属于 Bridge 运行目录时才会加入切换；

@@ -31,5 +31,6 @@ owns it; external Core stays untouched. Uninstall uses the same ownership
 guard. Daemon restart and runtime deployment refuse active work unless
 the operator passes `--force`; forced interruption can leave durable records
 in `recovery_required`. Run `deploy-runtime` only from outside the MetaBot
-process tree. Rolling back to a pre-daemon release also requires
+process tree. The command refuses to proceed when the live Bridge PID or caller
+ancestry cannot be verified. Rolling back to a pre-daemon release also requires
 `pm2 delete metabot-worker-runnerd metabot-arcd && pm2 save`.
