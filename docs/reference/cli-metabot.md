@@ -67,7 +67,9 @@ restart loop.
 
 When `--resume` has a normal user or PM bot/chat scope, startup schedules one
 durable continuation in the existing chat session so the interrupted task
-continues exactly once. Agent Team and Worker/ARC internal chats are not
+continues exactly once. The scheduler writes that task atomically before it
+arms the timer; a persistence failure retains the restart breadcrumb for the
+next startup replay. Agent Team and Worker/ARC internal chats are not
 generically resumed; their durable supervisors and daemons remain responsible
 for recovery. Restart state is under `SESSION_STORE_DIR`, `METABOT_STATE_DIR`,
 or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).

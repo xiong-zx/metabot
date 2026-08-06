@@ -25,6 +25,8 @@ ID deduplicates retries. The new Bridge saves PM2 only after startup health and
 the pinned cwd, script, interpreter, arguments, and secret-safe SHA-256
 environment fingerprints all match. It then
 queues one continuation for normal user/PM chats when `--resume` is enabled;
+the continuation must be atomically persisted before its timer is armed, and a
+write failure retains the restart breadcrumb for startup replay.
 Team and Worker/ARC internal recovery stays with their durable owners.
 `deploy-runtime` prevalidates and switches the three Bridge-runtime apps
 without deleting PM2 registrations, rolling back changed apps on failure. It

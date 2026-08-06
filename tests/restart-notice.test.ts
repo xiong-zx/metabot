@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { RestartStore } from '../src/runtime/restart-store.js';
 
 process.env.SESSION_STORE_DIR = mkdtempSync(join(tmpdir(), 'metabot-restart-notice-'));
 
@@ -65,5 +66,28 @@ describe('structured restart breadcrumb', () => {
     expect(JSON.parse(readFileSync(breadcrumb, 'utf8')).requestId).toBe('stale-request');
     expect(loadRestartBreadcrumb()).toBeUndefined();
     expect(existsSync(breadcrumb)).toBe(false);
+  });
+
+  it('retains a stale breadcrumb while durable recovery is still undecided', () => {
+    const store = new RestartStore();
+    try {
+      store.claim({
+        requestId: 'stale-pending-recovery',
+        kind: 'restart',
+        targetRoot: '/srv/metabot',
+      });
+      writeRestartBreadcrumb({
+        requestId: 'stale-pending-recovery',
+        kind: 'restart',
+        resume: true,
+        targetRoot: '/srv/metabot',
+        restartedAt: Math.floor(Date.now() / 1000) - 60 * 60,
+      });
+      expect(loadRestartBreadcrumb()).toMatchObject({ requestId: 'stale-pending-recovery' });
+      expect(isFreshRestart()).toBe(true);
+      expect(existsSync(breadcrumb)).toBe(true);
+    } finally {
+      store.close();
+    }
   });
 });

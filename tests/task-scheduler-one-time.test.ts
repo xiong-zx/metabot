@@ -153,6 +153,36 @@ describe('TaskScheduler one-time tasks — creation', () => {
     expect(scheduler.listTasks()).toHaveLength(1);
     scheduler.destroy();
   });
+
+  it('persists a durable task before its timer can execute', async () => {
+    const registry = createMockRegistry();
+    const scheduler = new TaskScheduler(registry, createMockLogger());
+    const task = scheduler.scheduleTaskDurably({
+      botName: 'b', chatId: 'c', prompt: 'durable continuation', delaySeconds: 0, dedupeKey: 'restart-resume:durable',
+    });
+    const persisted = JSON.parse(fs.readFileSync(PERSIST_FILE, 'utf8')) as { tasks: Array<{ id: string; status: string }> };
+    expect(persisted.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id, status: 'pending' })]));
+    expect(registry.get).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(registry.get).toHaveBeenCalled();
+    scheduler.destroy();
+  });
+
+  it('does not enqueue a durable task when persistence fails', () => {
+    const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    fs.rmSync(PERSIST_DIR, { recursive: true, force: true });
+    fs.writeFileSync(PERSIST_DIR, 'not a directory');
+    try {
+      expect(() => scheduler.scheduleTaskDurably({
+        botName: 'b', chatId: 'c', prompt: 'must not run', delaySeconds: 0, dedupeKey: 'restart-resume:failed',
+      })).toThrow();
+      expect(scheduler.taskCount()).toBe(0);
+    } finally {
+      fs.rmSync(PERSIST_DIR, { force: true });
+      fs.mkdirSync(PERSIST_DIR, { recursive: true });
+      scheduler.destroy();
+    }
+  });
 });
 
 // =====================================================================

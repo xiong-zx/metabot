@@ -61,7 +61,8 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 之后才删除 breadcrumb，从而避免恢复后的会话再次重启。
 
 带 `--resume` 且来源是普通用户或 PM chat 时，启动流程会在原有 chat 会话中创建
-一个可去重的持久续做任务，让被中断的工作只继续一次。Agent Team、Worker 和 ARC
+一个可去重的持久续做任务，让被中断的工作只继续一次。调度器会先原子写盘，再启动
+计时器；如果写盘失败，系统会保留 breadcrumb，供下一次启动重试。Agent Team、Worker 和 ARC
 内部 chat 不走通用恢复，而由各自的持久 supervisor 或守护进程负责。状态文件位于
 `SESSION_STORE_DIR`、`METABOT_STATE_DIR` 或 `~/.metabot/` 下，文件名为
 `restart-state.sqlite` 和 `last-restart.json`。

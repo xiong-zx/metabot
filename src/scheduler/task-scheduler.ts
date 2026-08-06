@@ -159,6 +159,50 @@ export class TaskScheduler {
     return task;
   }
 
+  /** Persist a system-created task before arming its timer, or fail without enqueueing it. */
+  scheduleTaskDurably(input: ScheduleInput): ScheduledTask {
+    if (input.dedupeKey) {
+      const existing = Array.from(this.tasks.values()).find(
+        (task) => task.dedupeKey === input.dedupeKey && task.status !== 'cancelled',
+      );
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey: input.dedupeKey, status: existing.status },
+          'Durable scheduled task deduplicated',
+        );
+        return existing;
+      }
+    }
+    const now = Date.now();
+    const task: ScheduledTask = {
+      id: crypto.randomUUID(),
+      botName: input.botName,
+      chatId: input.chatId,
+      prompt: input.prompt,
+      executeAt: now + input.delaySeconds * 1000,
+      sendCards: input.sendCards ?? true,
+      label: input.label,
+      dedupeKey: input.dedupeKey,
+      status: 'pending',
+      createdAt: now,
+      retryCount: 0,
+    };
+
+    this.tasks.set(task.id, task);
+    try {
+      this.saveToDisk(true);
+    } catch (error) {
+      this.tasks.delete(task.id);
+      throw error;
+    }
+    this.setTimer(task);
+    this.logger.info(
+      { taskId: task.id, botName: task.botName, chatId: task.chatId, dedupeKey: task.dedupeKey },
+      'Durable scheduled task created',
+    );
+    return task;
+  }
+
   updateTask(id: string, input: ScheduleUpdateInput): ScheduledTask | null {
     const task = this.tasks.get(id);
     if (!task || task.status !== 'pending') return null;
@@ -509,7 +553,8 @@ export class TaskScheduler {
 
   // ===== Persistence =====
 
-  private saveToDisk(): void {
+  private saveToDisk(strict = false): void {
+    let tempFile: string | undefined;
     try {
       fs.mkdirSync(PERSIST_DIR, { recursive: true });
       // Prune old completed/failed child tasks to prevent unbounded growth
@@ -527,9 +572,15 @@ export class TaskScheduler {
         tasks,
         recurringTasks: Array.from(this.recurringTasks.values()),
       };
-      fs.writeFileSync(PERSIST_FILE, JSON.stringify(data, null, 2));
+      tempFile = `${PERSIST_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+      fs.renameSync(tempFile, PERSIST_FILE);
     } catch (err) {
+      if (tempFile) {
+        try { fs.unlinkSync(tempFile); } catch { /* best effort temp cleanup */ }
+      }
       this.logger.error({ err }, 'Failed to save scheduled tasks to disk');
+      if (strict) throw err;
     }
   }
 

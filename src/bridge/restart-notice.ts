@@ -1,8 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  RestartStore,
   assertRestartRequestId,
   resolveRestartStateDir,
+  restartStatePath,
   type RestartKind,
 } from '../runtime/restart-store.js';
 
@@ -76,15 +78,36 @@ export function loadRestartBreadcrumb(): RestartBreadcrumb | undefined {
     restartBreadcrumb = parsed;
     restartedAtMs = parsed.restartedAt * 1000;
     if (!isFreshRestart()) {
-      fs.rmSync(file, { force: true });
-      restartBreadcrumb = undefined;
-      restartedAtMs = undefined;
+      const pending = hasPendingDurableRecovery(parsed.requestId);
+      if (pending === true) {
+        restartedAtMs = Date.now();
+      } else {
+        if (pending === false) fs.rmSync(file, { force: true });
+        restartBreadcrumb = undefined;
+        restartedAtMs = undefined;
+      }
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') fs.rmSync(file, { force: true });
   }
   return restartBreadcrumb;
+}
+
+function hasPendingDurableRecovery(requestId: string): boolean | undefined {
+  if (!fs.existsSync(restartStatePath())) return false;
+  let store: RestartStore | undefined;
+  try {
+    store = new RestartStore();
+    const record = store.get(requestId);
+    return Boolean(record && !record.continuationDecidedAt);
+  } catch {
+    // Keep the file when the ledger is temporarily unreadable. A later startup
+    // can retry without turning a storage outage into permanent task loss.
+    return undefined;
+  } finally {
+    store?.close();
+  }
 }
 
 /** Clear only the breadcrumb for the expected request, never a newer request. */

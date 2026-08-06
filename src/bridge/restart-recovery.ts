@@ -98,8 +98,9 @@ export async function finalizeControlledRestartAfterStartup(options: RestartReco
 
     await reportRestartOnce(record, store, options, now());
     record = store.get(record.requestId) ?? record;
-    decideContinuationOnce(record, store, options, now());
-    clearRestartBreadcrumb(record.requestId);
+    if (decideContinuationOnce(record, store, options, now())) {
+      clearRestartBreadcrumb(record.requestId);
+    }
   } finally {
     if (ownsStore) store.close();
   }
@@ -155,46 +156,55 @@ function decideContinuationOnce(
   store: RestartStore,
   options: RestartRecoveryOptions,
   now: number,
-): void {
-  if (record.continuationDecidedAt) return;
+): boolean {
+  if (record.continuationDecidedAt) return true;
   if (record.status !== 'healthy') {
     store.recordContinuationDecision(record.requestId, { recoveryOwner: 'none:restart-failed', now });
-    return;
+    return true;
   }
   if (!record.resume) {
     store.recordContinuationDecision(record.requestId, { recoveryOwner: 'none:resume-disabled', now });
-    return;
+    return true;
   }
   if (!record.requesterBot || !record.requesterChat) {
     store.recordContinuationDecision(record.requestId, { recoveryOwner: 'none:no-requester', now });
-    return;
+    return true;
   }
   const internalOwner = internalRecoveryOwner(record.requesterChat);
   if (internalOwner) {
     store.recordContinuationDecision(record.requestId, { recoveryOwner: internalOwner, now });
-    return;
+    return true;
   }
   if (!options.registry.get(record.requesterBot)) {
     store.recordContinuationDecision(record.requestId, { recoveryOwner: 'none:bot-not-found', now });
-    return;
+    return true;
   }
 
   const continuationKey = `restart-resume:${record.requestId}`;
-  const task = options.scheduler.scheduleTask({
-    botName: record.requesterBot,
-    chatId: record.requesterChat,
-    prompt: buildContinuationPrompt(record),
-    delaySeconds: 0,
-    sendCards: true,
-    label: `Continue after ${record.kind}`,
-    dedupeKey: continuationKey,
-  });
-  store.recordContinuationDecision(record.requestId, {
-    recoveryOwner: 'task-scheduler',
-    continuationKey,
-    continuationTaskId: task.id,
-    now,
-  });
+  try {
+    const task = options.scheduler.scheduleTaskDurably({
+      botName: record.requesterBot,
+      chatId: record.requesterChat,
+      prompt: buildContinuationPrompt(record),
+      delaySeconds: 0,
+      sendCards: true,
+      label: `Continue after ${record.kind}`,
+      dedupeKey: continuationKey,
+    });
+    store.recordContinuationDecision(record.requestId, {
+      recoveryOwner: 'task-scheduler',
+      continuationKey,
+      continuationTaskId: task.id,
+      now,
+    });
+    return true;
+  } catch (error) {
+    options.logger.error(
+      { err: error, requestId: record.requestId, continuationKey },
+      'Controlled restart continuation was not durably scheduled; retaining breadcrumb for startup replay',
+    );
+    return false;
+  }
 }
 
 function internalRecoveryOwner(chatId: string): string | undefined {

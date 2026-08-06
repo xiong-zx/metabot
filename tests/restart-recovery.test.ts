@@ -30,8 +30,8 @@ function recoveryFixture(chatId = 'chat-user-1', resume = true) {
   const bot = { sender: { sendTextNotice } };
   const registry = { get: vi.fn().mockReturnValue(bot) } as unknown as BotRegistry;
   const scheduledTask = { id: 'continuation-task-1' };
-  const scheduleTask = vi.fn().mockReturnValue(scheduledTask);
-  const scheduler = { scheduleTask } as unknown as TaskScheduler;
+  const scheduleTaskDurably = vi.fn().mockReturnValue(scheduledTask);
+  const scheduler = { scheduleTaskDurably } as unknown as TaskScheduler;
   store.claim({
     requestId: 'restart-recovery',
     kind: 'restart',
@@ -57,7 +57,7 @@ function recoveryFixture(chatId = 'chat-user-1', resume = true) {
     targetRoot: '/srv/metabot',
   });
   loadRestartBreadcrumb();
-  return { store, registry, scheduler, sendTextNotice, scheduleTask };
+  return { store, registry, scheduler, sendTextNotice, scheduleTaskDurably };
 }
 
 beforeEach(() => clearRestartBreadcrumb());
@@ -126,8 +126,8 @@ describe('controlled restart startup finalization', () => {
       continuationTaskId: 'continuation-task-1',
     });
     expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
-    expect(kit.scheduleTask).toHaveBeenCalledTimes(1);
-    expect(kit.scheduleTask).toHaveBeenCalledWith(expect.objectContaining({
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledWith(expect.objectContaining({
       botName: 'pm',
       chatId: 'chat-user-1',
       delaySeconds: 0,
@@ -145,7 +145,81 @@ describe('controlled restart startup finalization', () => {
       persistProcessList: async () => undefined,
     });
     expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
-    expect(kit.scheduleTask).toHaveBeenCalledTimes(1);
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(1);
+    kit.store.close();
+  });
+
+  it('retains the breadcrumb and retries after durable continuation persistence fails', async () => {
+    const kit = recoveryFixture();
+    kit.scheduleTaskDurably.mockImplementationOnce(() => {
+      throw new Error('injected scheduler persistence failure');
+    });
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.store.get('restart-recovery')).toMatchObject({ status: 'healthy' });
+    expect(kit.store.get('restart-recovery')?.continuationDecidedAt).toBeUndefined();
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(true);
+
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.scheduleTaskDurably).toHaveBeenCalledTimes(2);
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      recoveryOwner: 'task-scheduler',
+      continuationTaskId: 'continuation-task-1',
+    });
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(false);
+    kit.store.close();
+  });
+
+  it('audits a failed requester notice once without claiming delivery', async () => {
+    const kit = recoveryFixture();
+    kit.sendTextNotice.mockRejectedValue(new Error('injected send failure'));
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      reportOutcome: 'failed:send',
+    });
+    expect(kit.store.get('restart-recovery')?.reportedAt).toBeUndefined();
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
+
+    writeRestartBreadcrumb({
+      requestId: 'restart-recovery',
+      kind: 'restart',
+      botName: 'pm',
+      chatId: 'chat-user-1',
+      source: 'test',
+      reason: 'continue work',
+      resume: true,
+      targetRoot: '/srv/metabot',
+    });
+    loadRestartBreadcrumb();
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+    });
+    expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
     kit.store.close();
   });
 
@@ -167,7 +241,7 @@ describe('controlled restart startup finalization', () => {
       reportOutcome: 'delivered',
       recoveryOwner: 'none:restart-failed',
     });
-    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
     kit.store.close();
   });
 
@@ -186,7 +260,7 @@ describe('controlled restart startup finalization', () => {
       healthError: 'injected pm2 save failure',
       recoveryOwner: 'none:restart-failed',
     });
-    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
     kit.store.close();
   });
 
@@ -206,7 +280,7 @@ describe('controlled restart startup finalization', () => {
       recoveryOwner: 'none:resume-disabled',
     });
     expect(kit.sendTextNotice).toHaveBeenCalledTimes(1);
-    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
     kit.store.close();
   });
 
@@ -226,7 +300,7 @@ describe('controlled restart startup finalization', () => {
       persistProcessList: async () => undefined,
     });
     expect(kit.store.get('restart-recovery')).toMatchObject({ status: 'healthy', recoveryOwner: owner });
-    expect(kit.scheduleTask).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
     kit.store.close();
   });
 });
