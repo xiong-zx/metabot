@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -63,5 +64,27 @@ describe('ArcArtifactStore', () => {
         pollIntervalMs: 5,
       }),
     ).rejects.toMatchObject({ code: 'artifact_missing' });
+  });
+
+  it.each([
+    ['absolute path', (outside: string) => outside, 'run-absolute-escape'],
+    ['file URI', (outside: string) => pathToFileURL(outside).href, 'run-file-uri-escape'],
+  ])('rejects an artifact %s outside the project root', (_kind, artifactUri, runId) => {
+    const temporary = temporaryDirectory();
+    cleanup.push(temporary);
+    const projectRoot = projectDirectory(temporary);
+    const outside = path.join(temporary, 'outside.txt');
+    writeFileSync(outside, 'outside project root', 'utf8');
+    const store = new ArcArtifactStore();
+
+    expect(() =>
+      store.writeOutput(
+        { projectId: 'project-1', projectRoot, runId },
+        validOutput('project-1', runId, {
+          artifacts: [{ id: 'escaped-artifact', uri: artifactUri(outside), summary: 'Must be rejected.' }],
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'path_outside_project' }));
+    expect(existsSync(path.join(projectRoot, store.outputRelativePath(runId)))).toBe(false);
   });
 });
