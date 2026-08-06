@@ -121,6 +121,18 @@ describe('WorkerService pinned authority and lifecycle', () => {
     expect(kit.runner.launches).toHaveLength(0);
   });
 
+  it('accepts the bounded encoded dedupe key for maximum-size ARC identifiers', async () => {
+    const kit = makeKit();
+    const dedupeKey = `arc:v1:${encodeURIComponent('界'.repeat(200))}:${encodeURIComponent('界'.repeat(200))}`;
+    expect(dedupeKey.length).toBeLessThanOrEqual(4_096);
+    await expect(kit.service.dispatch(input(kit.dir, { dedupeKey }))).resolves.toMatchObject({
+      worker: { dedupeKey },
+    });
+    await expect(kit.service.dispatch(input(kit.dir, { dedupeKey: 'x'.repeat(4_097) }))).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+  });
+
   it('rejects an explicitly empty output-contract description', async () => {
     const kit = makeKit();
     await expect(

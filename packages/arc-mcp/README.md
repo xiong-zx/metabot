@@ -13,9 +13,10 @@ artifacts, durable SQLite run state, and six MCP tools:
 
 The package does not import MetaBot Bridge, Memory Core, Wiki ingest,
 WorkerManager, Agent Team, or engine-specific code. It never promotes a result
-to memory. A runner is supplied through the small `ArcRunner` interface; a
-future Memory MCP may consume the validated output through the separate
-`ArcResultConsumer` interface.
+to memory. A runner is supplied through the small `ArcRunner` interface; the
+independent `@xvirobotics/arc-worker-runner-adapter` implements it over the
+Worker Runner MCP wire. A future Memory MCP may consume the validated output
+through the separate `ArcResultConsumer` interface.
 
 It ships three executables: `metabot-arc-mcp` keeps the original standalone
 stdio mode; `metabot-arcd` is the long-lived authenticated loopback daemon; and

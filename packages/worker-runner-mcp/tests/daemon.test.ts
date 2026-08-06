@@ -65,10 +65,12 @@ describe('Worker Runner daemon authentication', () => {
     expect(rebound.status).toBe(403);
   });
 
-  it('lets agent principals read their scope but not dispatch or abort', async () => {
+  it.each(['manager', 'agent', 'worker'] as const)(
+    'lets %s principals read their scope but not dispatch or abort',
+    async (role) => {
     const kit = await makeDaemon((store, dir) => store.createWorker('wrk-own', scopedInput(dir), 2, 1));
-    const agent: TrustedPrincipal = { role: 'agent', botName: 'bot-a', chatId: 'chat-a' };
-    const connected = await connect(kit.daemon.url, kit.authority.issue(agent, { ttlMs: 60_000 }));
+    const readOnly: TrustedPrincipal = { role, botName: 'bot-a', chatId: 'chat-a' };
+    const connected = await connect(kit.daemon.url, kit.authority.issue(readOnly, { ttlMs: 60_000 }));
     cleanups.push(() => connected.client.close());
 
     const listed = await connected.client.callTool({ name: 'worker_list', arguments: {} });
@@ -81,7 +83,8 @@ describe('Worker Runner daemon authentication', () => {
     const aborted = await connected.client.callTool({ name: 'worker_abort', arguments: { id: 'wrk-own' } });
     expect(aborted).toMatchObject({ isError: true, structuredContent: { code: 'FORBIDDEN' } });
     expect(kit.runner.launches).toHaveLength(0);
-  });
+    },
+  );
 });
 
 const PM: TrustedPrincipal = { role: 'pm', botName: 'bot-a', chatId: 'chat-a' };

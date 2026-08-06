@@ -484,7 +484,7 @@ export class WorkerService {
       engine: input.engine,
       ...(input.model !== undefined ? { model: normalizeNonempty(input.model, 'model', 200) } : {}),
       ...(input.label !== undefined ? { label: normalizeNonempty(input.label, 'label', 200) } : {}),
-      ...(input.dedupeKey !== undefined ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 300) } : {}),
+      ...(input.dedupeKey !== undefined ? { dedupeKey: normalizeNonempty(input.dedupeKey, 'dedupeKey', 4_096) } : {}),
       dedupePolicy: { completedTtlMs, retryTerminal },
       timeoutMs,
       idleTimeoutMs,

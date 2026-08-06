@@ -29,6 +29,8 @@ describe('HttpCompletionNotifier', () => {
     const body = request?.body as string;
     const signature = (request?.headers as Record<string, string>)['x-metabot-callback-signature'];
     expect(verifyTerminalCallback(body, signature, signingKey, 'worker.terminal')).toBe(true);
+    expect(verifyTerminalCallback(`${body} `, signature, signingKey, 'worker.terminal')).toBe(false);
+    expect(verifyTerminalCallback(body, signature, Buffer.alloc(32, 6), 'worker.terminal')).toBe(false);
     expect(JSON.parse(body)).toMatchObject({
       contract_version: 'metabot.terminal-callback.v1',
       purpose: 'worker.terminal',

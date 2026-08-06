@@ -3,6 +3,7 @@
   "references": [
     { "path": "./tsconfig.bridge.json" },
     { "path": "./packages/arc-mcp" },
+    { "path": "./packages/arc-worker-runner-adapter" },
     { "path": "./packages/cli-core" },
     { "path": "./packages/metamemory" },
     { "path": "./packages/skill-hub" },
