@@ -13,6 +13,7 @@ import type {
   SDKMessage,
 } from '../claude/executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import type { McpEntry } from '../mcp-entries.js';
 import {
   createCodexTranslatorState,
   translateCodexJsonEvent,
@@ -271,6 +272,7 @@ export function buildCodexArgs(
   sessionId: string | undefined,
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
+  mcpEntries: readonly McpEntry[] = [],
 ): string[] {
   const args: string[] = [];
 
@@ -287,6 +289,16 @@ export function buildCodexArgs(
   if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
   const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
   if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
+  for (const entry of mcpEntries) {
+    args.push('-c', `mcp_servers.${entry.name}.command=${tomlString(entry.command)}`);
+    if (entry.args.length > 0) {
+      args.push('-c', `mcp_servers.${entry.name}.args=[${entry.args.map(tomlString).join(',')}]`);
+    }
+    for (const [key, value] of Object.entries(entry.env).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`Invalid MCP environment key: ${key}`);
+      args.push('-c', `mcp_servers.${entry.name}.env.${key}=${tomlString(value)}`);
+    }
+  }
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -315,7 +327,15 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      fullPrompt,
+      sessionId,
+      model,
+      options.reasoningEffort,
+      options.mcpEntries,
+    );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;

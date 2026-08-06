@@ -27,6 +27,7 @@
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
 import type { TeamEvent, ApiContext } from './executor.js';
+import type { McpEntry } from '../mcp-entries.js';
 import {
   PersistentClaudeExecutor,
   type PersistentExecutorOptions,
@@ -82,6 +83,12 @@ export interface AcquireOptions {
   outputsDir?: string;
   /** Short-lived bridge-issued environment values scoped to this chat executor. */
   env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
+  /** Private Claude PTY MCP config path. */
+  mcpConfigPath?: string;
+  /** Releases the materialized file leases if this executor owns them. */
+  mcpCleanup?: () => void;
 }
 
 interface PoolEntry {
@@ -174,10 +181,16 @@ export class ExecutorRegistry extends EventEmitter {
       const state = existing.executor.getState();
       const healthy = state === 'ready' || state === 'restarting' || state === 'starting';
       const sameExecutionEnv = equalStringRecords(existing.acquireOpts.env, opts.env);
-      if (healthy && existing.model === effectiveModel && sameExecutionEnv) {
+      const sameMcp =
+        equalMcpEntries(existing.acquireOpts.mcpEntries, opts.mcpEntries) &&
+        existing.acquireOpts.mcpConfigPath === opts.mcpConfigPath;
+      if (healthy && existing.model === effectiveModel && sameExecutionEnv && sameMcp) {
         // Healthy + same model — bump LRU position
         this.executors.delete(chatId);
         this.executors.set(chatId, existing);
+        // The existing executor already owns an equivalent lease. Release the
+        // duplicate lease created by this turn's idempotent materialization.
+        opts.mcpCleanup?.();
         return existing.executor;
       }
       if (healthy) {
@@ -185,9 +198,13 @@ export class ExecutorRegistry extends EventEmitter {
         // reusing this executor would keep the OLD model. Release + respawn —
         // the new executor RESUMES the same session (opts.resumeSessionId), so
         // the conversation is preserved, just continued on the new model.
-        const reason = existing.model !== effectiveModel ? 'model-change' : 'execution-credential-rotation';
+        const reason = existing.model !== effectiveModel
+          ? 'model-change'
+          : sameExecutionEnv
+            ? 'execution-mcp-change'
+            : 'execution-credential-rotation';
         this.opts.logger.info(
-          { chatId, from: existing.model, to: effectiveModel, executionEnvChanged: !sameExecutionEnv },
+          { chatId, from: existing.model, to: effectiveModel, executionEnvChanged: !sameExecutionEnv, mcpChanged: !sameMcp },
           `ExecutorRegistry: ${reason} — respawning executor`,
         );
         await this.release(chatId, reason);
@@ -238,7 +255,12 @@ export class ExecutorRegistry extends EventEmitter {
       healthySince: Date.now(),
     };
     const executor = this.buildExecutor(chatId, entry, opts, effectiveModel, opts.resumeSessionId);
-    await executor.start();
+    try {
+      await executor.start();
+    } catch (error) {
+      opts.mcpCleanup?.();
+      throw error;
+    }
     entry.executor = executor;
     entry.healthySince = Date.now();
     this.executors.set(chatId, entry);
@@ -270,6 +292,10 @@ export class ExecutorRegistry extends EventEmitter {
       onTeamEvent: opts.onTeamEvent,
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
+      env: opts.env,
+      mcpEntries: opts.mcpEntries,
+      mcpConfigPath: opts.mcpConfigPath,
+      mcpCleanup: opts.mcpCleanup,
       backend: this.opts.backend,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
@@ -392,7 +418,9 @@ export class ExecutorRegistry extends EventEmitter {
       await executor.start();
     } catch (err) {
       this.opts.logger.error({ err, chatId }, 'ExecutorRegistry: crash respawn start() failed');
-      // Re-park (or remove if now exhausted) and let the caller fall back.
+      // Re-park (or remove if now exhausted) and let acquire() fall through to
+      // a fresh create with the SAME materialized lease. The fresh-create path
+      // becomes its owner and will clean it if that start also fails.
       if (entry.respawnAttempts >= maxRespawn) {
         this.executors.delete(chatId);
         this.emit('executor-removed', chatId);
@@ -510,4 +538,8 @@ function equalStringRecords(left?: Record<string, string>, right?: Record<string
     leftEntries.length === rightEntries.length &&
     leftEntries.every(([key, value], index) => key === rightEntries[index]?.[0] && value === rightEntries[index]?.[1])
   );
+}
+
+function equalMcpEntries(left?: readonly McpEntry[], right?: readonly McpEntry[]): boolean {
+  return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
 }

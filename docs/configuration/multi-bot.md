@@ -149,8 +149,13 @@ personal-edition bots default to Codex when `engine` is omitted.
 - `workerTools` and `arcTools` are authorization settings, not convenience
   switches. Non-Team chats fall back to the `user` role, so the per-bot flag is
   the effective dispatch boundary. Agent Team `manager`/`agent` chats never
-  receive these capabilities. Capability minting alone does not install MCP
-  tools; engine-side materialization must independently enforce the same flag.
+  receive these capabilities. Engine-side materialization independently
+  requires the already-minted per-turn capability and a configured loopback
+  `METABOT_WORKER_DAEMON_URL` / `METABOT_ARC_DAEMON_URL`; a missing or unsafe
+  endpoint means the tool is omitted. Codex uses invocation-local config and
+  Claude uses additive session config, so shared user MCP settings are not
+  overwritten. Kimi has no isolated per-session MCP surface and therefore
+  receives neither tool even when a flag is enabled.
 
 When `BOTS_CONFIG` is set, single-bot `FEISHU_APP_ID` and
 `FEISHU_APP_SECRET` are ignored.

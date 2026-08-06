@@ -6,6 +6,7 @@ import { AgentTeamGovernanceExtension, createAgentTeamGovernanceHost } from '../
 import { AgentTeamStore } from '../src/agent-teams/team-store.js';
 import { webBotFromJson } from '../src/config.js';
 import { stripBridgeLocalAdminCredentials } from '../src/engines/execution-env.js';
+import { buildExecutionMcpEntries } from '../src/engines/mcp-entries.js';
 import {
   ExecutionCapabilityService,
   provisionExecutionKeyPairs,
@@ -138,5 +139,41 @@ describe('worker/ARC execution environment', () => {
     expect(enabled).toMatchObject({ workerTools: true, arcTools: false });
     expect(defaultOff.workerTools).toBeUndefined();
     expect(defaultOff.arcTools).toBeUndefined();
+  });
+
+  it('composes the mint and materialization gates without re-authorizing Team sessions', () => {
+    const { store, governance, service } = fixture();
+    const pm = deriveExecutionPrincipal(governance, store, 'pm-codex', 'chat-pm');
+    const capabilityEnv = mintOptedInExecutionCapabilities({
+      service,
+      principal: pm,
+      config: { workerTools: true, arcTools: true },
+    });
+    const entries = buildExecutionMcpEntries({
+      executionEnv: { ...capabilityEnv, METABOT_CHAT_ID: 'chat-pm' },
+      bridgeEnv: {
+        METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp',
+        METABOT_ARC_DAEMON_URL: 'http://127.0.0.1:9312/mcp',
+      },
+      runtimeRoot: '/runtime',
+      capabilityFiles: { worker: '/private/worker.token', arc: '/private/arc.token' },
+    });
+    expect(entries.map((entry) => entry.name)).toEqual(['metabot-worker', 'metabot-arc']);
+
+    const teamPrincipal = deriveExecutionPrincipal(governance, store, 'pm-codex', 'team:legacy:coder');
+    const teamEnv = mintOptedInExecutionCapabilities({
+      service,
+      principal: teamPrincipal,
+      config: { workerTools: true, arcTools: true },
+    });
+    expect(buildExecutionMcpEntries({
+      executionEnv: { ...teamEnv, METABOT_CHAT_ID: 'team:legacy:coder' },
+      bridgeEnv: {
+        METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp',
+        METABOT_ARC_DAEMON_URL: 'http://127.0.0.1:9312/mcp',
+      },
+      runtimeRoot: '/runtime',
+      capabilityFiles: { worker: '/private/worker.token', arc: '/private/arc.token' },
+    })).toEqual([]);
   });
 });
