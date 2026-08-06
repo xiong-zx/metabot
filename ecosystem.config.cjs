@@ -1,12 +1,27 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const dotenv = require('dotenv');
 
 const fileEnv = fs.existsSync(path.join(__dirname, '.env'))
   ? dotenv.parse(fs.readFileSync(path.join(__dirname, '.env')))
   : {};
 const configured = (name, fallback) => process.env[name] || fileEnv[name] || fallback;
+const runtimeNode = configured('METABOT_NODE_INTERPRETER', process.execPath);
+if (!path.isAbsolute(runtimeNode) || !fs.existsSync(runtimeNode)) {
+  throw new Error('METABOT_NODE_INTERPRETER must be an existing absolute path');
+}
+const runtimeNodeVersion = execFileSync(runtimeNode, ['--version'], {
+  encoding: 'utf8',
+  timeout: 5_000,
+}).trim();
+const versionMatch = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(runtimeNodeVersion);
+if (!versionMatch) throw new Error(`Could not parse Node.js version: ${runtimeNodeVersion}`);
+const [, nodeMajor, nodeMinor, nodePatch] = versionMatch.map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 19)) {
+  throw new Error(`MetaBot requires Node.js >=22.19.0; configured interpreter reports ${nodeMajor}.${nodeMinor}.${nodePatch}`);
+}
 const stateRoot = configured('METABOT_STATE_DIR', path.join(os.homedir(), '.metabot'));
 const keysDir = configured('METABOT_KEYS_DIR', path.join(stateRoot, 'keys'));
 const workerEndpoint = configured(
@@ -35,7 +50,7 @@ const workerAllowlist = [...new Set([
 ])].join(',');
 const common = {
   cwd: __dirname,
-  interpreter: 'node',
+  interpreter: runtimeNode,
   watch: false,
   autorestart: true,
   max_restarts: 10,
@@ -57,6 +72,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         CLAUDE_MAX_TURNS: '',
         ...proxyEnv,
       },
@@ -69,6 +85,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'worker-runner-out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         METABOT_WORKER_DATA_DIR: configured('METABOT_WORKER_DATA_DIR', path.join(stateRoot, 'worker-runner')),
         METABOT_WORKER_LISTEN: workerEndpoint,
         METABOT_WORKER_CAPABILITY_PUBLIC_KEY_FILE: configured(
@@ -92,6 +109,7 @@ module.exports = {
       out_file: path.join(__dirname, 'logs', 'arc-out.log'),
       env: {
         NODE_ENV: 'production',
+        METABOT_HOME: __dirname,
         METABOT_ARC_DATA_DIR: configured('METABOT_ARC_DATA_DIR', path.join(stateRoot, 'arc')),
         METABOT_ARC_PROJECT_ROOTS: configured(
           'METABOT_ARC_PROJECT_ROOTS',

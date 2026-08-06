@@ -21,6 +21,8 @@ export interface ScheduledTask {
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
+  /** Stable idempotency key for durable system-created tasks. */
+  dedupeKey?: string;
   parentRecurringId?: string;  // set if spawned by a recurring task
 }
 
@@ -31,6 +33,7 @@ export interface ScheduleInput {
   delaySeconds: number;
   sendCards?: boolean;
   label?: string;
+  dedupeKey?: string;
 }
 
 export interface ScheduleUpdateInput {
@@ -121,6 +124,18 @@ export class TaskScheduler {
   // ===== One-time task methods (unchanged) =====
 
   scheduleTask(input: ScheduleInput): ScheduledTask {
+    if (input.dedupeKey) {
+      const existing = Array.from(this.tasks.values()).find(
+        (task) => task.dedupeKey === input.dedupeKey && task.status !== 'cancelled',
+      );
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey: input.dedupeKey, status: existing.status },
+          'Scheduled task deduplicated',
+        );
+        return existing;
+      }
+    }
     const now = Date.now();
     const task: ScheduledTask = {
       id: crypto.randomUUID(),
@@ -130,6 +145,7 @@ export class TaskScheduler {
       executeAt: now + input.delaySeconds * 1000,
       sendCards: input.sendCards ?? true,
       label: input.label,
+      dedupeKey: input.dedupeKey,
       status: 'pending',
       createdAt: now,
       retryCount: 0,
@@ -139,7 +155,51 @@ export class TaskScheduler {
     this.setTimer(task);
     this.saveToDisk();
 
-    this.logger.info({ taskId: task.id, botName: task.botName, chatId: task.chatId, delaySeconds: input.delaySeconds, label: task.label }, 'Scheduled task created');
+    this.logger.info({ taskId: task.id, botName: task.botName, chatId: task.chatId, delaySeconds: input.delaySeconds, label: task.label, dedupeKey: task.dedupeKey }, 'Scheduled task created');
+    return task;
+  }
+
+  /** Persist a system-created task before arming its timer, or fail without enqueueing it. */
+  scheduleTaskDurably(input: ScheduleInput): ScheduledTask {
+    if (input.dedupeKey) {
+      const existing = Array.from(this.tasks.values()).find(
+        (task) => task.dedupeKey === input.dedupeKey && task.status !== 'cancelled',
+      );
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey: input.dedupeKey, status: existing.status },
+          'Durable scheduled task deduplicated',
+        );
+        return existing;
+      }
+    }
+    const now = Date.now();
+    const task: ScheduledTask = {
+      id: crypto.randomUUID(),
+      botName: input.botName,
+      chatId: input.chatId,
+      prompt: input.prompt,
+      executeAt: now + input.delaySeconds * 1000,
+      sendCards: input.sendCards ?? true,
+      label: input.label,
+      dedupeKey: input.dedupeKey,
+      status: 'pending',
+      createdAt: now,
+      retryCount: 0,
+    };
+
+    this.tasks.set(task.id, task);
+    try {
+      this.saveToDisk(true);
+    } catch (error) {
+      this.tasks.delete(task.id);
+      throw error;
+    }
+    this.setTimer(task);
+    this.logger.info(
+      { taskId: task.id, botName: task.botName, chatId: task.chatId, dedupeKey: task.dedupeKey },
+      'Durable scheduled task created',
+    );
     return task;
   }
 
@@ -493,11 +553,15 @@ export class TaskScheduler {
 
   // ===== Persistence =====
 
-  private saveToDisk(): void {
+  private saveToDisk(strict = false): void {
+    let tempFile: string | undefined;
     try {
       fs.mkdirSync(PERSIST_DIR, { recursive: true });
       // Prune old completed/failed child tasks to prevent unbounded growth
       const tasks = Array.from(this.tasks.values()).filter((t) => {
+        if (t.dedupeKey && (t.status === 'completed' || t.status === 'failed')) {
+          return Date.now() - t.createdAt < 7 * 24 * 60 * 60 * 1000;
+        }
         if (t.parentRecurringId && (t.status === 'completed' || t.status === 'failed')) {
           const age = Date.now() - t.createdAt;
           return age < 7 * 24 * 60 * 60 * 1000; // keep for 7 days
@@ -508,9 +572,15 @@ export class TaskScheduler {
         tasks,
         recurringTasks: Array.from(this.recurringTasks.values()),
       };
-      fs.writeFileSync(PERSIST_FILE, JSON.stringify(data, null, 2));
+      tempFile = `${PERSIST_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+      fs.renameSync(tempFile, PERSIST_FILE);
     } catch (err) {
+      if (tempFile) {
+        try { fs.unlinkSync(tempFile); } catch { /* best effort temp cleanup */ }
+      }
       this.logger.error({ err }, 'Failed to save scheduled tasks to disk');
+      if (strict) throw err;
     }
   }
 
@@ -535,8 +605,19 @@ export class TaskScheduler {
 
       // Restore one-time tasks
       for (const task of taskList) {
-        // Skip completed/cancelled/failed tasks
-        if (task.status !== 'pending') continue;
+        // Retain recent terminal idempotent tasks so a restart cannot enqueue
+        // the same recovery continuation twice. An interrupted execution is
+        // terminalized rather than replayed because the engine may already
+        // have accepted it before the process died.
+        if (task.dedupeKey && task.status === 'executing') task.status = 'failed';
+        if (task.status !== 'pending') {
+          if (task.dedupeKey
+            && task.status !== 'cancelled'
+            && now - task.createdAt < 7 * 24 * 60 * 60 * 1000) {
+            this.tasks.set(task.id, task);
+          }
+          continue;
+        }
 
         // Skip tasks that are more than 24h overdue (stale)
         if (task.executeAt < now - STALE_THRESHOLD_MS) {

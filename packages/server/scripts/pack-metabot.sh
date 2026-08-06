@@ -92,6 +92,7 @@ INCLUDES=(
   'install.sh'
   'uninstall.sh'
   'ecosystem.config.cjs'
+  'scripts/pm2-protected-runtime-switch.cjs'
   'package-lock.json'
   'tsconfig.bridge.json'
   'src'
@@ -146,6 +147,11 @@ for required in \
     exit 1
   fi
 done
+
+if [[ ! -f "$REPO_ROOT/scripts/pm2-protected-runtime-switch.cjs" ]]; then
+  echo "error: required protected restart helper is missing" >&2
+  exit 1
+fi
 
 mkdir -p "$SERVER_STATIC_DIR"
 
