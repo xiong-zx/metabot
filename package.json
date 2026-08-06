@@ -11,6 +11,7 @@
     "packages/cli-core",
     "packages/metamemory",
     "packages/skill-hub",
+    "packages/worker-runner-mcp",
     "packages/server",
     "packages/web-ui"
   ],
