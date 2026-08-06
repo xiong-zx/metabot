@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as lark from '@larksuiteoapi/node-sdk';
 import { DocSync, type DocSyncConfig, type FullDocument } from '../src/sync/doc-sync.js';
 import type { FolderTreeNode } from '../src/memory/memory-client.js';
 
@@ -118,6 +119,23 @@ describe('DocSync', () => {
   it('reports not syncing initially', () => {
     setup();
     expect(docSync.isSyncing()).toBe(false);
+  });
+
+  it('creates its SDK client on the configured Lark tenant', () => {
+    mockMemory = createMockMemoryClient();
+    docSync = new DocSync({
+      feishuAppId: 'test_id',
+      feishuAppSecret: 'test_secret',
+      feishuDomain: 'lark',
+      databaseDir: tmpDir,
+    }, mockMemory, createLogger());
+
+    const expected = new lark.Client({
+      appId: 'test_id',
+      appSecret: 'test_secret',
+      domain: lark.Domain.Lark,
+    });
+    expect((docSync as any).client.domain).toBe(expected.domain);
   });
 
   it('returns empty stats when no docs synced', () => {

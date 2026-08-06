@@ -34,7 +34,7 @@ const platforms = [
   {
     name: 'Feishu',
     generator: extractGenerator('FEISHU_BOTS_JSON'),
-    args: ['bot', 'cli_test', 'secret', '/workspace'],
+    args: ['bot', 'cli_test', 'secret', 'feishu', '/workspace'],
   },
   {
     name: 'Telegram',
@@ -52,7 +52,7 @@ const powerShellPlatforms = [
   {
     name: 'PowerShell Feishu',
     generator: extractPowerShellGenerator('FeishuBotsJson'),
-    args: ['bot', 'cli_test', 'secret', 'C:\\workspace'],
+    args: ['bot', 'cli_test', 'secret', 'feishu', 'C:\\workspace'],
   },
   {
     name: 'PowerShell Telegram',
@@ -90,6 +90,17 @@ describe('interactive installer engine selection', () => {
       expect(bot.engine).toBe('codex');
       expect(bot.codex).toEqual({ approvalPolicy: 'never', sandbox: 'workspace-write' });
       expect(bot.kimi).toBeUndefined();
+    });
+  }
+
+  for (const platform of [platforms[0], powerShellPlatforms[0]]) {
+    it(`${platform.name} persists the selected Lark tenant`, () => {
+      const args = [...platform.args];
+      args[3] = 'lark';
+
+      const bot = generateBot(platform.generator, args, 'codex');
+
+      expect(bot.feishuDomain).toBe('lark');
     });
   }
 });
