@@ -11,6 +11,7 @@ import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import type { ApiContext } from '../prompt-context.js';
+import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 
 export type { ApiContext } from '../prompt-context.js';
@@ -266,6 +267,8 @@ export interface ExecutorOptions {
   onTeamEvent?: (event: TeamEvent) => void;
   /** Short-lived bridge-issued environment values scoped to this engine session. */
   env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
 }
 
 export type SDKMessage = {
@@ -336,6 +339,7 @@ export class ClaudeExecutor {
     outputsDir?: string,
     apiContext?: ApiContext,
     env?: Record<string, string>,
+    mcpEntries?: readonly McpEntry[],
   ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
@@ -363,6 +367,7 @@ export class ClaudeExecutor {
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
       ...(env ? { env } : {}),
+      ...(mcpEntries?.length ? { mcpServers: toSdkMcpServers(mcpEntries) } : {}),
     };
 
     // Build system prompt appendix from sections
@@ -456,7 +461,15 @@ export class ClaudeExecutor {
     };
     inputQueue.enqueue(initialMessage);
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext, options.env);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      apiContext,
+      options.env,
+      options.mcpEntries,
+    );
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }

@@ -24,6 +24,7 @@ import { listClaudeSessions, type SessionSummary } from '../engines/claude/sessi
 import { listCodexSessions } from '../engines/codex/session-lister.js';
 import { listKimiSessions } from '../engines/kimi/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
+import { materializeExecutionMcp } from '../engines/mcp-materialize.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
 import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
@@ -1415,6 +1416,15 @@ export class MessageBridge {
   ): Promise<ExecutionHandle> {
     const session = this.sessionManager.getSession(chatId);
     const executionEnv = this.executionEnvProvider?.({ botName: this.config.name, chatId });
+    const executionMcp = materializeExecutionMcp({
+      executionEnv,
+      bridgeEnv: process.env,
+      runtimeRoot: process.env.METABOT_HOME ?? process.cwd(),
+      engineName,
+      botName: this.config.name,
+      chatId,
+      logger: this.logger,
+    });
     // Persistent only applies to Claude. Options that need per-turn binding
     // (maxTurns / allowedTools) aren't plumbed through the persistent path yet,
     // so fall back to legacy spawn when they're present — matches the gating
@@ -1433,34 +1443,52 @@ export class MessageBridge {
           this.logger.warn({ err, chatId }, 'runOneTurn: failed to release persistent executor before retry');
         }
       }
-      const exec = await this.getOrCreateRegistry().acquire(chatId, {
-        cwd: opts.cwd,
-        resumeSessionId: opts.freshSession ? undefined : session.sessionId,
-        onTeamEvent: opts.onTeamEvent,
-        model: opts.model,
-        apiContext: opts.apiContext,
-        outputsDir: opts.outputsDir,
-        env: executionEnv,
-      });
+      let exec;
+      try {
+        exec = await this.getOrCreateRegistry().acquire(chatId, {
+          cwd: opts.cwd,
+          resumeSessionId: opts.freshSession ? undefined : session.sessionId,
+          onTeamEvent: opts.onTeamEvent,
+          model: opts.model,
+          apiContext: opts.apiContext,
+          outputsDir: opts.outputsDir,
+          env: executionEnv,
+          mcpEntries: executionMcp?.entries,
+          mcpConfigPath: executionMcp?.claudeMcpConfigPath,
+          mcpCleanup: executionMcp?.cleanup,
+        });
+      } catch (error) {
+        // acquire() normally transfers the lease to the registry, but this
+        // catch also covers constructor/registry failures before that happens.
+        executionMcp?.cleanup();
+        throw error;
+      }
       // TurnHandle is structurally compatible with ExecutionHandle (stream,
       // sendAnswer, resolveQuestion, finish) — see persistent-executor.ts.
       return exec.nextTurn(opts.prompt) as unknown as ExecutionHandle;
     }
 
-    return this.executorForEngine(chatId, engineName).startExecution({
-      prompt: opts.prompt,
-      cwd: opts.cwd,
-      sessionId: opts.freshSession ? undefined : session.sessionId,
-      abortController: opts.abortController,
-      outputsDir: opts.outputsDir,
-      apiContext: opts.apiContext,
-      model: opts.model,
-      reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
-      onTeamEvent: opts.onTeamEvent,
-      maxTurns: opts.maxTurns,
-      allowedTools: opts.allowedTools,
-      env: executionEnv,
-    });
+    try {
+      const handle = this.executorForEngine(chatId, engineName).startExecution({
+        prompt: opts.prompt,
+        cwd: opts.cwd,
+        sessionId: opts.freshSession ? undefined : session.sessionId,
+        abortController: opts.abortController,
+        outputsDir: opts.outputsDir,
+        apiContext: opts.apiContext,
+        model: opts.model,
+        reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
+        onTeamEvent: opts.onTeamEvent,
+        maxTurns: opts.maxTurns,
+        allowedTools: opts.allowedTools,
+        env: executionEnv,
+        mcpEntries: executionMcp?.entries,
+      });
+      return withMcpCleanup(handle, executionMcp?.cleanup);
+    } catch (error) {
+      executionMcp?.cleanup();
+      throw error;
+    }
   }
 
   /**
@@ -3253,6 +3281,25 @@ export class MessageBridge {
 
 function hasTeamState(teamState: TeamState | undefined): boolean {
   return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
+}
+
+function withMcpCleanup(handle: ExecutionHandle, cleanup: (() => void) | undefined): ExecutionHandle {
+  if (!cleanup) return handle;
+  let finished = false;
+  return {
+    stream: handle.stream,
+    sendAnswer: handle.sendAnswer.bind(handle),
+    resolveQuestion: handle.resolveQuestion.bind(handle),
+    finish: () => {
+      if (finished) return;
+      finished = true;
+      try {
+        handle.finish();
+      } finally {
+        cleanup();
+      }
+    },
+  };
 }
 
 function mergeBackgroundEvents(

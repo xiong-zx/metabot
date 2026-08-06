@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
+import type { McpEntry } from '../src/engines/mcp-entries.js';
 import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
@@ -79,6 +80,44 @@ describe('buildCodexArgs', () => {
     const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
     const execIdx = args.indexOf('exec');
     expect(args.slice(execIdx - 3, execIdx)).toEqual(['--foo', 'bar baz', '--qux']);
+  });
+
+  it('adds per-invocation MCP overrides before operator extraArgs without token bytes', () => {
+    const entries: McpEntry[] = [
+      {
+        name: 'metabot-worker',
+        command: '/runtime with spaces/node_modules/.bin/metabot-"worker"',
+        args: ['--path', 'C:\\private files\\proxy'],
+        env: {
+          METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
+          METABOT_WORKER_PROXY_CAPABILITY_FILE: '/private/token file',
+        },
+      },
+    ];
+    const args = buildCodexArgs(
+      { extraArgs: ['--operator-override'] },
+      cwd,
+      prompt,
+      undefined,
+      undefined,
+      undefined,
+      entries,
+    );
+    const joined = args.join('\n');
+
+    expect(joined).toContain('mcp_servers.metabot-worker.command="/runtime with spaces/node_modules/.bin/metabot-\\"worker\\""');
+    expect(joined).toContain('mcp_servers.metabot-worker.args=["--path","C:\\\\private files\\\\proxy"]');
+    expect(joined).toContain(
+      'mcp_servers.metabot-worker.env.METABOT_WORKER_PROXY_CAPABILITY_FILE="/private/token file"',
+    );
+    expect(joined).not.toContain('CAPABILITY_TOKEN_SENTINEL');
+    expect(args.indexOf('--operator-override')).toBeGreaterThan(args.findIndex((arg) => arg.includes('mcp_servers.')));
+    expect(args.indexOf('--operator-override')).toBeLessThan(args.indexOf('exec'));
+  });
+
+  it('keeps argv byte-identical when no MCP entries are materialized', () => {
+    const existing = buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high');
+    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high', [])).toEqual(existing);
   });
 
   it('uses `exec resume <sessionId>` when a session id is provided', () => {
