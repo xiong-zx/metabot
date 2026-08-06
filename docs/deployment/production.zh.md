@@ -88,6 +88,7 @@ metabot doctor
 重启必须明确指定：
 
 ```bash
+metabot restart --request-id <稳定ID> --wait --json
 metabot restart --daemon worker
 metabot restart --daemon arc
 metabot restart --daemon worker --force
@@ -95,6 +96,13 @@ metabot restart --daemon worker --force
 
 有活跃工作时默认拒绝重启。`--force` 表示操作者接受后果：状态不明确的工作可能变为
 `recovery_required`，系统不会盲目重新执行。
+
+受保护的 Bridge 重启不会删除 PM2 条目。它先在 SQLite 中领取 request ID，再原子
+写入 `last-restart.json`，并且只在相同运行目录和脚本上重启 Bridge。相同 request ID
+再次提交时会返回持久记录，不会再次重启。新 Bridge 启动后会验证自身 HTTP、两个
+守护进程通信端点和 PM2 身份，全部通过后才保存 PM2。普通用户或 PM chat 使用
+`--resume` 时，会在原会话里只创建一次续做任务；Agent Team、Worker 和 ARC 内部
+chat 仍由各自的持久恢复机制负责。
 
 Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 `~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，
@@ -109,7 +117,16 @@ pm2 save
 
 从源码切换运行目录时，应从 SSH 或 MetaBot 进程树之外的控制器执行
 `metabot deploy-runtime --runtime /absolute/checkout`。默认会在有活跃工作时拒绝；
-`--force` 会给出 `recovery_required` 提示。
+`--force` 会给出 `recovery_required` 提示。命令会先校验目标与回退配置，再按 Worker
+Runner、ARC、Bridge 顺序就地切换，不产生 `pm2 delete` 的空档；失败时回退 PM2
+已经接受的所有变更。旧控制器不会保存 PM2，只有健康的新 Bridge 才会保存。自动化
+重试应使用稳定的 `--request-id`，并用 `--wait --json` 取得持久终态。
+
+个人版 Core 仍然使用独立的 PM2 ecosystem。只有当前 Core 的 PM2 cwd 和脚本都精确
+属于当前 Bridge checkout，而且目标目录也包含独立 Core ecosystem 与已构建服务时，
+切换流程才会把 Core 放在 ARC 与 Bridge 之间。远程或单独管理的 Core 不会被重启或
+切换。`uninstall.sh` 也只会删除通过此所有权检查的 Core，因此卸载 Bridge 不会误删
+外部 Core。
 
 ## 源码部署
 

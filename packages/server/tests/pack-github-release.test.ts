@@ -52,6 +52,8 @@ describe('GitHub release package', () => {
     expect(listing).toContain('packages/arc-mcp/package.json');
     expect(listing).toContain('packages/arc-worker-runner-adapter/package.json');
     expect(listing).toContain('packages/worker-runner-mcp/package.json');
+    expect(listing).toContain('scripts/pm2-protected-runtime-switch.cjs');
+    expect(listing).toContain('src/runtime/restart-state-cli.ts');
     expect(listing).not.toContain('packages/server/static/');
     expect(listing).not.toMatch(/(^|\n)\.?\/?web\//);
 

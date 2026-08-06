@@ -1609,10 +1609,9 @@ else
   exit 1
 fi
 
-# Always delete + start the three sibling apps from this runtime. Daemons are
-# never Bridge children, so a later ordinary `metabot restart` remains
-# Bridge-only. The lifecycle command saves PM2 state only after all three
-# authenticated health probes pass.
+# Package refreshes never delete live PM2 registrations. Daemons are never
+# Bridge children, so an externally controlled protected deployment can update
+# them before replacing Bridge while preserving registration IDs.
 for daemon in worker arc; do
   app="metabot-${daemon}"
   [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
@@ -1631,14 +1630,36 @@ for daemon in worker arc; do
     fi
   fi
 done
-for app in metabot metabot-worker-runnerd metabot-arcd; do
-  if pm2 describe "$app" &>/dev/null 2>&1; then
-    info "Removing old $app PM2 process..."
-    pm2 delete "$app" 2>/dev/null || true
-  fi
-done
-info "Starting MetaBot Bridge and execution daemons with PM2..."
-METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+EXISTING_METABOT_STATUS=""
+if pm2 describe metabot &>/dev/null 2>&1; then
+  EXISTING_METABOT_STATUS="$(pm2 jlist 2>/dev/null | node -e '
+    let input="";
+    process.stdin.on("data",c=>input+=c).on("end",()=>{
+      try {
+        const row=JSON.parse(input).find(entry=>entry.name==="metabot");
+        process.stdout.write(String(row?.pm2_env?.status||""));
+      } catch { process.exitCode=2; }
+    });
+  ')" || {
+    error "Could not inspect the existing MetaBot PM2 registration. Refusing lifecycle change."
+    exit 1
+  }
+fi
+
+if [[ "${METABOT_PACKAGE_UPDATE:-0}" == "1" && "$EXISTING_METABOT_STATUS" == "online" ]]; then
+  info "Applying package refresh through the protected no-delete runtime switch..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" deploy-runtime \
+    --runtime "$METABOT_HOME" \
+    --request-id "${METABOT_RESTART_REQUEST_ID:?package update requestId is required}" \
+    --source package-update \
+    --reason "MetaBot package update" \
+    --resume \
+    --wait \
+    --timeout 120
+else
+  info "Starting MetaBot Bridge and execution daemons with PM2..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+fi
 success "MetaBot Bridge and execution daemons are running!"
 
 # --- WeChat QR login: wait for URL and display it ---

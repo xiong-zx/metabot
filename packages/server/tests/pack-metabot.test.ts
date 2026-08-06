@@ -107,10 +107,14 @@ describe('pack-metabot.sh', () => {
     for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
       expect(ecosystem).toContain(proxyName);
     }
-    expect(installSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(installSh).toContain('Applying package refresh through the protected no-delete runtime switch');
+    expect(installSh).toContain('deploy-runtime');
+    expect(installSh).not.toContain('pm2 delete "$app"');
     expect(installSh).toContain('package replacement may leave it recovery_required');
     expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
     expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstallSh).toContain('pm2_app_owned_by_runtime metabot-core');
+    expect(uninstallSh).toContain('Leaving metabot-core untouched');
     expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
@@ -165,6 +169,15 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?package\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package-lock\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?bin\/metabot\b/);
+    expect(tarListing).toContain('scripts/pm2-protected-runtime-switch.cjs');
+    expect(tarListing).toContain('src/runtime/restart-state-cli.ts');
+    expect(tarListing).toContain('src/bridge/restart-recovery.ts');
+  });
+
+  it('keeps the TypeScript source launcher in runtime dependencies', () => {
+    const packageJson = JSON.parse(execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} package.json`, { encoding: 'utf-8' }));
+    expect(packageJson.dependencies.tsx).toMatch(/^\^4\./);
+    expect(packageJson.devDependencies?.tsx).toBeUndefined();
   });
 
   it('tarball includes the seven bot-host workspaces', () => {

@@ -11,6 +11,7 @@ import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
 import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-factory.js';
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
+import { finalizeControlledRestartAfterStartup } from './bridge/restart-recovery.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -211,9 +212,9 @@ async function main() {
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
 
-  // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
-  // so the first turn in each chat after a restart can be reminded not to
-  // restart again. Must run before any message can be handled.
+  // Load but retain the restart breadcrumb. The new process clears it only
+  // after startup health, PM2 persistence, reporting, and continuation
+  // ownership have all reached a durable decision.
   loadRestartBreadcrumb();
 
   const feishuCount = appConfig.feishuBots.length;
@@ -403,6 +404,13 @@ async function main() {
     peerManager,
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
+  });
+
+  await finalizeControlledRestartAfterStartup({
+    registry,
+    scheduler,
+    logger,
+    apiServer,
   });
 
   // Graceful shutdown
