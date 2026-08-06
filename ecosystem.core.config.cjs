@@ -1,5 +1,27 @@
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
+const dotenv = require('dotenv');
+
+const fileEnv = fs.existsSync(path.join(__dirname, '.env'))
+  ? dotenv.parse(fs.readFileSync(path.join(__dirname, '.env')))
+  : {};
+const configured = (name, fallback) => process.env[name] || fileEnv[name] || fallback;
+const runtimeNode = configured('METABOT_NODE_INTERPRETER', process.execPath);
+if (!path.isAbsolute(runtimeNode) || !fs.existsSync(runtimeNode)) {
+  throw new Error('METABOT_NODE_INTERPRETER must be an existing absolute path');
+}
+const runtimeNodeVersion = execFileSync(runtimeNode, ['--version'], {
+  encoding: 'utf8',
+  timeout: 5_000,
+}).trim();
+const versionMatch = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(runtimeNodeVersion);
+if (!versionMatch) throw new Error(`Could not parse Node.js version: ${runtimeNodeVersion}`);
+const [, nodeMajor, nodeMinor, nodePatch] = versionMatch.map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 19)) {
+  throw new Error(`MetaBot requires Node.js >=22.19.0; configured interpreter reports ${nodeMajor}.${nodeMinor}.${nodePatch}`);
+}
 
 const dataDir = process.env.METABOT_CORE_DATA_DIR
   || path.join(os.homedir(), '.metabot-core', 'data');
@@ -11,7 +33,7 @@ module.exports = {
     {
       name: 'metabot-core',
       script: 'packages/server/dist/index.js',
-      interpreter: 'node',
+      interpreter: runtimeNode,
       cwd: __dirname,
       watch: false,
       autorestart: true,

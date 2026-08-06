@@ -19,6 +19,7 @@ values you need.
 | `METABOT_CORE_PORT` | `9200` | Core port |
 | `METABOT_CORE_DATA_DIR` | `~/.metabot-core/data` | Core data directory |
 | `METABOT_PUBLIC_DISTRIBUTION` | `0` | Serve Core install/CLI assets anonymously; enable only intentionally |
+| `METABOT_NODE_INTERPRETER` | current `node` executable | Absolute Node.js >=22.19 path pinned into every PM2 app; useful when upgrading a host whose system Node is older |
 | `LOG_LEVEL` | `info` | Bridge log level |
 
 Memory, Skills, Agents, and T5T are served by Core at `METABOT_CORE_URL`. The
