@@ -203,7 +203,7 @@ describe('interleaved text/images', () => {
 });
 
 describe('post images combined with cached group media', () => {
-  it('cached media appends after post extras; anchors stay post-owned; cache clears once attached', async () => {
+  it('does not attach cached media to a mentioned post without an exact reply', async () => {
     const received: IncomingMessage[] = [];
     const d = makeDispatcher(m => received.push(m), { botOpenId: BOT_OPEN_ID });
     const chatId = 'oc_cache_combo';
@@ -222,8 +222,8 @@ describe('post images combined with cached group media', () => {
     });
     expect(received).toHaveLength(0);
 
-    // @bot post with two inline images: post extras must precede cached media,
-    // because [Image N] anchors in the text belong to the post's own images.
+    // @bot post with two inline images but no reply: only the post's own
+    // attachments are eligible. Cached media requires an exact parent reply.
     await invokeMessage(d, {
       msgId: 'om_post', chatId, userId,
       msgType: 'post', chatType: 'group',
@@ -244,11 +244,9 @@ describe('post images combined with cached group media', () => {
     expect(m.imageKey).toBe('k_p1');
     expect(m.extraMedia).toEqual([
       { messageId: 'om_post', imageKey: 'k_p2' },
-      { messageId: 'om_cached_img', imageKey: 'k_cached_img', fileKey: undefined, fileName: undefined },
-      { messageId: 'om_cached_file', imageKey: undefined, fileKey: 'k_cached_file', fileName: 'report.pdf' },
     ]);
 
-    // Cache must be consumed: the next mentioned post carries only its own extras.
+    // A later mention without a reply still cannot consume or attach cache entries.
     await invokeMessage(d, {
       msgId: 'om_post2', chatId, userId,
       msgType: 'post', chatType: 'group',
