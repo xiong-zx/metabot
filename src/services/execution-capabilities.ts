@@ -44,6 +44,10 @@ export interface ExecutionCapabilityClaims {
   exp: number;
 }
 
+interface LocalLifecycleCapabilityClaims extends Omit<ExecutionCapabilityClaims, 'role'> {
+  role: 'admin';
+}
+
 export interface KeyFileDiagnostic {
   path: string;
   exists: boolean;
@@ -206,16 +210,42 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
       throw new ExecutionCapabilityError('Capability ttlMs must be a positive integer', 'INVALID_TTL');
     }
-    const claims: ExecutionCapabilityClaims = {
+    return this.signCapability({
       v: 1,
       purpose: input.purpose,
       role: input.role,
       botName: requireClaim(input.botName, 'botName', EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH),
       chatId: requireClaim(input.chatId, 'chatId', EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH),
       exp: now + ttlMs,
-    };
+    });
+  }
+
+  /**
+   * Mint the fixed local-operator principal used only for daemon health and
+   * lifecycle reads. Engine sessions never call this path and continue to be
+   * limited to pm/user capabilities through issue().
+   */
+  issueLocalLifecycleAdmin(
+    purpose: ExecutionCapabilityPurpose,
+    ttlMs = 2 * 60 * 1000,
+    now = Date.now(),
+  ): string {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isSafeInteger(now + ttlMs)) {
+      throw new ExecutionCapabilityError('Lifecycle capability ttlMs is invalid', 'INVALID_TTL');
+    }
+    return this.signCapability({
+      v: 1,
+      purpose,
+      role: 'admin',
+      botName: 'metabot-local-lifecycle',
+      chatId: 'local:daemon-lifecycle',
+      exp: now + ttlMs,
+    });
+  }
+
+  private signCapability(claims: ExecutionCapabilityClaims | LocalLifecycleCapabilityClaims): string {
     const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
-    const privateKey = this.loadPrivateKey(capabilityPrefix(input.purpose));
+    const privateKey = this.loadPrivateKey(capabilityPrefix(claims.purpose));
     const signature = cryptoSign(null, Buffer.from(payload), privateKey).toString('base64url');
     return `${payload}.${signature}`;
   }

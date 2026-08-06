@@ -22,9 +22,12 @@ metabot update                                  # package install: latest GitHub
 metabot update --package                        # force latest GitHub Release package
 metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
 metabot update --git                            # force git pull + rebuild + restart
-metabot start                       # start with PM2
-metabot stop                        # stop
-metabot restart                     # restart
+metabot start                       # start Bridge + Worker Runner + ARC
+metabot stop                        # stop the whole three-app runtime
+metabot restart                     # restart Bridge only
+metabot restart --daemon worker     # guarded Worker Runner restart
+metabot restart --daemon arc        # guarded ARC restart
+metabot deploy-runtime --runtime /absolute/checkout  # external runtime switch
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
@@ -43,7 +46,11 @@ instead of `latest`. Package updating performs:
 5. Preserve user/Core state under `~/.metabot/` and `~/.metabot-core/`; only package-owned `~/.metabot/default.env` may be refreshed.
 6. Install dependencies and build the Bridge, Core, Web UI, and delegated CLI.
 7. Refresh bundled/workspace Skills and existing Lark CLI Skills when present.
-8. Restart the managed PM2 services.
+8. Restart Bridge and both execution daemons, then save PM2 only after health.
+
+Daemon restarts refuse while work is active. `--force` explicitly accepts that
+ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
+the same guard and must run outside the MetaBot process tree.
 
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and

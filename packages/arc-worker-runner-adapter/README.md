@@ -61,14 +61,16 @@ group/other users. Its Worker Runner principal should use the dedicated
 `arc-service` scope; direct chat-scoped Worker tools then cannot see or abort
 ARC's internal workers.
 
-## Phase B integration still required
+## Runtime integration boundary
 
-This package does not issue capabilities, receive callbacks, supervise the two
-daemons, or write engine MCP configuration. Those Bridge responsibilities
-belong to Phase B. The package daemons verify v2.1 Ed25519 capabilities and
-sign terminal callbacks, but this is scope hygiene rather than containment
-against malicious same-UID code; that stronger boundary needs OS-user
-separation.
+The MetaBot runtime supervises both PM2 daemons and provisions the dedicated
+private `arc-service` capability used by this adapter. This package still does
+not issue chat capabilities, receive callbacks, or write engine MCP
+configuration; those contacts remain on signed wire interfaces. Engine-session
+materialization is separate and default-off. The package daemons verify v2.1
+Ed25519 capabilities and sign terminal callbacks, but this is scope hygiene
+rather than containment against malicious same-UID code; that stronger
+boundary needs OS-user separation.
 
 ## Development
 

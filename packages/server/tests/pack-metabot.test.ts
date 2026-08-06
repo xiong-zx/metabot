@@ -89,6 +89,36 @@ describe('pack-metabot.sh', () => {
     expect(installSh).not.toContain('npm run build --workspaces');
   });
 
+  it('ships the complete execution-daemon lifecycle without coupling Bridge to package internals', () => {
+    const ecosystem = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} ecosystem.config.cjs`, { encoding: 'utf-8' });
+    const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
+    const uninstallSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} uninstall.sh`, { encoding: 'utf-8' });
+    const metabot = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} bin/metabot`, { encoding: 'utf-8' });
+    const daemonHealth = execSync(
+      `tar xOf ${JSON.stringify(TARBALL_PATH)} src/services/local-daemon-health.ts`,
+      { encoding: 'utf-8' },
+    );
+
+    expect(ecosystem).toContain("name: 'metabot-worker-runnerd'");
+    expect(ecosystem).toContain("name: 'metabot-arcd'");
+    expect(ecosystem).toContain('packages/worker-runner-mcp/dist/daemon-cli.js');
+    expect(ecosystem).toContain('packages/arc-mcp/dist/daemon-cli.js');
+    expect(ecosystem).toContain("'packages', 'arc-worker-runner-adapter', 'dist', 'factory.js'");
+    for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
+      expect(ecosystem).toContain(proxyName);
+    }
+    expect(installSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(installSh).toContain('package replacement may leave it recovery_required');
+    expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
+    expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
+    expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(daemonHealth).toContain('StreamableHTTPClientTransport');
+    expect(daemonHealth).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
+    expect(daemonHealth).not.toMatch(/packages\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
+  });
+
   it('rewrites root manifests for the runtime-only workspace subset', () => {
     const packageJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} package.json`, { encoding: 'utf-8' });
     const pkg = JSON.parse(packageJson);
@@ -130,6 +160,7 @@ describe('pack-metabot.sh', () => {
   it('tarball includes the bot-host runtime entrypoints', () => {
     // Phase 2 / 3 entry points the bootstrap exec's into.
     expect(tarListing).toMatch(/(^|\n)\.?\/?install\.sh\b/);
+    expect(tarListing).toMatch(/(^|\n)\.?\/?uninstall\.sh\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?ecosystem\.config\.cjs\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package\.json\b/);
     expect(tarListing).toMatch(/(^|\n)\.?\/?package-lock\.json\b/);

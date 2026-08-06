@@ -175,9 +175,12 @@ If no callback URL is configured, no notification worker starts; originator
 metadata remains durable for a later correctly configured restart. ARC still
 does not promote or ingest memory automatically.
 
-MetaBot release packages include and build this workspace, but the installer
-does not start or register the MCP server. Supplying the trusted scope and
-runner adapter remains an explicit integration step.
+MetaBot release packages build this workspace and register `metabot-arcd` as a
+PM2 sibling of Bridge and Worker Runner. Production configuration supplies the
+trusted project roots; the safe default is the dedicated
+`~/.metabot/arc-projects` directory. The daemon loads the packaged runner
+adapter, and lifecycle health uses an authenticated read-only MCP call. Engine
+session materialization remains a separate, default-off integration.
 
 ## Development
 

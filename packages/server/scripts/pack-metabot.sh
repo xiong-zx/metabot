@@ -90,6 +90,7 @@ TAR_EXCLUDES=(
 INCLUDES=(
   'bin'
   'install.sh'
+  'uninstall.sh'
   'ecosystem.config.cjs'
   'package-lock.json'
   'tsconfig.bridge.json'
@@ -131,6 +132,7 @@ done
 # bot host. Fail loud here instead.
 for required in \
   'install.sh' \
+  'uninstall.sh' \
   'packages/skills/metabot/SKILL.md' \
   'packages/skills/metabot-team/SKILL.md' \
   'packages/skills/metabot-todos/SKILL.md' \

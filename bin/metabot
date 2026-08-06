@@ -213,9 +213,12 @@ cmd_update() {
   info "Installing dependencies..."
   npm install --production=false
 
-  info "Building bridge and metabot CLI..."
+  info "Building bridge, metabot CLI, and execution daemons..."
   npm run build:bridge
   npm run build -w @xvirobotics/cli
+  npm run build -w @xvirobotics/worker-runner-mcp
+  npm run build -w @xvirobotics/arc-mcp
+  npm run build -w @xvirobotics/arc-worker-runner-adapter
 
   # A personal-edition git checkout owns a local Core/Web UI when that PM2
   # process was created by install.sh. Keep it on the same exact checkout;
@@ -455,12 +458,22 @@ cmd_update() {
     fi
   fi
 
-  info "Restarting MetaBot..."
-  _write_restart_breadcrumb
-  pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
-  pm2 save --force 2>/dev/null || true
+  info "Checking execution daemons before update restart..."
+  _prepare_execution_daemons
+  _restart_execution_daemons_for_update
 
-  success "MetaBot updated and restarted!"
+  info "Restarting MetaBot bridge..."
+  _write_restart_breadcrumb
+  pm2 restart metabot --update-env 2>/dev/null \
+    || pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only metabot --update-env
+  if _wait_all_runtime_health 60; then
+    pm2 save --force
+  else
+    error "Updated runtime did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+
+  success "MetaBot bridge and execution daemons updated and restarted!"
 
   _update_core_workspace || true
 }
@@ -506,9 +519,270 @@ _write_restart_breadcrumb() {
   printf '{"restartedAt": %s}\n' "$(date +%s)" > "$dir/last-restart.json" 2>/dev/null || true
 }
 
-cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
-cmd_stop()    { pm2 stop metabot; }
-cmd_restart() { _write_restart_breadcrumb; pm2 restart metabot; }
+_execution_health_script() {
+  printf '%s\n' "$METABOT_HOME/src/services/local-daemon-health.ts"
+}
+
+_ensure_runtime_artifacts() {
+  local missing=false
+  if ! (cd "$METABOT_HOME" && node -e "require.resolve('tsx')" >/dev/null 2>&1); then
+    error "tsx is not resolvable from $METABOT_HOME; refusing to change PM2 state."
+    missing=true
+  fi
+  for artifact in \
+    packages/worker-runner-mcp/dist/daemon-cli.js \
+    packages/arc-mcp/dist/daemon-cli.js \
+    packages/arc-worker-runner-adapter/dist/factory.js; do
+    if [[ ! -f "$METABOT_HOME/$artifact" ]]; then
+      error "Missing built runtime artifact: $METABOT_HOME/$artifact"
+      missing=true
+    fi
+  done
+  [[ "$missing" == false ]]
+}
+
+_prepare_execution_daemons() {
+  _ensure_runtime_artifacts || return 1
+  METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" --provision-arc-service >/dev/null
+}
+
+_wait_bridge_health() {
+  local timeout="${1:-60}"
+  _load_bridge_api_config
+  local i
+  for ((i=0; i<timeout; i++)); do
+    if curl -fsS --connect-timeout 1 --max-time 2 -H "$METABOT_AUTH" "${METABOT_URL%/}/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+_wait_daemon_health() {
+  local daemon="$1"
+  local timeout="${2:-60}"
+  local i
+  for ((i=0; i<timeout; i++)); do
+    if METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" "$daemon" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+_wait_all_runtime_health() {
+  local timeout="${1:-60}"
+  _wait_daemon_health worker "$timeout" \
+    && _wait_daemon_health arc "$timeout" \
+    && _wait_bridge_health "$timeout"
+}
+
+_pm2_app_exists() {
+  pm2 describe "$1" >/dev/null 2>&1
+}
+
+_daemon_app_name() {
+  case "$1" in
+    worker|worker-runner|worker-runnerd|metabot-worker-runnerd) printf '%s\n' 'metabot-worker-runnerd' ;;
+    arc|arcd|metabot-arcd) printf '%s\n' 'metabot-arcd' ;;
+    *) return 1 ;;
+  esac
+}
+
+_daemon_kind() {
+  [[ "$1" == "metabot-worker-runnerd" ]] && printf '%s\n' worker || printf '%s\n' arc
+}
+
+_daemon_busy() {
+  local daemon="$1"
+  set +e
+  METABOT_HOME="$METABOT_HOME" node --import tsx "$(_execution_health_script)" --busy "$daemon" >/dev/null
+  local status=$?
+  set -e
+  [[ "$status" -eq 10 ]] && return 0
+  [[ "$status" -eq 0 ]] && return 1
+  error "Could not verify whether the $daemon daemon is idle; refusing lifecycle change."
+  return 2
+}
+
+_restart_execution_daemons_for_update() {
+  local app daemon busy=false
+  # Complete the wire preflight before changing either process. A failed ARC
+  # probe must not leave Worker Runner already replaced by the new checkout.
+  for app in metabot-worker-runnerd metabot-arcd; do
+    _pm2_app_exists "$app" || continue
+    daemon="$(_daemon_kind "$app")"
+    if _daemon_busy "$daemon"; then
+      busy=true
+      warn "$app has in-flight work. Updating it will make ambiguous work recovery_required."
+    else
+      local status=$?
+      [[ "$status" -eq 1 ]] || return "$status"
+      info "$app is idle; its MCP sessions will drain during the controlled restart."
+    fi
+  done
+
+  for app in metabot-worker-runnerd metabot-arcd; do
+    daemon="$(_daemon_kind "$app")"
+    if _pm2_app_exists "$app"; then
+      pm2 restart "$app" --update-env
+    else
+      pm2 start "$METABOT_HOME/ecosystem.config.cjs" --only "$app" --update-env
+    fi
+    _wait_daemon_health "$daemon" 60 || {
+      error "$app did not become healthy after update."
+      return 1
+    }
+  done
+  [[ "$busy" == false ]] || warn "Forced daemon update completed; inspect affected jobs for recovery_required before retrying."
+}
+
+cmd_start() {
+  _prepare_execution_daemons
+  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --update-env
+  if _wait_all_runtime_health 60; then
+    pm2 save --force
+    success "MetaBot bridge and execution daemons are healthy."
+  else
+    error "MetaBot runtime did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+}
+
+cmd_stop() {
+  local app
+  for app in metabot metabot-worker-runnerd metabot-arcd; do
+    if _pm2_app_exists "$app"; then
+      pm2 stop "$app"
+    fi
+  done
+  return 0
+}
+
+cmd_restart() {
+  if [[ "${1:-}" != "--daemon" ]]; then
+    [[ $# -eq 0 ]] || { error "Usage: metabot restart [--daemon <worker|arc> [--force]]"; return 2; }
+    _write_restart_breadcrumb
+    pm2 restart metabot
+    return
+  fi
+
+  [[ $# -ge 2 ]] || { error "--daemon requires worker or arc"; return 2; }
+  local requested="$2"
+  shift 2
+  local force=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=true; shift ;;
+      *) error "Unknown daemon restart option: $1"; return 2 ;;
+    esac
+  done
+  local app daemon
+  app="$(_daemon_app_name "$requested")" || { error "Unknown daemon: $requested"; return 2; }
+  daemon="$(_daemon_kind "$app")"
+  _pm2_app_exists "$app" || { error "$app is not registered in PM2; run 'metabot start'."; return 1; }
+
+  if _daemon_busy "$daemon"; then
+    if [[ "$force" != true ]]; then
+      error "$app has in-flight work; restart refused. Retry after it is idle or pass --force."
+      return 4
+    fi
+    warn "Forced restart: in-flight work may become recovery_required and will not be blindly relaunched."
+  else
+    local status=$?
+    [[ "$status" -eq 1 ]] || return "$status"
+  fi
+  pm2 restart "$app" --update-env
+  if _wait_daemon_health "$daemon" 60; then
+    pm2 save --force
+  else
+    error "$app did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+}
+
+_live_metabot_pid() {
+  pm2 jlist 2>/dev/null | node -e '
+let input="";process.stdin.on("data",c=>input+=c).on("end",()=>{
+  try { const app=JSON.parse(input).find(row=>row.name==="metabot"); process.stdout.write(String(app?.pid||"")); }
+  catch { process.stdout.write(""); }
+});'
+}
+
+_inside_metabot_process_tree() {
+  local live_pid pid
+  live_pid="$(_live_metabot_pid)"
+  [[ "$live_pid" =~ ^[0-9]+$ ]] || return 1
+  pid="$$"
+  while [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]]; do
+    [[ "$pid" == "$live_pid" ]] && return 0
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  done
+  return 1
+}
+
+cmd_deploy_runtime() {
+  local target="" timeout=90 force=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --runtime) [[ $# -ge 2 ]] || { error "--runtime requires a directory"; return 2; }; target="$2"; shift 2 ;;
+      --timeout) [[ $# -ge 2 ]] || { error "--timeout requires seconds"; return 2; }; timeout="$2"; shift 2 ;;
+      --force) force=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot deploy-runtime --runtime DIR [--timeout SEC] [--force]"
+        echo "Run only from SSH or another controller outside the MetaBot process tree."
+        return 0
+        ;;
+      *) error "Unknown deploy-runtime option: $1"; return 2 ;;
+    esac
+  done
+  [[ -n "$target" ]] || { error "--runtime DIR is required"; return 2; }
+  [[ "$timeout" =~ ^[0-9]+$ && "$timeout" -gt 0 ]] || { error "--timeout must be a positive integer"; return 2; }
+  target="$(readlink -f "$target")"
+  [[ -f "$target/ecosystem.config.cjs" ]] || { error "No ecosystem.config.cjs at $target"; return 2; }
+  if _inside_metabot_process_tree; then
+    error "Runtime switching is refused inside the MetaBot process tree."
+    return 3
+  fi
+
+  local app daemon
+  for app in metabot-worker-runnerd metabot-arcd; do
+    if _pm2_app_exists "$app"; then
+      daemon="$(_daemon_kind "$app")"
+      if _daemon_busy "$daemon"; then
+        if [[ "$force" != true ]]; then
+          error "$app has in-flight work; deploy-runtime refused. Retry when idle or pass --force."
+          return 4
+        fi
+        warn "Forced runtime switch: $app in-flight work may become recovery_required."
+      else
+        local status=$?
+        [[ "$status" -eq 1 ]] || return "$status"
+      fi
+    fi
+  done
+
+  METABOT_HOME="$target"
+  export METABOT_HOME
+  _prepare_execution_daemons
+  _write_restart_breadcrumb
+  for app in metabot metabot-worker-runnerd metabot-arcd; do
+    if _pm2_app_exists "$app"; then
+      pm2 delete "$app"
+    fi
+  done
+  pm2 start "$METABOT_HOME/ecosystem.config.cjs" --update-env
+  if _wait_all_runtime_health "$timeout"; then
+    pm2 save --force
+    success "MetaBot runtime switched to $METABOT_HOME"
+  else
+    error "New runtime did not become healthy; PM2 process list was not saved."
+    return 1
+  fi
+}
+
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
@@ -1826,7 +2100,9 @@ print_help() {
   echo "    metabot update --git      Git pull, rebuild, and restart"
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
-  echo "    metabot restart    Restart MetaBot"
+  echo "    metabot restart    Restart Bridge only; execution daemons survive"
+  echo "    metabot restart --daemon <worker|arc> [--force]  Guarded daemon restart"
+  echo "    metabot deploy-runtime --runtime DIR [--force]  Switch all sibling apps externally"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
@@ -1851,7 +2127,8 @@ case "${1:-}" in
   update|up)    shift; cmd_update "$@" ;;
   start)        cmd_start ;;
   stop)         cmd_stop ;;
-  restart|rs)   cmd_restart ;;
+  restart|rs)   shift; cmd_restart "$@" ;;
+  deploy-runtime) shift; cmd_deploy_runtime "$@" ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;

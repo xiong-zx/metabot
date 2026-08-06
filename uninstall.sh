@@ -80,13 +80,15 @@ fi
 step "Phase 1: Stopping MetaBot services"
 
 if command -v pm2 &>/dev/null; then
-  if pm2 describe metabot &>/dev/null 2>&1; then
-    info "Stopping MetaBot PM2 process..."
-    pm2 delete metabot 2>/dev/null || true
-    success "MetaBot PM2 process removed"
-  else
-    info "No MetaBot PM2 process found"
-  fi
+  for app in metabot metabot-worker-runnerd metabot-arcd; do
+    if pm2 describe "$app" &>/dev/null 2>&1; then
+      info "Stopping $app PM2 process..."
+      pm2 delete "$app" 2>/dev/null || true
+      success "$app PM2 process removed"
+    else
+      info "No $app PM2 process found"
+    fi
+  done
   if pm2 describe metamemory &>/dev/null 2>&1; then
     info "Stopping MetaMemory PM2 process..."
     pm2 delete metamemory 2>/dev/null || true
@@ -99,7 +101,7 @@ fi
 
 # Kill any process on MetaBot port (default 9100)
 if command -v lsof &>/dev/null; then
-  for port in 9100 8100; do
+  for port in 9100 8100 9311 9312; do
     PID=$(lsof -ti :"$port" 2>/dev/null || true)
     if [[ -n "$PID" ]]; then
       info "Killing process on port $port (PID: $PID)..."
