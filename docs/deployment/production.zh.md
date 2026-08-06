@@ -1,12 +1,14 @@
 # 生产部署
 
-个人版支持的生产部署路径是带签名校验的 GitHub Release 安装器。它会安装两个本地
-服务：
+个人版支持的生产部署路径是带签名校验的 GitHub Release 安装器。它会安装四个本地
+服务；两个执行守护进程与 Bridge 是 PM2 同级应用，不是 Bridge 子进程：
 
 | 服务 | 默认端口 | 作用 |
 |---|---:|---|
 | Core Console | `9200` | Web UI、Chat、Agents、Memory、Skills、T5T、Teams、CLI API |
 | Bridge | `9100` | IM 渠道、引擎执行、调度、语音与 peer 路由 |
+| Worker Runner | `9311` | 持久化的一次性 Codex、Claude、Kimi MCP 工作 |
+| ARC | `9312` | 通过 Worker Runner 执行的 AutoResearchClaw 生命周期 |
 
 MetaMemory 已属于 Core，不再存在 `8100` 端口的独立服务。
 
@@ -20,8 +22,9 @@ metabot doctor
 curl -fsS http://localhost:9200/health
 ```
 
-安装器会验证 `SHA256SUMS`、校验个人版 Manifest，并启动它管理的 PM2 应用。两个
-服务健康后再启用开机启动：
+安装器会验证 `SHA256SUMS`、校验个人版 Manifest，构建两个 MCP Package 和适配器，
+并且只在 Bridge 与两个守护进程的鉴权健康检查通过后保存 PM2 应用。全部服务健康后
+再启用开机启动：
 
 ```bash
 pm2 save
@@ -80,9 +83,33 @@ metabot update --package --version 1.3.0        # 已知不可变 Release
 metabot doctor
 ```
 
+`metabot start` 与 `metabot stop` 管理 Bridge 和两个执行守护进程。普通
+`metabot restart` 只重启 Bridge，因此脱离聊天会话的工作可以继续运行。守护进程
+重启必须明确指定：
+
+```bash
+metabot restart --daemon worker
+metabot restart --daemon arc
+metabot restart --daemon worker --force
+```
+
+有活跃工作时默认拒绝重启。`--force` 表示操作者接受后果：状态不明确的工作可能变为
+`recovery_required`，系统不会盲目重新执行。
+
 Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 `~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，
 应显式重装上一已知版本，不要直接修改已安装包文件。
+
+回退到尚未包含执行守护进程的版本时，还要删除已保存的 PM2 条目：
+
+```bash
+pm2 delete metabot-worker-runnerd metabot-arcd
+pm2 save
+```
+
+从源码切换运行目录时，应从 SSH 或 MetaBot 进程树之外的控制器执行
+`metabot deploy-runtime --runtime /absolute/checkout`。默认会在有活跃工作时拒绝；
+`--force` 会给出 `recovery_required` 提示。
 
 ## 源码部署
 

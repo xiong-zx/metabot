@@ -23,6 +23,21 @@
 Memory、Skills、Agents 和 T5T 都由 `METABOT_CORE_URL` 指向的 Core 提供。旧的独立
 MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
+## 执行守护进程
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `METABOT_STATE_DIR` | `~/.metabot` | 守护进程 SQLite 状态与默认 ARC 项目根目录的上级目录 |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | 运行目录之外的 Ed25519 密钥与 ARC 服务凭证目录 |
+| `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner 本机 MCP 地址 |
+| `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite 状态与独占锁 |
+| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC 本机 MCP 地址 |
+| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite 状态与独占锁 |
+| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | ARC 信任的规范项目根目录 JSON 数组 |
+| `METABOT_ARC_WORKER_ENGINE` | `codex` | ARC 适配器调用的一次性工作引擎 |
+
+健康检查通过短期签名凭证执行只读 MCP 调用；守护进程不提供未鉴权健康接口。
+
 ## 工作区与引擎
 
 | 变量 | 默认值 | 作用 |
@@ -86,7 +101,9 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
 ## 代理
 
-支持标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`。应在 `NO_PROXY` 中包含
+生产守护进程支持 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy`、
+`NO_PROXY` 和 `no_proxy`。这些普通代理变量可以进入 Worker Runner 的安全白名单；
+看起来像密码、Token 或 API 凭证的代理变量即使写入白名单也会被拒绝。应在 `NO_PROXY` 中包含
 `localhost` 和 `127.0.0.1`，保证 Core、Bridge 与本地 Kimi Server 流量不经过代理。
 
 不要提交已填写的 `.env` 或 `bots.json`。

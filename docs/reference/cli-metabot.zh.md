@@ -21,9 +21,12 @@ metabot update                                  # Package 安装：最新 GitHub
 metabot update --package                        # 强制使用最新 GitHub Release 包
 metabot update --package --version 1.3.0        # 固定不可变 Release v1.3.0
 metabot update --git                            # 强制 git pull + 构建 + 重启
-metabot start                       # 启动（PM2）
-metabot stop                        # 停止
-metabot restart                     # 重启
+metabot start                       # 启动 Bridge、Worker Runner 与 ARC
+metabot stop                        # 停止整套三个 PM2 应用
+metabot restart                     # 只重启 Bridge
+metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
+metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
+metabot deploy-runtime --runtime /absolute/checkout  # 从外部切换整套运行目录
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态
 ```
@@ -42,7 +45,10 @@ Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--
 5. 保留 `~/.metabot/` 和 `~/.metabot-core/` 下的用户/Core 状态；只有 Package 管理的 `~/.metabot/default.env` 可能刷新。
 6. 安装依赖并构建 Bridge、Core、Web UI 和委托 CLI。
 7. 刷新内置/工作区 Skills，以及已有的 Lark CLI Skills。
-8. 重启受管理的 PM2 服务。
+8. 重启 Bridge 与两个执行守护进程，健康检查通过后再保存 PM2 状态。
+
+守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
+`recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
 
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。

@@ -298,6 +298,12 @@ stable event ID.
 proxy diagnostics go to stderr; stdout is reserved exclusively for stdio MCP
 JSON-RPC framing.
 
+The MetaBot production ecosystem registers `metabot-worker-runnerd` as a PM2
+sibling, points it at the out-of-runtime Ed25519 keys, and enables only the six
+ordinary proxy variable names by default. `metabot restart` remains
+Bridge-only; `metabot restart --daemon worker` performs an authenticated busy
+check and requires `--force` before interrupting active work.
+
 ## Build and test
 
 From the repository root:

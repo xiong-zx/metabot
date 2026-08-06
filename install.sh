@@ -1576,9 +1576,9 @@ else
   exit 1
 fi
 
-# ARC MCP is shipped as an independent stdio binary. Installation only builds
-# it; a trusted runtime must explicitly configure its project scope and runner
-# adapter before starting it.
+# ARC ships both an independent stdio binary and the authenticated daemon used
+# by the PM2 lifecycle below. The daemon receives its scope and runner adapter
+# only through trusted process configuration.
 info "Building independent ARC MCP..."
 if npm run build -w @xvirobotics/arc-mcp; then
   success "ARC MCP build complete"
@@ -1587,9 +1587,9 @@ else
   exit 1
 fi
 
-# Worker Runner is shipped as an independent stdio binary. Installation only
-# builds it; a trusted runtime must pin its principal, state directory, and
-# completion callback before starting it.
+# Worker Runner ships both an independent stdio binary and the authenticated
+# PM2 daemon. The daemon receives principal scope per signed MCP connection;
+# its state directory and completion callback remain trusted process config.
 info "Building independent Worker Runner MCP..."
 if npm run build -w @xvirobotics/worker-runner-mcp; then
   success "Worker Runner MCP build complete"
@@ -1599,8 +1599,8 @@ else
 fi
 
 # This adapter connects the two independent services over the Worker Runner
-# MCP wire. Bridge capability issuance, callback receiving, daemon supervision,
-# and engine MCP materialization are a separate integration phase.
+# MCP wire. This phase supervises the daemons; per-engine MCP materialization
+# remains a separate, opt-in integration.
 info "Building independent ARC Worker Runner adapter..."
 if npm run build -w @xvirobotics/arc-worker-runner-adapter; then
   success "ARC Worker Runner adapter build complete"
@@ -1609,16 +1609,37 @@ else
   exit 1
 fi
 
-# Always delete + start fresh to avoid stale/stopped process issues
-if pm2 describe metabot &>/dev/null 2>&1; then
-  info "Removing old MetaBot PM2 process..."
-  pm2 delete metabot 2>/dev/null || true
-fi
-info "Starting MetaBot with PM2..."
-pm2 start ecosystem.config.cjs
-
-pm2 save --force 2>/dev/null || true
-success "MetaBot is running!"
+# Always delete + start the three sibling apps from this runtime. Daemons are
+# never Bridge children, so a later ordinary `metabot restart` remains
+# Bridge-only. The lifecycle command saves PM2 state only after all three
+# authenticated health probes pass.
+for daemon in worker arc; do
+  app="metabot-${daemon}"
+  [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
+  [[ "$daemon" == "arc" ]] && app="metabot-arcd"
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    set +e
+    METABOT_HOME="$METABOT_HOME" node --import tsx \
+      "$METABOT_HOME/src/services/local-daemon-health.ts" --busy "$daemon" >/dev/null
+    DAEMON_BUSY_STATUS=$?
+    set -e
+    if [[ "$DAEMON_BUSY_STATUS" -eq 10 ]]; then
+      warn "$app has in-flight work; package replacement may leave it recovery_required."
+    elif [[ "$DAEMON_BUSY_STATUS" -ne 0 ]]; then
+      error "Could not verify whether $app is idle. Refusing package replacement."
+      exit 1
+    fi
+  fi
+done
+for app in metabot metabot-worker-runnerd metabot-arcd; do
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    info "Removing old $app PM2 process..."
+    pm2 delete "$app" 2>/dev/null || true
+  fi
+done
+info "Starting MetaBot Bridge and execution daemons with PM2..."
+METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+success "MetaBot Bridge and execution daemons are running!"
 
 # --- WeChat QR login: wait for URL and display it ---
 HAS_WECHAT_BOT=false
@@ -1659,6 +1680,8 @@ if [[ "$HAS_WECHAT_BOT" == "true" ]]; then
   else
     warn "QR URL not yet available. Check logs to get it:"
     echo "    pm2 logs metabot --lines 30"
+    echo "    pm2 logs metabot-worker-runnerd --lines 30"
+    echo "    pm2 logs metabot-arcd --lines 30"
   fi
 fi
 
@@ -1688,12 +1711,15 @@ echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
+echo "    pm2 logs metabot-worker-runnerd  # View Worker Runner daemon logs"
+echo "    pm2 logs metabot-arcd      # View ARC daemon logs"
 if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
   echo "    pm2 logs metabot-core     # View local Core logs"
   echo "    open http://localhost:9200 # Personal Web UI (or use your browser)"
 fi
-echo "    pm2 restart metabot       # Restart MetaBot"
-echo "    pm2 stop metabot          # Stop MetaBot"
+echo "    metabot restart           # Restart Bridge only"
+echo "    metabot restart --daemon worker  # Guarded Worker Runner restart"
+echo "    metabot stop              # Stop the whole MetaBot runtime"
 echo "    metabot memory list       # Browse central memory (delegated to metabot-core)"
 echo "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 echo "    metabot skills list       # List shared skills"
