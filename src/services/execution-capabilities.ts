@@ -24,6 +24,8 @@ export type ExecutionCapabilityRole = 'pm' | 'user';
 
 export const EXECUTION_CAPABILITY_TTL_MS = 60 * 60 * 1000;
 export const TERMINAL_CALLBACK_MAX_SKEW_MS = 5 * 60 * 1000;
+export const EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH = 200;
+export const EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH = 500;
 
 const KEY_PREFIXES = [
   'worker-capability',
@@ -208,8 +210,8 @@ export class ExecutionCapabilityService {
       v: 1,
       purpose: input.purpose,
       role: input.role,
-      botName: requireClaim(input.botName, 'botName'),
-      chatId: requireClaim(input.chatId, 'chatId'),
+      botName: requireClaim(input.botName, 'botName', EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH),
+      chatId: requireClaim(input.chatId, 'chatId', EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH),
       exp: now + ttlMs,
     };
     const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
@@ -228,6 +230,16 @@ export class ExecutionCapabilityService {
       now?: number;
     },
   ): ExecutionCapabilityClaims {
+    const expectedBotName = requireCanonicalClaim(
+      expected.botName,
+      'expected botName',
+      EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+    );
+    const expectedChatId = requireCanonicalClaim(
+      expected.chatId,
+      'expected chatId',
+      EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+    );
     const [payload, signature, extra] = token.split('.');
     if (!payload || !signature || extra || !isBase64Url(payload) || !isBase64Url(signature)) {
       throw new ExecutionCapabilityError('Invalid execution capability', 'INVALID_CAPABILITY');
@@ -245,11 +257,17 @@ export class ExecutionCapabilityService {
       throw new ExecutionCapabilityError('Invalid execution capability claims', 'INVALID_CLAIMS');
     }
     if (
+      !isCanonicalBoundedClaim(claims.botName, EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH)
+      || !isCanonicalBoundedClaim(claims.chatId, EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH)
+    ) {
+      throw new ExecutionCapabilityError('Invalid execution capability claims', 'INVALID_CLAIMS');
+    }
+    if (
       claims.v !== 1
       || claims.purpose !== expected.purpose
       || (claims.role !== 'pm' && claims.role !== 'user')
-      || claims.botName !== expected.botName
-      || claims.chatId !== expected.chatId
+      || claims.botName !== expectedBotName
+      || claims.chatId !== expectedChatId
     ) {
       throw new ExecutionCapabilityError('Execution capability scope mismatch', 'CAPABILITY_SCOPE_MISMATCH');
     }
@@ -314,10 +332,31 @@ function callbackPrefix(purpose: TerminalCallbackPurpose): KeyPrefix {
   return purpose === 'worker.terminal' ? 'worker-callback' : 'arc-callback';
 }
 
-function requireClaim(value: string, name: string): string {
+function requireClaim(value: string, name: string, maxLength: number): string {
   const normalized = value?.trim();
   if (!normalized) throw new ExecutionCapabilityError(`Missing ${name}`, 'INVALID_CLAIMS');
+  if (normalized.length > maxLength) {
+    throw new ExecutionCapabilityError(
+      `${name} exceeds ${maxLength} characters`,
+      'INVALID_CLAIMS',
+    );
+  }
   return normalized;
+}
+
+function requireCanonicalClaim(value: string, name: string, maxLength: number): string {
+  const normalized = requireClaim(value, name, maxLength);
+  if (normalized !== value) {
+    throw new ExecutionCapabilityError(`${name} is not canonical`, 'INVALID_CLAIMS');
+  }
+  return value;
+}
+
+function isCanonicalBoundedClaim(value: unknown, maxLength: number): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= maxLength
+    && value === value.trim();
 }
 
 function isBase64Url(value: string): boolean {

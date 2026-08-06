@@ -2,9 +2,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { WorkerService } from '../src/service.js';
+import { normalizeTrustedPrincipal, WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
-import type { DispatchWorkerInput, ScopedDispatchWorkerInput, TrustedPrincipal } from '../src/types.js';
+import {
+  TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+  type DispatchWorkerInput,
+  type ScopedDispatchWorkerInput,
+  type TrustedPrincipal,
+} from '../src/types.js';
 import { FakeProcessRunner, PM_PRINCIPAL, RecordingNotifier, SUCCESS_RESULT } from './helpers.js';
 
 const dirs: string[] = [];
@@ -43,6 +49,18 @@ describe('WorkerService pinned authority and lifecycle', () => {
           chatId: 'chat-a',
         } as unknown as TrustedPrincipal),
     ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+  });
+
+  it('accepts 200/500 trusted principals and rejects 201/501', () => {
+    const botName = 'b'.repeat(TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH);
+    const chatId = 'c'.repeat(TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH);
+    expect(normalizeTrustedPrincipal({ role: 'pm', botName, chatId })).toEqual({
+      role: 'pm', botName, chatId,
+    });
+    expect(() => normalizeTrustedPrincipal({ role: 'pm', botName: `${botName}x`, chatId }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }));
+    expect(() => normalizeTrustedPrincipal({ role: 'pm', botName, chatId: `${chatId}x` }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }));
   });
 
   it('persists queued before spawn and transitions to running only with a launch identity', async () => {

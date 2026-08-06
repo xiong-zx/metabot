@@ -23,6 +23,8 @@ import {
 } from '../src/api/routes/worker-events-routes.js';
 import {
   ExecutionCapabilityService,
+  EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   provisionExecutionKeyPairs,
   type TerminalCallbackPurpose,
 } from '../src/services/execution-capabilities.js';
@@ -159,6 +161,22 @@ describe('signed terminal callback route', () => {
       },
       sender: {},
     } as any);
+    const maxBotName = 'b'.repeat(EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH);
+    const maxChatId = 'c'.repeat(EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH);
+    registry.register({
+      name: maxBotName,
+      platform: 'web',
+      config: {
+        claude: { defaultWorkingDirectory: dir },
+      },
+      bridge: {
+        setAgentTeamStore: vi.fn(),
+        setExecutionEnvProvider: vi.fn(),
+        releaseChatExecutorIfIdle: vi.fn(async () => true),
+        executeApiTask,
+      },
+      sender: {},
+    } as any);
     const server = startApiServer({
       port: 0,
       secret: 'bridge-admin-secret',
@@ -262,6 +280,30 @@ describe('signed terminal callback route', () => {
         expect.objectContaining({ purpose: 'worker.terminal', botName: 'pm-codex' }),
         'Terminal callback acceptance rate limit exceeded',
       );
+
+      const metadataId = 'i'.repeat(200);
+      const maxEnvelope = makeEnvelope(capabilities, {
+        event_id: 'max-principal-boundary',
+        bot_name: maxBotName,
+        chat_id: maxChatId,
+        payload: { worker: { id: metadataId, status: 'completed' } },
+      });
+      const maxResponse = await postEnvelope(baseUrl, keysDir, maxEnvelope);
+      expect(maxResponse.status).toBe(200);
+      await waitFor(() => terminalStore.get(maxEnvelope.event_id)?.state === 'woken');
+      expect(executeApiTask.mock.calls.at(-1)?.[0].prompt).toContain(metadataId);
+
+      const countBeforeInvalidBounds = terminalStore.count();
+      for (const envelope of [
+        { ...maxEnvelope, event_id: 'overlong-bot-name', bot_name: `${maxBotName}x` },
+        { ...maxEnvelope, event_id: 'overlong-chat-id', chat_id: `${maxChatId}x` },
+      ]) {
+        const response = await postEnvelope(baseUrl, keysDir, envelope);
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({ code: 'INVALID_CALLBACK_ENVELOPE' });
+        expect(terminalStore.has(envelope.event_id)).toBe(false);
+      }
+      expect(terminalStore.count()).toBe(countBeforeInvalidBounds);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       governance.close();

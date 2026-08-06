@@ -1,6 +1,8 @@
 import type * as http from 'node:http';
 import {
   ExecutionCapabilityError,
+  EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   TERMINAL_CALLBACK_MAX_SKEW_MS,
   type TerminalCallbackPurpose,
 } from '../../services/execution-capabilities.js';
@@ -148,7 +150,7 @@ export function buildTerminalWakePrompt(envelope: TerminalCallbackEnvelope): str
   const metadata = {
     eventId: envelope.event_id,
     purpose: envelope.purpose,
-    id: safeString(field(source, 'id', 'worker_id', 'run_id'), 160),
+    id: safeString(field(source, 'id', 'worker_id', 'run_id'), 200),
     label: safeString(field(source, 'label'), 200),
     engine: safeString(field(source, 'engine'), 80),
     status: safeString(envelope.status, 80),
@@ -209,8 +211,8 @@ function parseEnvelope(rawBody: Buffer): TerminalCallbackEnvelope {
     body.contract_version !== CALLBACK_CONTRACT
     || (purpose !== 'worker.terminal' && purpose !== 'arc.terminal')
     || !boundedString(body.event_id, 256)
-    || !boundedString(body.bot_name, 160)
-    || !boundedString(body.chat_id, 512)
+    || !boundedString(body.bot_name, EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH)
+    || !boundedString(body.chat_id, EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH)
     || !boundedString(body.status, 80)
     || typeof body.finished_at !== 'number'
     || !Number.isFinite(body.finished_at)

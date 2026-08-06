@@ -17,8 +17,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   ExecutionCapabilityError,
   ExecutionCapabilityService,
+  EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   inspectExecutionKeyDirectory,
   provisionExecutionKeyPairs,
+  type ExecutionCapabilityClaims,
 } from '../src/services/execution-capabilities.js';
 
 const dirs: string[] = [];
@@ -33,6 +36,16 @@ function keyDir(): string {
   chmodSync(dir, 0o700);
   provisionExecutionKeyPairs(dir);
   return dir;
+}
+
+function signCapabilityClaims(dir: string, claims: ExecutionCapabilityClaims): string {
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  const signature = cryptoSign(
+    null,
+    Buffer.from(payload),
+    readFileSync(join(dir, `${claims.purpose}-capability.key`), 'utf8'),
+  ).toString('base64url');
+  return `${payload}.${signature}`;
 }
 
 describe('execution capability Ed25519 keys', () => {
@@ -189,6 +202,46 @@ describe('execution capability Ed25519 keys', () => {
     ).toString('base64')}`;
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'worker.terminal')).not.toThrow();
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'arc.terminal')).toThrow();
+  });
+
+  it('enforces the 200/500 execution-principal wire limits before mint and during verification', () => {
+    const dir = keyDir();
+    const service = new ExecutionCapabilityService(dir);
+    const botName = 'b'.repeat(EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH);
+    const chatId = 'c'.repeat(EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH);
+    const token = service.issue({
+      purpose: 'worker', role: 'pm', botName, chatId, ttlMs: 60_000,
+    }, 10_000);
+
+    expect(service.verify(token, {
+      purpose: 'worker', botName, chatId, now: 10_001,
+    })).toMatchObject({ botName, chatId });
+
+    const unavailableKeys = new ExecutionCapabilityService(join(dir, 'not-provisioned'));
+    for (const input of [
+      { botName: `${botName}x`, chatId },
+      { botName, chatId: `${chatId}x` },
+    ]) {
+      expect(() => unavailableKeys.issue({
+        purpose: 'worker', role: 'pm', ...input,
+      })).toThrowError(expect.objectContaining({ code: 'INVALID_CLAIMS' }));
+    }
+
+    for (const claims of [
+      { botName: `${botName}x`, chatId: 'chat-ok' },
+      { botName: 'bot-ok', chatId: `${chatId}x` },
+    ]) {
+      const forged = signCapabilityClaims(dir, {
+        v: 1,
+        purpose: 'worker',
+        role: 'pm',
+        ...claims,
+        exp: 20_000,
+      });
+      expect(() => service.verify(forged, {
+        purpose: 'worker', botName: 'bot-ok', chatId: 'chat-ok', now: 10_001,
+      })).toThrowError(expect.objectContaining({ code: 'INVALID_CLAIMS' }));
+    }
   });
 
   it('accepts the previous public key during rotation and rejects it after retirement', () => {
