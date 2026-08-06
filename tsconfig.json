@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./tsconfig.bridge.json" },
+    { "path": "./packages/arc-mcp" },
     { "path": "./packages/cli-core" },
     { "path": "./packages/metamemory" },
     { "path": "./packages/skill-hub" },
