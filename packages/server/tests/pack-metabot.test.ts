@@ -79,11 +79,12 @@ describe('pack-metabot.sh', () => {
     expect(codeOnly).not.toContain('--keep-newer-files');
   });
 
-  it('packaged install builds the bridge runtime, delegated CLI, and independent ARC MCP', () => {
+  it('packaged install builds the bridge runtime, delegated CLI, and independent MCP packages', () => {
     const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(installSh).not.toContain('npm run build --workspaces');
   });
 
@@ -99,6 +100,7 @@ describe('pack-metabot.sh', () => {
       'packages/metamemory',
       'packages/skill-hub',
       'packages/arc-mcp',
+      'packages/worker-runner-mcp',
     ]);
 
     const tsconfigJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} tsconfig.json`, { encoding: 'utf-8' });
@@ -132,8 +134,8 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?bin\/metabot\b/);
   });
 
-  it('tarball includes the five bot-host workspaces', () => {
-    for (const ws of ['cli', 'cli-core', 'metamemory', 'skill-hub', 'arc-mcp']) {
+  it('tarball includes the six bot-host workspaces', () => {
+    for (const ws of ['cli', 'cli-core', 'metamemory', 'skill-hub', 'arc-mcp', 'worker-runner-mcp']) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);
     }
   });

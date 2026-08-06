@@ -26,14 +26,15 @@ jobs:
         run: |
           npx tsc --noEmit
           npm run typecheck -w @xvirobotics/arc-mcp
+          npm run typecheck -w @xvirobotics/worker-runner-mcp
 
       # Workspace test suites (packages/cli, metamemory, skill-hub) import the
       # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
       # exports -> dist/). `tsc --noEmit` above does not emit, so build them
-      # before running tests or the imports fail to resolve. Build ARC here too
-      # so the independently shipped stdio binary is covered in the check job.
+      # before running tests or the imports fail to resolve. Build both MCP
+      # packages here too so their independently shipped binaries are covered.
       - name: Build workspace libraries
-        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub -w @xvirobotics/arc-mcp
+        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub -w @xvirobotics/arc-mcp -w @xvirobotics/worker-runner-mcp
 
       - name: Run tests
         run: npm test
