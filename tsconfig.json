@@ -5,6 +5,7 @@
     { "path": "./packages/cli-core" },
     { "path": "./packages/metamemory" },
     { "path": "./packages/skill-hub" },
+    { "path": "./packages/worker-runner-mcp" },
     { "path": "./packages/cli" },
     { "path": "./packages/server" }
   ]
