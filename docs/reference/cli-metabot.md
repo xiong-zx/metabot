@@ -82,6 +82,25 @@ metabot peers                       # list peers and status
 
 `metabot teams` talks to the local bridge `/api/agent-teams/*` API. It is the coordination surface for MetaBot Agent Teams: agents, mailbox messages, shared tasks, and background runs.
 
+Governed Teams add separate versioned resources without changing legacy or
+`bots.json` Teams:
+
+```bash
+metabot teams templates list
+metabot teams templates publish implementation --body '{"agents":[{"name":"coder","engine":"codex"}]}'
+metabot teams rules publish implementation-policy --scope team-template --rules '[{"text":"Keep changes focused."}]'
+metabot teams instances resolve implementation --scope project --scope-key project-a --pm-bot metabot
+metabot teams instances stop atg_0123456789abcdef
+metabot teams audit --instance atg_0123456789abcdef
+```
+
+Chat scope is the default. Global scope requires the explicit `--global`
+option. Engine sessions automatically forward a short-lived bridge-issued
+credential and do not inherit the bridge administrator secret. Persistent
+executor retirement begins before that credential expires, waits for an active
+turn to finish, and provides a fresh credential on the next turn. Callers
+cannot gain authority with body or CLI role fields.
+
 ```bash
 metabot teams list
 metabot teams create <team> [--description <text>]

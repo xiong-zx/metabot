@@ -162,6 +162,7 @@ export interface AgentTeamGovernanceAuditEvent {
  * Team, Agent, Task, Message, and Run execution state.
  */
 export interface AgentTeamGovernanceHost {
+  listTeams(): Array<{ name: string; status: 'active' | 'stopped' }>;
   getTeam(name: string): { name: string; status: 'active' | 'stopped' } | undefined;
   createTeam(
     name: string,
@@ -172,6 +173,7 @@ export interface AgentTeamGovernanceHost {
       status?: 'active' | 'stopped';
     },
   ): { name: string; status: 'active' | 'stopped' };
+  setTeamStatus(name: string, status: 'active' | 'stopped'): { name: string; status: 'active' | 'stopped' } | undefined;
   deleteTeam(name: string): boolean;
   listAgents(teamName: string): TeamAgent[];
   getAgent(teamName: string, name: string): TeamAgent | undefined;
@@ -187,6 +189,7 @@ export interface AgentTeamGovernanceHost {
     },
   ): TeamAgent;
   setAgentStatus(teamName: string, name: string, status: AgentStatus): TeamAgent | undefined;
+  deleteAgent(teamName: string, name: string): boolean;
   upsertTask(teamName: string, input: GovernanceTemplateTask): TeamTask;
   listTasks(teamName: string): TeamTask[];
   listRuns(teamName: string): TeamRun[];
@@ -229,6 +232,13 @@ export interface GovernedRulesContext {
     scope: GovernanceRuleScope;
     ruleCount: number;
   }>;
+}
+
+export interface GovernanceReconciliationReport {
+  recreatedTeams: string[];
+  reactivatedTeams: string[];
+  stoppedTeams: string[];
+  stoppedOrphans: string[];
 }
 
 export class AgentTeamGovernanceError extends Error {
@@ -406,6 +416,17 @@ export class AgentTeamGovernanceExtension {
     return row ? this.rowToRuleSet(row) : undefined;
   }
 
+  listRuleSets(name?: string): GovernanceRuleSetVersion[] {
+    const rows = name
+      ? (this.db
+          .prepare('SELECT * FROM agent_team_governance_rule_sets WHERE name = ? ORDER BY version DESC')
+          .all(name) as any[])
+      : (this.db
+          .prepare('SELECT * FROM agent_team_governance_rule_sets ORDER BY name ASC, version DESC')
+          .all() as any[]);
+    return rows.map((row) => this.rowToRuleSet(row));
+  }
+
   resolveInstance(input: ResolveGovernedTeamInstanceInput): GovernedTeamInstance | undefined {
     const scopeType = input.scopeType ?? 'chat';
     if (scopeType === 'global' && input.allowGlobal !== true) {
@@ -423,8 +444,20 @@ export class AgentTeamGovernanceExtension {
       );
     }
     const scopeKey = resolveScopeKey(scopeType, input);
-    const existing = this.findInstance(input.templateName, scopeType, scopeKey);
-    if (existing || input.createIfMissing === false) return existing;
+    const existing = this.findInstanceRecord(input.templateName, scopeType, scopeKey);
+    if (existing?.status === 'active' || input.createIfMissing === false) {
+      return existing?.status === 'active' ? existing : undefined;
+    }
+    if (existing) {
+      if (input.templateVersion != null && input.templateVersion !== existing.templateVersion) {
+        throw new AgentTeamGovernanceError(
+          `Stopped instance is pinned to ${existing.templateName}@v${existing.templateVersion}`,
+          409,
+          'PINNED_TEMPLATE_VERSION_CONFLICT',
+        );
+      }
+      return this.reactivateInstance(input.actor, existing.id);
+    }
 
     this.requireAuthority(input.actor, 'create_team', {
       subject: input.templateName,
@@ -455,13 +488,20 @@ export class AgentTeamGovernanceExtension {
     }
 
     const instanceId = `atg_${hashText(`${template.name}:${scopeType}:${scopeKey}`).slice(0, 20)}`;
-    const teamName = `${safeName(template.name)}@${scopeType}:${safeScopeKey(scopeKey)}`;
+    const teamName = `atg-${safeName(template.name)}-${scopeType}-${safeScopeKey(scopeKey)}`;
     if (this.host.getTeam(teamName)) {
-      throw new AgentTeamGovernanceError(
-        `Upstream Agent Team name is already in use: ${teamName}`,
-        409,
-        'TEAM_NAME_COLLISION',
-      );
+      // `atg-` is reserved for this extension. A matching upstream row with no
+      // governance record is the recoverable half of a previous two-database
+      // crash; remove it before the deterministic clean recreate.
+      if (teamName.startsWith('atg-') && !this.findAnyInstanceByTeamName(teamName)) {
+        this.host.deleteTeam(teamName);
+      } else {
+        throw new AgentTeamGovernanceError(
+          `Upstream Agent Team name is already in use: ${teamName}`,
+          409,
+          'TEAM_NAME_COLLISION',
+        );
+      }
     }
 
     const displayChatIds = scopeType === 'chat' ? [scopeKey] : [];
@@ -556,6 +596,15 @@ export class AgentTeamGovernanceExtension {
     return row ? this.rowToInstance(row) : undefined;
   }
 
+  listInstances(includeStopped = true): GovernedTeamInstance[] {
+    const rows = includeStopped
+      ? (this.db.prepare('SELECT * FROM agent_team_governance_instances ORDER BY created_at ASC').all() as any[])
+      : (this.db
+          .prepare("SELECT * FROM agent_team_governance_instances WHERE status = 'active' ORDER BY created_at ASC")
+          .all() as any[]);
+    return rows.map((row) => this.rowToInstance(row));
+  }
+
   findInstance(
     templateName: string,
     scopeType: TeamGovernanceScope,
@@ -573,6 +622,20 @@ export class AgentTeamGovernanceExtension {
     return row ? this.rowToInstance(row) : undefined;
   }
 
+  private findInstanceRecord(
+    templateName: string,
+    scopeType: TeamGovernanceScope,
+    scopeKey: string,
+  ): GovernedTeamInstance | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM agent_team_governance_instances
+         WHERE template_name = ? AND scope_type = ? AND scope_key = ? LIMIT 1`,
+      )
+      .get(templateName, scopeType, scopeKey) as any;
+    return row ? this.rowToInstance(row) : undefined;
+  }
+
   findInstanceByTeamName(teamName: string): GovernedTeamInstance | undefined {
     const row = this.db
       .prepare(
@@ -584,6 +647,143 @@ export class AgentTeamGovernanceExtension {
       )
       .get(teamName) as any;
     return row ? this.rowToInstance(row) : undefined;
+  }
+
+  findAnyInstanceByTeamName(teamName: string): GovernedTeamInstance | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM agent_team_governance_instances WHERE team_name = ? LIMIT 1')
+      .get(teamName) as any;
+    return row ? this.rowToInstance(row) : undefined;
+  }
+
+  stopInstance(actor: TeamGovernanceActor, instanceId: string): GovernedTeamInstance {
+    const instance = this.requireAnyInstance(instanceId);
+    this.requireAuthority(actor, 'stop_team', { instanceId, teamName: instance.teamName });
+    this.host.setTeamStatus(instance.teamName, 'stopped');
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE agent_team_governance_instances SET status = 'stopped', updated_at = ? WHERE id = ?")
+        .run(now, instanceId);
+      this.insertAudit({
+        eventType: 'instance.stopped',
+        actor,
+        instanceId,
+        teamName: instance.teamName,
+        createdAt: now,
+      });
+    })();
+    return this.getInstance(instanceId)!;
+  }
+
+  reactivateInstance(actor: TeamGovernanceActor, instanceId: string): GovernedTeamInstance {
+    const instance = this.requireAnyInstance(instanceId);
+    this.requireAuthority(actor, 'start_team', { instanceId, teamName: instance.teamName });
+    const template = this.requirePinnedTemplate(instance);
+    const upstream = this.host.getTeam(instance.teamName);
+    if (!upstream) this.createUpstreamFromTemplate(instance, template);
+    else {
+      this.host.setTeamStatus(instance.teamName, 'active');
+      this.repairTemplateMembers(instance, template);
+    }
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE agent_team_governance_instances SET status = 'active', updated_at = ? WHERE id = ?")
+        .run(now, instanceId);
+      this.insertAudit({
+        eventType: upstream ? 'instance.reactivated' : 'instance.recreated',
+        actor,
+        instanceId,
+        teamName: instance.teamName,
+        details: { reason: upstream ? 'explicit_reactivation' : 'missing_upstream_team' },
+        createdAt: now,
+      });
+    })();
+    return this.getInstance(instanceId)!;
+  }
+
+  deleteInstance(actor: TeamGovernanceActor, instanceId: string): boolean {
+    const instance = this.requireAnyInstance(instanceId);
+    this.requireAuthority(actor, 'delete_team', { instanceId, teamName: instance.teamName });
+    const now = Date.now();
+    this.db.transaction(() => {
+      this.insertAudit({
+        eventType: 'instance.deleted',
+        actor,
+        instanceId,
+        teamName: instance.teamName,
+        createdAt: now,
+      });
+      this.db.prepare('DELETE FROM agent_team_governance_instances WHERE id = ?').run(instanceId);
+    })();
+    // Delete the governance row first. If the process dies before the upstream
+    // delete, startup reconciliation sees a reserved-prefix orphan and stops
+    // it. The opposite order could recreate a Team whose deletion had already
+    // been requested.
+    this.host.deleteTeam(instance.teamName);
+    return true;
+  }
+
+  reconcile(): GovernanceReconciliationReport {
+    const report: GovernanceReconciliationReport = {
+      recreatedTeams: [],
+      reactivatedTeams: [],
+      stoppedTeams: [],
+      stoppedOrphans: [],
+    };
+    const knownTeams = new Set<string>();
+    for (const instance of this.listInstances(true)) {
+      knownTeams.add(instance.teamName);
+      const template = this.requirePinnedTemplate(instance);
+      const upstream = this.host.getTeam(instance.teamName);
+      if (instance.status === 'active') {
+        if (!upstream) {
+          this.createUpstreamFromTemplate(instance, template);
+          report.recreatedTeams.push(instance.teamName);
+        } else {
+          if (upstream.status !== 'active') {
+            this.host.setTeamStatus(instance.teamName, 'active');
+            report.reactivatedTeams.push(instance.teamName);
+          }
+          this.repairTemplateMembers(instance, template);
+        }
+      } else if (upstream?.status === 'active') {
+        this.host.setTeamStatus(instance.teamName, 'stopped');
+        report.stoppedTeams.push(instance.teamName);
+      }
+    }
+    for (const team of this.host.listTeams()) {
+      // Do not claim an arbitrary pre-existing legacy/config Team merely
+      // because its name begins with `atg-`. Only the complete deterministic
+      // name shape emitted by this extension is eligible for orphan repair.
+      if (!isGovernanceTeamName(team.name) || knownTeams.has(team.name) || team.status === 'stopped') continue;
+      this.host.setTeamStatus(team.name, 'stopped');
+      report.stoppedOrphans.push(team.name);
+      this.insertAudit({
+        eventType: 'reconcile.orphan_stopped',
+        actor: { role: 'system' },
+        teamName: team.name,
+        details: { reason: 'governance_row_missing' },
+      });
+    }
+    for (const [eventType, teams] of [
+      ['reconcile.team_recreated', report.recreatedTeams],
+      ['reconcile.team_reactivated', report.reactivatedTeams],
+      ['reconcile.team_stopped', report.stoppedTeams],
+    ] as const) {
+      for (const teamName of teams) {
+        const instance = this.findAnyInstanceByTeamName(teamName);
+        this.insertAudit({
+          eventType,
+          actor: { role: 'system' },
+          instanceId: instance?.id,
+          teamName,
+          details: { reason: 'startup_reconciliation' },
+        });
+      }
+    }
+    return report;
   }
 
   findInstanceForContext(input: {
@@ -695,6 +895,41 @@ export class AgentTeamGovernanceExtension {
     }
   }
 
+  stopAgent(actor: TeamGovernanceActor, instanceId: string, agentName: string): TeamAgent | undefined {
+    const instance = this.requireInstance(instanceId);
+    this.requireAuthority(actor, 'stop_agent', { instanceId, teamName: instance.teamName, subject: agentName });
+    const agent = this.host.setAgentStatus(instance.teamName, agentName, 'stopped');
+    if (!agent) return undefined;
+    const lease = this.getActiveLease(instanceId, agentName);
+    if (lease) this.markLeaseRecycled(lease.id, Date.now(), 'agent_stopped');
+    this.insertAudit({
+      eventType: 'agent.stopped',
+      actor,
+      instanceId,
+      teamName: instance.teamName,
+      subject: agentName,
+    });
+    return agent;
+  }
+
+  deleteAgent(actor: TeamGovernanceActor, instanceId: string, agentName: string): boolean {
+    const instance = this.requireInstance(instanceId);
+    this.requireAuthority(actor, 'delete_agent', { instanceId, teamName: instance.teamName, subject: agentName });
+    const deleted = this.host.deleteAgent(instance.teamName, agentName);
+    const lease = this.getActiveLease(instanceId, agentName);
+    if (lease) this.markLeaseRecycled(lease.id, Date.now(), 'agent_deleted');
+    if (deleted) {
+      this.insertAudit({
+        eventType: 'agent.deleted',
+        actor,
+        instanceId,
+        teamName: instance.teamName,
+        subject: agentName,
+      });
+    }
+    return deleted;
+  }
+
   reapExpired(now = Date.now()): GovernedAgentReapAction[] {
     const rows = this.db
       .prepare(
@@ -771,14 +1006,14 @@ export class AgentTeamGovernanceExtension {
     return this.getLease(lease.id);
   }
 
-  prepareRun(teamName: string, agentName: string, runId?: string): GovernedRunPreparation | undefined {
+  prepareRun(teamName: string, agentName: string, _runId?: string): GovernedRunPreparation | undefined {
     const instance = this.findInstanceByTeamName(teamName);
     if (!instance) return undefined;
     this.touchAgent(instance.id, agentName);
     const base = `teaminst:${instance.id}:${agentName}`;
     return {
       instanceId: instance.id,
-      chatId: runId ? `${base}:${runId}` : base,
+      chatId: base,
       ...(instance.pmBot ? { executionBot: instance.pmBot } : {}),
     };
   }
@@ -811,13 +1046,13 @@ export class AgentTeamGovernanceExtension {
     return { text: sections.join('\n'), provenance };
   }
 
-  assertCanQueueTask(instanceId: string): void {
+  assertCanQueueTask(instanceId: string, actor: TeamGovernanceActor | { role: 'system' } = { role: 'system' }): void {
     const instance = this.requireInstance(instanceId);
     const queued = this.host
       .listTasks(instance.teamName)
       .filter((task) => task.status === 'pending' || task.status === 'in_progress').length;
     if (queued >= instance.quotas.maxQueuedTasks) {
-      this.quotaDenied({ role: 'system' }, instance, 'maxQueuedTasks', queued);
+      this.quotaDenied(actor, instance, 'maxQueuedTasks', queued);
     }
   }
 
@@ -1093,6 +1328,53 @@ export class AgentTeamGovernanceExtension {
     return instance;
   }
 
+  private requireAnyInstance(instanceId: string): GovernedTeamInstance {
+    const instance = this.getInstance(instanceId);
+    if (!instance) {
+      throw new AgentTeamGovernanceError(
+        `Governed Agent Team instance not found: ${instanceId}`,
+        404,
+        'INSTANCE_NOT_FOUND',
+      );
+    }
+    return instance;
+  }
+
+  private requirePinnedTemplate(instance: GovernedTeamInstance): AgentTeamGovernanceTemplateVersion {
+    const template = this.getTemplate(instance.templateName, instance.templateVersion);
+    if (!template || template.digest !== instance.templateDigest) {
+      throw new AgentTeamGovernanceError(
+        `Pinned Agent Team template is unavailable or changed: ${instance.templateName}@v${instance.templateVersion}`,
+        500,
+        'PINNED_TEMPLATE_INVALID',
+      );
+    }
+    return template;
+  }
+
+  private createUpstreamFromTemplate(
+    instance: GovernedTeamInstance,
+    template: AgentTeamGovernanceTemplateVersion,
+  ): void {
+    const collision = this.host.getTeam(instance.teamName);
+    if (collision) this.host.deleteTeam(instance.teamName);
+    const displayChatIds = instance.scopeType === 'chat' ? [instance.scopeKey] : [];
+    this.host.createTeam(instance.teamName, template.body.description, { displayChatIds, status: 'active' });
+    this.repairTemplateMembers(instance, template);
+  }
+
+  private repairTemplateMembers(instance: GovernedTeamInstance, template: AgentTeamGovernanceTemplateVersion): void {
+    for (const agent of template.body.agents ?? []) {
+      if (!this.host.getAgent(instance.teamName, agent.name)) {
+        this.host.upsertAgent(instance.teamName, { ...agent, status: 'idle' });
+      }
+    }
+    const existingTaskIds = new Set(this.host.listTasks(instance.teamName).map((task) => task.id));
+    for (const task of template.body.tasks ?? []) {
+      if (task.id == null || !existingTaskIds.has(task.id)) this.host.upsertTask(instance.teamName, task);
+    }
+  }
+
   private countActiveTemporaryAgents(instanceId: string): number {
     return Number(
       (
@@ -1160,23 +1442,39 @@ export class AgentTeamGovernanceExtension {
   }
 
   private rowToTemplate(row: any): AgentTeamGovernanceTemplateVersion {
+    const body = parseJsonStrict<AgentTeamGovernanceTemplateBody>(row.body_json, 'template body');
+    if (hashObject(body) !== row.digest) {
+      throw new AgentTeamGovernanceError(
+        `Stored Agent Team template digest mismatch: ${row.name}@v${row.version}`,
+        500,
+        'TEMPLATE_DIGEST_MISMATCH',
+      );
+    }
     return {
       name: row.name,
       version: Number(row.version),
       digest: row.digest,
-      body: parseJson(row.body_json, {}),
+      body,
       ...(row.created_by ? { createdBy: row.created_by } : {}),
       createdAt: Number(row.created_at),
     };
   }
 
   private rowToRuleSet(row: any): GovernanceRuleSetVersion {
+    const rules = parseJsonStrict<GovernanceRule[]>(row.rules_json, 'RuleSet rules');
+    if (hashObject({ scope: row.scope, rules }) !== row.digest) {
+      throw new AgentTeamGovernanceError(
+        `Stored Agent Team RuleSet digest mismatch: ${row.name}@v${row.version}`,
+        500,
+        'RULE_SET_DIGEST_MISMATCH',
+      );
+    }
     return {
       name: row.name,
       version: Number(row.version),
       digest: row.digest,
       scope: row.scope,
-      rules: parseJson(row.rules_json, []),
+      rules,
       ...(row.created_by ? { createdBy: row.created_by } : {}),
       createdAt: Number(row.created_at),
     };
@@ -1200,7 +1498,7 @@ export class AgentTeamGovernanceExtension {
       templateDigest: row.template_digest,
       scopeType: row.scope_type,
       scopeKey: row.scope_key,
-      quotas: mergeQuotas(parseJson(row.quotas_json, {})),
+      quotas: mergeQuotas(parseJsonStrict(row.quotas_json, 'instance quotas')),
       ruleSetRefs: rules.map((rule) => ({
         name: rule.rule_set_name,
         version: Number(rule.rule_set_version),
@@ -1276,13 +1574,16 @@ export class AgentTeamGovernanceExtension {
 
 export function createAgentTeamGovernanceHost(store: AgentTeamStore): AgentTeamGovernanceHost {
   return {
+    listTeams: () => store.listTeams(),
     getTeam: (name) => store.getTeam(name),
     createTeam: (name, description, options) => store.createTeam(name, description, options),
+    setTeamStatus: (name, status) => store.setTeamStatus(name, status),
     deleteTeam: (name) => store.deleteTeam(name),
     listAgents: (teamName) => store.listAgents(teamName),
     getAgent: (teamName, name) => store.getAgent(teamName, name),
     upsertAgent: (teamName, input) => store.upsertAgent(teamName, input),
     setAgentStatus: (teamName, name, status) => store.setAgentStatus(teamName, name, status),
+    deleteAgent: (teamName, name) => store.deleteAgent(teamName, name),
     upsertTask: (teamName, input) => store.upsertTask(teamName, input),
     listTasks: (teamName) => store.listTasks(teamName),
     listRuns: (teamName) => store.listRuns(teamName),
@@ -1291,7 +1592,7 @@ export function createAgentTeamGovernanceHost(store: AgentTeamStore): AgentTeamG
 
 export function hasTeamGovernanceAuthority(role: TeamGovernanceActorRole, action: TeamGovernanceAction): boolean {
   if (role === 'admin' || role === 'user' || role === 'pm') return true;
-  return role === 'manager' && action === 'coordinate_existing_agents';
+  return (role === 'manager' || role === 'agent') && action === 'coordinate_existing_agents';
 }
 
 function isTeamGovernanceActorRole(value: unknown): value is TeamGovernanceActorRole {
@@ -1404,6 +1705,10 @@ function safeScopeKey(value: string): string {
   return `${normalized.slice(0, 32) || 'scope'}-${hashText(value).slice(0, 8)}`;
 }
 
+function isGovernanceTeamName(value: string): boolean {
+  return /^atg-[a-z0-9._-]+-[0-9a-f]{6}-(?:chat|project|global)-[a-z0-9._-]+-[0-9a-f]{8}$/.test(value);
+}
+
 function hashObject(value: unknown): string {
   return hashText(stableStringify(value));
 }
@@ -1428,5 +1733,17 @@ function parseJson<T>(value: string, fallback: T): T {
     return JSON.parse(value) as T;
   } catch {
     return fallback;
+  }
+}
+
+function parseJsonStrict<T>(value: string, label: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    throw new AgentTeamGovernanceError(
+      `Stored Agent Team governance ${label} is corrupt`,
+      500,
+      'GOVERNANCE_DATA_CORRUPT',
+    );
   }
 }

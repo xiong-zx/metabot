@@ -2,6 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import {
   AgentTeamGovernanceError,
   AgentTeamGovernanceExtension,
@@ -56,7 +57,7 @@ describe('AgentTeamGovernanceExtension authority', () => {
       expect(hasTeamGovernanceAuthority(role, 'stop_run')).toBe(true);
       expect(hasTeamGovernanceAuthority(role, 'promote_rules')).toBe(true);
     }
-    expect(hasTeamGovernanceAuthority('agent', 'coordinate_existing_agents')).toBe(false);
+    expect(hasTeamGovernanceAuthority('agent', 'coordinate_existing_agents')).toBe(true);
     expect(hasTeamGovernanceAuthority('worker', 'create_agent')).toBe(false);
     for (const action of [
       'create_team',
@@ -101,6 +102,99 @@ describe('AgentTeamGovernanceExtension authority', () => {
 });
 
 describe('AgentTeamGovernanceExtension templates and scope', () => {
+  it('fails startup reconciliation when a pinned Template digest no longer matches stored content', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-governance-corrupt-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+    const governancePath = join(dir, 'governance.db');
+    const governance = new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(store), logger, governancePath);
+    governance.publishTemplate({ actor: pm, name: 'digest-check', body: { description: 'original' } });
+    governance.resolveInstance({ actor: pm, templateName: 'digest-check', chatId: 'oc_digest' });
+    governance.close();
+
+    const db = new Database(governancePath);
+    db.prepare("UPDATE agent_team_governance_templates SET body_json = ? WHERE name = 'digest-check'").run(
+      JSON.stringify({ description: 'tampered' }),
+    );
+    db.close();
+
+    const reopened = new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(store), logger, governancePath);
+    expectGovernanceError(() => reopened.reconcile(), { statusCode: 500, code: 'TEMPLATE_DIGEST_MISMATCH' });
+    reopened.close();
+    store.close();
+  });
+
+  it('repairs a crash orphan with no governance row and cleanly recreates it on demand', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-governance-orphan-'));
+    const store = new AgentTeamStore(logger, join(dir, 'teams.db'));
+    const governancePath = join(dir, 'governance.db');
+    const governance = new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(store), logger, governancePath);
+    governance.publishTemplate({ actor: pm, name: 'crash-repair', body: { agents: [{ name: 'coder' }] } });
+    const original = governance.resolveInstance({ actor: pm, templateName: 'crash-repair', chatId: 'oc_crash' })!;
+    governance.close();
+
+    const db = new Database(governancePath);
+    db.prepare('DELETE FROM agent_team_governance_instances WHERE id = ?').run(original.id);
+    db.close();
+
+    const reopened = new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(store), logger, governancePath);
+    expect(reopened.reconcile().stoppedOrphans).toEqual([original.teamName]);
+    expect(store.getTeam(original.teamName)).toMatchObject({ status: 'stopped' });
+    const recreated = reopened.resolveInstance({ actor: pm, templateName: 'crash-repair', chatId: 'oc_crash' })!;
+    expect(recreated).toMatchObject({ id: original.id, teamName: original.teamName, status: 'active' });
+    expect(store.getAgent(original.teamName, 'coder')).toBeDefined();
+    reopened.close();
+    store.close();
+  });
+
+  it('uses safe deterministic names and repairs stop, delete, recreate, orphan, and missing-upstream states', () => {
+    const { store, governance, close } = makeHarness();
+    governance.publishTemplate({
+      actor: pm,
+      name: 'Runtime / Team @ One',
+      body: { agents: [{ name: 'lead', role: 'manager' }] },
+    });
+    const instance = governance.resolveInstance({
+      actor: pm,
+      templateName: 'Runtime / Team @ One',
+      chatId: 'oc:unsafe/@chat',
+    })!;
+    expect(instance.teamName).toMatch(/^[a-z0-9._-]+$/);
+    expect(instance.teamName).not.toMatch(/[@/:]/);
+
+    expect(governance.stopInstance(pm, instance.id)).toMatchObject({ status: 'stopped' });
+    expect(store.getTeam(instance.teamName)).toMatchObject({ status: 'stopped' });
+    expectGovernanceError(() => governance.reactivateInstance(manager, instance.id), {
+      statusCode: 403,
+      code: 'AUTHORITY_DENIED',
+    });
+    expect(
+      governance.resolveInstance({
+        actor: pm,
+        templateName: 'Runtime / Team @ One',
+        chatId: 'oc:unsafe/@chat',
+      }),
+    ).toMatchObject({ id: instance.id, status: 'active' });
+
+    store.deleteTeam(instance.teamName);
+    expect(governance.reconcile().recreatedTeams).toEqual([instance.teamName]);
+    expect(store.getAgent(instance.teamName, 'lead')).toBeDefined();
+
+    store.createTeam('atg-legacy-compatible');
+    expect(governance.reconcile().stoppedOrphans).toEqual([]);
+    expect(store.getTeam('atg-legacy-compatible')).toMatchObject({ status: 'active' });
+
+    expect(governance.deleteInstance(pm, instance.id)).toBe(true);
+    expect(store.getTeam(instance.teamName)).toBeUndefined();
+    const recreated = governance.resolveInstance({
+      actor: pm,
+      templateName: 'Runtime / Team @ One',
+      chatId: 'oc:unsafe/@chat',
+    })!;
+    expect(recreated.id).toBe(instance.id);
+    expect(recreated.teamName).toBe(instance.teamName);
+    close();
+  });
+
   it('pins template and RuleSet versions and keeps global fallback opt-in', () => {
     const { store, governance, close } = makeHarness();
 
@@ -137,7 +231,7 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
     expect(store.getAgent(chat.teamName, 'coder')).toMatchObject({ status: 'idle', engine: 'codex' });
     expect(governance.prepareRun(chat.teamName, 'coder', 'run-1')).toEqual({
       instanceId: chat.id,
-      chatId: `teaminst:${chat.id}:coder:run-1`,
+      chatId: `teaminst:${chat.id}:coder`,
       executionBot: 'pm-codex',
     });
     expect(governance.buildRulesContext(chat.id)).toMatchObject({

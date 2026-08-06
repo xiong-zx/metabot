@@ -1,8 +1,9 @@
 # Agent Team Governance Extension
 
 `src/agent-teams/governance-extension.ts` is the downstream W01 policy layer
-for the upstream Agent Team runtime. It deliberately does not replace or alter
-`AgentTeamStore` or `AgentTeamSupervisor`.
+for the upstream Agent Team runtime. It preserves `AgentTeamStore` as the
+execution-state source of truth and integrates with the existing supervisor
+through narrow lifecycle, quota, prompt, and recycling hooks.
 
 The extension owns a separate SQLite database containing immutable Template
 and RuleSet versions, scope-bound instance metadata, temporary-Agent leases,
@@ -21,8 +22,8 @@ of truth for Teams, Agents, Tasks, Messages, Runs, and supervisor execution.
   instances.
 - Only `admin`, `user`, and `pm` actors may create/start/stop/delete Teams or
   Agents, stop Runs, dispatch a Worker, restart/update services, or promote
-  Templates/RuleSets. A `manager` may only authorize
-  `coordinate_existing_agents`; Agents and Workers receive no governance
+  Templates/RuleSets. A `manager` or `agent` may only coordinate its existing,
+  signed Team scope through Tasks and Messages. Workers receive no governance
   capability. Missing or untrusted principals fail closed.
 - Quotas cover Teams per scope, active and temporary Agents, queued Tasks,
   active Runs, and parallel Runs per Agent. Temporary Agents require a positive
@@ -33,23 +34,64 @@ of truth for Teams, Agents, Tasks, Messages, Runs, and supervisor execution.
 - Promotions, instance/Agent creation, TTL recycling, authority decisions, and
   quota denials are auditable.
 - Each instance may pin its owning PM bot. `prepareRun()` returns that bot and
-  a stable `teaminst:<instance>:<agent>[:<run>]` chat id without changing
+  a stable `teaminst:<instance>:<agent>` chat id without changing
   upstream session records.
+- Governed upstream Team names use only `[a-z0-9._-]` and reserve the `atg-`
+  prefix. Startup reconciliation recreates missing upstream rows, restores the
+  governed active/stopped state, repairs missing pinned Template members, and
+  stops `atg-` upstream orphans. Template and RuleSet JSON is re-hashed whenever
+  it is read, so corrupt or changed pinned content fails closed.
 
-## Integration hooks
+## Runtime integration
 
-The extension is intentionally not registered in the bridge composition root
-by the isolated W01 module. Integration should construct it beside
-`AgentTeamStore` and close it with the HTTP server lifecycle. API/CLI creation
-routes must call `authorize()` or the governed creation methods with a
-principal built by the authenticated transport; never accept `role` directly
-from a request body. Task creation
-must call `assertCanQueueTask()`, and the supervisor must call
-`assertCanStartRun()` immediately before it creates a Run. The supervisor must
-also use `prepareRun()`, call `touchAgent()` on run activity, and apply the
-stop/requeue actions returned by `reapExpired()` during maintenance. Prompt
-assembly may use `buildRulesContext()` to read only the versions pinned by the
-instance.
+The HTTP composition root constructs and closes the extension beside the
+upstream store. `/api/agent-team-governance/{templates,rules,instances,audit}`
+is separate from the legacy `/api/agent-teams` surface. Legacy and
+configuration-managed Teams remain compatible, while a direct mutation whose
+Team name belongs to a governed instance is routed through governance or
+rejected.
 
-These hooks should stay thin. Do not copy governance columns or policy methods
-into the upstream store or supervisor.
+The bridge creates a random in-process signing key at startup. Every engine
+session receives a short-lived signed execution capability containing its
+runtime-derived role, bot, chat, Team, Agent, and expiry; the signing key is
+never passed to an engine. Bridge-local administrator credentials are removed
+from the Claude, Codex, and Kimi subprocess environments. `metabot teams`
+forwards the scoped capability in request headers, and Agent Team routes accept
+that signature without also requiring the local administrator secret. A
+request carrying engine bot/chat markers fails closed when its capability is
+absent, invalid, expired, or for another session, even if it somehow presents
+the local secret. Only an external CLI request authenticated by the bridge API
+secret and carrying no engine markers is treated as local admin. Request-body
+`role` or `actorRole` fields never select the caller's authority.
+
+Capabilities live for one hour. The composition root caches one credential per
+bot/chat only until five minutes before expiry, then retires an idle persistent
+executor immediately or waits for its active turn to finish. The next turn
+receives a new signature; the executor registry also respawns a healthy
+persistent executor whenever its execution environment changes. An overlong
+active turn can only hold an expired, unusable capability until it drains; the
+credential is never refreshed in place or left valid indefinitely.
+
+The supervisor checks governed Run quotas immediately before `createRun()`,
+uses the pinned PM bot and stable instance chat, injects pinned RuleSets into
+the member prompt, touches lease activity, and executes reap actions by
+stopping owned Runs/chats and requeueing interrupted Tasks.
+
+Pending Tasks may still use the configured per-Agent parallel Run capacity,
+and task-associated wake-up Messages stay attached to those task lanes. An
+unrelated unread coordination Message does not open a separate message-only
+Run while that Agent already has active task work; it remains unread until the
+active task Runs drain.
+
+## Concurrency invariant
+
+Governance and upstream state are two local SQLite databases owned by one
+bridge process. Quota checks and their immediately following upstream mutation
+are synchronous and must remain in that single process; running two bridge
+processes against the same pair of database files is unsupported. Startup
+reconciliation repairs either half of a process crash. A future multi-process
+deployment must replace this invariant with a shared transactional reservation
+service before it is supported.
+
+These hooks stay thin. Do not copy governance columns or policy methods into
+the upstream store or replace the supervisor.

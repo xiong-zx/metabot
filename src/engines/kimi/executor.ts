@@ -178,6 +178,7 @@ export class KimiExecutor {
           goal.kind === 'start' ? goal.objective : prompt,
           outputsDir,
           apiContext,
+          options.env,
         );
         const submitted = await client.submitPrompt(session.id, fullPrompt, {
           model: model.id,
@@ -316,6 +317,7 @@ export class KimiExecutor {
     prompt: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
+    executionEnv?: Record<string, string>,
   ): string {
     const sections: string[] = [];
     if (outputsDir) {
@@ -330,6 +332,19 @@ export class KimiExecutor {
         const peers = apiContext.groupMembers.filter((name) => name !== apiContext.botName);
         if (peers.length) sections.push(`## Agent Organization\nOther Agents in this group: ${peers.join(', ')}.`);
       }
+    }
+    if (executionEnv?.METABOT_TEAM_CAPABILITY) {
+      const prefix = [
+        ['METABOT_TEAM_CAPABILITY', executionEnv.METABOT_TEAM_CAPABILITY],
+        ['METABOT_BOT_NAME', executionEnv.METABOT_BOT_NAME],
+        ['METABOT_CHAT_ID', executionEnv.METABOT_CHAT_ID],
+      ]
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+        .join(' ');
+      sections.push(
+        `## Agent Team execution capability\nFor every \`metabot teams\` shell command in this Kimi session, prefix the command with exactly:\n\`${prefix}\`\nThis is a short-lived signed credential. Do not reuse it outside this session.`,
+      );
     }
     return sections.length > 0 ? `${prompt}\n\n---\n\n${sections.join('\n\n')}` : prompt;
   }
