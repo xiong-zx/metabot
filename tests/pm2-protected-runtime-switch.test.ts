@@ -9,7 +9,7 @@ const HELPER = join(REPO_ROOT, 'scripts', 'pm2-protected-runtime-switch.cjs');
 const APPS = ['metabot-worker-runnerd', 'metabot-arcd', 'metabot'];
 const CORE_APP = 'metabot-core';
 
-function makeHarness() {
+function makeHarness(pm2Version = '7.0.3') {
   const root = mkdtempSync(join(tmpdir(), 'metabot-pm2-switch-fake-'));
   const source = join(root, 'source');
   const target = join(root, 'target');
@@ -18,7 +18,9 @@ function makeHarness() {
   makeRuntime(source, 'source');
   makeRuntime(target, 'target');
   mkdirSync(join(pm2Root, 'lib'), { recursive: true });
-  writeFileSync(join(pm2Root, 'package.json'), '{"name":"pm2","version":"6.0.14","main":"index.js"}\n');
+  writeFileSync(join(pm2Root, 'package.json'), `${JSON.stringify({
+    name: 'pm2', version: pm2Version, main: 'index.js',
+  })}\n`);
   writeFileSync(join(pm2Root, 'index.js'), `
 const fs = require('node:fs');
 const stateFile = process.env.FAKE_PM2_STATE;
@@ -206,5 +208,14 @@ describe('protected PM2 runtime switch helper', () => {
       METABOT_CORE_DATA_DIR: '/var/lib/metabot-core',
       METABOT_HOME: kit.target,
     });
+  });
+
+  it('rejects an unreviewed PM2 major version', () => {
+    const kit = makeHarness('8.0.0');
+    const failed = spawnSync(process.execPath, [
+      HELPER, '--runtime', kit.target, '--apps', APPS.join(','),
+    ], { env: kit.env, encoding: 'utf8' });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain('Unsupported PM2 version 8.0.0');
   });
 });
