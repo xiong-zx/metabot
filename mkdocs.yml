@@ -128,4 +128,5 @@ nav:
     - Architecture: concepts/architecture.md
     - Security: concepts/security.md
     - Production: deployment/production.md
+    - Downstream fork workflow: development/downstream-fork-workflow.md
     - Contributing: development/contributing.md

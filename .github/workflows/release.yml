@@ -32,6 +32,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify downstream release boundaries
+        run: npm run check:downstream-boundaries:release
+
       - name: Verify tag matches package version
         if: github.event_name == 'push'
         run: test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
