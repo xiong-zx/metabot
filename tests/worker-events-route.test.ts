@@ -1,6 +1,14 @@
 import { sign as cryptoSign } from 'node:crypto';
 import { once } from 'node:events';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -262,7 +270,7 @@ describe('signed terminal callback route', () => {
     }
   });
 
-  it('fails closed with 503 when callback verification keys are missing', async () => {
+  it('fails closed with 503 when callback verification keys are missing or unsafe', async () => {
     vi.stubEnv('METABOT_RATE_LIMIT_DISABLED', '1');
     const dir = tempDir('worker-events-missing-keys');
     const validKeys = join(dir, 'valid-keys');
@@ -298,6 +306,20 @@ describe('signed terminal callback route', () => {
 
     expect(status).toBe(503);
     expect(JSON.parse(body)).toMatchObject({ code: 'KEYS_UNAVAILABLE' });
+    expect(terminalStore.count()).toBe(0);
+
+    provisionExecutionKeyPairs(missingKeys);
+    const callbackPublic = join(missingKeys, 'worker-callback.pub');
+    const callbackTarget = join(missingKeys, 'worker-callback.pub.real');
+    renameSync(callbackPublic, callbackTarget);
+    symlinkSync(callbackTarget, callbackPublic);
+    const unsafeReq = (await import('node:stream')).Readable.from([raw]) as any;
+    unsafeReq.headers = req.headers;
+    status = 0;
+    body = '';
+    await handleWorkerEventsRoutes(ctx, unsafeReq, res, 'POST', '/api/worker-events');
+    expect(status).toBe(503);
+    expect(JSON.parse(body)).toMatchObject({ code: 'UNSAFE_KEY_NODE_TYPE' });
     expect(terminalStore.count()).toBe(0);
     terminalStore.close();
   });

@@ -1,5 +1,16 @@
 import { createHmac, generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -67,6 +78,82 @@ describe('execution capability Ed25519 keys', () => {
     expect(() => new ExecutionCapabilityService(permissive).issue({
       purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1',
     })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
+  });
+
+  it('rejects a symlinked key directory before mutating its target', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'metabot-execution-symlink-dir-'));
+    dirs.push(parent);
+    const target = join(parent, 'target');
+    const link = join(parent, 'keys');
+    mkdirSync(target, { mode: 0o755 });
+    chmodSync(target, 0o755);
+    symlinkSync(target, link, 'dir');
+
+    expect(() => provisionExecutionKeyPairs(link)).toThrowError(
+      expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }),
+    );
+    expect(lstatSync(target).mode & 0o777).toBe(0o755);
+    expect(inspectExecutionKeyDirectory(link)).toMatchObject({
+      ok: false,
+      directory: { isSymlink: true, nodeType: 'symbolic-link', nodeTypeOk: false },
+    });
+  });
+
+  it('does not silently repair an existing permissive key directory', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-execution-permissive-dir-'));
+    dirs.push(dir);
+    chmodSync(dir, 0o755);
+
+    expect(() => provisionExecutionKeyPairs(dir)).toThrowError(
+      expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }),
+    );
+    expect(lstatSync(dir).mode & 0o777).toBe(0o755);
+  });
+
+  it('rejects symlinked and non-regular current or previous key nodes', () => {
+    const symlinked = keyDir();
+    const privatePath = join(symlinked, 'worker-capability.key');
+    const privateTarget = join(symlinked, 'worker-capability.key.real');
+    renameSync(privatePath, privateTarget);
+    symlinkSync(privateTarget, privatePath);
+    expect(() => provisionExecutionKeyPairs(symlinked)).toThrowError(
+      expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }),
+    );
+    expect(() => new ExecutionCapabilityService(symlinked).issue({
+      purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1',
+    })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }));
+    expect(inspectExecutionKeyDirectory(symlinked).pairs[0].privateKey).toMatchObject({
+      isSymlink: true,
+      nodeType: 'symbolic-link',
+      nodeTypeOk: false,
+    });
+
+    const nonRegular = keyDir();
+    const publicPath = join(nonRegular, 'arc-capability.pub');
+    unlinkSync(publicPath);
+    mkdirSync(publicPath, { mode: 0o700 });
+    expect(() => provisionExecutionKeyPairs(nonRegular)).toThrowError(
+      expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }),
+    );
+    expect(inspectExecutionKeyDirectory(nonRegular).pairs[1].publicKey).toMatchObject({
+      nodeType: 'directory',
+      nodeTypeOk: false,
+    });
+
+    const previousSymlink = keyDir();
+    const previousToken = new ExecutionCapabilityService(previousSymlink).issue({
+      purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1',
+    });
+    symlinkSync(
+      join(previousSymlink, 'worker-capability.pub'),
+      join(previousSymlink, 'worker-capability.pub.prev'),
+    );
+    expect(() => new ExecutionCapabilityService(previousSymlink).verify(previousToken, {
+      purpose: 'worker', botName: 'pm-codex', chatId: 'chat-1',
+    })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }));
+    expect(() => provisionExecutionKeyPairs(previousSymlink)).toThrowError(
+      expect.objectContaining({ code: 'UNSAFE_KEY_NODE_TYPE' }),
+    );
   });
 
   it('keeps worker, ARC, callback, and W01-HMAC formats purpose-separated and enforces expiry', () => {

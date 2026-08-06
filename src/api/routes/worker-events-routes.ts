@@ -229,6 +229,8 @@ function isKeyAvailabilityError(error: ExecutionCapabilityError): boolean {
   return error.code === 'KEYS_UNAVAILABLE'
     || error.code === 'UNSAFE_KEY_PERMISSIONS'
     || error.code === 'UNSAFE_KEY_OWNER'
+    || error.code === 'UNSAFE_KEY_NODE_TYPE'
+    || error.code === 'UNSAFE_KEY_PATH_CHANGED'
     || error.code === 'KEY_PAIR_MISMATCH';
 }
 

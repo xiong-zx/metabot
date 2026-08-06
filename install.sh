@@ -450,37 +450,93 @@ const keysDir = process.env.METABOT_KEYS_DIR;
 const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
 const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
 
-function assertPath(file, mode, label) {
-  const stat = fs.statSync(file);
-  const actual = stat.mode & 0o777;
-  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
-  if (uid !== undefined && stat.uid !== uid) throw new Error(`unexpected ${label} owner uid ${stat.uid}; expected ${uid}`);
+function nodeType(value) {
+  if (value.isSymbolicLink()) return 'symbolic-link';
+  if (value.isFile()) return 'regular-file';
+  if (value.isDirectory()) return 'directory';
+  if (value.isFIFO()) return 'fifo';
+  if (value.isSocket()) return 'socket';
+  if (value.isBlockDevice()) return 'block-device';
+  if (value.isCharacterDevice()) return 'character-device';
+  return 'unknown';
 }
 
-fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-fs.chmodSync(keysDir, 0o700);
-assertPath(keysDir, 0o700, 'key directory');
+function lstatIfPresent(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return undefined;
+    throw error;
+  }
+}
+
+function assertStat(value, mode, label, expectedType) {
+  const typeOk = expectedType === 'directory' ? value.isDirectory() : value.isFile();
+  if (value.isSymbolicLink() || !typeOk) {
+    throw new Error(`unsafe ${label} node type: expected ${expectedType}, got ${nodeType(value)}`);
+  }
+  const actual = value.mode & 0o777;
+  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
+  if (uid !== undefined && value.uid !== uid) throw new Error(`unexpected ${label} owner uid ${value.uid}; expected ${uid}`);
+}
+
+function assertPath(file, mode, label, expectedType) {
+  const value = fs.lstatSync(file);
+  assertStat(value, mode, label, expectedType);
+  return value;
+}
+
+function readKey(file, label) {
+  const before = assertPath(file, 0o600, label, 'regular-file');
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fs.constants.O_NONBLOCK === 'number' ? fs.constants.O_NONBLOCK : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    assertStat(opened, 0o600, label, 'regular-file');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new Error(`unsafe ${label} path changed while opening`);
+    }
+    return fs.readFileSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+const existingKeysDir = lstatIfPresent(keysDir);
+if (existingKeysDir) {
+  assertStat(existingKeysDir, 0o700, 'key directory', 'directory');
+} else {
+  fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(keysDir, 0o700);
+  assertPath(keysDir, 0o700, 'key directory', 'directory');
+}
 
 for (const name of names) {
   const privatePath = path.join(keysDir, `${name}.key`);
   const publicPath = path.join(keysDir, `${name}.pub`);
-  const privateExists = fs.existsSync(privatePath);
-  const publicExists = fs.existsSync(publicPath);
+  const previousPath = `${publicPath}.prev`;
+  const privateStat = lstatIfPresent(privatePath);
+  const publicStat = lstatIfPresent(publicPath);
+  const previousStat = lstatIfPresent(previousPath);
+  if (privateStat) assertStat(privateStat, 0o600, `${name} private key`, 'regular-file');
+  if (publicStat) assertStat(publicStat, 0o600, `${name} public key`, 'regular-file');
+  if (previousStat) assertStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+  const privateExists = Boolean(privateStat);
+  const publicExists = Boolean(publicStat);
   if (privateExists !== publicExists) throw new Error(`refusing to replace incomplete ${name} keypair`);
   if (!privateExists) {
     const pair = crypto.generateKeyPairSync('ed25519');
     fs.writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
     fs.writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { flag: 'wx', mode: 0o600 });
   }
-  assertPath(privatePath, 0o600, `${name} private key`);
-  assertPath(publicPath, 0o600, `${name} public key`);
+  assertPath(privatePath, 0o600, `${name} private key`, 'regular-file');
+  assertPath(publicPath, 0o600, `${name} public key`, 'regular-file');
   const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
-  const signature = crypto.sign(null, challenge, fs.readFileSync(privatePath));
-  if (!crypto.verify(null, challenge, fs.readFileSync(publicPath), signature)) {
+  const signature = crypto.sign(null, challenge, readKey(privatePath, `${name} private key`));
+  if (!crypto.verify(null, challenge, readKey(publicPath, `${name} public key`), signature)) {
     throw new Error(`${name} public/private keys do not correspond`);
   }
-  const previousPath = `${publicPath}.prev`;
-  if (fs.existsSync(previousPath)) assertPath(previousPath, 0o600, `${name} previous public key`);
 }
 NODE
 success "Execution trust keys ready at ${METABOT_KEYS_DIR} (TOFU; outside METABOT_HOME)"

@@ -4,12 +4,16 @@ import {
   verify as cryptoVerify,
 } from 'node:crypto';
 import {
+  constants,
+  closeSync,
+  fstatSync,
   chmodSync,
-  existsSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
-  statSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -41,10 +45,14 @@ export interface ExecutionCapabilityClaims {
 export interface KeyFileDiagnostic {
   path: string;
   exists: boolean;
+  isSymlink?: boolean;
+  nodeType?: string;
+  nodeTypeOk?: boolean;
   mode?: number;
   ownerUid?: number;
   ownerMatches?: boolean;
   permissionsOk?: boolean;
+  error?: string;
 }
 
 export interface KeyPairDiagnostic {
@@ -85,15 +93,27 @@ export function resolveExecutionKeysDir(env: NodeJS.ProcessEnv = process.env): s
 
 /** Create all missing keypairs without ever replacing existing key material. */
 export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()): ExecutionKeyDirectoryDiagnostic {
-  mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-  chmodSync(keysDir, 0o700);
-  assertTrustedPath(keysDir, 0o700, 'key directory');
+  const existingDirectory = lstatIfPresent(keysDir, 'key directory');
+  if (existingDirectory) {
+    assertTrustedStat(existingDirectory, 0o700, 'key directory', 'directory');
+  } else {
+    mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+    chmodSync(keysDir, 0o700);
+    assertTrustedPath(keysDir, 0o700, 'key directory', 'directory');
+  }
 
   for (const name of KEY_PREFIXES) {
     const privatePath = join(keysDir, `${name}.key`);
     const publicPath = join(keysDir, `${name}.pub`);
-    const privateExists = existsSync(privatePath);
-    const publicExists = existsSync(publicPath);
+    const previousPath = join(keysDir, `${name}.pub.prev`);
+    const privateStat = lstatIfPresent(privatePath, `${name} private key`);
+    const publicStat = lstatIfPresent(publicPath, `${name} public key`);
+    const previousStat = lstatIfPresent(previousPath, `${name} previous public key`);
+    if (privateStat) assertTrustedStat(privateStat, 0o600, `${name} private key`, 'regular-file');
+    if (publicStat) assertTrustedStat(publicStat, 0o600, `${name} public key`, 'regular-file');
+    if (previousStat) assertTrustedStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+    const privateExists = !!privateStat;
+    const publicExists = !!publicStat;
     if (privateExists !== publicExists) {
       throw new ExecutionCapabilityError(
         `Refusing to replace incomplete ${name} keypair`,
@@ -111,25 +131,25 @@ export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()):
         mode: 0o600,
       });
     }
-    assertTrustedPath(privatePath, 0o600, `${name} private key`);
-    assertTrustedPath(publicPath, 0o600, `${name} public key`);
+    assertTrustedPath(privatePath, 0o600, `${name} private key`, 'regular-file');
+    assertTrustedPath(publicPath, 0o600, `${name} public key`, 'regular-file');
     assertPairMatches(privatePath, publicPath, name);
   }
   return inspectExecutionKeyDirectory(keysDir);
 }
 
 export function inspectExecutionKeyDirectory(keysDir = resolveExecutionKeysDir()): ExecutionKeyDirectoryDiagnostic {
-  const directory = inspectPath(keysDir, 0o700);
+  const directory = inspectPath(keysDir, 0o700, 'directory');
   const pairs = KEY_PREFIXES.map((name): KeyPairDiagnostic => {
     const privatePath = join(keysDir, `${name}.key`);
     const publicPath = join(keysDir, `${name}.pub`);
     const previousPath = join(keysDir, `${name}.pub.prev`);
-    const privateKey = inspectPath(privatePath, 0o600);
-    const publicKey = inspectPath(publicPath, 0o600);
-    const previousPublicKey = inspectPath(previousPath, 0o600);
+    const privateKey = inspectPath(privatePath, 0o600, 'regular-file');
+    const publicKey = inspectPath(publicPath, 0o600, 'regular-file');
+    const previousPublicKey = inspectPath(previousPath, 0o600, 'regular-file');
     let pairMatches = false;
     let error: string | undefined;
-    if (privateKey.exists && publicKey.exists) {
+    if (isSafeDiagnostic(directory) && isSafeDiagnostic(privateKey) && isSafeDiagnostic(publicKey)) {
       try {
         assertPairMatches(privatePath, publicPath, name);
         pairMatches = true;
@@ -138,13 +158,12 @@ export function inspectExecutionKeyDirectory(keysDir = resolveExecutionKeysDir()
       }
     }
     const previousOk = !previousPublicKey.exists
-      || (previousPublicKey.permissionsOk === true && previousPublicKey.ownerMatches !== false);
-    const ok = directory.permissionsOk === true
+      || isSafeDiagnostic(previousPublicKey);
+    const ok = directory.nodeTypeOk === true
+      && directory.permissionsOk === true
       && directory.ownerMatches !== false
-      && privateKey.permissionsOk === true
-      && privateKey.ownerMatches !== false
-      && publicKey.permissionsOk === true
-      && publicKey.ownerMatches !== false
+      && isSafeDiagnostic(privateKey)
+      && isSafeDiagnostic(publicKey)
       && previousOk
       && pairMatches;
     return {
@@ -162,6 +181,7 @@ export function inspectExecutionKeyDirectory(keysDir = resolveExecutionKeysDir()
     directory,
     pairs,
     ok: directory.exists
+      && directory.nodeTypeOk === true
       && directory.permissionsOk === true
       && directory.ownerMatches !== false
       && pairs.every((pair) => pair.ok),
@@ -262,27 +282,27 @@ export class ExecutionCapabilityService {
   private loadPrivateKey(prefix: KeyPrefix): string {
     const privatePath = join(this.keysDir, `${prefix}.key`);
     const publicPath = join(this.keysDir, `${prefix}.pub`);
-    assertTrustedPath(this.keysDir, 0o700, 'key directory');
-    assertTrustedPath(privatePath, 0o600, `${prefix} private key`);
-    assertTrustedPath(publicPath, 0o600, `${prefix} public key`);
-    assertPairMatches(privatePath, publicPath, prefix);
-    try {
-      return readFileSync(privatePath, 'utf8');
-    } catch (cause) {
-      throw keyReadError(prefix, cause);
-    }
+    assertTrustedPath(this.keysDir, 0o700, 'key directory', 'directory');
+    const privateKey = readTrustedKeyFile(privatePath, `${prefix} private key`);
+    const publicKey = readTrustedKeyFile(publicPath, `${prefix} public key`);
+    assertPairContents(privateKey, publicKey, prefix);
+    return privateKey;
   }
 
   private loadPublicKeys(prefix: KeyPrefix): string[] {
-    assertTrustedPath(this.keysDir, 0o700, 'key directory');
+    assertTrustedPath(this.keysDir, 0o700, 'key directory', 'directory');
     const currentPath = join(this.keysDir, `${prefix}.pub`);
-    assertTrustedPath(currentPath, 0o600, `${prefix} verification key`);
     const previousPath = join(this.keysDir, `${prefix}.pub.prev`);
-    const paths = [currentPath, ...(existsSync(previousPath) ? [previousPath] : [])];
-    return paths.map((path) => {
-      assertTrustedPath(path, 0o600, `${prefix} verification key`);
-      return readFileSync(path, 'utf8');
-    });
+    const previousStat = lstatIfPresent(previousPath, `${prefix} previous verification key`);
+    if (previousStat) {
+      assertTrustedStat(previousStat, 0o600, `${prefix} previous verification key`, 'regular-file');
+    }
+    return [
+      readTrustedKeyFile(currentPath, `${prefix} verification key`),
+      ...(previousStat
+        ? [readTrustedKeyFile(previousPath, `${prefix} previous verification key`)]
+        : []),
+    ];
   }
 }
 
@@ -306,9 +326,25 @@ function isBase64Url(value: string): boolean {
 
 function assertPairMatches(privatePath: string, publicPath: string, name: string): void {
   try {
+    assertPairContents(
+      readTrustedKeyFile(privatePath, `${name} private key`),
+      readTrustedKeyFile(publicPath, `${name} public key`),
+      name,
+    );
+  } catch (cause) {
+    if (cause instanceof ExecutionCapabilityError) throw cause;
+    throw new ExecutionCapabilityError(
+      `Invalid ${name} keypair: ${cause instanceof Error ? cause.message : String(cause)}`,
+      'KEY_PAIR_MISMATCH',
+    );
+  }
+}
+
+function assertPairContents(privateKey: string, publicKey: string, name: string): void {
+  try {
     const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
-    const signature = cryptoSign(null, challenge, readFileSync(privatePath, 'utf8'));
-    if (!cryptoVerify(null, challenge, readFileSync(publicPath, 'utf8'), signature)) {
+    const signature = cryptoSign(null, challenge, privateKey);
+    if (!cryptoVerify(null, challenge, publicKey, signature)) {
       throw new Error('public/private keys do not correspond');
     }
   } catch (cause) {
@@ -319,14 +355,38 @@ function assertPairMatches(privatePath: string, publicPath: string, name: string
   }
 }
 
-function assertTrustedPath(path: string, expectedMode: number, label: string): void {
+type ExpectedNodeType = 'directory' | 'regular-file';
+
+function assertTrustedPath(
+  path: string,
+  expectedMode: number,
+  label: string,
+  expectedType: ExpectedNodeType,
+): Stats {
   let stat;
   try {
-    stat = statSync(path);
+    stat = lstatSync(path);
   } catch (cause) {
     throw new ExecutionCapabilityError(
       `Missing or unreadable ${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
       'KEYS_UNAVAILABLE',
+    );
+  }
+  assertTrustedStat(stat, expectedMode, label, expectedType);
+  return stat;
+}
+
+function assertTrustedStat(
+  stat: Stats,
+  expectedMode: number,
+  label: string,
+  expectedType: ExpectedNodeType,
+): void {
+  const nodeTypeOk = expectedType === 'directory' ? stat.isDirectory() : stat.isFile();
+  if (stat.isSymbolicLink() || !nodeTypeOk) {
+    throw new ExecutionCapabilityError(
+      `Unsafe ${label} node type: expected ${expectedType}, got ${nodeTypeName(stat)}`,
+      'UNSAFE_KEY_NODE_TYPE',
     );
   }
   const actualMode = stat.mode & 0o777;
@@ -345,28 +405,103 @@ function assertTrustedPath(path: string, expectedMode: number, label: string): v
   }
 }
 
-function inspectPath(path: string, expectedMode: number): KeyFileDiagnostic {
-  if (!existsSync(path)) return { path, exists: false };
+function inspectPath(
+  path: string,
+  expectedMode: number,
+  expectedType: ExpectedNodeType,
+): KeyFileDiagnostic {
   try {
-    const stat = statSync(path);
+    const stat = lstatSync(path);
     const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
     const mode = stat.mode & 0o777;
+    const isSymlink = stat.isSymbolicLink();
+    const nodeType = nodeTypeName(stat);
+    const nodeTypeOk = !isSymlink
+      && (expectedType === 'directory' ? stat.isDirectory() : stat.isFile());
     return {
       path,
       exists: true,
+      isSymlink,
+      nodeType,
+      nodeTypeOk,
       mode,
       ownerUid: stat.uid,
       ownerMatches: currentUid === undefined || stat.uid === currentUid,
       permissionsOk: mode === expectedMode,
     };
-  } catch {
-    return { path, exists: true, permissionsOk: false, ownerMatches: false };
+  } catch (cause) {
+    if (isMissingPathError(cause)) return { path, exists: false };
+    return {
+      path,
+      exists: true,
+      nodeTypeOk: false,
+      permissionsOk: false,
+      ownerMatches: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+    };
   }
 }
 
-function keyReadError(prefix: string, cause: unknown): ExecutionCapabilityError {
+function readTrustedKeyFile(path: string, label: string): string {
+  const before = assertTrustedPath(path, 0o600, label, 'regular-file');
+  const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof constants.O_NONBLOCK === 'number' ? constants.O_NONBLOCK : 0;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
+    const opened = fstatSync(descriptor);
+    assertTrustedStat(opened, 0o600, label, 'regular-file');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new ExecutionCapabilityError(
+        `Unsafe ${label} path changed while opening`,
+        'UNSAFE_KEY_PATH_CHANGED',
+      );
+    }
+    return readFileSync(descriptor, 'utf8');
+  } catch (cause) {
+    if (cause instanceof ExecutionCapabilityError) throw cause;
+    throw keyReadError(label, cause);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function lstatIfPresent(path: string, label: string): Stats | undefined {
+  try {
+    return lstatSync(path);
+  } catch (cause) {
+    if (isMissingPathError(cause)) return undefined;
+    throw keyReadError(label, cause);
+  }
+}
+
+function isSafeDiagnostic(value: KeyFileDiagnostic): boolean {
+  return value.exists
+    && value.nodeTypeOk === true
+    && value.permissionsOk === true
+    && value.ownerMatches !== false;
+}
+
+function nodeTypeName(stat: Stats): string {
+  if (stat.isSymbolicLink()) return 'symbolic-link';
+  if (stat.isFile()) return 'regular-file';
+  if (stat.isDirectory()) return 'directory';
+  if (stat.isFIFO()) return 'fifo';
+  if (stat.isSocket()) return 'socket';
+  if (stat.isBlockDevice()) return 'block-device';
+  if (stat.isCharacterDevice()) return 'character-device';
+  return 'unknown';
+}
+
+function isMissingPathError(cause: unknown): boolean {
+  return cause instanceof Error
+    && 'code' in cause
+    && (cause.code === 'ENOENT' || cause.code === 'ENOTDIR');
+}
+
+function keyReadError(label: string, cause: unknown): ExecutionCapabilityError {
   return new ExecutionCapabilityError(
-    `Unable to load ${prefix} key: ${cause instanceof Error ? cause.message : String(cause)}`,
+    `Unable to load ${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
     'KEYS_UNAVAILABLE',
   );
 }
