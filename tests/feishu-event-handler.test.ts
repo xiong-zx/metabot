@@ -139,6 +139,57 @@ describe('Feishu replied-message routing', () => {
     }]);
   });
 
+  it('uses cached fallback only with exact same-chat provenance when lookup is unavailable', async () => {
+    const messageSender = { getMessage: vi.fn(async () => undefined) };
+    const { received, handle } = messageHandler(messageSender);
+    await handle(event({
+      messageId: 'same-chat-file',
+      messageType: 'file',
+      content: { file_key: 'same-chat-key', file_name: 'same-chat.pdf' },
+    }));
+    await handle(event({
+      messageId: 'reply-same-chat-file',
+      content: { text: '@_bot_open_id inspect' },
+      parentId: 'same-chat-file',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].extraMedia).toEqual([{
+      messageId: 'same-chat-file',
+      fileKey: 'same-chat-key',
+      fileName: 'same-chat.pdf',
+    }]);
+  });
+
+  it('fails closed when a fetched snapshot has no chat provenance, including cached media', async () => {
+    const messageSender = {
+      getMessage: vi.fn(async () => ({
+        messageId: 'missing-chat-file',
+        messageType: 'file',
+        content: JSON.stringify({ file_key: 'lookup-key', file_name: 'lookup.pdf' }),
+      })),
+    };
+    const { received, logger: testLogger, handle } = messageHandler(messageSender);
+    await handle(event({
+      messageId: 'missing-chat-file',
+      messageType: 'file',
+      content: { file_key: 'cached-key', file_name: 'cached.pdf' },
+    }));
+    await handle(event({
+      messageId: 'reply-missing-chat-file',
+      content: { text: '@_bot_open_id inspect' },
+      parentId: 'missing-chat-file',
+      mentions: ['bot-open-id'],
+    }));
+
+    expect(received[0].replyContext).toBeUndefined();
+    expect(received[0].extraMedia).toBeUndefined();
+    expect(testLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: 'missing-chat-file', chatId: 'chat-1' }),
+      'Ignoring reply reference without chat provenance',
+    );
+  });
+
   it.each([
     [
       'text',
@@ -352,6 +403,11 @@ describe('Feishu replied-message routing', () => {
       });
     const { received, logger: testLogger, handle } = messageHandler({ getMessage });
 
+    await handle(event({
+      messageId: 'cross-chat',
+      messageType: 'file',
+      content: { file_key: 'cached-cross-chat-key', file_name: 'cached-cross-chat.pdf' },
+    }));
     await handle(event({
       messageId: 'reply-cross-chat',
       content: { text: '@_bot_open_id quote it' },

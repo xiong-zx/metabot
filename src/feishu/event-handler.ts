@@ -41,6 +41,7 @@ const MAX_PENDING_MEDIA_PER_USER = 10;
 const MAX_REFERENCED_TEXT_CHARS = 16_000;
 interface CachedMedia {
   messageId: string;
+  provenanceChatId?: string;
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
@@ -68,7 +69,9 @@ function consumeCachedMedia(
     return [];
   }
 
-  const selected = valid.filter(m => m.messageId === replyToMessageId);
+  const selected = valid.filter(
+    m => m.messageId === replyToMessageId && m.provenanceChatId === chatId,
+  );
   if (selected.length === 0) {
     cache.set(key, valid);
     return [];
@@ -83,12 +86,12 @@ function cachePendingMedia(
   cache: PendingMediaCache,
   chatId: string,
   userId: string,
-  media: Omit<CachedMedia, 'ts'>,
+  media: Omit<CachedMedia, 'ts' | 'provenanceChatId'>,
 ): void {
   const key = cacheMediaKey(chatId, userId);
   const now = Date.now();
   const valid = (cache.get(key) ?? []).filter(item => now - item.ts < MEDIA_CACHE_TTL_MS);
-  valid.push({ ...media, ts: now });
+  valid.push({ ...media, provenanceChatId: chatId, ts: now });
   cache.set(key, valid.slice(-MAX_PENDING_MEDIA_PER_USER));
 }
 
@@ -438,7 +441,11 @@ async function resolveReferencedMessage(
 
   const snapshot = await messageSender.getMessage(messageId);
   if (!snapshot) return { media: cachedMedia };
-  if (snapshot.chatId && snapshot.chatId !== chatId) {
+  if (!snapshot.chatId) {
+    logger.warn({ messageId, chatId }, 'Ignoring reply reference without chat provenance');
+    return { media: [], messageType: snapshot.messageType };
+  }
+  if (snapshot.chatId !== chatId) {
     logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
     return { media: [], messageType: snapshot.messageType };
   }
