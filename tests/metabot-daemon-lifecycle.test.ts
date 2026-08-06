@@ -43,8 +43,16 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
   const switchHelper = join(root, 'protected-switch.cjs');
   writeFileSync(switchHelper, [
     "const fs = require('node:fs');",
-    "fs.appendFileSync(process.env.PM2_LOG, `protected-switch ${process.argv.slice(2).join(' ')}\\n`);",
-    "process.stdout.write(JSON.stringify({ ok: true }) + '\\n');",
+    "const args = process.argv.slice(2);",
+    "const value = (name) => args[args.indexOf(name) + 1];",
+    "const planOnly = value('--plan-only') === 'true';",
+    "fs.appendFileSync(process.env.PM2_LOG, `${planOnly ? 'protected-plan' : 'protected-switch'} ${args.join(' ')}\\n`);",
+    "if (planOnly) {",
+    "  const root = value('--runtime');",
+    "  const scripts = { metabot: 'src/index.ts', 'metabot-worker-runnerd': 'packages/worker-runner-mcp/dist/daemon-cli.js', 'metabot-arcd': 'packages/arc-mcp/dist/daemon-cli.js', 'metabot-core': 'packages/server/dist/index.js' };",
+    "  const plan = Object.fromEntries(value('--apps').split(',').map((app) => [app, { cwd: root, script: require('node:path').join(root, scripts[app]), interpreter: 'node', interpreterArgs: [], envHashes: {} }]));",
+    "  process.stdout.write(JSON.stringify(plan) + '\\n');",
+    "} else process.stdout.write(JSON.stringify({ ok: true }) + '\\n');",
   ].join('\n'));
   writeExecutable(join(fakeBin, 'pm2'), [
     '#!/usr/bin/env bash',

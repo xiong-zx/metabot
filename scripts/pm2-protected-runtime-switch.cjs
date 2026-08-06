@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 const ALLOWED_APPS = new Set(['metabot', 'metabot-worker-runnerd', 'metabot-arcd', 'metabot-core']);
@@ -101,6 +102,29 @@ function targetEnvironment(Common, target, current, fileEnv, declaredEnv, target
   return mergedAttributes;
 }
 
+function stringArray(value) {
+  if (Array.isArray(value)) return value.map((entry) => String(entry));
+  if (value === undefined || value === null || value === '') return [];
+  return String(value).trim().split(/\s+/).filter(Boolean);
+}
+
+function fingerprint(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function runtimeExpectation(config) {
+  const plannedEnv = config.env?.current_conf?.env || {};
+  return {
+    cwd: config.root,
+    script: config.script,
+    interpreter: config.interpreter,
+    interpreterArgs: config.interpreterArgs,
+    envHashes: Object.fromEntries(Object.entries(plannedEnv)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, fingerprint(value)])),
+  };
+}
+
 function resolveConfiguration({ Common, pm2, dotenv, root, appName, current, preferCurrent }) {
   // Core intentionally remains a separate ecosystem/service. It participates
   // in a cutover only when the CLI has already proved the current checkout
@@ -122,19 +146,26 @@ function resolveConfiguration({ Common, pm2, dotenv, root, appName, current, pre
   }
   if (!target.env) target.env = {};
   target.env.PM2_HOME = pm2.pm2_home;
+  const interpreter = String(target.exec_interpreter || target.interpreter || 'node');
+  const interpreterArgs = stringArray(target.node_args ?? target.interpreter_args);
+  const env = targetEnvironment(
+    Common,
+    target,
+    current,
+    readFileEnvironment(root, dotenv),
+    app.env || {},
+    root,
+    preferCurrent,
+  );
+  env.exec_interpreter = interpreter;
+  env.node_args = interpreterArgs;
   return {
     appName,
     root,
     script: path.resolve(target.pm_exec_path),
-    env: targetEnvironment(
-      Common,
-      target,
-      current,
-      readFileEnvironment(root, dotenv),
-      app.env || {},
-      root,
-      preferCurrent,
-    ),
+    interpreter,
+    interpreterArgs,
+    env,
   };
 }
 
@@ -178,6 +209,7 @@ async function main() {
   const flags = parseArgs(process.argv.slice(2));
   const targetRoot = path.resolve(flags.get('runtime') || '');
   const apps = (flags.get('apps') || '').split(',').map((value) => value.trim()).filter(Boolean);
+  const planOnly = flags.get('plan-only') === 'true';
   if (!flags.get('runtime') || apps.length === 0) {
     throw new Error('Usage: pm2-protected-runtime-switch.cjs --runtime DIR --apps app[,app]');
   }
@@ -225,6 +257,15 @@ async function main() {
       }));
     }
 
+    const expectations = Object.fromEntries(apps.map((appName) => [
+      appName,
+      runtimeExpectation(targetConfigs.get(appName)),
+    ]));
+    if (planOnly) {
+      process.stdout.write(`${JSON.stringify(expectations)}\n`);
+      return;
+    }
+
     const switched = [];
     try {
       for (const appName of apps) {
@@ -266,7 +307,7 @@ async function main() {
         script: row?.pm2_env?.pm_exec_path,
       };
     });
-    process.stdout.write(`${JSON.stringify({ ok: true, apps: result })}\n`);
+    process.stdout.write(`${JSON.stringify({ ok: true, apps: result, expectations })}\n`);
   } finally {
     pm2.disconnect();
   }

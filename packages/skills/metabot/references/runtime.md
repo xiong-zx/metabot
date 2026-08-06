@@ -22,6 +22,8 @@ change. Immutable release versions provide the package rollback surface.
 `start`/`stop` cover Bridge, Worker Runner, and ARC. Plain `restart` remains
 Bridge-only and changes its registered PM2 process in place. A stable request
 ID deduplicates retries. The new Bridge saves PM2 only after startup health and
+the pinned cwd, script, interpreter, arguments, and secret-safe SHA-256
+environment fingerprints all match. It then
 queues one continuation for normal user/PM chats when `--resume` is enabled;
 Team and Worker/ARC internal recovery stays with their durable owners.
 `deploy-runtime` prevalidates and switches the three Bridge-runtime apps

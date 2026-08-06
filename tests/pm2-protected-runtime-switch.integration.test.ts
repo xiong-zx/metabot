@@ -62,6 +62,8 @@ suite('protected PM2 runtime switch with an isolated PM2 daemon', () => {
       expect(row.pm2_env.NO_PROXY).toBe('source.internal');
       expect(row.pm2_env.no_proxy).toBe('source.internal');
       expect(row.pm2_env.METABOT_HOME).toBe(target);
+      expect(row.pm2_env.exec_interpreter).toBe('node');
+      expect(row.pm2_env.node_args).toEqual(['--trace-warnings']);
     }
   }, 20_000);
 
@@ -81,6 +83,8 @@ function makeRuntime(root: string, label: string): void {
       name: app,
       cwd: root,
       script: `${app}.cjs`,
+      interpreter: 'node',
+      interpreter_args: label === 'source' ? '--no-warnings' : '--trace-warnings',
       env: {
         RUNTIME_LABEL: label,
         ...(label === 'source' ? {

@@ -46,6 +46,16 @@ describe('RestartStore', () => {
         requestId: 'deploy-001',
         kind: 'deploy',
         targetRoot: '/srv/metabot-next',
+        targetApps: ['metabot'],
+        runtimeExpectations: {
+          metabot: {
+            cwd: '/srv/metabot-next',
+            script: '/srv/metabot-next/src/index.ts',
+            interpreter: 'node',
+            interpreterArgs: ['--import', 'tsx'],
+            envHashes: { HTTP_PROXY: 'a'.repeat(64) },
+          },
+        },
         now: 10,
       });
       store.markRestarting('deploy-001', { oldRuntimePid: 11, now: 20 });
@@ -70,6 +80,13 @@ describe('RestartStore', () => {
           runtimePid: 22,
           startupHealthyAt: 30,
           processListSavedAt: 40,
+          runtimeExpectations: {
+            metabot: {
+              interpreter: 'node',
+              interpreterArgs: ['--import', 'tsx'],
+              envHashes: { HTTP_PROXY: 'a'.repeat(64) },
+            },
+          },
           reportClaimedAt: 50,
           reportedAt: 60,
           reportOutcome: 'delivered',

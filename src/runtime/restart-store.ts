@@ -12,6 +12,14 @@ export const RESTART_APP_NAMES = [
 export type RestartKind = 'restart' | 'deploy';
 export type RestartStatus = 'claimed' | 'restarting' | 'healthy' | 'failed';
 
+export interface RuntimeExpectation {
+  cwd: string;
+  script: string;
+  interpreter: string;
+  interpreterArgs: string[];
+  envHashes: Record<string, string>;
+}
+
 export interface RestartRequestRecord {
   requestId: string;
   kind: RestartKind;
@@ -28,6 +36,7 @@ export interface RestartRequestRecord {
   targetRoot: string;
   targetApps: string[];
   targetScripts: Record<string, string>;
+  runtimeExpectations: Record<string, RuntimeExpectation>;
   oldRuntimePid?: number;
   runtimePid?: number;
   startupHealthyAt?: number;
@@ -58,6 +67,7 @@ interface RestartRequestRow {
   target_root: string;
   target_apps_json: string;
   target_scripts_json: string;
+  runtime_expectations_json: string;
   old_runtime_pid: number | null;
   runtime_pid: number | null;
   startup_healthy_at: number | null;
@@ -83,6 +93,7 @@ export interface RestartClaimInput {
   targetRoot: string;
   targetApps?: string[];
   targetScripts?: Record<string, string>;
+  runtimeExpectations?: Record<string, RuntimeExpectation>;
   now?: number;
 }
 
@@ -125,11 +136,11 @@ export class RestartStore {
       INSERT OR IGNORE INTO restart_requests (
         request_id, kind, status, created_at, updated_at, attempted_at, attempt_count,
         requester_bot, requester_chat, source, reason, resume, target_root,
-        target_apps_json, target_scripts_json, old_runtime_pid, runtime_pid,
+        target_apps_json, target_scripts_json, runtime_expectations_json, old_runtime_pid, runtime_pid,
         startup_healthy_at, process_list_saved_at, health_error, report_claimed_at,
         reported_at, report_outcome, recovery_owner, continuation_key,
         continuation_task_id, continuation_decided_at
-      ) VALUES (?, ?, 'claimed', ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?,
+      ) VALUES (?, ?, 'claimed', ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
     `).run(
       input.requestId,
@@ -144,6 +155,7 @@ export class RestartStore {
       targetRoot,
       JSON.stringify(targetApps),
       JSON.stringify(targetScripts),
+      JSON.stringify(normalizeRuntimeExpectations(input.runtimeExpectations ?? {}, targetApps)),
     );
     const record = this.get(input.requestId);
     if (!record) throw new Error(`Restart request claim disappeared: ${input.requestId}`);
@@ -296,6 +308,7 @@ export class RestartStore {
         target_root TEXT NOT NULL,
         target_apps_json TEXT NOT NULL,
         target_scripts_json TEXT NOT NULL,
+        runtime_expectations_json TEXT NOT NULL DEFAULT '{}',
         old_runtime_pid INTEGER,
         runtime_pid INTEGER,
         startup_healthy_at INTEGER,
@@ -312,6 +325,10 @@ export class RestartStore {
       CREATE INDEX IF NOT EXISTS restart_requests_updated_idx
         ON restart_requests(updated_at);
     `);
+    const columns = this.db.pragma('table_info(restart_requests)') as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'runtime_expectations_json')) {
+      this.db.exec("ALTER TABLE restart_requests ADD COLUMN runtime_expectations_json TEXT NOT NULL DEFAULT '{}'");
+    }
   }
 }
 
@@ -360,6 +377,7 @@ function rowToRecord(row: RestartRequestRow): RestartRequestRecord {
     targetRoot: row.target_root,
     targetApps: JSON.parse(row.target_apps_json) as string[],
     targetScripts: JSON.parse(row.target_scripts_json) as Record<string, string>,
+    runtimeExpectations: JSON.parse(row.runtime_expectations_json || '{}') as Record<string, RuntimeExpectation>,
     ...(row.old_runtime_pid != null ? { oldRuntimePid: row.old_runtime_pid } : {}),
     ...(row.runtime_pid != null ? { runtimePid: row.runtime_pid } : {}),
     ...(row.startup_healthy_at != null ? { startupHealthyAt: row.startup_healthy_at } : {}),
@@ -390,6 +408,33 @@ function normalizeTargetScripts(input: Record<string, string>): Record<string, s
   return Object.fromEntries(entries.map(([app, script]) => {
     if (!app || !script) throw new Error('targetScripts contains an empty app or script');
     return [app, resolve(script)];
+  }));
+}
+
+function normalizeRuntimeExpectations(
+  input: Record<string, RuntimeExpectation>,
+  targetApps: string[],
+): Record<string, RuntimeExpectation> {
+  const entries = Object.entries(input);
+  if (entries.length === 0) return {};
+  if (entries.length !== targetApps.length || entries.some(([app]) => !targetApps.includes(app))) {
+    throw new Error('runtimeExpectations must match targetApps exactly');
+  }
+  return Object.fromEntries(entries.map(([app, value]) => {
+    if (!value || typeof value !== 'object') throw new Error(`Invalid runtime expectation for ${app}`);
+    const envHashes = Object.fromEntries(Object.entries(value.envHashes ?? {}).map(([key, hash]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !/^[a-f0-9]{64}$/.test(hash)) {
+        throw new Error(`Invalid runtime environment fingerprint for ${app}`);
+      }
+      return [key, hash];
+    }));
+    return [app, {
+      cwd: resolveRequiredPath(value.cwd, `${app}.cwd`),
+      script: resolveRequiredPath(value.script, `${app}.script`),
+      interpreter: bounded(value.interpreter) || 'node',
+      interpreterArgs: (value.interpreterArgs ?? []).map((arg) => String(arg).slice(0, MAX_TEXT_LENGTH)),
+      envHashes,
+    }];
   }));
 }
 

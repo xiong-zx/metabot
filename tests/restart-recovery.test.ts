@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +15,7 @@ const {
   loadRestartBreadcrumb,
   writeRestartBreadcrumb,
 } = await import('../src/bridge/restart-notice.js');
-const { finalizeControlledRestartAfterStartup } = await import('../src/bridge/restart-recovery.js');
+const { finalizeControlledRestartAfterStartup, validatePm2RuntimeExpectations } = await import('../src/bridge/restart-recovery.js');
 
 function logger(): Logger {
   return {
@@ -62,6 +63,47 @@ function recoveryFixture(chatId = 'chat-user-1', resume = true) {
 beforeEach(() => clearRestartBreadcrumb());
 
 describe('controlled restart startup finalization', () => {
+  it('rejects stale interpreter, arguments, and secret-safe environment fingerprints', () => {
+    const kit = recoveryFixture();
+    const base = kit.store.get('restart-recovery')!;
+    const expected = {
+      ...base,
+      runtimeExpectations: {
+        metabot: {
+          cwd: '/srv/metabot',
+          script: '/srv/metabot/src/index.ts',
+          interpreter: 'node',
+          interpreterArgs: ['--import', 'tsx'],
+          envHashes: {
+            HTTP_PROXY: createHash('sha256').update('http://proxy.invalid:7890').digest('hex'),
+          },
+        },
+      },
+    };
+    const row = {
+      name: 'metabot',
+      pm2_env: {
+        status: 'online',
+        pm_cwd: '/srv/metabot',
+        pm_exec_path: '/srv/metabot/src/index.ts',
+        exec_interpreter: 'node',
+        node_args: ['--import', 'tsx'],
+        env: { HTTP_PROXY: 'http://proxy.invalid:7890' },
+      },
+    };
+    expect(() => validatePm2RuntimeExpectations(expected, [row])).not.toThrow();
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, exec_interpreter: 'bash' },
+    }])).toThrow(/interpreter/);
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, node_args: ['--import', 'wrong'] },
+    }])).toThrow(/arguments/);
+    expect(() => validatePm2RuntimeExpectations(expected, [{
+      ...row, pm2_env: { ...row.pm2_env, env: { HTTP_PROXY: 'http://stale.invalid:7890' } },
+    }])).toThrow(/HTTP_PROXY/);
+    kit.store.close();
+  });
+
   it('orders startup health before PM2 save and durable healthy state, then continues exactly once', async () => {
     const kit = recoveryFixture();
     const events: string[] = [];

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
 import * as path from 'node:path';
@@ -244,29 +245,70 @@ async function checkRestartStartupHealth(record: RestartRequestRecord): Promise<
 
     const listed = await runProcess('pm2', ['jlist'], PROCESS_TIMEOUT_MS);
     if (listed.code !== 0) throw new Error(`pm2 jlist failed: ${listed.stderr || `exit ${listed.code}`}`);
-    const rows = JSON.parse(listed.stdout || '[]') as Array<{
-      name?: string;
-      pm2_env?: Record<string, unknown> & { status?: string; pm_cwd?: string; pm_exec_path?: string; METABOT_HOME?: string };
-    }>;
-    for (const appName of record.targetApps) {
-      const app = rows.find((row) => row.name === appName);
-      const env = app?.pm2_env;
-      const expectedScript = record.targetScripts[appName];
-      if (!env || env.status !== 'online') throw new Error(`PM2 app ${appName} is not online`);
-      if (path.resolve(env.pm_cwd || '') !== record.targetRoot) {
-        throw new Error(`PM2 app ${appName} cwd does not match the controlled target`);
-      }
-      if (!expectedScript || path.resolve(env.pm_exec_path || '') !== path.resolve(expectedScript)) {
-        throw new Error(`PM2 app ${appName} script does not match the controlled target`);
-      }
-      if (typeof env.METABOT_HOME === 'string' && path.resolve(env.METABOT_HOME) !== record.targetRoot) {
-        throw new Error(`PM2 app ${appName} METABOT_HOME does not match the controlled target`);
-      }
-    }
+    const rows = JSON.parse(listed.stdout || '[]') as Pm2RuntimeRow[];
+    validatePm2RuntimeExpectations(record, rows);
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+interface Pm2RuntimeRow {
+  name?: string;
+  pm2_env?: Record<string, unknown> & {
+    status?: string;
+    pm_cwd?: string;
+    pm_exec_path?: string;
+    exec_interpreter?: string;
+    interpreter?: string;
+    node_args?: unknown;
+    interpreter_args?: unknown;
+    env?: Record<string, unknown>;
+  };
+}
+
+export function validatePm2RuntimeExpectations(record: RestartRequestRecord, rows: Pm2RuntimeRow[]): void {
+  for (const appName of record.targetApps) {
+    const app = rows.find((row) => row.name === appName);
+    const env = app?.pm2_env;
+    const expectation = record.runtimeExpectations[appName];
+    const expectedCwd = expectation?.cwd || record.targetRoot;
+    const expectedScript = expectation?.script || record.targetScripts[appName];
+    if (!env || env.status !== 'online') throw new Error(`PM2 app ${appName} is not online`);
+    if (path.resolve(env.pm_cwd || '') !== path.resolve(expectedCwd)) {
+      throw new Error(`PM2 app ${appName} cwd does not match the controlled target`);
+    }
+    if (!expectedScript || path.resolve(env.pm_exec_path || '') !== path.resolve(expectedScript)) {
+      throw new Error(`PM2 app ${appName} script does not match the controlled target`);
+    }
+    if (!expectation) continue;
+
+    const interpreter = String(env.exec_interpreter || env.interpreter || 'node');
+    if (interpreter !== expectation.interpreter) {
+      throw new Error(`PM2 app ${appName} interpreter does not match the controlled plan`);
+    }
+    const interpreterArgs = normalizeStringArray(env.node_args ?? env.interpreter_args);
+    if (JSON.stringify(interpreterArgs) !== JSON.stringify(expectation.interpreterArgs)) {
+      throw new Error(`PM2 app ${appName} interpreter arguments do not match the controlled plan`);
+    }
+    const processEnv = env.env && typeof env.env === 'object' ? env.env : env;
+    for (const [key, expectedHash] of Object.entries(expectation.envHashes)) {
+      const actual = processEnv[key];
+      if (actual === undefined || actual === null || fingerprint(actual) !== expectedHash) {
+        throw new Error(`PM2 app ${appName} environment fingerprint mismatch for ${key}`);
+      }
+    }
+  }
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((entry) => String(entry));
+  if (value === undefined || value === null || value === '') return [];
+  return [String(value)];
+}
+
+function fingerprint(value: unknown): string {
+  return createHash('sha256').update(String(value)).digest('hex');
 }
 
 async function persistPm2ProcessList(): Promise<void> {

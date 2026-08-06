@@ -6,6 +6,7 @@ import {
   assertRestartRequestId,
   defaultTargetScripts,
   type RestartKind,
+  type RuntimeExpectation,
 } from './restart-store.js';
 import { clearRestartBreadcrumb, writeRestartBreadcrumb } from '../bridge/restart-notice.js';
 
@@ -61,6 +62,16 @@ function boolean(flags: Map<string, string>, name: string, fallback: boolean): b
   throw new Error(`--${name} must be true or false`);
 }
 
+function runtimeExpectations(flags: Map<string, string>): Record<string, RuntimeExpectation> | undefined {
+  const value = optional(flags, 'expectations-json');
+  if (!value) return undefined;
+  const parsed = JSON.parse(value) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--expectations-json must be a JSON object');
+  }
+  return parsed as Record<string, RuntimeExpectation>;
+}
+
 export function runRestartStateCli(argv = process.argv.slice(2)): unknown {
   const { positionals, flags } = parseArgs(argv);
   const command = positionals[0];
@@ -105,6 +116,7 @@ export function runRestartStateCli(argv = process.argv.slice(2)): unknown {
         targetRoot,
         targetApps,
         targetScripts: defaultTargetScripts(targetRoot, targetApps),
+        runtimeExpectations: runtimeExpectations(flags),
       });
     }
     if (command === 'mark-restarting') {

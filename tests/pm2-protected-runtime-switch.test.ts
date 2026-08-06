@@ -37,7 +37,7 @@ module.exports = {
     const conf = payload.env;
     const env = conf.current_conf?.env || conf.env || conf;
     row.pid += 100;
-    row.pm2_env = { ...env, status: 'online', pm_cwd: conf.pm_cwd, pm_exec_path: conf.pm_exec_path };
+    row.pm2_env = { ...env, status: 'online', pm_cwd: conf.pm_cwd, pm_exec_path: conf.pm_exec_path, exec_interpreter: conf.exec_interpreter, node_args: conf.node_args };
     write(rows);
     callback(env.FAKE_SWITCH_FAILURE === 'true' ? new Error('injected restart failure') : null);
   }},
@@ -81,6 +81,8 @@ function makeRuntime(root: string, label: string): void {
     name: app,
     script: `${app}.cjs`,
     cwd: root,
+    interpreter: 'node',
+    interpreter_args: label === 'source' ? '--no-warnings' : '--trace-warnings',
     env: {
       RUNTIME_LABEL: label,
       ...(label === 'source' ? {
@@ -133,6 +135,13 @@ describe('protected PM2 runtime switch helper', () => {
     const result = JSON.parse(stdout);
     expect(result.apps.map((entry: { app: string }) => entry.app)).toEqual(APPS);
     expect(stdout).not.toContain('must-not-be-printed');
+    expect(result.expectations.metabot).toMatchObject({
+      cwd: kit.target,
+      script: join(kit.target, 'metabot.cjs'),
+      interpreter: 'node',
+      interpreterArgs: ['--trace-warnings'],
+    });
+    expect(result.expectations.metabot.envHashes.API_SECRET).toMatch(/^[a-f0-9]{64}$/);
 
     const rows = JSON.parse(readFileSync(kit.stateFile, 'utf8'));
     expect(rows).toHaveLength(3);
@@ -150,8 +159,22 @@ describe('protected PM2 runtime switch helper', () => {
         no_proxy: 'source.internal',
         SESSION_STORE_DIR: '/var/lib/metabot-state',
         METABOT_HOME: kit.target,
+        exec_interpreter: 'node',
+        node_args: ['--trace-warnings'],
       });
     }
+  });
+
+  it('plans secret-safe expectations without changing PM2 state', () => {
+    const kit = makeHarness();
+    const before = readFileSync(kit.stateFile, 'utf8');
+    const stdout = execFileSync(process.execPath, [
+      HELPER, '--runtime', kit.target, '--apps', APPS.join(','), '--plan-only', 'true',
+    ], { env: kit.env, encoding: 'utf8' });
+    const plan = JSON.parse(stdout);
+    expect(plan.metabot.envHashes.API_SECRET).toMatch(/^[a-f0-9]{64}$/);
+    expect(stdout).not.toContain('must-not-be-printed');
+    expect(readFileSync(kit.stateFile, 'utf8')).toBe(before);
   });
 
   it('rolls back the failing app and every earlier switched app without deleting entries', () => {

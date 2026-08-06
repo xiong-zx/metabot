@@ -58,8 +58,10 @@ does not repeat the PM2 action.
 The old Bridge process writes an atomic breadcrumb and a transactional SQLite
 request record, then changes only the registered `metabot` process in place.
 The new Bridge verifies its HTTP health, both execution-daemon wire probes,
-and the expected PM2 cwd/script before it runs `pm2 save --force` and marks the
-request healthy. The breadcrumb is retained until reporting and continuation
+and the expected PM2 cwd, script, interpreter, interpreter arguments, and
+environment before it runs `pm2 save --force` and marks the request healthy.
+Environment values, including credentials and proxy settings, are stored in
+the restart ledger only as SHA-256 fingerprints. The breadcrumb is retained until reporting and continuation
 ownership are recorded, preventing a recovered session from starting a
 restart loop.
 
