@@ -15,7 +15,14 @@ import type {
   WorkerRecord,
   WorkerServiceConfig,
 } from './types.js';
-import { TRUSTED_PRINCIPAL_ROLES, WORKER_ENGINES, WORKER_MUTATING_ROLES, WorkerRunnerError } from './types.js';
+import {
+  TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+  TRUSTED_PRINCIPAL_ROLES,
+  WORKER_ENGINES,
+  WORKER_MUTATING_ROLES,
+  WorkerRunnerError,
+} from './types.js';
 import type { WorkerStore } from './store.js';
 
 interface ActiveJob {
@@ -522,8 +529,16 @@ export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefine
   if (!TRUSTED_PRINCIPAL_ROLES.includes(principal.role)) {
     throw new WorkerRunnerError('Trusted principal role is not recognized', 'FORBIDDEN');
   }
-  const botName = normalizeNonempty(principal.botName, 'principal.botName', 200);
-  const chatId = normalizeNonempty(principal.chatId, 'principal.chatId', 500);
+  const botName = normalizeNonempty(
+    principal.botName,
+    'principal.botName',
+    TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  );
+  const chatId = normalizeNonempty(
+    principal.chatId,
+    'principal.chatId',
+    TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+  );
   if (chatId.toLowerCase().startsWith('team:')) {
     throw new WorkerRunnerError('Agent Team chats cannot be trusted Worker Runner principals', 'FORBIDDEN');
   }

@@ -534,6 +534,7 @@ cmd_doctor() {
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -643,6 +644,105 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       "Package builds should include .metabot-package/manifest.json; package default env may include .metabot-package/default.env.",
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
+
+keys_dir = Path(env("METABOT_KEYS_DIR", str(Path.home() / ".metabot" / "keys"))).expanduser()
+key_names = ("worker-capability", "arc-capability", "worker-callback", "arc-callback")
+current_uid = os.geteuid() if hasattr(os, "geteuid") else None
+
+def key_node_type(file_stat):
+    mode = file_stat.st_mode
+    if stat.S_ISLNK(mode): return "symbolic-link"
+    if stat.S_ISREG(mode): return "regular-file"
+    if stat.S_ISDIR(mode): return "directory"
+    if stat.S_ISFIFO(mode): return "fifo"
+    if stat.S_ISSOCK(mode): return "socket"
+    if stat.S_ISBLK(mode): return "block-device"
+    if stat.S_ISCHR(mode): return "character-device"
+    return "unknown"
+
+def key_path_data(path, expected_mode, expected_type):
+    try:
+        file_stat = os.lstat(path)
+        mode = stat.S_IMODE(file_stat.st_mode)
+        is_symlink = stat.S_ISLNK(file_stat.st_mode)
+        node_type = key_node_type(file_stat)
+        node_type_ok = (not is_symlink) and (
+            stat.S_ISDIR(file_stat.st_mode) if expected_type == "directory"
+            else stat.S_ISREG(file_stat.st_mode)
+        )
+        return {
+            "path": str(path),
+            "exists": True,
+            "isSymlink": is_symlink,
+            "nodeType": node_type,
+            "nodeTypeOk": node_type_ok,
+            "mode": oct(mode),
+            "permissionsOk": mode == expected_mode,
+            "ownerUid": file_stat.st_uid,
+            "ownerMatches": current_uid is None or file_stat.st_uid == current_uid,
+        }
+    except (FileNotFoundError, NotADirectoryError):
+        return {"path": str(path), "exists": False, "nodeTypeOk": False, "permissionsOk": False, "ownerMatches": False}
+    except Exception as e:
+        return {"path": str(path), "exists": True, "nodeTypeOk": False, "permissionsOk": False, "ownerMatches": False, "error": str(e)}
+
+def safe_key_path(data):
+    return all((data.get("exists"), data.get("nodeTypeOk"), data.get("permissionsOk"), data.get("ownerMatches")))
+
+key_dir_data = key_path_data(keys_dir, 0o700, "directory")
+key_pairs = []
+pair_check_source = """
+const c=require('node:crypto'),f=require('node:fs');
+const nofollow=typeof f.constants.O_NOFOLLOW==='number'?f.constants.O_NOFOLLOW:0;
+const nonblock=typeof f.constants.O_NONBLOCK==='number'?f.constants.O_NONBLOCK:0;
+function readKey(path){
+  const fd=f.openSync(path,f.constants.O_RDONLY|nofollow|nonblock);
+  try { const s=f.fstatSync(fd); if(!s.isFile()) throw new Error('unsafe key node type'); return f.readFileSync(fd); }
+  finally { f.closeSync(fd); }
+}
+const b=Buffer.from('metabot-ed25519-keypair-check-v1');
+const s=c.sign(null,b,readKey(process.argv[1]));
+process.exit(c.verify(null,b,readKey(process.argv[2]),s)?0:1);
+"""
+for key_name in key_names:
+    private_data = key_path_data(keys_dir / f"{key_name}.key", 0o600, "regular-file")
+    public_data = key_path_data(keys_dir / f"{key_name}.pub", 0o600, "regular-file")
+    previous_data = key_path_data(keys_dir / f"{key_name}.pub.prev", 0o600, "regular-file")
+    pair_result = {"ok": False, "stderr": "missing key file"}
+    if safe_key_path(key_dir_data) and safe_key_path(private_data) and safe_key_path(public_data):
+        pair_result = run([
+            "node", "-e", pair_check_source,
+            private_data["path"], public_data["path"],
+        ], timeout=3)
+    previous_ok = (not previous_data["exists"]) or safe_key_path(previous_data)
+    pair_ok = all((
+        safe_key_path(private_data), safe_key_path(public_data),
+        previous_ok, pair_result["ok"],
+    ))
+    key_pairs.append({
+        "name": key_name,
+        "ok": pair_ok,
+        "pairMatches": pair_result["ok"],
+        "privateKey": private_data,
+        "publicKey": public_data,
+        "previousPublicKey": previous_data,
+        **({"pairError": pair_result["stderr"]} if not pair_result["ok"] else {}),
+    })
+execution_keys_ok = bool(
+    safe_key_path(key_dir_data)
+    and all(pair["ok"] for pair in key_pairs)
+)
+check("execution_keys", execution_keys_ok,
+      "execution_keys_unavailable_or_unsafe" if not execution_keys_ok else "ok",
+      "All execution keypairs are present, owner-matched, mode-safe, and corresponding." if execution_keys_ok else "Execution key material is missing, unsafe, or mismatched; worker/ARC capabilities and callbacks fail closed.",
+      "Re-run install.sh to create missing TOFU keypairs; repair partial/mismatched ownership or permissions manually without replacing trusted keys.",
+      False,
+      {
+          "path": str(keys_dir),
+          "trustModel": "TOFU scope hygiene; not containment against arbitrary same-UID code",
+          "directory": key_dir_data,
+          "pairs": key_pairs,
+      })
 
 pm2 = shutil.which("pm2")
 pm2_data = {"installed": bool(pm2)}

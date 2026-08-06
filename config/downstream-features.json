@@ -31,6 +31,7 @@
         "src/workers",
         "src/api/routes/research-memory",
         "src/engines",
+        "src/bridge",
         "@xvirobotics/worker-runner-mcp"
       ]
     },

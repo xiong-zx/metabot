@@ -54,6 +54,8 @@ Set `BOTS_CONFIG=./bots.json` in `.env`:
 | `model` | No | Engine default | Session model override |
 | `visible` | No | `true` | Register the bot for Agent Bus discovery |
 | `memoryPublic` | No | sticky/default policy | Pin the bot's default memory visibility when explicitly set |
+| `workerTools` | No | `false` | Security-relevant opt-in to mint Worker Runner capabilities for this bot's non-Team `pm`/`user` chats |
+| `arcTools` | No | `false` | Security-relevant opt-in to mint ARC capabilities for this bot's non-Team `pm`/`user` chats |
 | `maxTurns` / `maxBudgetUsd` | No | unlimited | Claude compatibility limits |
 | `outputsBaseDir` | No | temporary user directory | Files automatically returned to chat |
 
@@ -144,6 +146,11 @@ personal-edition bots default to Codex when `engine` is omitted.
 - Feishu reply modes persist per bot and group.
 - Agent Teams and the Agent Bus can coordinate bots running different engines.
 - Environment variables provide defaults; explicit `bots.json` fields win.
+- `workerTools` and `arcTools` are authorization settings, not convenience
+  switches. Non-Team chats fall back to the `user` role, so the per-bot flag is
+  the effective dispatch boundary. Agent Team `manager`/`agent` chats never
+  receive these capabilities. Capability minting alone does not install MCP
+  tools; engine-side materialization must independently enforce the same flag.
 
 When `BOTS_CONFIG` is set, single-bot `FEISHU_APP_ID` and
 `FEISHU_APP_SECRET` are ignored.

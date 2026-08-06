@@ -15,6 +15,8 @@ export type TerminalWorkerStatus = Exclude<WorkerStatus, 'queued' | 'running'>;
 
 export const TRUSTED_PRINCIPAL_ROLES = ['admin', 'user', 'pm', 'manager', 'agent', 'worker'] as const;
 export type TrustedPrincipalRole = (typeof TRUSTED_PRINCIPAL_ROLES)[number];
+export const TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH = 200;
+export const TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH = 500;
 
 export const WORKER_MUTATING_ROLES = ['admin', 'user', 'pm'] as const;
 export type WorkerMutatingRole = (typeof WORKER_MUTATING_ROLES)[number];

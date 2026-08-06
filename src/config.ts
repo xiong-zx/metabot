@@ -92,6 +92,10 @@ export interface BotConfigBase {
    * the bridge re-asserts it on every bulk-register.
    */
   memoryPublic?: boolean;
+  /** Security-relevant opt-in for Worker Runner tools in pm/user chats. Default off. */
+  workerTools?: boolean;
+  /** Security-relevant opt-in for ARC tools in pm/user chats. Default off. */
+  arcTools?: boolean;
   /** Agent engine. Defaults to 'codex' unless METABOT_ENGINE or bots.json overrides it. */
   engine?: EngineName;
   claude: {
@@ -307,6 +311,9 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
+  /** Security-relevant opt-ins; omitted/false means no capability is minted. */
+  workerTools?: boolean;
+  arcTools?: boolean;
   /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
   backend?: 'sdk' | 'pty';
 }
@@ -352,6 +359,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -403,6 +411,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -449,6 +458,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -483,6 +493,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -491,6 +502,13 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
       botToken: entry.wechatBotToken,
     },
     claude: buildClaudeConfig(entry),
+  };
+}
+
+function executionToolOptIns(entry: EngineJsonFields): Pick<BotConfigBase, 'workerTools' | 'arcTools'> {
+  return {
+    ...(entry.workerTools !== undefined ? { workerTools: entry.workerTools } : {}),
+    ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
   };
 }
 

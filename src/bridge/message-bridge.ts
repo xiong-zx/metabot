@@ -265,7 +265,7 @@ export class MessageBridge {
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
   private agentTeamStore?: AgentTeamStore;
-  private agentTeamExecutionEnvProvider?: (input: { botName: string; chatId: string }) => Record<string, string>;
+  private executionEnvProvider?: (input: { botName: string; chatId: string }) => Record<string, string>;
   /**
    * Periodic sweep that evicts stale per-chat between-turn bookkeeping as a
    * safety net behind the event-driven `executor-removed` cleanup. Cleared in
@@ -455,10 +455,10 @@ export class MessageBridge {
   }
 
   /** Inject bridge-owned, per-session credentials without exposing their signing key. */
-  setAgentTeamExecutionEnvProvider(
+  setExecutionEnvProvider(
     provider: (input: { botName: string; chatId: string }) => Record<string, string>,
   ): void {
-    this.agentTeamExecutionEnvProvider = provider;
+    this.executionEnvProvider = provider;
   }
 
   /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
@@ -1414,7 +1414,7 @@ export class MessageBridge {
     },
   ): Promise<ExecutionHandle> {
     const session = this.sessionManager.getSession(chatId);
-    const executionEnv = this.agentTeamExecutionEnvProvider?.({ botName: this.config.name, chatId });
+    const executionEnv = this.executionEnvProvider?.({ botName: this.config.name, chatId });
     // Persistent only applies to Claude. Options that need per-turn binding
     // (maxTurns / allowedTools) aren't plumbed through the persistent path yet,
     // so fall back to legacy spawn when they're present — matches the gating

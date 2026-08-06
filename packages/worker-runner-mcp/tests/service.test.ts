@@ -8,9 +8,14 @@ import {
   verifyTerminalCallback,
   WORKER_TERMINAL_CALLBACK_MAX_BYTES,
 } from '../src/notifier.js';
-import { WorkerService } from '../src/service.js';
+import { normalizeTrustedPrincipal, WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
-import type { DispatchWorkerInput, ScopedDispatchWorkerInput } from '../src/types.js';
+import {
+  TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+  type DispatchWorkerInput,
+  type ScopedDispatchWorkerInput,
+} from '../src/types.js';
 import { FakeProcessRunner, PM_PRINCIPAL, RecordingNotifier, SUCCESS_RESULT } from './helpers.js';
 
 const dirs: string[] = [];
@@ -48,6 +53,18 @@ describe('WorkerService pinned authority and lifecycle', () => {
     });
     services.push(readOnly);
     expect(readOnly.list()).toEqual([]);
+  });
+
+  it('accepts 200/500 trusted principals and rejects 201/501', () => {
+    const botName = 'b'.repeat(TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH);
+    const chatId = 'c'.repeat(TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH);
+    expect(normalizeTrustedPrincipal({ role: 'pm', botName, chatId })).toEqual({
+      role: 'pm', botName, chatId,
+    });
+    expect(() => normalizeTrustedPrincipal({ role: 'pm', botName: `${botName}x`, chatId }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }));
+    expect(() => normalizeTrustedPrincipal({ role: 'pm', botName, chatId: `${chatId}x` }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }));
   });
 
   it('persists queued before spawn and transitions to running only with a launch identity', async () => {

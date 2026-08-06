@@ -21,6 +21,9 @@ import type { AgentTeamStore } from '../../agent-teams/team-store.js';
 import type { AgentTeamSupervisor } from '../../agent-teams/team-supervisor.js';
 import type { AgentTeamGovernanceExtension } from '../../agent-teams/governance-extension.js';
 import type { AgentTeamExecutionPrincipal } from '../../agent-teams/governance-capability.js';
+import type { ExecutionCapabilityService } from '../../services/execution-capabilities.js';
+import type { TerminalEventDispatcher, TerminalEventStore } from '../../services/terminal-event-store.js';
+import type { TerminalEventRateLimiter } from './worker-events-routes.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -45,6 +48,10 @@ export interface RouteContext {
   agentTeamSupervisor?: AgentTeamSupervisor;
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
+  executionCapabilityService?: ExecutionCapabilityService;
+  terminalEventStore?: TerminalEventStore;
+  terminalEventDispatcher?: TerminalEventDispatcher;
+  terminalEventRateLimiter?: TerminalEventRateLimiter;
 }
 
 /**

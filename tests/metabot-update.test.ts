@@ -4,12 +4,27 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { provisionExecutionKeyPairs } from '../src/services/execution-capabilities.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const METABOT_BIN = path.join(REPO_ROOT, 'bin', 'metabot');
 
 function makeTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-update-test-'));
+}
+
+function installerKeyProvisioner(): string {
+  const installer = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf8');
+  const match = /METABOT_KEYS_DIR=.*? node <<'NODE'\n([\s\S]*?)\nNODE\nsuccess "Execution trust keys ready/.exec(installer);
+  if (!match) throw new Error('Unable to locate install.sh execution-key provisioner');
+  return match[1];
+}
+
+function runInstallerKeyProvisioner(keysDir: string): void {
+  execFileSync(process.execPath, ['-e', installerKeyProvisioner()], {
+    env: { ...process.env, METABOT_KEYS_DIR: keysDir },
+    stdio: 'pipe',
+  });
 }
 
 describe('metabot update source selection', () => {
@@ -197,6 +212,93 @@ describe('metabot doctor command', () => {
     expect(source).toContain('"memories"');
     expect(source).toContain('"skillsDirExists"');
     expect(source).toContain('"mcpServerCount"');
+  });
+
+  it('checks out-of-runtime execution key ownership, modes, and key-pair correspondence', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('check("execution_keys"');
+    expect(source).toContain('METABOT_KEYS_DIR');
+    expect(source).toContain('pair_check_source');
+    expect(source).toContain('ownerMatches');
+    expect(source).toContain('os.lstat(path)');
+    expect(source).toContain('"isSymlink": is_symlink');
+    expect(source).toContain('"nodeTypeOk": node_type_ok');
+    expect(source).toContain('TOFU scope hygiene; not containment against arbitrary same-UID code');
+  });
+
+  it('reports a symlinked key as unsafe instead of a false green', () => {
+    const tmp = makeTempDir();
+    const home = path.join(tmp, 'home');
+    const keysDir = path.join(tmp, 'keys');
+    fs.mkdirSync(home, { mode: 0o700 });
+    provisionExecutionKeyPairs(keysDir);
+    const keyPath = path.join(keysDir, 'worker-capability.key');
+    const realPath = path.join(keysDir, 'worker-capability.key.real');
+    fs.renameSync(keyPath, realPath);
+    fs.symlinkSync(realPath, keyPath);
+
+    try {
+      const output = execFileSync('bash', [METABOT_BIN, 'doctor', '--json'], {
+        env: {
+          HOME: home,
+          PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+          METABOT_HOME: home,
+          METABOT_KEYS_DIR: keysDir,
+          METABOT_URL: 'http://127.0.0.1:1',
+          METABOT_CORE_URL: 'http://127.0.0.1:1',
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const report = JSON.parse(output) as {
+        checks: Array<{ name: string; ok: boolean; data: any }>;
+      };
+      const keyCheck = report.checks.find((check) => check.name === 'execution_keys');
+      expect(keyCheck?.ok).toBe(false);
+      expect(keyCheck?.data.pairs[0].privateKey).toMatchObject({
+        exists: true,
+        isSymlink: true,
+        nodeType: 'symbolic-link',
+        nodeTypeOk: false,
+      });
+      expect(keyCheck?.data.pairs[0].pairMatches).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('installer execution-key provisioning', () => {
+  it('mirrors validate-before-mutate and no-follow rejection', () => {
+    const tmp = makeTempDir();
+    try {
+      const permissive = path.join(tmp, 'permissive');
+      fs.mkdirSync(permissive, { mode: 0o755 });
+      fs.chmodSync(permissive, 0o755);
+      expect(() => runInstallerKeyProvisioner(permissive)).toThrow();
+      expect(fs.lstatSync(permissive).mode & 0o777).toBe(0o755);
+
+      const target = path.join(tmp, 'target');
+      const linkedDir = path.join(tmp, 'linked-keys');
+      fs.mkdirSync(target, { mode: 0o700 });
+      fs.symlinkSync(target, linkedDir, 'dir');
+      expect(() => runInstallerKeyProvisioner(linkedDir)).toThrow();
+
+      const keysDir = path.join(tmp, 'keys');
+      provisionExecutionKeyPairs(keysDir);
+      const keyPath = path.join(keysDir, 'arc-capability.pub');
+      const realPath = path.join(keysDir, 'arc-capability.pub.real');
+      fs.renameSync(keyPath, realPath);
+      fs.symlinkSync(realPath, keyPath);
+      expect(() => runInstallerKeyProvisioner(keysDir)).toThrow();
+
+      const installer = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf8');
+      expect(installer).toContain('fs.lstatSync(file)');
+      expect(installer).toContain('fs.constants.O_NOFOLLOW');
+      expect(installer).toContain('unsafe ${label} node type');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
