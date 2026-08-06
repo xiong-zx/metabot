@@ -1,6 +1,6 @@
 {
   "name": "@xvirobotics/worker-runner-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone MCP server for durable one-shot Codex, Claude, and Kimi CLI workers",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,9 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "metabot-worker-runner-mcp": "dist/cli.js"
+    "metabot-worker-runner-mcp": "dist/cli.js",
+    "metabot-worker-runnerd": "dist/daemon-cli.js",
+    "metabot-worker-runner-proxy": "dist/proxy-cli.js"
   },
   "files": [
     "dist",

@@ -13,8 +13,11 @@ export const WORKER_STATUSES = [
 export type WorkerStatus = (typeof WORKER_STATUSES)[number];
 export type TerminalWorkerStatus = Exclude<WorkerStatus, 'queued' | 'running'>;
 
-export const TRUSTED_PRINCIPAL_ROLES = ['admin', 'user', 'pm'] as const;
+export const TRUSTED_PRINCIPAL_ROLES = ['admin', 'user', 'pm', 'manager', 'agent', 'worker'] as const;
 export type TrustedPrincipalRole = (typeof TRUSTED_PRINCIPAL_ROLES)[number];
+
+export const WORKER_MUTATING_ROLES = ['admin', 'user', 'pm'] as const;
+export type WorkerMutatingRole = (typeof WORKER_MUTATING_ROLES)[number];
 
 /** Trusted identity pinned by the process that starts this MCP server. */
 export interface TrustedPrincipal {
@@ -116,6 +119,18 @@ export interface CompletionNotification {
   eventId: string;
   eventType: 'worker.terminal';
   worker: Omit<WorkerRecord, 'prompt'>;
+}
+
+export interface TerminalCallbackEnvelope<TPayload = unknown> {
+  contract_version: 'metabot.terminal-callback.v1';
+  purpose: 'worker.terminal' | 'arc.terminal';
+  event_id: string;
+  bot_name: string;
+  chat_id: string;
+  status: string;
+  finished_at: number;
+  iat: number;
+  payload: TPayload;
 }
 
 export interface CompletionNotifier {

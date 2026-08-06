@@ -278,6 +278,19 @@ export class WorkerStore {
     return rows.map(fromRow);
   }
 
+  listScopes(): Array<{ botName: string; chatId: string }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT bot_name, chat_id FROM worker_jobs
+           WHERE status IN ('queued', 'running')
+              OR notification_state IN ('pending', 'sending', 'failed')
+           ORDER BY bot_name, chat_id`,
+        )
+        .all() as Array<{ bot_name: string; chat_id: string }>
+    ).map((row) => ({ botName: row.bot_name, chatId: row.chat_id }));
+  }
+
   listRestartCandidates(botName: string, chatId: string): WorkerRecord[] {
     const rows = this.db
       .prepare(
@@ -460,11 +473,15 @@ export class WorkerStore {
 
 function shouldReuseDedupe(existing: WorkerRecord, input: ScopedDispatchWorkerInput, now: number): boolean {
   if (existing.status === 'queued' || existing.status === 'running') return true;
+  // A caller that declares retryTerminal=false is asking for durable
+  // idempotence, not merely a longer successful-result cache. This must win
+  // over the completed-result TTL or a late retry could launch twice.
+  if (!input.dedupePolicy.retryTerminal) return true;
   if (existing.status === 'completed') {
     const terminalAt = existing.finishedAt ?? existing.createdAt;
     return input.dedupePolicy.completedTtlMs > 0 && now - terminalAt < input.dedupePolicy.completedTtlMs;
   }
-  return !input.dedupePolicy.retryTerminal;
+  return false;
 }
 
 function isTerminal(status: WorkerRecord['status']): boolean {

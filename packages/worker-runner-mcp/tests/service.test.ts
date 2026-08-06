@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
-import type { DispatchWorkerInput, ScopedDispatchWorkerInput, TrustedPrincipal } from '../src/types.js';
+import type { DispatchWorkerInput, ScopedDispatchWorkerInput } from '../src/types.js';
 import { FakeProcessRunner, PM_PRINCIPAL, RecordingNotifier, SUCCESS_RESULT } from './helpers.js';
 
 const dirs: string[] = [];
@@ -25,7 +25,7 @@ describe('WorkerService pinned authority and lifecycle', () => {
     );
   });
 
-  it('rejects Team principals and roles outside admin/user/pm', () => {
+  it('rejects Team principals while accepting low-privilege read-only roles', () => {
     const { store } = makeStore();
     expect(
       () =>
@@ -35,14 +35,13 @@ describe('WorkerService pinned authority and lifecycle', () => {
           chatId: 'team:project:agent',
         }),
     ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
-    expect(
-      () =>
-        new WorkerService(store, new FakeProcessRunner(), new RecordingNotifier(), {
-          role: 'agent',
-          botName: 'bot-a',
-          chatId: 'chat-a',
-        } as unknown as TrustedPrincipal),
-    ).toThrowError(expect.objectContaining({ code: 'FORBIDDEN' }));
+    const readOnly = new WorkerService(store, new FakeProcessRunner(), new RecordingNotifier(), {
+      role: 'agent',
+      botName: 'bot-a',
+      chatId: 'chat-a',
+    });
+    services.push(readOnly);
+    expect(readOnly.list()).toEqual([]);
   });
 
   it('persists queued before spawn and transitions to running only with a launch identity', async () => {

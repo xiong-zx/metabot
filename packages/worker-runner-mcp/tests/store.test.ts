@@ -126,6 +126,28 @@ describe('WorkerStore', () => {
     });
   });
 
+  it('durably reuses a completed key beyond its TTL when retryTerminal is false', () => {
+    const { store, dir } = makeStore();
+    const noRetry = input(dir, {
+      dedupeKey: 'arc:v1:project:run',
+      dedupePolicy: { completedTtlMs: 1, retryTerminal: false },
+    });
+    store.createWorker('wrk-1', noRetry, 2, 0);
+    store.markRunning('wrk-1', 'launch-1', 100, 1, false);
+    store.markTerminal('wrk-1', {
+      status: 'completed',
+      expectedStatus: 'running',
+      expectedLaunchId: 'launch-1',
+      finishedAt: 2,
+      terminalReason: 'process_exit',
+    });
+
+    expect(store.createWorker('wrk-2', noRetry, 2, 10_000)).toMatchObject({
+      deduplicated: true,
+      worker: { id: 'wrk-1', status: 'completed' },
+    });
+  });
+
   it.each(['failed', 'aborted', 'timed_out', 'recovery_required'] as const)(
     'allows a dedupe retry after %s when retryTerminal is enabled',
     (status) => {
