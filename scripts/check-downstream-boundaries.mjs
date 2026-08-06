@@ -10,14 +10,19 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs',
 export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downstream-features.json', options = {}) {
   const root = path.resolve(repoRoot);
   const manifest = JSON.parse(fs.readFileSync(resolveInside(root, manifestPath), 'utf8'));
-  if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.features) || !Array.isArray(manifest.forbiddenPaths)) {
+  if (
+    manifest.schemaVersion !== 1 ||
+    !Array.isArray(manifest.features) ||
+    !Array.isArray(manifest.forbiddenPaths) ||
+    (manifest.reverseBoundaries !== undefined && !Array.isArray(manifest.reverseBoundaries))
+  ) {
     throw new Error('Unsupported downstream feature manifest');
   }
 
   const failures = [];
   const checkedFeatures = [];
   for (const forbiddenPath of manifest.forbiddenPaths) {
-    if (fs.existsSync(resolveInside(root, forbiddenPath))) failures.push(`forbidden path exists: ${forbiddenPath}`);
+    if (pathEntryExists(resolveInside(root, forbiddenPath))) failures.push(`forbidden path exists: ${forbiddenPath}`);
   }
 
   for (const feature of manifest.features) {
@@ -29,32 +34,118 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
       failures.push(`${feature.id}: planned feature is not allowed in release mode`);
     }
     const roots = Array.isArray(feature.roots) ? feature.roots : [];
-    const existingRoots = roots.filter((item) => fs.existsSync(resolveInside(root, item)));
-    for (const sourceRoot of existingRoots) {
-      const resolvedRoot = resolveInside(root, sourceRoot);
-      if (fs.lstatSync(resolvedRoot).isSymbolicLink()) {
-        throw new Error(`source root cannot be a symlink: ${resolvedRoot}`);
-      }
+    if (feature.status === 'required' && roots.length === 0) {
+      failures.push(`${feature.id}: required feature must declare non-empty roots`);
     }
+    if (roots.some((item) => typeof item !== 'string' || item.trim() === '')) {
+      failures.push(`${feature.id}: roots must contain non-empty relative paths`);
+      checkedFeatures.push({ id: feature.id, status: feature.status, presentRoots: 0 });
+      continue;
+    }
+    const existingRoots = roots.filter((item) => pathEntryExists(resolveInside(root, item)));
+    assertSourceRootsAreNotSymlinks(root, existingRoots);
     if (feature.status === 'required' && existingRoots.length !== roots.length) {
       const missing = roots.filter((item) => !existingRoots.includes(item));
       failures.push(`${feature.id}: missing required roots: ${missing.join(', ')}`);
     }
     if (existingRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
-      for (const sourceRoot of existingRoots) {
-        for (const file of walkSourceFiles(resolveInside(root, sourceRoot))) {
-          for (const specifier of collectModuleSpecifiers(file)) {
-            const forbidden = feature.forbiddenImports.find(
-              (item) => specifier === item || specifier.startsWith(`${item}/`) || specifier.includes(item),
-            );
-            if (forbidden) failures.push(`${feature.id}: ${relative(root, file)} imports forbidden '${specifier}'`);
-          }
-        }
-      }
+      scanForbiddenImports(root, feature.id, existingRoots, feature.forbiddenImports, failures);
     }
     checkedFeatures.push({ id: feature.id, status: feature.status, presentRoots: existingRoots.length });
   }
-  return { ok: failures.length === 0, failures, checkedFeatures };
+
+  const checkedReverseBoundaries = [];
+  for (const boundary of manifest.reverseBoundaries ?? []) {
+    if (!boundary || typeof boundary.id !== 'string') {
+      failures.push('reverse boundary entries require an id');
+      continue;
+    }
+    if (
+      !Array.isArray(boundary.roots) ||
+      boundary.roots.length === 0 ||
+      boundary.roots.some((item) => typeof item !== 'string' || item.trim() === '')
+    ) {
+      failures.push(`${boundary.id}: reverse boundary must declare non-empty roots`);
+      continue;
+    }
+    const existingRoots = boundary.roots.filter((item) => pathEntryExists(resolveInside(root, item)));
+    assertSourceRootsAreNotSymlinks(root, existingRoots);
+    if (existingRoots.length !== boundary.roots.length) {
+      const missing = boundary.roots.filter((item) => !existingRoots.includes(item));
+      failures.push(`${boundary.id}: missing reverse-boundary roots: ${missing.join(', ')}`);
+    }
+    if (!Array.isArray(boundary.forbiddenImports) || boundary.forbiddenImports.length === 0) {
+      failures.push(`${boundary.id}: reverse boundary must declare forbidden imports`);
+    } else if (existingRoots.length > 0) {
+      scanForbiddenImports(root, boundary.id, existingRoots, boundary.forbiddenImports, failures);
+    }
+    checkedReverseBoundaries.push({ id: boundary.id, presentRoots: existingRoots.length });
+  }
+
+  return { ok: failures.length === 0, failures, checkedFeatures, checkedReverseBoundaries };
+}
+
+function assertSourceRootsAreNotSymlinks(root, sourceRoots) {
+  for (const sourceRoot of sourceRoots) {
+    const resolvedRoot = resolveInside(root, sourceRoot);
+    if (fs.lstatSync(resolvedRoot).isSymbolicLink()) {
+      throw new Error(`source root cannot be a symlink: ${resolvedRoot}`);
+    }
+  }
+}
+
+function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, failures) {
+  if (forbiddenImports.some((item) => typeof item !== 'string' || item.trim() === '')) {
+    failures.push(`${boundaryId}: forbiddenImports must contain non-empty strings`);
+    return;
+  }
+  for (const sourceRoot of sourceRoots) {
+    for (const file of walkSourceFiles(resolveInside(root, sourceRoot))) {
+      for (const specifier of collectModuleSpecifiers(file)) {
+        const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
+        if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);
+      }
+    }
+  }
+}
+
+function matchesForbiddenImport(root, importingFile, specifier, forbiddenImport) {
+  if (isPackageBoundary(forbiddenImport)) {
+    return isBareSpecifier(specifier) && (specifier === forbiddenImport || specifier.startsWith(`${forbiddenImport}/`));
+  }
+  if (!isRelativeSpecifier(specifier)) return false;
+
+  const resolvedImport = stripSourceExtension(path.resolve(path.dirname(importingFile), specifier));
+  const resolvedBoundary = stripSourceExtension(resolveInside(root, forbiddenImport));
+  return resolvedImport === resolvedBoundary || resolvedImport.startsWith(`${resolvedBoundary}${path.sep}`);
+}
+
+function isPackageBoundary(forbiddenImport) {
+  return forbiddenImport.startsWith('@') || !forbiddenImport.includes('/');
+}
+
+function isBareSpecifier(specifier) {
+  return !isRelativeSpecifier(specifier) && !path.isAbsolute(specifier);
+}
+
+function isRelativeSpecifier(specifier) {
+  return specifier === '.' || specifier === '..' || specifier.startsWith('./') || specifier.startsWith('../');
+}
+
+function stripSourceExtension(file) {
+  return SOURCE_EXTENSIONS.has(path.extname(file)) ? file.slice(0, -path.extname(file).length) : file;
+}
+
+function pathEntryExists(file) {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ENOTDIR'].includes(error.code)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function collectModuleSpecifiers(file) {
@@ -69,6 +160,14 @@ function collectModuleSpecifiers(file) {
       ts.isStringLiteralLike(node.moduleSpecifier)
     ) {
       specifiers.push(node.moduleSpecifier.text);
+    }
+    if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      node.moduleReference.expression &&
+      ts.isStringLiteralLike(node.moduleReference.expression)
+    ) {
+      specifiers.push(node.moduleReference.expression.text);
     }
     if (
       ts.isCallExpression(node) &&
@@ -102,7 +201,7 @@ function walkSourceFiles(entry) {
 }
 
 function resolveInside(root, relativePath) {
-  if (typeof relativePath !== 'string' || path.isAbsolute(relativePath)) {
+  if (typeof relativePath !== 'string' || relativePath.trim() === '' || path.isAbsolute(relativePath)) {
     throw new Error(`manifest path must be relative: ${String(relativePath)}`);
   }
   const resolved = path.resolve(root, relativePath);
@@ -123,8 +222,11 @@ function main() {
   const rootArg = args.find((arg) => !arg.startsWith('-'));
   const result = checkDownstreamBoundaries(rootArg ?? process.cwd(), undefined, { release });
   if (json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  else if (result.ok) process.stdout.write(`Downstream boundaries OK (${result.checkedFeatures.length} features)\n`);
-  else process.stderr.write(`${result.failures.join('\n')}\n`);
+  else if (result.ok) {
+    process.stdout.write(
+      `Downstream boundaries OK (${result.checkedFeatures.length} features, ${result.checkedReverseBoundaries.length} reverse boundaries)\n`,
+    );
+  } else process.stderr.write(`${result.failures.join('\n')}\n`);
   if (!result.ok) process.exitCode = 1;
 }
 

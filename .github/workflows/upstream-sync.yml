@@ -6,20 +6,31 @@ on:
     - cron: '17 8 * * 1'
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: upstream-sync
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  validate:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      needed: ${{ steps.delta.outputs.needed }}
+      upstream_sha: ${{ steps.delta.outputs.upstream_sha }}
+      short_sha: ${{ steps.delta.outputs.short_sha }}
+      sync_branch: ${{ steps.delta.outputs.sync_branch }}
+      open_pr: ${{ steps.open_pr.outputs.exists }}
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch upstream
         run: |
@@ -30,21 +41,49 @@ jobs:
         id: delta
         shell: bash
         run: |
+          set -euo pipefail
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           else
+            upstream_sha="$(git rev-parse upstream/main)"
+            short_sha="$(git rev-parse --short=12 upstream/main)"
             echo 'needed=true' >> "$GITHUB_OUTPUT"
-            echo "sha=$(git rev-parse --short=12 upstream/main)" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+            echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+            echo "sync_branch=sync/upstream-$short_sha" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Merge upstream into a review branch
+      - name: Preserve an existing sync pull request
+        id: open_pr
         if: steps.delta.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.delta.outputs.sync_branch }}
         shell: bash
         run: |
-          branch="sync/upstream-${{ steps.delta.outputs.sha }}"
+          set -euo pipefail
+          count="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq 'length')"
+          if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+            echo "invalid open pull request count: '$count'" >&2
+            exit 1
+          fi
+          if (( count > 0 )); then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::An open pull request already owns $SYNC_BRANCH; leaving its branch untouched."
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into an unprivileged review candidate
+        if: steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
+        env:
+          SYNC_BRANCH: ${{ steps.delta.outputs.sync_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git switch -c "$branch"
+          git switch -c "$SYNC_BRANCH"
           set +e
           git merge --no-edit --no-ff upstream/main
           status=$?
@@ -53,41 +92,135 @@ jobs:
             git diff --name-only --diff-filter=U | tee upstream-sync-conflicts.txt
             exit "$status"
           fi
-          echo "SYNC_BRANCH=$branch" >> "$GITHUB_ENV"
 
       - name: Use Node.js 22.19.0
-        if: steps.delta.outputs.needed == 'true'
+        if: steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
         uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: npm
 
-      - name: Validate merged tree
-        if: steps.delta.outputs.needed == 'true'
+      - name: Validate merged tree without release-only policy
+        if: steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
         run: |
           npm ci
-          npm run check:downstream-boundaries:release
+          npm run check:downstream-boundaries
           npm test
           npm run build
 
-      - name: Push review branch
-        if: steps.delta.outputs.needed == 'true'
-        run: git push --force-with-lease origin "$SYNC_BRANCH"
-
-      - name: Open or reuse pull request
-        if: steps.delta.outputs.needed == 'true'
+      - name: Create validated candidate bundle
+        if: steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.delta.outputs.sync_branch }}
+        shell: bash
         run: |
-          gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number' | grep -q . || \
-            gh pr create --base main --head "$SYNC_BRANCH" \
-              --title "sync: merge upstream/main ${{ steps.delta.outputs.sha }}" \
-              --body "Automated upstream merge candidate. CI, downstream feature boundaries, and human review are required before merge."
+          set -euo pipefail
+          git bundle create "$RUNNER_TEMP/upstream-sync-candidate.bundle" "refs/heads/$SYNC_BRANCH" ^refs/heads/main
+          git bundle verify "$RUNNER_TEMP/upstream-sync-candidate.bundle"
 
-      - name: Upload conflict report
-        if: failure() && steps.delta.outputs.needed == 'true'
+      - name: Upload validated candidate
+        if: steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: upstream-sync-conflicts-${{ steps.delta.outputs.sha }}
+          name: upstream-sync-candidate-${{ steps.delta.outputs.short_sha }}
+          path: ${{ runner.temp }}/upstream-sync-candidate.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload conflict report
+        if: failure() && steps.delta.outputs.needed == 'true' && steps.open_pr.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-conflicts-${{ steps.delta.outputs.short_sha }}
           path: upstream-sync-conflicts.txt
           if-no-files-found: ignore
+
+  publish:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.validate.result == 'success' &&
+      needs.validate.outputs.needed == 'true' &&
+      needs.validate.outputs.open_pr != 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download validated candidate
+        uses: actions/download-artifact@v5
+        with:
+          name: upstream-sync-candidate-${{ needs.validate.outputs.short_sha }}
+          path: ${{ runner.temp }}/upstream-sync-candidate
+
+      - name: Push a new review branch and open its pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ needs.validate.outputs.sync_branch }}
+          UPSTREAM_SHA: ${{ needs.validate.outputs.upstream_sha }}
+          CANDIDATE_BUNDLE: ${{ runner.temp }}/upstream-sync-candidate/upstream-sync-candidate.bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$SYNC_BRANCH" =~ ^sync/upstream-[0-9a-f]{12}$ ]]; then
+            echo "invalid sync branch: '$SYNC_BRANCH'" >&2
+            exit 1
+          fi
+          if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "invalid upstream commit: '$UPSTREAM_SHA'" >&2
+            exit 1
+          fi
+
+          git bundle verify "$CANDIDATE_BUNDLE"
+          git fetch "$CANDIDATE_BUNDLE" "refs/heads/$SYNC_BRANCH:refs/remotes/candidate/sync"
+          candidate_commit="$(git rev-parse refs/remotes/candidate/sync)"
+          git merge-base --is-ancestor "$UPSTREAM_SHA" "$candidate_commit"
+
+          count_open_prs() {
+            local count
+            count="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq 'length')"
+            if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+              echo "invalid open pull request count: '$count'" >&2
+              return 1
+            fi
+            printf '%s\n' "$count"
+          }
+
+          open_prs="$(count_open_prs)"
+          if (( open_prs > 0 )); then
+            echo "::notice::An open pull request already owns $SYNC_BRANCH; leaving its branch untouched."
+            exit 0
+          fi
+
+          authenticated_origin="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          set +e
+          git ls-remote --exit-code --heads "$authenticated_origin" "refs/heads/$SYNC_BRANCH" >/dev/null
+          branch_status=$?
+          set -e
+          case "$branch_status" in
+            0)
+              echo "::notice::Branch $SYNC_BRANCH already exists; leaving it untouched."
+              exit 0
+              ;;
+            2) ;;
+            *)
+              echo "failed to check whether $SYNC_BRANCH exists" >&2
+              exit "$branch_status"
+              ;;
+          esac
+
+          git push "$authenticated_origin" "refs/remotes/candidate/sync:refs/heads/$SYNC_BRANCH"
+
+          open_prs="$(count_open_prs)"
+          if (( open_prs == 0 )); then
+            gh pr create --base main --head "$SYNC_BRANCH" \
+              --title "sync: merge upstream/main ${{ needs.validate.outputs.short_sha }}" \
+              --body "Automated upstream merge candidate. CI, downstream feature boundaries, and human review are required before merge."
+          fi
