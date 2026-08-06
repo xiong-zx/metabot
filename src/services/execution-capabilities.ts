@@ -2,7 +2,6 @@ import {
   generateKeyPairSync,
   sign as cryptoSign,
   verify as cryptoVerify,
-  type KeyObject,
 } from 'node:crypto';
 import {
   chmodSync,
@@ -260,13 +259,7 @@ export class ExecutionCapabilityService {
     }
   }
 
-  /** Test/daemon-contract helper; the Bridge runtime never calls this method. */
-  signTerminalCallback(rawBody: Buffer, purpose: TerminalCallbackPurpose): string {
-    const privateKey = this.loadPrivateKey(callbackPrefix(purpose));
-    return `ed25519:${cryptoSign(null, rawBody, privateKey).toString('base64')}`;
-  }
-
-  private loadPrivateKey(prefix: KeyPrefix): KeyObject {
+  private loadPrivateKey(prefix: KeyPrefix): string {
     const privatePath = join(this.keysDir, `${prefix}.key`);
     const publicPath = join(this.keysDir, `${prefix}.pub`);
     assertTrustedPath(this.keysDir, 0o700, 'key directory');
@@ -274,22 +267,21 @@ export class ExecutionCapabilityService {
     assertTrustedPath(publicPath, 0o600, `${prefix} public key`);
     assertPairMatches(privatePath, publicPath, prefix);
     try {
-      return readFileSync(privatePath, 'utf8') as unknown as KeyObject;
+      return readFileSync(privatePath, 'utf8');
     } catch (cause) {
       throw keyReadError(prefix, cause);
     }
   }
 
-  private loadPublicKeys(prefix: KeyPrefix): KeyObject[] {
+  private loadPublicKeys(prefix: KeyPrefix): string[] {
     assertTrustedPath(this.keysDir, 0o700, 'key directory');
-    const paths = [join(this.keysDir, `${prefix}.pub`), join(this.keysDir, `${prefix}.pub.prev`)]
-      .filter((path) => existsSync(path));
-    if (paths.length === 0) {
-      throw new ExecutionCapabilityError(`Missing ${prefix} verification key`, 'KEYS_UNAVAILABLE');
-    }
+    const currentPath = join(this.keysDir, `${prefix}.pub`);
+    assertTrustedPath(currentPath, 0o600, `${prefix} verification key`);
+    const previousPath = join(this.keysDir, `${prefix}.pub.prev`);
+    const paths = [currentPath, ...(existsSync(previousPath) ? [previousPath] : [])];
     return paths.map((path) => {
       assertTrustedPath(path, 0o600, `${prefix} verification key`);
-      return readFileSync(path, 'utf8') as unknown as KeyObject;
+      return readFileSync(path, 'utf8');
     });
   }
 }

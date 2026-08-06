@@ -32,6 +32,7 @@ import {
   AgentTeamExecutionCapabilityService,
 } from '../agent-teams/governance-capability.js';
 import { ExecutionCapabilityService } from '../services/execution-capabilities.js';
+import { TerminalEventDispatcher, TerminalEventStore } from '../services/terminal-event-store.js';
 import {
   deriveExecutionPrincipal,
   mintOptedInExecutionCapabilities,
@@ -55,8 +56,13 @@ import {
   handleExecutorRoutes,
   handleAgentTeamRoutes,
   handleAgentTeamGovernanceRoutes,
+  handleWorkerEventsRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
+import {
+  buildTerminalWakePrompt,
+  TerminalEventRateLimiter,
+} from './routes/worker-events-routes.js';
 import type { RouteContext } from './routes/index.js';
 
 export interface ApiServerOptions {
@@ -76,6 +82,8 @@ export interface ApiServerOptions {
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   agentTeamCapabilityService?: AgentTeamExecutionCapabilityService;
   executionCapabilityService?: ExecutionCapabilityService;
+  terminalEventStore?: TerminalEventStore;
+  terminalEventRateLimiter?: TerminalEventRateLimiter;
   agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
 }
@@ -182,6 +190,27 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const ownsAgentTeamGovernance = !options.agentTeamGovernance;
   const agentTeamCapabilityService = options.agentTeamCapabilityService ?? new AgentTeamExecutionCapabilityService();
   const executionCapabilityService = options.executionCapabilityService ?? new ExecutionCapabilityService();
+  const terminalEventStore = options.terminalEventStore ?? new TerminalEventStore(logger);
+  const ownsTerminalEventStore = !options.terminalEventStore;
+  const terminalEventRateLimiter = options.terminalEventRateLimiter ?? new TerminalEventRateLimiter();
+  const terminalEventDispatcher = new TerminalEventDispatcher({
+    store: terminalEventStore,
+    logger,
+    wake: async (envelope) => {
+      const bot = registry.get(envelope.bot_name);
+      if (!bot) throw new Error(`Terminal callback bot no longer exists: ${envelope.bot_name}`);
+      const result = await bot.bridge.executeApiTask({
+        prompt: buildTerminalWakePrompt(envelope),
+        chatId: envelope.chat_id,
+        userId: 'terminal-event-dispatcher',
+        sendCards: true,
+        maxTurns: 1,
+      });
+      if (!result.success) {
+        throw new Error(result.error || `Failed to wake terminal callback chat ${envelope.chat_id}`);
+      }
+    },
+  });
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
@@ -234,6 +263,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     agentTeamStore,
     agentTeamSupervisor,
     agentTeamGovernance,
+    executionCapabilityService,
+    terminalEventStore,
+    terminalEventDispatcher,
+    terminalEventRateLimiter,
     resolveAgentTeamPrincipal: (req) =>
       agentTeamCapabilityService.resolve({
         capability: headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]),
@@ -366,6 +399,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     });
   }
   agentTeamSupervisor.start();
+  terminalEventDispatcher.start();
 
   // Route handlers in priority order
   const routeHandlers = [
@@ -381,6 +415,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleExecutorRoutes,
     handleAgentTeamRoutes,
     handleAgentTeamGovernanceRoutes,
+    handleWorkerEventsRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {
@@ -424,7 +459,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
-    if (secret && !isPublicHealth && !url.startsWith('/api/files/')) {
+    const isSignedTerminalCallback = method === 'POST' && url === '/api/worker-events';
+    if (secret && !isPublicHealth && !isSignedTerminalCallback && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const bearer = typeof auth === 'string' && /^Bearer\s+/i.test(auth)
         ? auth.replace(/^Bearer\s+/i, '')
@@ -587,10 +623,12 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     closing = true;
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
+    terminalEventDispatcher.stop();
     for (const timer of capabilityRetirementTimers) clearTimeout(timer);
     capabilityRetirementTimers.clear();
     if (ownsAgentTeamGovernance) agentTeamGovernance.close();
     if (ownsAgentTeamStore) agentTeamStore.close();
+    if (ownsTerminalEventStore) terminalEventStore.close();
     rateLimiter.stopSweep();
   });
 

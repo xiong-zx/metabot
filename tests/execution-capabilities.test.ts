@@ -1,4 +1,4 @@
-import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { createHmac, generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,7 +95,11 @@ describe('execution capability Ed25519 keys', () => {
     })).toThrowError(expect.objectContaining({ code: 'INVALID_SIGNATURE' }));
 
     const raw = Buffer.from('{"purpose":"worker.terminal"}');
-    const callbackSignature = service.signTerminalCallback(raw, 'worker.terminal');
+    const callbackSignature = `ed25519:${cryptoSign(
+      null,
+      raw,
+      readFileSync(join(dir, 'worker-callback.key'), 'utf8'),
+    ).toString('base64')}`;
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'worker.terminal')).not.toThrow();
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'arc.terminal')).toThrow();
   });
