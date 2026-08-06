@@ -34,3 +34,8 @@ in `recovery_required`. Run `deploy-runtime` only from outside the MetaBot
 process tree. The command refuses to proceed when the live Bridge PID or caller
 ancestry cannot be verified. Rolling back to a pre-daemon release also requires
 `pm2 delete metabot-worker-runnerd metabot-arcd && pm2 save`.
+
+Run an online package update only from SSH or another verified external
+controller. It is rejected before download from inside the Bridge tree and
+uses the request-ID-backed no-delete deployment path; initial/offline install
+may create missing registrations but does not delete existing ones.

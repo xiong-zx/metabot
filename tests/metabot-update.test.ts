@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { provisionExecutionKeyPairs } from '../src/services/execution-capabilities.js';
 
@@ -11,6 +11,10 @@ const METABOT_BIN = path.join(REPO_ROOT, 'bin', 'metabot');
 
 function makeTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-update-test-'));
+}
+
+function hideHostPm2(fakeBin: string): void {
+  fs.writeFileSync(path.join(fakeBin, 'pm2'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
 }
 
 function installerKeyProvisioner(): string {
@@ -28,6 +32,35 @@ function runInstallerKeyProvisioner(keysDir: string): void {
 }
 
 describe('metabot update source selection', () => {
+  it('refuses an online package update from inside the live Bridge tree before download', () => {
+    const tmp = makeTempDir();
+    const fakeBin = path.join(tmp, 'bin');
+    const metabotHome = path.join(tmp, 'metabot');
+    const liveRoot = path.join(tmp, 'live-metabot');
+    const curlMarker = path.join(tmp, 'curl-called');
+    fs.mkdirSync(fakeBin, { recursive: true });
+    fs.mkdirSync(path.join(metabotHome, '.metabot-package'), { recursive: true });
+    fs.writeFileSync(path.join(metabotHome, '.metabot-package', 'manifest.json'), '{}\n');
+    fs.writeFileSync(path.join(fakeBin, 'curl'), `#!/usr/bin/env bash\ntouch ${JSON.stringify(curlMarker)}\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, 'pm2'), [
+      '#!/usr/bin/env bash',
+      'if [[ "$1" == "describe" ]]; then exit 0; fi',
+      'if [[ "$1" == "jlist" ]]; then',
+      `  printf '[{"name":"metabot","pid":%s,"pm2_env":{"status":"online","pm_cwd":${JSON.stringify(liveRoot)},"pm_exec_path":${JSON.stringify(path.join(liveRoot, 'src/index.ts'))}}}]\\n' "${'${FAKE_LIVE_PID:-$PPID}'}"`,
+      'fi',
+    ].join('\n'), { mode: 0o755 });
+
+    const result = spawnSync('bash', [
+      '-c', 'export FAKE_LIVE_PID=$$; exec bash "$@"', 'bash', METABOT_BIN, 'update', '--package',
+    ], {
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}`, METABOT_HOME: metabotHome },
+      encoding: 'utf8',
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toMatch(/inside the MetaBot process tree/);
+    expect(fs.existsSync(curlMarker)).toBe(false);
+  });
+
   it('uses the GitHub Release installer for package-managed installs', () => {
     const tmp = makeTempDir();
     const fakeBin = path.join(tmp, 'bin');
@@ -37,6 +70,7 @@ describe('metabot update source selection', () => {
     const curlArgs = path.join(tmp, 'curl-args.txt');
 
     fs.mkdirSync(fakeBin, { recursive: true });
+    hideHostPm2(fakeBin);
     fs.mkdirSync(metabotHome, { recursive: true });
     fs.mkdirSync(path.join(metabotHome, '.git'), { recursive: true });
     fs.mkdirSync(path.join(metabotHome, '.metabot-package'), { recursive: true });
@@ -90,6 +124,7 @@ describe('metabot update source selection', () => {
     const curlArgs = path.join(tmp, 'curl-args.txt');
 
     fs.mkdirSync(fakeBin, { recursive: true });
+    hideHostPm2(fakeBin);
     fs.mkdirSync(path.join(metabotHome, '.metabot-package'), { recursive: true });
     fs.writeFileSync(
       path.join(metabotHome, '.metabot-package', 'manifest.json'),
@@ -154,6 +189,7 @@ describe('metabot update source selection', () => {
     const fakeBin = path.join(tmp, 'bin');
     const metabotHome = path.join(tmp, 'metabot');
     fs.mkdirSync(fakeBin, { recursive: true });
+    hideHostPm2(fakeBin);
     fs.mkdirSync(path.join(metabotHome, '.metabot-package'), { recursive: true });
     fs.writeFileSync(
       path.join(metabotHome, '.metabot-package', 'manifest.json'),
@@ -181,6 +217,8 @@ describe('metabot update source selection', () => {
     expect(source).toContain('metabot update --git');
     expect(source).toContain('metabot update --package');
     expect(source).toContain('METABOT_EXPECTED_PACKAGE_VERSION');
+    expect(source).toContain('METABOT_PACKAGE_UPDATE=1');
+    expect(source).toContain('_require_external_package_update_if_live');
     expect(source).toContain('releases/download/v${update_version}');
     expect(source).toContain('exec "$METABOT_HOME/bin/metabot" update --git');
     expect(source).toContain("require('./package.json').metabotEdition");

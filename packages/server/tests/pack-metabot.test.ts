@@ -107,7 +107,9 @@ describe('pack-metabot.sh', () => {
     for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
       expect(ecosystem).toContain(proxyName);
     }
-    expect(installSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(installSh).toContain('Applying package refresh through the protected no-delete runtime switch');
+    expect(installSh).toContain('deploy-runtime');
+    expect(installSh).not.toContain('pm2 delete "$app"');
     expect(installSh).toContain('package replacement may leave it recovery_required');
     expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
     expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');

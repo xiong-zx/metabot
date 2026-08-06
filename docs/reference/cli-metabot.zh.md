@@ -75,6 +75,10 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 外部 Core 完全不动。`uninstall.sh` 使用相同的所有权检查。只有健康的新 Bridge 会保存
 PM2 进程列表。
 
+在线运行目录的包更新必须从 SSH 或其他位于 Bridge 进程树之外的控制器发起。
+更新器会在下载前拒绝内部调用者或无法验证的调用者，然后使用带 request ID 的
+无删除原地切换。首次安装或服务离线时可以创建缺失的 PM2 条目，但不会删除已有条目。
+
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。
 

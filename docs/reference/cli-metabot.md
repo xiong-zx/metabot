@@ -83,6 +83,12 @@ current PM2 cwd/script exactly match the Bridge runtime; an external Core is
 left untouched. `uninstall.sh` uses the same ownership check. Only the healthy
 new Bridge saves the process list.
 
+Package updates of an online runtime must be launched from SSH or another
+controller outside the live Bridge process tree. The updater refuses internal
+or unverifiable callers before downloading the package, then uses the same
+request-ID-backed no-delete runtime switch. Initial or offline installation
+may start missing registrations, but never deletes an existing registration.
+
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and
 cannot be combined with `--git`.
