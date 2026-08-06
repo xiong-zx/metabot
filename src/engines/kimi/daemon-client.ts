@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 
 const DEFAULT_ORIGIN = 'http://127.0.0.1:58627';
 const START_TIMEOUT_MS = 15_000;
@@ -418,7 +419,10 @@ export class KimiDaemonClient {
     }
     const args = ['server', 'run', '--port', url.port || '58627', '--keep-alive'];
     const child = spawn(this.executable, args, {
-      env: { ...process.env, ...(this.apiKey ? { KIMI_API_KEY: this.apiKey } : {}) },
+      env: stripBridgeLocalAdminCredentials({
+        ...process.env,
+        ...(this.apiKey ? { KIMI_API_KEY: this.apiKey } : {}),
+      }),
       stdio: 'ignore',
       detached: true,
     });

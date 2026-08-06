@@ -5,6 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { BotRegistry } from '../src/api/bot-registry.js';
 import { AgentTeamStore } from '../src/agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../src/agent-teams/team-supervisor.js';
+import {
+  AgentTeamGovernanceExtension,
+  createAgentTeamGovernanceHost,
+} from '../src/agent-teams/governance-extension.js';
 
 const logger = {
   child: () => logger,
@@ -59,6 +63,93 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('AgentTeamSupervisor', () => {
+  it('uses governed run preparation, pinned rules and bot, quota guard, activity touch, and reap execution', async () => {
+    const store = makeStore();
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-supervisor-governance-'));
+    const governance = new AgentTeamGovernanceExtension(
+      createAgentTeamGovernanceHost(store),
+      logger,
+      join(dir, 'governance.db'),
+    );
+    governance.publishRuleSet({
+      actor: { role: 'pm', id: 'pm' },
+      name: 'runtime',
+      scope: 'team-instance',
+      rules: [{ text: 'Use the pinned runtime rule.' }],
+    });
+    governance.publishTemplate({
+      actor: { role: 'pm', id: 'pm' },
+      name: 'runtime',
+      body: {
+        agents: [{ name: 'worker', engine: 'codex' }],
+        ruleSetRefs: [{ name: 'runtime' }],
+      },
+    });
+    const instance = governance.resolveInstance({
+      actor: { role: 'pm', id: 'pm' },
+      templateName: 'runtime',
+      chatId: 'oc_runtime',
+      pmBot: 'metabot',
+    })!;
+    store.createTask(instance.teamName, { subject: 'governed task', owner: 'worker' });
+    const assertRun = vi.spyOn(governance, 'assertCanStartRun');
+    const prepareRun = vi.spyOn(governance, 'prepareRun');
+    const touchAgent = vi.spyOn(governance, 'touchAgent');
+    const executeApiTask = vi.fn(async ({ chatId, prompt }: { chatId: string; prompt: string }) => ({
+      success: true,
+      responseText: `${chatId}\n${prompt}`,
+      sessionId: 'governed-session',
+    }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, governance, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => expect(executeApiTask).toHaveBeenCalled());
+    expect(prepareRun).toHaveBeenCalledWith(instance.teamName, 'worker');
+    expect(assertRun).toHaveBeenCalledWith(instance.id, 'worker');
+    expect(executeApiTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: `teaminst:${instance.id}:worker`,
+        prompt: expect.stringContaining('Use the pinned runtime rule.'),
+      }),
+    );
+    expect(touchAgent).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(store.listRuns(instance.teamName)[0]).toMatchObject({ status: 'completed' });
+    });
+
+    const interrupted = store.createTask(instance.teamName, { subject: 'reap task', owner: 'worker' });
+    store.updateTask(instance.teamName, interrupted.id, { status: 'in_progress' });
+    const run = store.createRun(instance.teamName, { agentName: 'worker', taskId: interrupted.id });
+    vi.spyOn(governance, 'reapExpired').mockReturnValue([
+      {
+        lease: {
+          id: 999,
+          instanceId: instance.id,
+          teamName: instance.teamName,
+          agentName: 'worker',
+          kind: 'temporary',
+          lastActiveAt: 1,
+          recycledAt: 2,
+          createdAt: 1,
+        },
+        reason: 'ttl_expired',
+        runningRuns: [{ runId: run.id, taskId: interrupted.id }],
+      },
+    ]);
+    store.setAgentStatus(instance.teamName, 'worker', 'stopped');
+    await supervisor.tick();
+    expect(store.getRun(instance.teamName, run.id)).toMatchObject({ status: 'stopped' });
+    expect(store.getTask(instance.teamName, interrupted.id)).toMatchObject({
+      status: 'pending',
+      result: expect.stringContaining('ttl_expired'),
+    });
+
+    supervisor.destroy();
+    governance.close();
+    store.close();
+  });
+
   it('recovers stale running runs left by a previous bridge process', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo');
@@ -67,6 +158,11 @@ describe('AgentTeamSupervisor', () => {
     store.updateTask('demo', task.id, { status: 'in_progress' });
     const run = store.createRun('demo', { agentName: 'worker', taskId: task.id });
     store.setAgentStatus('demo', 'worker', 'working');
+    store.createAgent('demo', { name: 'reaped', engine: 'codex' });
+    const reapedTask = store.createTask('demo', { subject: 'Reaped interrupted task', owner: 'reaped' });
+    store.updateTask('demo', reapedTask.id, { status: 'in_progress' });
+    const reapedRun = store.createRun('demo', { agentName: 'reaped', taskId: reapedTask.id });
+    store.setAgentStatus('demo', 'reaped', 'stopped');
 
     const { registry } = makeRegistry(vi.fn());
     const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
@@ -83,10 +179,17 @@ describe('AgentTeamSupervisor', () => {
       result: expect.stringContaining(run.id),
     });
     expect(store.getAgent('demo', 'worker')).toMatchObject({ status: 'idle' });
-    expect(store.listMessages('demo', 'lead', false)[0]).toMatchObject({
-      fromName: 'worker',
-      summary: expect.stringContaining('Recovered stale run'),
-    });
+    expect(store.getRun('demo', reapedRun.id)).toMatchObject({ status: 'failed' });
+    expect(store.getTask('demo', reapedTask.id)).toMatchObject({ status: 'pending' });
+    expect(store.getAgent('demo', 'reaped')).toMatchObject({ status: 'stopped' });
+    expect(store.listMessages('demo', 'lead', false)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          fromName: 'worker',
+          summary: expect.stringContaining('Recovered stale run'),
+        }),
+      ]),
+    );
     supervisor.destroy();
     store.close();
   });
@@ -403,6 +506,78 @@ describe('AgentTeamSupervisor', () => {
       expect(store.getAgent('demo', 'reviewer')).toMatchObject({ status: 'idle' });
     });
     expect(store.getAgent('demo', 'reviewer')?.sessionId).toBeUndefined();
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('leaves unrelated inbox messages unread until active task work drains', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    const activeTask = store.createTask('demo', { subject: 'already active', owner: 'worker' });
+    store.updateTask('demo', activeTask.id, { status: 'in_progress' });
+    const activeRun = store.createRun('demo', { agentName: 'worker', taskId: activeTask.id });
+    store.setAgentStatus('demo', 'worker', 'working');
+    store.sendMessage('demo', {
+      fromName: 'lead',
+      toName: 'worker',
+      body: 'Unrelated coordination note with no task reference.',
+    });
+
+    const executeApiTask = vi.fn(async () => ({ success: true, responseText: 'handled later', sessionId: 'sid' }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    expect(executeApiTask).not.toHaveBeenCalled();
+    expect(store.listMessages('demo', 'worker', true)).toHaveLength(1);
+
+    store.updateRun('demo', activeRun.id, { status: 'completed' });
+    store.updateTask('demo', activeTask.id, { status: 'completed' });
+    store.setAgentStatus('demo', 'worker', 'idle');
+    await supervisor.tick();
+    await waitFor(() => expect(executeApiTask).toHaveBeenCalledTimes(1));
+    expect(store.listMessages('demo', 'worker', true)).toHaveLength(0);
+    await waitFor(() => expect(store.listRuns('demo').some((run) => run.status === 'running')).toBe(false));
+
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('does not open a message-only lane beside newly scheduled task work', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'scheduled task', owner: 'worker' });
+    store.sendMessage('demo', {
+      fromName: 'lead',
+      toName: 'worker',
+      body: 'Unrelated coordination note with no task reference.',
+    });
+
+    let finishTask!: (value: { success: boolean; responseText: string; sessionId: string }) => void;
+    const executeApiTask = vi
+      .fn()
+      .mockImplementationOnce(
+        async () =>
+          await new Promise<{ success: boolean; responseText: string; sessionId: string }>((resolve) => {
+            finishTask = resolve;
+          }),
+      )
+      .mockResolvedValue({ success: true, responseText: 'handled message later', sessionId: 'message-sid' });
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => expect(executeApiTask).toHaveBeenCalledTimes(1));
+    expect(store.listMessages('demo', 'worker', true)).toHaveLength(1);
+
+    finishTask({ success: true, responseText: 'task completed', sessionId: 'task-sid' });
+    await waitFor(() => expect(store.listRuns('demo').some((run) => run.status === 'running')).toBe(false));
+    await supervisor.tick();
+    await waitFor(() => expect(executeApiTask).toHaveBeenCalledTimes(2));
+    expect(store.listMessages('demo', 'worker', true)).toHaveLength(0);
+
     supervisor.destroy();
     store.close();
   });
