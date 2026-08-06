@@ -6,6 +6,9 @@ import {
 } from 'node:crypto';
 import type { CompletionNotification, CompletionNotifier, TerminalCallbackEnvelope } from './types.js';
 
+/** Deliberately far below Bridge's 256 KiB raw-body ceiling. */
+export const WORKER_TERMINAL_CALLBACK_MAX_BYTES = 16 * 1_024;
+
 export interface HttpCompletionNotifierConfig {
   url: string;
   signingKey: KeyObject;
@@ -45,15 +48,21 @@ export class HttpCompletionNotifier implements CompletionNotifier {
       contract_version: 'metabot.terminal-callback.v1',
       purpose: 'worker.terminal',
       event_id: notification.eventId,
-      bot_name: notification.worker.botName,
-      chat_id: notification.worker.chatId,
+      bot_name: notification.botName,
+      chat_id: notification.chatId,
       status: notification.worker.status,
-      finished_at: notification.worker.finishedAt ?? notification.worker.createdAt,
+      finished_at: notification.finishedAt,
       iat: this.now(),
       authorizing_capability: notification.authorizingCapability,
       payload: notification.worker,
     };
     const body = JSON.stringify(envelope);
+    const bodyBytes = Buffer.byteLength(body, 'utf8');
+    if (bodyBytes > WORKER_TERMINAL_CALLBACK_MAX_BYTES) {
+      throw new Error(
+        `Worker terminal callback body exceeds ${WORKER_TERMINAL_CALLBACK_MAX_BYTES} bytes: ${bodyBytes}`,
+      );
+    }
     const response = await this.fetchImpl(this.url, {
       method: 'POST',
       headers: {

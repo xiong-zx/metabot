@@ -239,12 +239,17 @@ instances require separate `METABOT_WORKER_DATA_DIR` values.
 
 In authenticated daemon mode, set `METABOT_WORKER_CALLBACK_URL` and
 `METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` to enable HTTP completion posts. The
-prompt is omitted. The signed `metabot.terminal-callback.v1` envelope contains
-the event, bot/chat scope, terminal status, numeric epoch-ms finish time, issue
-time, original `authorizing_capability`, and bounded worker payload. Its stable
-event ID is `worker:<id>:terminal:v1`, sent in the body and the
-`Idempotency-Key` header. `X-MetaBot-Callback-Signature` is
-`ed25519:<base64>` over the exact raw body bytes.
+signed `metabot.terminal-callback.v1` envelope contains the event, bot/chat
+scope, terminal status, numeric epoch-ms finish time, issue time, original
+`authorizing_capability`, and a metadata-only Worker payload. That payload is
+strictly limited to `id`, optional `label`, `engine`, terminal `status`,
+optional `exitCode`, and optional `durationMs`. It excludes prompt, workdir,
+stdout, stderr, error text, model, output contract, and notification internals;
+full bounded results remain available through `worker_status`. The serialized
+callback has a 16 KiB hard ceiling, well below Bridge's 256 KiB request limit.
+Its stable event ID is `worker:<id>:terminal:v1`, sent in the body and the
+`Idempotency-Key` header. `X-MetaBot-Callback-Signature` is `ed25519:<base64>`
+over the exact raw body bytes.
 
 Notification state, attempt count, next retry deadline, last error, and
 delivery time are durable. Failures use bounded exponential backoff and an

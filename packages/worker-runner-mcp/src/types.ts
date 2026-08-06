@@ -116,11 +116,27 @@ export interface DispatchWorkerResult {
   retriedTerminal: boolean;
 }
 
+/**
+ * Strict, bounded wake-up metadata for a Worker terminal callback. Full
+ * process results remain available only through worker_status.
+ */
+export interface WorkerTerminalCallbackMetadata {
+  id: string;
+  label?: string;
+  engine: WorkerEngine;
+  status: TerminalWorkerStatus;
+  exitCode?: number;
+  durationMs?: number;
+}
+
 export interface CompletionNotification {
   eventId: string;
   eventType: 'worker.terminal';
+  botName: string;
+  chatId: string;
+  finishedAt: number;
   authorizingCapability?: string;
-  worker: Omit<WorkerRecord, 'prompt'>;
+  worker: WorkerTerminalCallbackMetadata;
 }
 
 export interface TerminalCallbackEnvelope<TPayload = unknown> {

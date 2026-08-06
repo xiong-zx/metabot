@@ -10,6 +10,7 @@ import type {
   ProcessResult,
   ProcessRunner,
   ScopedDispatchWorkerInput,
+  TerminalWorkerStatus,
   TrustedPrincipal,
   WorkerRecord,
   WorkerServiceConfig,
@@ -367,14 +368,23 @@ export class WorkerService {
       if (current) this.scheduleNotification(current);
       return;
     }
-    const { prompt: _prompt, ...publicWorker } = worker;
     const authorizingCapability = this.store.getAuthorizingCapability(worker.id);
     try {
       await this.notifier.notify({
         eventId: `worker:${worker.id}:terminal:v1`,
         eventType: 'worker.terminal',
+        botName: worker.botName,
+        chatId: worker.chatId,
+        finishedAt: requireTerminalFinishedAt(worker),
         ...(authorizingCapability ? { authorizingCapability } : {}),
-        worker: publicWorker,
+        worker: {
+          id: worker.id,
+          ...(worker.label !== undefined ? { label: worker.label } : {}),
+          engine: worker.engine,
+          status: requireTerminalStatus(worker.status),
+          ...(worker.exitCode !== undefined ? { exitCode: worker.exitCode } : {}),
+          ...(worker.durationMs !== undefined ? { durationMs: worker.durationMs } : {}),
+        },
       });
       this.store.markNotificationDelivered(id, this.now());
     } catch (error) {
@@ -582,6 +592,20 @@ function normalizeNonempty(value: unknown, name: string, maxLength: number): str
 
 function normalizeId(id: unknown): string {
   return normalizeNonempty(id, 'id', 200);
+}
+
+function requireTerminalStatus(status: WorkerRecord['status']): TerminalWorkerStatus {
+  if (status === 'queued' || status === 'running') {
+    throw new Error(`Cannot notify for non-terminal Worker status: ${status}`);
+  }
+  return status;
+}
+
+function requireTerminalFinishedAt(worker: WorkerRecord): number {
+  if (worker.finishedAt === undefined) {
+    throw new Error(`Terminal Worker ${worker.id} is missing finishedAt`);
+  }
+  return worker.finishedAt;
 }
 
 function normalizeLimit(limit: number | undefined, max: number): number {
