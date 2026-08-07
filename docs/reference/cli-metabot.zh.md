@@ -25,6 +25,7 @@ metabot start                       # 启动 Bridge、Worker Runner 与 ARC
 metabot stop                        # 停止整套三个 PM2 应用
 metabot restart --wait --json       # 受保护的 Bridge 单独重启
 metabot restart --request-id ID     # 调用方提供的稳定去重键
+metabot restart --force             # 会话准备失败时的紧急显式覆盖
 metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
 metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
 metabot deploy-runtime --runtime /absolute/checkout --wait  # 从外部安全切换整套运行目录
@@ -49,7 +50,7 @@ Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--
 8. 重启 Bridge 与两个执行守护进程，健康检查通过后再保存 PM2 状态。
 
 普通 `restart` 支持 `--request-id`、`--bot`、`--chat`、`--source`、
-`--reason`、`--resume`/`--no-resume`、`--wait`、`--timeout` 和 `--json`。
+`--reason`、`--resume`/`--no-resume`、`--wait`、`--timeout`、`--force` 和 `--json`。
 `deploy-runtime` 还支持 `--wait`/`--no-wait` 与 `--force`。相同 request ID
 再次提交时只读取已有的持久结果，不会重复执行 PM2 操作。
 
@@ -60,12 +61,19 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 代理等环境值只以 SHA-256 指纹写入重启台账，不保存明文。完成通知和恢复归属都持久化
 之后才删除 breadcrumb，从而避免恢复后的会话再次重启。
 
-带 `--resume` 且来源是普通用户或 PM chat 时，启动流程会在原有 chat 会话中创建
-一个可去重的持久续做任务，让被中断的工作只继续一次。调度器会先原子写盘，再启动
-计时器；如果写盘失败，系统会保留 breadcrumb，供下一次启动重试。Agent Team、Worker 和 ARC
+在进入持久 PM2 切换前，已鉴权的本地 Bridge 会短暂暂停所有已注册 Bot 接收新任务，
+并快照所有活跃 chat。每个受影响的用户 chat 都由自己的 Bot 发送 **Restart Preparing**
+通知；任一通知失败都会取消重启并解除暂停，除非操作者明确传入 `--force`。准备状态还有
+两分钟租约，控制器若在修改 PM2 前消失，Bridge 会自动恢复接收工作。
+
+带 `--resume` 时，启动流程会为每个被中断的用户 chat 创建可去重的持久续做任务，
+而不再只恢复发起者；每个受影响 Bot 都会发送自己的 **Restart Complete** 通知。
+调度器会先原子写盘，再启动计时器；如果写盘或完成通知失败，系统会保留 breadcrumb，
+供下一次启动重试。无卡片的 Agent Bus 任务仍会恢复，但不会向虚拟 chat ID 发消息。Agent Team、Worker 和 ARC
 内部 chat 不走通用恢复，而由各自的持久 supervisor 或守护进程负责。状态文件位于
 `SESSION_STORE_DIR`、`METABOT_STATE_DIR` 或 `~/.metabot/` 下，文件名为
-`restart-state.sqlite` 和 `last-restart.json`。
+`restart-state.sqlite`、`controlled-restart.json` 和 `last-restart.json`。该功能不迁移
+`sessions.db`。
 
 守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
 `recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。

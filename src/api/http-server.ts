@@ -57,6 +57,7 @@ import {
   handleAgentTeamRoutes,
   handleAgentTeamGovernanceRoutes,
   handleWorkerEventsRoutes,
+  handleRestartRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
 import {
@@ -403,6 +404,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   // Route handlers in priority order
   const routeHandlers = [
+    handleRestartRoutes,
     handleCoreChatRoutes,
     handleVoiceRoutes,
     handleFileRoutes,

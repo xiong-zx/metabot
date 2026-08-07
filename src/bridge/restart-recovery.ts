@@ -11,6 +11,7 @@ import {
   type RestartRequestRecord,
 } from '../runtime/restart-store.js';
 import type { Logger } from '../utils/logger.js';
+import type { ControlledRestartPlan } from './restart-coordinator.js';
 import {
   clearRestartBreadcrumb,
   getRestartBreadcrumb,
@@ -31,6 +32,7 @@ export interface RestartRecoveryOptions {
   persistProcessList?: () => Promise<void>;
   store?: RestartStore;
   now?: () => number;
+  recoverParticipants?: (health: RestartStartupHealth) => Promise<ControlledRestartPlan | undefined>;
 }
 
 const PROCESS_TIMEOUT_MS = 15_000;
@@ -96,6 +98,34 @@ export async function finalizeControlledRestartAfterStartup(options: RestartReco
       }
     }
 
+    if (options.recoverParticipants) {
+      let participantPlan: ControlledRestartPlan | undefined;
+      try {
+        participantPlan = await options.recoverParticipants({
+          ok: record.status === 'healthy',
+          ...(record.healthError ? { error: record.healthError } : {}),
+        });
+      } catch (error) {
+        options.logger.error(
+          { err: error, requestId: record.requestId },
+          'Multi-bot restart recovery failed; retaining breadcrumb for startup replay',
+        );
+        return;
+      }
+      if (participantPlan?.requestId === record.requestId) {
+        if (participantPlan.status !== 'completed') {
+          options.logger.error(
+            { requestId: record.requestId },
+            'Multi-bot restart recovery is incomplete; retaining breadcrumb for startup replay',
+          );
+          return;
+        }
+        recordMultiBotRecoveryOutcome(record, participantPlan, store, now());
+        clearRestartBreadcrumb(record.requestId);
+        return;
+      }
+    }
+
     await reportRestartOnce(record, store, options, now());
     record = store.get(record.requestId) ?? record;
     if (decideContinuationOnce(record, store, options, now())) {
@@ -103,6 +133,37 @@ export async function finalizeControlledRestartAfterStartup(options: RestartReco
     }
   } finally {
     if (ownsStore) store.close();
+  }
+}
+
+function recordMultiBotRecoveryOutcome(
+  record: RestartRequestRecord,
+  plan: ControlledRestartPlan,
+  store: RestartStore,
+  now: number,
+): void {
+  if (store.claimReport(record.requestId, now)) {
+    const expectedNotices = plan.participants.filter((participant) => participant.sendCards);
+    const failedNotices = expectedNotices.filter((participant) => participant.completionNotice !== 'delivered');
+    const outcome = expectedNotices.length === 0
+      ? 'skipped:no-card-participants'
+      : `multi-bot:${expectedNotices.length - failedNotices.length}/${expectedNotices.length}`;
+    store.recordReportOutcome(record.requestId, outcome, {
+      delivered: expectedNotices.length > 0 && failedNotices.length === 0,
+      now,
+    });
+  }
+  if (!record.continuationDecidedAt) {
+    const scheduled = plan.participants.filter(
+      (participant) => participant.continuationOutcome === 'scheduled',
+    ).length;
+    store.recordContinuationDecision(record.requestId, {
+      recoveryOwner: record.status === 'healthy'
+        ? `multi-bot-coordinator:${scheduled}`
+        : 'none:restart-failed',
+      ...(scheduled > 0 ? { continuationKey: `restart-resume:${record.requestId}:participants` } : {}),
+      now,
+    });
   }
 }
 

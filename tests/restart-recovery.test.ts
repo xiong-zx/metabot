@@ -149,6 +149,90 @@ describe('controlled restart startup finalization', () => {
     kit.store.close();
   });
 
+  it('delegates reporting and continuation to the multi-bot coordinator without replaying the requester twice', async () => {
+    const kit = recoveryFixture();
+    const recoverParticipants = vi.fn().mockResolvedValue({
+      version: 1,
+      requestId: 'restart-recovery',
+      status: 'completed',
+      source: 'test',
+      resume: true,
+      force: false,
+      createdAt: 10,
+      updatedAt: 100,
+      completedAt: 100,
+      restartOutcome: 'healthy',
+      participants: [
+        {
+          botName: 'pm',
+          platform: 'feishu',
+          chatId: 'chat-user-1',
+          userPrompt: '',
+          startedAt: 10,
+          source: 'chat',
+          sendCards: true,
+          wasActive: true,
+          prepareNotice: 'delivered',
+          completionNotice: 'delivered',
+          continuationOutcome: 'scheduled',
+          continuationTaskId: 'multi-task-1',
+          recoveredAt: 100,
+        },
+      ],
+    });
+
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+      recoverParticipants,
+    });
+
+    expect(recoverParticipants).toHaveBeenCalledWith({ ok: true });
+    expect(kit.sendTextNotice).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    expect(kit.store.get('restart-recovery')).toMatchObject({
+      status: 'healthy',
+      reportOutcome: 'multi-bot:1/1',
+      recoveryOwner: 'multi-bot-coordinator:1',
+      continuationKey: 'restart-resume:restart-recovery:participants',
+    });
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(false);
+    kit.store.close();
+  });
+
+  it('retains the breadcrumb when multi-bot participant recovery is incomplete', async () => {
+    const kit = recoveryFixture();
+    await finalizeControlledRestartAfterStartup({
+      registry: kit.registry,
+      scheduler: kit.scheduler,
+      logger: logger(),
+      store: kit.store,
+      healthCheck: async () => ({ ok: true }),
+      persistProcessList: async () => undefined,
+      recoverParticipants: async () => ({
+        version: 1,
+        requestId: 'restart-recovery',
+        status: 'prepared',
+        source: 'test',
+        resume: true,
+        force: false,
+        createdAt: 10,
+        updatedAt: 100,
+        participants: [],
+      }),
+    });
+
+    expect(kit.sendTextNotice).not.toHaveBeenCalled();
+    expect(kit.scheduleTaskDurably).not.toHaveBeenCalled();
+    expect(kit.store.get('restart-recovery')?.continuationDecidedAt).toBeUndefined();
+    expect(existsSync(join(process.env.SESSION_STORE_DIR, 'last-restart.json'))).toBe(true);
+    kit.store.close();
+  });
+
   it('retains the breadcrumb and retries after durable continuation persistence fails', async () => {
     const kit = recoveryFixture();
     kit.scheduleTaskDurably.mockImplementationOnce(() => {

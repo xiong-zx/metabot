@@ -53,7 +53,8 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     "  const scripts = { metabot: 'src/index.ts', 'metabot-worker-runnerd': 'packages/worker-runner-mcp/dist/daemon-cli.js', 'metabot-arcd': 'packages/arc-mcp/dist/daemon-cli.js', 'metabot-core': 'packages/server/dist/index.js' };",
     "  const plan = Object.fromEntries(value('--apps').split(',').map((app) => [app, { cwd: root, script: require('node:path').join(root, scripts[app]), interpreter: 'node', interpreterArgs: [], envHashes: {} }]));",
     "  process.stdout.write(JSON.stringify(plan) + '\\n');",
-    "} else process.stdout.write(JSON.stringify({ ok: true }) + '\\n');",
+    "} else if (process.env.FAKE_SWITCH_FAIL === 'true') process.exit(1);",
+    "else process.stdout.write(JSON.stringify({ ok: true }) + '\\n');",
   ].join('\n'));
   writeExecutable(join(fakeBin, 'pm2'), [
     '#!/usr/bin/env bash',
@@ -76,7 +77,28 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'if [[ "${FAKE_PS_FAIL:-}" == "true" ]]; then exit 1; fi',
     'exec /usr/bin/ps "$@"',
   ]);
-  writeExecutable(join(fakeBin, 'curl'), ['#!/usr/bin/env bash', 'exit 0']);
+  writeExecutable(join(fakeBin, 'curl'), [
+    '#!/usr/bin/env bash',
+    'printf "curl %s\\n" "$*" >> "$PM2_LOG"',
+    'out=""',
+    'want_code=false',
+    'args=("$@")',
+    'for ((i=0; i<${#args[@]}; i++)); do',
+    '  [[ "${args[$i]}" == "-o" ]] && out="${args[$((i+1))]}"',
+    '  [[ "${args[$i]}" == "-w" ]] && want_code=true',
+    'done',
+    'if [[ "$*" == *"/api/runtime/restart/prepare"* ]]; then',
+    '  status="${FAKE_PREPARE_STATUS:-200}"',
+    '  [[ -n "$out" ]] && printf \'{"status":"prepared"}\' > "$out"',
+    '  [[ "$want_code" == true ]] && printf "%s" "$status"',
+    '  exit 0',
+    'fi',
+    'if [[ "$*" == *"/api/runtime/restart/cancel"* ]]; then',
+    '  [[ -n "$out" ]] && printf \'{"status":"cancelled"}\' > "$out"',
+    '  [[ "$want_code" == true ]] && printf "200"',
+    'fi',
+    'exit 0',
+  ]);
   return {
     runtime,
     bin: join(runtime, 'bin/metabot'),
@@ -118,10 +140,30 @@ describe('metabot execution-daemon lifecycle', () => {
     const kit = fixture();
     run(kit, ['restart']);
     const log = readFileSync(kit.log, 'utf8');
+    expect(log).toContain('/api/runtime/restart/prepare');
     expect(log).toContain(`protected-switch --runtime ${kit.runtime} --apps metabot`);
+    expect(log.indexOf('/api/runtime/restart/prepare')).toBeLessThan(log.indexOf('protected-switch --runtime'));
     expect(log).not.toContain('restart metabot-worker-runnerd');
     expect(log).not.toContain('delete ');
     expect(log).not.toContain('save --force');
+  });
+
+  it('refuses the protected switch when multi-bot prepare is rejected', () => {
+    const kit = fixture();
+    expect(() => run(kit, ['restart'], { FAKE_PREPARE_STATUS: '409' })).toThrow(
+      /could not checkpoint and notify all affected chats/,
+    );
+    const log = readFileSync(kit.log, 'utf8');
+    expect(log).toContain('/api/runtime/restart/prepare');
+    expect(log).not.toContain('protected-switch --runtime');
+  });
+
+  it('cancels Bridge quiesce when the protected PM2 switch fails', () => {
+    const kit = fixture();
+    expect(() => run(kit, ['restart'], { FAKE_SWITCH_FAIL: 'true' })).toThrow();
+    const log = readFileSync(kit.log, 'utf8');
+    expect(log).toContain('/api/runtime/restart/prepare');
+    expect(log).toContain('/api/runtime/restart/cancel');
   });
 
   it('deduplicates a caller-provided requestId before a second PM2 action', () => {

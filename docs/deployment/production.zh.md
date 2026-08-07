@@ -104,9 +104,20 @@ metabot restart --daemon worker --force
 `--resume` 时，会在原会话里只创建一次续做任务；Agent Team、Worker 和 ARC 内部
 chat 仍由各自的持久恢复机制负责。
 
+在这次受保护切换触碰 PM2 前，已鉴权的本地 Bridge 会暂停所有已注册 Bot 的新工作，
+原子快照每个受影响的活跃 chat，并用各 Bot 自己的身份发送准备通知。新进程通过启动
+健康检查并完成 `pm2 save` 后，会为每个受影响的用户 chat 持久排队一次续做任务，
+并由各 Bot 发送完成通知。请使用 CLI，不要直接执行 `pm2 restart`；直接调用 PM2 会
+绕过这份契约。首次从旧 Bridge 升级时，因为正在运行的旧进程尚无准备接口，只允许
+一次明确的兼容交接。
+
 Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 `~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，
 应显式重装上一已知版本，不要直接修改已安装包文件。
+
+多 Bot 交接只增加 `controlled-restart.json`，不会修改 `sessions.db`。回退时可直接
+重装上一版本而无需恢复数据库；只有确认没有重启正在进行时，才可清理残留交接 JSON，
+旧版本本来也会忽略它。
 
 回退到尚未包含执行守护进程的版本时，还要删除已保存的 PM2 条目：
 

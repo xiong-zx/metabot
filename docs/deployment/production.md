@@ -114,10 +114,24 @@ list only after all checks pass. Normal user/PM chats with `--resume` receive
 one durable continuation in their existing session. Agent Team and
 Worker/ARC internal chats remain owned by their purpose-built durable recovery.
 
+Before that protected transition touches PM2, the authenticated local Bridge
+quiesces every registered bot, atomically snapshots every affected active
+chat, and sends a preparation notice through each bot identity. After startup
+health and `pm2 save` succeed, it durably queues one continuation per affected
+user chat and sends per-bot completion notices. Use the CLI rather than direct
+`pm2 restart`; direct PM2 commands bypass this contract. The first upgrade from
+an older Bridge uses one explicit compatibility handoff because the running
+old process does not yet expose the prepare endpoint.
+
 Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
 state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
 smoke checks, reinstall the previously known version explicitly instead of
 editing installed package files.
+
+Multi-bot handoff state is additive (`controlled-restart.json`) and does not
+change `sessions.db`. A rollback may reinstall the previous release without a
+database restore. Remove a stale handoff JSON only after confirming no restart
+is in progress; older releases ignore it.
 
 When rolling back to a release from before the execution daemons existed,
 remove their saved PM2 entries as well as installing the old package:

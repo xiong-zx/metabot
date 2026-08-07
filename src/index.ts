@@ -12,6 +12,7 @@ import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-fa
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
 import { finalizeControlledRestartAfterStartup } from './bridge/restart-recovery.js';
+import { recoverControlledRestartAfterStartup } from './bridge/restart-coordinator.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -467,6 +468,13 @@ async function main() {
     scheduler,
     logger,
     apiServer,
+    recoverParticipants: (startupHealth) => recoverControlledRestartAfterStartup({
+      registry,
+      scheduler,
+      logger,
+      clearBreadcrumb: false,
+      startupHealth,
+    }),
   });
 
   // Graceful shutdown

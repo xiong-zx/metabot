@@ -26,6 +26,7 @@ metabot start                       # start Bridge + Worker Runner + ARC
 metabot stop                        # stop the whole three-app runtime
 metabot restart --wait --json       # protected Bridge-only restart
 metabot restart --request-id ID     # caller-stable idempotency key
+metabot restart --force             # emergency override if chat preparation fails
 metabot restart --daemon worker     # guarded Worker Runner restart
 metabot restart --daemon arc        # guarded ARC restart
 metabot deploy-runtime --runtime /absolute/checkout --wait  # protected external runtime switch
@@ -50,7 +51,7 @@ instead of `latest`. Package updating performs:
 8. Restart Bridge and both execution daemons, then save PM2 only after health.
 
 Plain `restart` accepts `--request-id`, `--bot`, `--chat`, `--source`,
-`--reason`, `--resume`/`--no-resume`, `--wait`, `--timeout`, and `--json`.
+`--reason`, `--resume`/`--no-resume`, `--wait`, `--timeout`, `--force`, and `--json`.
 `deploy-runtime` accepts the same request metadata plus `--wait`/`--no-wait`
 and `--force`. A repeated request ID reads the existing durable result and
 does not repeat the PM2 action.
@@ -65,14 +66,24 @@ the restart ledger only as SHA-256 fingerprints. The breadcrumb is retained unti
 ownership are recorded, preventing a recovered session from starting a
 restart loop.
 
+Before that durable PM2 transition, the authenticated local Bridge briefly
+quiesces every registered bot and snapshots all active chats. Each affected
+user-facing chat receives a **Restart Preparing** notice from its own bot. A
+notification failure cancels the restart and releases the quiesce unless the
+operator explicitly passes `--force`. A two-minute preparation lease also
+unfreezes the Bridge if the controller disappears before changing PM2 state.
+
 When `--resume` has a normal user or PM bot/chat scope, startup schedules one
-durable continuation in the existing chat session so the interrupted task
-continues exactly once. The scheduler writes that task atomically before it
-arms the timer; a persistence failure retains the restart breadcrumb for the
-next startup replay. Agent Team and Worker/ARC internal chats are not
+durable continuation for every interrupted user-facing chat, not just the
+requester, so each affected bot continues exactly once and sends its own
+**Restart Complete** notice. The scheduler writes each task atomically before
+it arms the timer; a persistence or completion-notice failure retains the
+restart breadcrumb for the next startup replay. Non-card Agent Bus work is
+resumed without attempting to send to synthetic chat IDs. Agent Team and Worker/ARC internal chats are not
 generically resumed; their durable supervisors and daemons remain responsible
 for recovery. Restart state is under `SESSION_STORE_DIR`, `METABOT_STATE_DIR`,
-or `~/.metabot/` (`restart-state.sqlite` and `last-restart.json`).
+or `~/.metabot/` (`restart-state.sqlite`, `controlled-restart.json`, and
+`last-restart.json`). This addition does not migrate `sessions.db`.
 
 Daemon restarts refuse while work is active. `--force` explicitly accepts that
 ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
