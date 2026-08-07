@@ -216,6 +216,16 @@ export async function cmdCreate(cfg: Config, args: ParsedArgs): Promise<void> {
       shared: resolveShareFlag(args.flags),
       created_by: typeof args.flags.by === 'string' ? args.flags.by : undefined,
       content_type: contentType,
+      index_role: typeof args.flags['index-role'] === 'string'
+        ? args.flags['index-role']
+        : undefined,
+      project_key: typeof args.flags['project-key'] === 'string'
+        ? args.flags['project-key']
+        : undefined,
+      index_keywords: parseTags(args.flags['index-keywords']),
+      index_summary: typeof args.flags['index-summary'] === 'string'
+        ? args.flags['index-summary']
+        : undefined,
     },
   });
   print(body);
@@ -235,6 +245,22 @@ export async function cmdUpdate(cfg: Config, args: ParsedArgs): Promise<void> {
   if (tags !== undefined) patch.tags = tags;
   if (content !== undefined && content !== '') patch.content = content;
   if (contentType !== undefined) patch.content_type = contentType;
+  if (typeof args.flags['expected-version'] === 'string') {
+    const expectedVersion = Number.parseInt(args.flags['expected-version'], 10);
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      const err = new Error('update: --expected-version must be a non-negative integer');
+      (err as Error & { exitCode?: number }).exitCode = 2;
+      throw err;
+    }
+    patch.expected_version = expectedVersion;
+  }
+  if (typeof args.flags['index-role'] === 'string') patch.index_role = args.flags['index-role'];
+  if (typeof args.flags['project-key'] === 'string') patch.project_key = args.flags['project-key'];
+  const indexKeywords = parseTags(args.flags['index-keywords']);
+  if (indexKeywords !== undefined) patch.index_keywords = indexKeywords;
+  if (typeof args.flags['index-summary'] === 'string') {
+    patch.index_summary = args.flags['index-summary'];
+  }
   const shared = resolveShareFlag(args.flags);
   if (shared !== undefined) patch.shared = shared;
   const body = await request(cfg, {
@@ -279,6 +305,125 @@ export async function cmdDelete(cfg: Config, args: ParsedArgs): Promise<void> {
 
 export async function cmdHealth(cfg: Config): Promise<void> {
   const body = await request(cfg, { path: '/health' });
+  print(body);
+}
+
+export async function cmdEvents(cfg: Config, args: ParsedArgs): Promise<void> {
+  const after = typeof args.flags.after === 'string' ? args.flags.after : undefined;
+  const limit = typeof args.flags.limit === 'string' ? args.flags.limit : undefined;
+  const prefix = typeof args.flags.prefix === 'string' ? args.flags.prefix : undefined;
+  const body = await request(cfg, {
+    path: '/api/memory/events',
+    query: { after, limit, prefix },
+  });
+  print(body);
+}
+
+export async function cmdEventStats(cfg: Config): Promise<void> {
+  const body = await request(cfg, { path: '/api/memory/events/stats' });
+  print(body);
+}
+
+export async function cmdIndexProposals(cfg: Config, args: ParsedArgs): Promise<void> {
+  const consumer = typeof args.flags.consumer === 'string'
+    ? args.flags.consumer
+    : args.positional[0] || 'memory-status-dry-run';
+  const after = typeof args.flags.after === 'string' ? args.flags.after : undefined;
+  const limit = typeof args.flags.limit === 'string' ? args.flags.limit : undefined;
+  const body = await request(cfg, {
+    path: '/api/memory/events/processing',
+    query: { consumer, after, limit },
+  });
+  print(body);
+}
+
+export async function cmdIndexReconcile(cfg: Config, args: ParsedArgs): Promise<void> {
+  const root = typeof args.flags.root === 'string' ? args.flags.root : undefined;
+  const indexPath = typeof args.flags['index-path'] === 'string'
+    ? args.flags['index-path']
+    : undefined;
+  const statusPath = typeof args.flags['status-path'] === 'string'
+    ? args.flags['status-path']
+    : undefined;
+  const body = await request(cfg, {
+    path: '/api/memory/index-reconciliation',
+    query: {
+      root,
+      index_path: indexPath,
+      status_path: statusPath,
+    },
+  });
+  print(body);
+}
+
+export async function cmdIndexReview(cfg: Config, args: ParsedArgs): Promise<void> {
+  const consumer = args.positional[0];
+  const eventId = Number.parseInt(args.positional[1] || '', 10);
+  const outcome = args.positional[2];
+  if (!consumer || !Number.isInteger(eventId) || eventId < 1) {
+    throw new Error('index-review: <consumer> <event-id> <outcome> required');
+  }
+  if (!['pending', 'accepted', 'corrected', 'rejected'].includes(outcome)) {
+    throw new Error(
+      'index-review: outcome must be pending, accepted, corrected, or rejected',
+    );
+  }
+  const body = await request(cfg, {
+    method: 'PATCH',
+    path: '/api/memory/events/processing/review',
+    body: {
+      consumer,
+      event_ids: [eventId],
+      review_outcome: outcome,
+    },
+  });
+  print(body);
+}
+
+export async function cmdRoutingPreview(cfg: Config, args: ParsedArgs): Promise<void> {
+  const root = typeof args.flags.root === 'string' ? args.flags.root : undefined;
+  const targetPath = typeof args.flags['target-path'] === 'string'
+    ? args.flags['target-path']
+    : undefined;
+  const body = await request(cfg, {
+    path: '/api/memory/routing-index/preview',
+    query: { root, target_path: targetPath },
+  });
+  print(body);
+}
+
+export async function cmdRoutingRebuild(cfg: Config, args: ParsedArgs): Promise<void> {
+  const rawExpected = args.flags['expected-version'];
+  const expectedVersion = typeof rawExpected === 'string'
+    ? Number.parseInt(rawExpected, 10)
+    : Number.NaN;
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    throw new Error('routing-rebuild: --expected-version <N> required');
+  }
+  const body = await request(cfg, {
+    method: 'POST',
+    path: '/api/memory/routing-index/rebuild',
+    body: {
+      root: typeof args.flags.root === 'string' ? args.flags.root : undefined,
+      target_path: typeof args.flags['target-path'] === 'string'
+        ? args.flags['target-path']
+        : undefined,
+      expected_version: expectedVersion,
+    },
+  });
+  print(body);
+}
+
+export async function cmdRoutingSnapshots(cfg: Config, args: ParsedArgs): Promise<void> {
+  const body = await request(cfg, {
+    path: '/api/memory/routing-index/snapshots',
+    query: {
+      target_path: typeof args.flags['target-path'] === 'string'
+        ? args.flags['target-path']
+        : undefined,
+      limit: typeof args.flags.limit === 'string' ? args.flags.limit : undefined,
+    },
+  });
   print(body);
 }
 
@@ -359,15 +504,30 @@ Commands:
   create <title> [content]    [--folder <id>] [--path </abs/path>]
                               [--tags a,b,c] [--by <name>]
                               [--share | --no-share]
+                              [--index-role <role>] [--project-key <key>]
+                              [--index-keywords a,b] [--index-summary <text>]
                               [--html | --content-type <mime>]
   update <doc_id> [content]   [--title <t>] [--tags a,b,c]
                               [--share | --no-share]
+                              [--expected-version N]
+                              [--index-role <role>] [--project-key <key>]
+                              [--index-keywords a,b] [--index-summary <text>]
                               [--html | --content-type <mime>]
   share <doc_id> [on|off]     toggle a single doc's shared flag (default: on)
   mkdir <name> [parent_id]    [--path </abs/path>]
   delete <doc_id>
   visibility [public|private] read or toggle this bot's DEFAULT share for new
                               docs (public → shared:true, private → shared:false)
+  events                      [--after N] [--limit N] [--prefix </path>]
+  event-stats
+  index-proposals [consumer]  [--after N] [--limit N]
+  index-review <consumer> <event-id> <pending|accepted|corrected|rejected>
+  index-reconcile             [--root </path>] [--index-path </path>]
+                              [--status-path </path>]
+  routing-preview             [--root </path>] [--target-path </path>]
+  routing-rebuild             --expected-version N [--root </path>]
+                              [--target-path </path>]
+  routing-snapshots           [--target-path </path>] [--limit N]
   health
   help
 

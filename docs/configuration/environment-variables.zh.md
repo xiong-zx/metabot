@@ -79,6 +79,20 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许创建或更新的顶层路径 |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | 本服务器额外的 MetaMemory 顶层命名空间，例如 `/cargo1` |
+| `METABOT_MEMORY_INDEX_AUTOMATION` | `off` | 增量索引模式：`off`、`events`（仅 outbox）、`dry-run`、`routing` 或双门禁 `full` |
+| `METABOT_MEMORY_INDEX_QUALITY_APPROVED` | `false` | 操作者确认已通过文档中的 P5 质量合同；`full` 必需 |
+| `METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED` | `false` | P5 状态写入的独立 kill switch；`full` 必需 |
+| `METABOT_MEMORY_INDEX_WATCH_ROOT` | server root 或 `/cargo1` | 索引消费者监视的语义范围 |
+| `METABOT_MEMORY_INDEX_STATUS_PATH` | `<watch-root>/status/project-progress-status` | dry-run 提案使用的状态文档 |
+| `METABOT_MEMORY_INDEX_TARGET_BOT` | `memory` | 生成有界状态提案的 Bot |
+| `METABOT_MEMORY_INDEX_CONSUMER` | 按模式 | 持久化事件消费者游标名；`full` 默认为 `memory-status-full`，其他模式默认为 `memory-status-dry-run` |
+| `METABOT_MEMORY_INDEX_POLL_MS` | `60000` | 事件轮询间隔 |
+| `METABOT_MEMORY_INDEX_RECONCILE_MS` | `900000` | 只读对账间隔 |
+| `METABOT_MEMORY_INDEX_BATCH_SIZE` | `50` | 每轮最多读取的事件数 |
+| `METABOT_MEMORY_INDEX_MAX_ATTEMPTS` | `3` | 提案失败进入 dead-letter 前的重试次数 |
+| `METABOT_MEMORY_ROUTING_REBUILD_ENABLED` | `false` | Core 端确定性路由索引重建写入门禁 |
 | `SCHEDULE_TIMEZONE` | 系统时区 | Cron 任务使用的 IANA 时区 |
 | `METABOT_PEERS` | — | 逗号分隔的 Peer URL |
 | `METABOT_PEER_SECRETS` | — | 与 Peer URL 对应的 Secret |

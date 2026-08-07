@@ -17,6 +17,15 @@
       "roots": ["packages/skills/metabot-todos"]
     },
     {
+      "id": "metamemory-index-automation",
+      "status": "required",
+      "roots": [
+        "src/memory/index-automation.ts",
+        "packages/server/src/memory/index-reconciliation.ts",
+        "packages/server/src/memory/routing-index.ts"
+      ]
+    },
+    {
       "id": "agent-team-governance",
       "status": "required",
       "roots": ["src/agent-teams/governance-extension.ts"]

@@ -23,7 +23,11 @@ import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
-
+import {
+  MemoryIndexAutomation,
+  parseMemoryIndexAutomationMode,
+  shouldInitializeMemoryIndexAutomation,
+} from './memory/index-automation.js';
 import { SessionRegistry } from './session/session-registry.js';
 
 interface FeishuBotHandle {
@@ -33,6 +37,21 @@ interface FeishuBotHandle {
   config: BotConfigBase;
   sender: IMessageSender;
   feishuClient: lark.Client;
+}
+
+function envPositiveInt(name: string, defaultValue: number, logger: Logger): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn({ name, value: raw, defaultValue }, 'Invalid positive integer env value; using default');
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function envExplicitTrue(name: string): boolean {
+  return process.env[name]?.trim().toLowerCase() === 'true';
 }
 
 /**
@@ -378,6 +397,34 @@ async function main() {
     logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
   }
 
+  const memoryIndexMode = parseMemoryIndexAutomationMode(
+    process.env.METABOT_MEMORY_INDEX_AUTOMATION,
+  );
+  const memoryIndexAutomation = shouldInitializeMemoryIndexAutomation(memoryIndexMode)
+    ? new MemoryIndexAutomation(
+        {
+          mode: memoryIndexMode,
+          pollMs: envPositiveInt('METABOT_MEMORY_INDEX_POLL_MS', 60_000, logger),
+          reconcileMs: envPositiveInt(
+            'METABOT_MEMORY_INDEX_RECONCILE_MS',
+            15 * 60_000,
+            logger,
+          ),
+          batchSize: envPositiveInt('METABOT_MEMORY_INDEX_BATCH_SIZE', 50, logger),
+          maxAttempts: envPositiveInt('METABOT_MEMORY_INDEX_MAX_ATTEMPTS', 3, logger),
+          consumer: process.env.METABOT_MEMORY_INDEX_CONSUMER?.trim() || undefined,
+          targetBot: process.env.METABOT_MEMORY_INDEX_TARGET_BOT?.trim() || undefined,
+          root: process.env.METABOT_MEMORY_INDEX_WATCH_ROOT?.trim() || undefined,
+          statusPath: process.env.METABOT_MEMORY_INDEX_STATUS_PATH?.trim() || undefined,
+          qualityApproved: envExplicitTrue('METABOT_MEMORY_INDEX_QUALITY_APPROVED'),
+          autoApplyEnabled: envExplicitTrue('METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED'),
+        },
+        new MemoryClient(logger),
+        registry,
+        logger,
+      )
+    : undefined;
+
   // Initialize cross-platform session registry
   const sessionRegistry = new SessionRegistry(logger);
   // Inject into all bot bridges
@@ -405,6 +452,15 @@ async function main() {
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
   });
+  memoryIndexAutomation?.start();
+  logger.info(
+    {
+      mode: memoryIndexMode,
+      consumer: process.env.METABOT_MEMORY_INDEX_CONSUMER?.trim()
+        || 'memory-status-dry-run',
+    },
+    'Memory index automation configured',
+  );
 
   await finalizeControlledRestartAfterStartup({
     registry,
@@ -424,6 +480,7 @@ async function main() {
     if (docSync) {
       docSync.destroy();
     }
+    memoryIndexAutomation?.destroy();
     sessionRegistry.close();
     const teardowns: Promise<void>[] = [];
     for (const handle of feishuHandles) {

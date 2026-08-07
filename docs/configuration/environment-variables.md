@@ -86,6 +86,20 @@ Multi-bot deployments should store channel credentials in the protected
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API writes may create or update |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's additional top-level MetaMemory namespace, for example `/cargo1` |
+| `METABOT_MEMORY_INDEX_AUTOMATION` | `off` | Incremental index mode: `off`, `events` (outbox only), `dry-run`, `routing`, or dual-gated `full` |
+| `METABOT_MEMORY_INDEX_QUALITY_APPROVED` | `false` | Operator attestation that the documented P5 quality contract passed; required by `full` |
+| `METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED` | `false` | Independent P5 status-write kill switch; required by `full` |
+| `METABOT_MEMORY_INDEX_WATCH_ROOT` | server root or `/cargo1` | Semantic scope watched by the index consumer |
+| `METABOT_MEMORY_INDEX_STATUS_PATH` | `<watch-root>/status/project-progress-status` | Curated status document used for dry-run proposals |
+| `METABOT_MEMORY_INDEX_TARGET_BOT` | `memory` | Bot used for bounded semantic status proposals |
+| `METABOT_MEMORY_INDEX_CONSUMER` | mode-specific | Durable event-consumer cursor name; defaults to `memory-status-full` in `full`, otherwise `memory-status-dry-run` |
+| `METABOT_MEMORY_INDEX_POLL_MS` | `60000` | Event poll interval |
+| `METABOT_MEMORY_INDEX_RECONCILE_MS` | `900000` | Read-only reconciliation interval |
+| `METABOT_MEMORY_INDEX_BATCH_SIZE` | `50` | Maximum events fetched per poll |
+| `METABOT_MEMORY_INDEX_MAX_ATTEMPTS` | `3` | Retry count before dead-lettering a proposal failure |
+| `METABOT_MEMORY_ROUTING_REBUILD_ENABLED` | `false` | Core-side write gate for deterministic routing-index rebuilds |
 | `SCHEDULE_TIMEZONE` | system timezone | IANA timezone for cron tasks |
 | `METABOT_PEERS` | — | Comma-separated peer URLs |
 | `METABOT_PEER_SECRETS` | — | Positional secrets for peer URLs |
