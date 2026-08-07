@@ -65,6 +65,9 @@ SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 B
 并快照所有活跃 chat。每个受影响的用户 chat 都由自己的 Bot 发送 **Restart Preparing**
 通知；任一通知失败都会取消重启并解除暂停，除非操作者明确传入 `--force`。准备状态还有
 两分钟租约，控制器若在修改 PM2 前消失，Bridge 会自动恢复接收工作。
+CLI 在带签名能力的引擎会话内运行时，只转发该会话的作用域能力，不暴露 Bridge 管理员
+密钥。只有 `user`、`pm` 或 `admin` 角色可以为签名中完全一致的 Bot 与 chat 准备或取消
+重启；Agent Team agent 和 Worker 仍会被拒绝。
 
 带 `--resume` 时，启动流程会为每个被中断的用户 chat 创建可去重的持久续做任务，
 而不再只恢复发起者；每个受影响 Bot 都会发送自己的 **Restart Complete** 通知。

@@ -557,9 +557,17 @@ _prepare_controlled_restart() {
   local payload="$1"
   _load_bridge_api_config
   local response_file http_code
+  local -a headers=(-H "$METABOT_AUTH" -H 'Content-Type: application/json')
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    headers+=(
+      -H "X-MetaBot-Team-Capability: $METABOT_TEAM_CAPABILITY"
+      -H "X-MetaBot-Bot-Name: ${METABOT_BOT_NAME:-}"
+      -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    )
+  fi
   response_file="$(mktemp)"
   if ! http_code="$(curl -sS --connect-timeout 3 --max-time 30 -o "$response_file" -w '%{http_code}' \
-    -X POST -H "$METABOT_AUTH" -H 'Content-Type: application/json' \
+    -X POST "${headers[@]}" \
     --data "$payload" "${METABOT_URL%/}/api/runtime/restart/prepare")"; then
     rm -f "$response_file"
     return 2
@@ -581,8 +589,16 @@ _cancel_controlled_restart() {
   local request_id="$1"
   _load_bridge_api_config
   local payload
+  local -a headers=(-H "$METABOT_AUTH" -H 'Content-Type: application/json')
+  if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
+    headers+=(
+      -H "X-MetaBot-Team-Capability: $METABOT_TEAM_CAPABILITY"
+      -H "X-MetaBot-Bot-Name: ${METABOT_BOT_NAME:-}"
+      -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
+    )
+  fi
   payload="$(RESTART_REQUEST_ID="$request_id" node -e 'process.stdout.write(JSON.stringify({requestId: process.env.RESTART_REQUEST_ID}))')"
-  curl -fsS -X POST -H "$METABOT_AUTH" -H 'Content-Type: application/json' \
+  curl -fsS -X POST "${headers[@]}" \
     --data "$payload" "${METABOT_URL%/}/api/runtime/restart/cancel" >/dev/null 2>&1 || true
 }
 

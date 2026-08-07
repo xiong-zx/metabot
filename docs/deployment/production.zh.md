@@ -110,6 +110,8 @@ chat 仍由各自的持久恢复机制负责。
 并由各 Bot 发送完成通知。请使用 CLI，不要直接执行 `pm2 restart`；直接调用 PM2 会
 绕过这份契约。首次从旧 Bridge 升级时，因为正在运行的旧进程尚无准备接口，只允许
 一次明确的兼容交接。
+引擎会话内的 CLI 使用自己的签名作用域能力完成准备/取消握手，不会获得 Bridge 全局
+密钥。Bridge 只允许 `user`、`pm` 或 `admin` 角色操作签名中完全一致的 Bot 与 chat。
 
 Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 `~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，

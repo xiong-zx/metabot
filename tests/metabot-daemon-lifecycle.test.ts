@@ -148,6 +148,21 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(log).not.toContain('save --force');
   });
 
+  it('forwards the scoped capability for restart without exposing the Bridge admin secret', () => {
+    const kit = fixture();
+    run(kit, ['restart', '--bot', 'admin', '--chat', 'oc_capability'], {
+      API_SECRET: 'bridge-admin-secret-must-not-leak',
+      METABOT_TEAM_CAPABILITY: 'signed-restart-capability',
+      METABOT_BOT_NAME: 'admin',
+      METABOT_CHAT_ID: 'oc_capability',
+    });
+    const log = readFileSync(kit.log, 'utf8');
+    expect(log).toContain('X-MetaBot-Team-Capability: signed-restart-capability');
+    expect(log).toContain('X-MetaBot-Bot-Name: admin');
+    expect(log).toContain('X-MetaBot-Chat-Id: oc_capability');
+    expect(log).not.toContain('bridge-admin-secret-must-not-leak');
+  });
+
   it('refuses the protected switch when multi-bot prepare is rejected', () => {
     const kit = fixture();
     expect(() => run(kit, ['restart'], { FAKE_PREPARE_STATUS: '409' })).toThrow(

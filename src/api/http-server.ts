@@ -137,6 +137,16 @@ export function isAgentTeamCapabilityReadRoute(method: string, url: string): boo
     && (url === '/api/bots' || url === '/api/peers' || url === '/api/stats' || url === '/api/metrics');
 }
 
+/**
+ * A user or PM engine session may coordinate only its own controlled restart.
+ * The route handler applies the role and exact bot/chat scope checks after the
+ * signed capability passes this outer authentication gate.
+ */
+export function isAgentTeamCapabilityRestartRoute(method: string, url: string): boolean {
+  return method === 'POST'
+    && (url === '/api/runtime/restart/prepare' || url === '/api/runtime/restart/cancel');
+}
+
 function metabotCoreBaseUrl(): string | undefined {
   const candidates = [process.env.METABOT_CORE_AGENT_BUS_URL, process.env.METABOT_CORE_URL];
   for (const raw of candidates) {
@@ -479,7 +489,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const capabilityChatId = headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]);
       const hasExecutionCapabilityHeaders = !!capability || !!capabilityBotName || !!capabilityChatId;
       const acceptsExecutionCapability = url.startsWith('/api/agent-team')
-        || isAgentTeamCapabilityReadRoute(method, url);
+        || isAgentTeamCapabilityReadRoute(method, url)
+        || isAgentTeamCapabilityRestartRoute(method, url);
       let executionCapabilityOk = false;
       let executionCapabilityError: AgentTeamCapabilityError | undefined;
       if (acceptsExecutionCapability && hasExecutionCapabilityHeaders) {
@@ -508,8 +519,9 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
       // A request marked as an engine session must never fall back to the
       // bridge-wide secret or metabot-core cross verification. Its signed
-      // capability is accepted only on Agent Team routes and the four exact
-      // read-only Bridge endpoints above.
+      // capability is accepted only on Agent Team routes, the four exact
+      // read-only Bridge endpoints, and the self-scoped controlled-restart
+      // endpoints whose handler performs an additional role/scope check.
       if (hasExecutionCapabilityHeaders && !executionCapabilityOk) {
         rejectUnauthorized(executionCapabilityError);
         return;

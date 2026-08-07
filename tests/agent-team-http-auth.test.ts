@@ -214,4 +214,97 @@ describe('Agent Team HTTP capability gate', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('allows only a user or PM capability to coordinate its own restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-restart-capability-auth-'));
+    vi.stubEnv('SESSION_STORE_DIR', dir);
+    vi.stubEnv('METABOT_RATE_LIMIT_DISABLED', '1');
+    const capabilities = new AgentTeamExecutionCapabilityService('restart-capability-test-key');
+    const registry = new BotRegistry();
+    const bridge = {
+      beginRestartQuiesce: vi.fn(),
+      cancelRestartQuiesce: vi.fn(),
+      getRestartTaskSnapshots: vi.fn().mockReturnValue([]),
+      getPersistentRegistry: vi.fn(),
+      setAgentTeamStore: vi.fn(),
+      setExecutionEnvProvider: vi.fn(),
+    };
+    const sender = { sendTextNotice: vi.fn().mockResolvedValue(undefined) };
+    registry.register({ name: 'admin', platform: 'feishu', bridge, sender, config: {} } as any);
+    const server = startApiServer({
+      port: 0,
+      secret: 'bridge-admin-secret',
+      registry,
+      scheduler: {
+        setWebSocketHandle: () => {},
+        taskCount: () => 0,
+        recurringTaskCount: () => 0,
+      } as any,
+      logger,
+      agentTeamCapabilityService: capabilities,
+    });
+    if (!server.listening) await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const markerHeaders = {
+      authorization: 'Bearer execution-capability',
+      'content-type': 'application/json',
+      'x-metabot-bot-name': 'admin',
+      'x-metabot-chat-id': 'oc_restart',
+    };
+    const capability = (role: 'user' | 'agent') => capabilities.issue({
+      role,
+      botName: 'admin',
+      chatId: 'oc_restart',
+      ttlMs: 60_000,
+    });
+
+    try {
+      const deniedRole = await fetch(`${baseUrl}/api/runtime/restart/prepare`, {
+        method: 'POST',
+        headers: { ...markerHeaders, 'x-metabot-team-capability': capability('agent') },
+        body: JSON.stringify({
+          requestId: 'restart-agent-denied',
+          requesterBot: 'admin',
+          requesterChat: 'oc_restart',
+        }),
+      });
+      expect(deniedRole.status).toBe(403);
+
+      const deniedScope = await fetch(`${baseUrl}/api/runtime/restart/prepare`, {
+        method: 'POST',
+        headers: { ...markerHeaders, 'x-metabot-team-capability': capability('user') },
+        body: JSON.stringify({
+          requestId: 'restart-scope-denied',
+          requesterBot: 'admin',
+          requesterChat: 'oc_other',
+        }),
+      });
+      expect(deniedScope.status).toBe(403);
+
+      const accepted = await fetch(`${baseUrl}/api/runtime/restart/prepare`, {
+        method: 'POST',
+        headers: { ...markerHeaders, 'x-metabot-team-capability': capability('user') },
+        body: JSON.stringify({
+          requestId: 'restart-capability-accepted',
+          requesterBot: 'admin',
+          requesterChat: 'oc_restart',
+        }),
+      });
+      expect(accepted.status).toBe(200);
+      expect(bridge.beginRestartQuiesce).toHaveBeenCalledWith('restart-capability-accepted');
+
+      const cancelled = await fetch(`${baseUrl}/api/runtime/restart/cancel`, {
+        method: 'POST',
+        headers: { ...markerHeaders, 'x-metabot-team-capability': capability('user') },
+        body: JSON.stringify({ requestId: 'restart-capability-accepted' }),
+      });
+      expect(cancelled.status).toBe(200);
+      expect(bridge.cancelRestartQuiesce).toHaveBeenCalledWith('restart-capability-accepted');
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

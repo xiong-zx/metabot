@@ -72,6 +72,10 @@ user-facing chat receives a **Restart Preparing** notice from its own bot. A
 notification failure cancels the restart and releases the quiesce unless the
 operator explicitly passes `--force`. A two-minute preparation lease also
 unfreezes the Bridge if the controller disappears before changing PM2 state.
+When the CLI runs inside a signed engine session, it forwards that scoped
+capability instead of the Bridge administrator secret. Only `user`, `pm`, or
+`admin` roles may prepare or cancel a restart, and only for the exact signed
+bot and chat; Agent Team agents and workers remain denied.
 
 When `--resume` has a normal user or PM bot/chat scope, startup schedules one
 durable continuation for every interrupted user-facing chat, not just the

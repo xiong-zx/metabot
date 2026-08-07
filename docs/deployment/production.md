@@ -122,6 +122,9 @@ user chat and sends per-bot completion notices. Use the CLI rather than direct
 `pm2 restart`; direct PM2 commands bypass this contract. The first upgrade from
 an older Bridge uses one explicit compatibility handoff because the running
 old process does not yet expose the prepare endpoint.
+An engine-session CLI authenticates this prepare/cancel handshake with its
+signed capability, never the Bridge-wide secret. The Bridge accepts only
+`user`, `pm`, or `admin` roles acting for the exact signed bot/chat scope.
 
 Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
 state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
