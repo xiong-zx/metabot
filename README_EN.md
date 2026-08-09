@@ -2,7 +2,7 @@
 
 # 🤖 MetaBot
 
-### Run Codex and Kimi Code from Feishu/Lark, Telegram, WeChat, or the Web
+### Run Codex and Kimi Code from Feishu/Lark, Telegram, Slack, WeChat, or the Web
 
 _A self-hosted personal agent workspace. Claude Code remains available for compatibility._
 
@@ -17,6 +17,14 @@ _A self-hosted personal agent workspace. Claude Code remains available for compa
 [中文](README.md) · **English** · [Documentation](https://xvirobotics.com/metabot/)
 
 </div>
+
+<div align="center">
+<img src="resources/web-ui.png" alt="MetaBot Core Console Chat" />
+<br>
+<sub>Core Console · Chat · Codex / Kimi Code · tools · files · user confirmation</sub>
+</div>
+
+<br>
 
 <div align="center">
 <table>
@@ -94,7 +102,7 @@ Prerequisites: **Node.js >= 22.19**, Git, and credentials for at least one engin
 
 1. Run the one-line installer above.
 2. Choose Codex or Kimi Code and complete its login in a separate terminal.
-3. Connect Feishu/Lark, Telegram, or WeChat when prompted.
+3. Connect Feishu/Lark, Telegram, or WeChat when prompted; for Slack, follow the [Slack Guide](docs/features/slack.md) to configure Events API.
 4. Verify the services and open the local console:
 
 ```bash
@@ -113,10 +121,13 @@ share the same token-authenticated console.
 | --------------- | ------------------------------------------------------- | ------------------------------------------------------------ |
 | **Feishu/Lark** | Workspaces, streaming cards, files, group routing       | [Feishu App Setup](docs/getting-started/feishu-app-setup.md) |
 | **Telegram**    | Fast personal setup; no public IP required              | [Quick Setup](docs/getting-started/quick-setup.md)           |
+| **Slack**       | DM and @mention routing for existing Slack workspaces   | [Slack Guide](docs/features/slack.md)                        |
 | **WeChat**      | Personal WeChat through ClawBot; currently gray testing | [WeChat Guide](docs/features/wechat.md)                      |
 | **Web**         | Browser chat, Core, Memory, Teams, and settings         | `http://localhost:9200`                                      |
 
-Feishu uses a persistent WebSocket; Telegram and WeChat use long polling. None requires an inbound public port.
+Feishu uses a persistent WebSocket; Telegram and WeChat use long polling.
+Slack uses Events API and requires a Slack-reachable HTTPS reverse-proxied
+`/api/slack/events/<botName>` endpoint.
 
 In Feishu groups, normal messages route to the exact bot that was @mentioned.
 The group owner can select mention-only or all-message mode per bot and group
@@ -145,6 +156,15 @@ in mention-only mode. See [Chat Commands](docs/usage/chat-commands.md#group-repl
       "feishuAppSecret": "...",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": { "thinking": true }
+    }
+  ],
+  "slackBots": [
+    {
+      "name": "slack-codex",
+      "engine": "codex",
+      "slackBotToken": "xoxb-...",
+      "slackSigningSecret": "...",
+      "defaultWorkingDirectory": "/home/me/project-c"
     }
   ]
 }
@@ -183,7 +203,7 @@ See [Chat Commands](docs/usage/chat-commands.md), the [CLI Reference](docs/refer
 ## Documentation
 
 - Start: [Installation](docs/getting-started/installation.md) · [Quick Setup](docs/getting-started/quick-setup.md) · [Troubleshooting](docs/troubleshooting.md)
-- Product: [Core Console](docs/features/web-ui.md) · [Multi-Bot and Engines](docs/configuration/multi-bot.md) · [MetaMemory](docs/features/metamemory.md) · [Agent Teams](docs/features/agent-teams.md)
+- Product: [Core Console](docs/features/web-ui.md) · [Multi-Bot and Engines](docs/configuration/multi-bot.md) · [Slack](docs/features/slack.md) · [MetaMemory](docs/features/metamemory.md) · [Agent Teams](docs/features/agent-teams.md)
 - Reference: [Chat Commands](docs/usage/chat-commands.md) · [CLI](docs/reference/cli-metabot.md) · [REST API](docs/reference/api.md) · [Environment Variables](docs/configuration/environment-variables.md)
 - Operations and development: [Architecture](docs/concepts/architecture.md) · [Production](docs/deployment/production.md) · [Contributing](CONTRIBUTING.md)
 

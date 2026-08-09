@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -11,7 +11,7 @@ export function temporaryDirectory(prefix = 'arc-mcp-'): string {
 export function projectDirectory(parent: string, name = 'project'): string {
   const projectRoot = path.join(parent, name);
   mkdirSync(projectRoot, { recursive: true });
-  return projectRoot;
+  return realpathSync.native(projectRoot);
 }
 
 export function removeDirectory(directory: string): void {

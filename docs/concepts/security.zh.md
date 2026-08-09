@@ -44,19 +44,25 @@ stat -c '%a %n' ~/.metabot-core/token
 
 ## Bridge API
 
-当 `API_SECRET` 为空时，Bridge `9100` 端口只绑定 localhost。确实需要远程 Bridge
-命令时，应生成独立 Secret，并在自有代理终止 TLS：
+Bridge `9100` 默认只监听 `127.0.0.1`，除健康检查外的 API 都需要 Bearer 凭据。
+确实需要远程 Bridge 命令时，应生成独立 Secret，显式设置 `API_HOST`，并在自有代理终止 TLS：
 
 ```bash
 openssl rand -hex 32
 ```
 
 不要把原始 `9100` 或 `9200` 端口直接暴露到公网。
+不要通过 `token=` 查询参数传递 Bridge 凭据；HTTP 和非浏览器 WebSocket 客户端请使用
+`Authorization: Bearer ...`，浏览器 WebSocket 客户端可使用
+`metabot-bearer.<secret>` subprotocol。
 
 ## 渠道
 
 - 限制飞书/Lark 应用可见范围，只发布必要权限。
-- 不要在 `bots.json` 副本、截图或 Issue 中泄露 Telegram、微信 Token。
+- 不要在 `bots.json` 副本、截图或 Issue 中泄露 Telegram、Slack、微信 Token
+  或 Slack Signing Secret。
+- Slack Events API 请求只有通过 Slack HMAC 签名和 timestamp 校验后才会进入
+  Bridge。
 - 群聊使用精确 `@Bot` 路由；回复模式变更由群主控制，无法验证群主时 fail-closed。
 
 ## Memory 共享

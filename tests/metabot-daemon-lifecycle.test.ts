@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const REAL_PS = execFileSync('sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).trim();
 
 function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.ProcessEnv } {
   const root = mkdtempSync(join(tmpdir(), 'metabot-daemon-lifecycle-'));
@@ -75,7 +76,7 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
   writeExecutable(join(fakeBin, 'ps'), [
     '#!/usr/bin/env bash',
     'if [[ "${FAKE_PS_FAIL:-}" == "true" ]]; then exit 1; fi',
-    'exec /usr/bin/ps "$@"',
+    'exec "$REAL_PS" "$@"',
   ]);
   writeExecutable(join(fakeBin, 'curl'), [
     '#!/usr/bin/env bash',
@@ -113,7 +114,14 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
       PM2_LOG: log,
       FAKE_RUNTIME: runtime,
       REAL_NODE: process.execPath,
+      REAL_PS,
       HOME: join(root, 'home'),
+      API_SECRET: '',
+      METABOT_RESTART_REQUEST_ID: '',
+      METABOT_BOT_NAME: '',
+      METABOT_CHAT_ID: '',
+      METABOT_CHAT: '',
+      METABOT_TEAM_CAPABILITY: '',
     },
   };
 }
@@ -251,7 +259,7 @@ describe('metabot execution-daemon lifecycle', () => {
     const target = fixture();
     run(current, ['deploy-runtime', '--runtime', target.runtime, '--no-wait']);
     const log = readFileSync(current.log, 'utf8');
-    expect(log).toContain(`protected-switch --runtime ${target.runtime} --apps metabot-worker-runnerd,metabot-arcd,metabot`);
+    expect(log).toContain(`protected-switch --runtime ${realpathSync(target.runtime)} --apps metabot-worker-runnerd,metabot-arcd,metabot`);
     expect(log).not.toContain('delete ');
     expect(log).not.toContain('start ');
     expect(log).not.toContain('save --force');

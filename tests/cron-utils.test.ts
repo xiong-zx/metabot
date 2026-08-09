@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { isValidCron, nextCronOccurrence, getDefaultTimezone } from '../src/scheduler/cron-utils.js';
+import { describe, it, expect, vi } from 'vitest';
+import { isValidCron, nextCronOccurrence } from '../src/scheduler/cron-utils.js';
 
 describe('cron-utils', () => {
   describe('isValidCron', () => {
@@ -63,9 +63,17 @@ describe('cron-utils', () => {
   });
 
   describe('getDefaultTimezone', () => {
-    it('returns Asia/Shanghai by default', () => {
-      // SCHEDULE_TIMEZONE is not set in test env
-      expect(getDefaultTimezone()).toBe('Asia/Shanghai');
+    it('returns Asia/Shanghai by default', async () => {
+      const original = process.env.SCHEDULE_TIMEZONE;
+      delete process.env.SCHEDULE_TIMEZONE;
+      vi.resetModules();
+      try {
+        const { getDefaultTimezone } = await import('../src/scheduler/cron-utils.js');
+        expect(getDefaultTimezone()).toBe('Asia/Shanghai');
+      } finally {
+        if (original === undefined) delete process.env.SCHEDULE_TIMEZONE;
+        else process.env.SCHEDULE_TIMEZONE = original;
+      }
     });
   });
 });

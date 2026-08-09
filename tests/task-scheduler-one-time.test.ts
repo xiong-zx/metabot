@@ -140,6 +140,25 @@ describe('TaskScheduler one-time tasks — creation', () => {
     scheduler.destroy();
   });
 
+  it('deduplicates system-created tasks by dedupeKey', () => {
+    const firstScheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const first = firstScheduler.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'resume once', delaySeconds: 60, dedupeKey: 'restart:one',
+    });
+    firstScheduler.destroy();
+
+    // Simulate another process booting after a crash between scheduling the
+    // continuation and marking its restart participant recovered.
+    const recoveredScheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
+    const duplicate = recoveredScheduler.scheduleTask({
+      botName: 'b', chatId: 'c', prompt: 'resume twice', delaySeconds: 120, dedupeKey: 'restart:one',
+    });
+    expect(duplicate.id).toBe(first.id);
+    expect(recoveredScheduler.listTasks()).toHaveLength(1);
+    expect(recoveredScheduler.listTasks()[0]?.prompt).toBe('resume once');
+    recoveredScheduler.destroy();
+  });
+
   it('returns the existing task for a durable dedupe key', () => {
     const scheduler = new TaskScheduler(createMockRegistry(), createMockLogger());
     const first = scheduler.scheduleTask({

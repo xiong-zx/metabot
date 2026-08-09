@@ -21,7 +21,7 @@ export interface ScheduledTask {
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
-  /** Stable idempotency key for durable system-created tasks. */
+  /** Stable idempotency key for system-created tasks such as restart recovery. */
   dedupeKey?: string;
   parentRecurringId?: string;  // set if spawned by a recurring task
 }
@@ -95,8 +95,9 @@ const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
 // Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
 // different PM2 app) can isolate its scheduled-tasks.json instead of racing the
 // production instance over the same plain-JSON file (no WAL → full rewrites).
-const PERSIST_DIR = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
-const PERSIST_FILE = path.join(PERSIST_DIR, 'scheduled-tasks.json');
+function resolvePersistDir(): string {
+  return process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
+}
 
 /**
  * Manages scheduled tasks (one-time and recurring) with persistence and timers.
@@ -108,11 +109,15 @@ export class TaskScheduler {
   private recurringTasks = new Map<string, RecurringTask>();
   private recurringTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private wsHandle?: WebSocketHandle;
+  private persistDir: string;
+  private persistFile: string;
 
   constructor(
     private registry: BotRegistry,
     private logger: Logger,
   ) {
+    this.persistDir = resolvePersistDir();
+    this.persistFile = path.join(this.persistDir, 'scheduled-tasks.json');
     this.loadFromDisk();
   }
 
@@ -556,7 +561,7 @@ export class TaskScheduler {
   private saveToDisk(strict = false): void {
     let tempFile: string | undefined;
     try {
-      fs.mkdirSync(PERSIST_DIR, { recursive: true });
+      fs.mkdirSync(this.persistDir, { recursive: true });
       // Prune old completed/failed child tasks to prevent unbounded growth
       const tasks = Array.from(this.tasks.values()).filter((t) => {
         if (t.dedupeKey && (t.status === 'completed' || t.status === 'failed')) {
@@ -572,9 +577,9 @@ export class TaskScheduler {
         tasks,
         recurringTasks: Array.from(this.recurringTasks.values()),
       };
-      tempFile = `${PERSIST_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      tempFile = `${this.persistFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
       fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-      fs.renameSync(tempFile, PERSIST_FILE);
+      fs.renameSync(tempFile, this.persistFile);
     } catch (err) {
       if (tempFile) {
         try { fs.unlinkSync(tempFile); } catch { /* best effort temp cleanup */ }
@@ -586,9 +591,9 @@ export class TaskScheduler {
 
   private loadFromDisk(): void {
     try {
-      if (!fs.existsSync(PERSIST_FILE)) return;
+      if (!fs.existsSync(this.persistFile)) return;
 
-      const raw = fs.readFileSync(PERSIST_FILE, 'utf-8');
+      const raw = fs.readFileSync(this.persistFile, 'utf-8');
       const parsed = JSON.parse(raw);
       const now = Date.now();
 

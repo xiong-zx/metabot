@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -120,8 +120,9 @@ describe('ARC to real Worker Runner MCP wire', () => {
 
 async function makeKit() {
   const temporary = mkdtempSync(path.join(tmpdir(), 'arc-worker-adapter-'));
-  const projectRoot = path.join(temporary, 'project');
-  mkdirSync(projectRoot, { recursive: true });
+  const requestedProjectRoot = path.join(temporary, 'project');
+  mkdirSync(requestedProjectRoot, { recursive: true });
+  const projectRoot = realpathSync.native(requestedProjectRoot);
   const workerStore = new WorkerStore(path.join(temporary, 'worker-state', 'workers.sqlite'));
   const processRunner = new FakeProcessRunner();
   const principal = ARC_SERVICE_PRINCIPAL;

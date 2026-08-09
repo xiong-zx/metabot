@@ -2,7 +2,7 @@
 
 # 🤖 MetaBot
 
-### 从飞书/Lark、Telegram、微信或 Web 使用 Codex 和 Kimi Code
+### 从飞书/Lark、Telegram、Slack、微信或 Web 使用 Codex 和 Kimi Code
 
 _可自托管的个人 Agent 工作台；Claude Code 作为兼容引擎继续保留。_
 
@@ -17,6 +17,14 @@ _可自托管的个人 Agent 工作台；Claude Code 作为兼容引擎继续保
 **中文** · [English](README_EN.md) · [文档站](https://xvirobotics.com/metabot/zh/)
 
 </div>
+
+<div align="center">
+<img src="resources/web-ui.png" alt="MetaBot Core Console Chat" />
+<br>
+<sub>Core Console · Chat · Codex / Kimi Code · 工具 · 文件 · 用户确认</sub>
+</div>
+
+<br>
 
 <div align="center">
 <table>
@@ -93,7 +101,7 @@ kimi login
 
 1. 执行上面的一行安装命令。
 2. 选择 Codex 或 Kimi Code，并在独立终端完成登录。
-3. 按引导连接飞书/Lark、Telegram 或微信。
+3. 按引导连接飞书/Lark、Telegram 或微信；如需 Slack，按 [Slack 指南](docs/features/slack.zh.md) 配置 Events API。
 4. 验证服务并打开本地控制台：
 
 ```bash
@@ -107,14 +115,16 @@ Core Console Chat 在同一个页面里展示流式回复、工具执行和输�
 Agent 的交互问题、停止运行，以及浏览器或 Bridge STT 语音输入。Agents、Memory、
 Skills、T5T、Teams 和 CLI Access 共用同一 Token 与同一套导航。
 
-| 渠道          | 适合场景                                | 配置入口                                                    |
-| ------------- | --------------------------------------- | ----------------------------------------------------------- |
-| **飞书/Lark** | 工作空间、流式卡片、文件、群聊路由      | [飞书应用配置](docs/getting-started/feishu-app-setup.zh.md) |
-| **Telegram**  | 最快个人配置；不需要公网 IP             | [快速配置](docs/getting-started/quick-setup.zh.md)          |
-| **微信**      | 通过 ClawBot 接入个人微信；目前灰测中   | [微信指南](docs/features/wechat.zh.md)                      |
-| **Web**       | 浏览器 Chat、Core、Memory、Teams 和设置 | `http://localhost:9200`                                     |
+| 渠道          | 适合场景                                   | 配置入口                                                    |
+| ------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| **飞书/Lark** | 工作空间、流式卡片、文件、群聊路由         | [飞书应用配置](docs/getting-started/feishu-app-setup.zh.md) |
+| **Telegram**  | 最快个人配置；不需要公网 IP                | [快速配置](docs/getting-started/quick-setup.zh.md)          |
+| **Slack**     | DM 和 @mention 路由；适合已有 Slack 工作区 | [Slack 指南](docs/features/slack.zh.md)                     |
+| **微信**      | 通过 ClawBot 接入个人微信；目前灰测中      | [微信指南](docs/features/wechat.zh.md)                      |
+| **Web**       | 浏览器 Chat、Core、Memory、Teams 和设置    | `http://localhost:9200`                                     |
 
-飞书使用长连接 WebSocket，Telegram 和微信使用长轮询，都不需要开放公网入站端口。
+飞书使用长连接 WebSocket，Telegram 和微信使用长轮询；Slack 使用 Events API，需要一个
+可被 Slack 访问并经过 HTTPS 反向代理保护的 `/api/slack/events/<botName>` 入口。
 
 飞书群里的普通消息只路由给被准确 @ 的 Bot。群主可以用
 `@Bot /group-reply ...` 为每个 Bot、每个群选择仅 @ 或回复全部消息；裸命令
@@ -142,6 +152,15 @@ Skills、T5T、Teams 和 CLI Access 共用同一 Token 与同一套导航。
       "feishuAppSecret": "...",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": { "thinking": true }
+    }
+  ],
+  "slackBots": [
+    {
+      "name": "slack-codex",
+      "engine": "codex",
+      "slackBotToken": "xoxb-...",
+      "slackSigningSecret": "...",
+      "defaultWorkingDirectory": "/home/me/project-c"
     }
   ]
 }
@@ -180,7 +199,7 @@ Skills、T5T、Teams 和 CLI Access 共用同一 Token 与同一套导航。
 ## 文档
 
 - 开始：[安装](docs/getting-started/installation.zh.md) · [快速配置](docs/getting-started/quick-setup.zh.md) · [故障排除](docs/troubleshooting.zh.md)
-- 产品：[Core Console](docs/features/web-ui.zh.md) · [多 Bot 与引擎](docs/configuration/multi-bot.zh.md) · [MetaMemory](docs/features/metamemory.zh.md) · [Agent Teams](docs/features/agent-teams.zh.md)
+- 产品：[Core Console](docs/features/web-ui.zh.md) · [多 Bot 与引擎](docs/configuration/multi-bot.zh.md) · [Slack](docs/features/slack.zh.md) · [MetaMemory](docs/features/metamemory.zh.md) · [Agent Teams](docs/features/agent-teams.zh.md)
 - 参考：[聊天命令](docs/usage/chat-commands.zh.md) · [CLI](docs/reference/cli-metabot.zh.md) · [REST API](docs/reference/api.zh.md) · [环境变量](docs/configuration/environment-variables.zh.md)
 - 运维与开发：[架构](docs/concepts/architecture.zh.md) · [生产部署](docs/deployment/production.zh.md) · [贡献指南](CONTRIBUTING.md)
 

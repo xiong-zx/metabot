@@ -1,6 +1,6 @@
 # 多 Bot 模式
 
-在一个 MetaBot Bridge 中运行多个飞书/Lark、Telegram 和微信 Bot。每个 Bot
+在一个 MetaBot Bridge 中运行多个飞书/Lark、Telegram、Slack 和微信 Bot。每个 Bot
 拥有独立的渠道凭证、引擎、工作区、会话和群回复设置。
 
 ## 配置
@@ -25,7 +25,6 @@
       "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
-      "feishuDomain": "lark",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": {
         "thinking": true
@@ -39,36 +38,42 @@
       "telegramBotToken": "123456:ABC...",
       "defaultWorkingDirectory": "/home/me/personal"
     }
+  ],
+  "slackBots": [
+    {
+      "name": "slack-codex",
+      "engine": "codex",
+      "slackBotToken": "xoxb-...",
+      "slackSigningSecret": "...",
+      "defaultWorkingDirectory": "/home/me/slack-workspace"
+    }
   ]
 }
 ```
 
 ## 通用 Bot 字段
 
-| 字段 | 必填 | 默认值 | 说明 |
-|---|---|---|---|
-| `name` | 是 | — | 稳定的 Bot 标识 |
-| `defaultWorkingDirectory` | 是 | — | Agent 可访问的工作区 |
-| `engine` | 否 | `"codex"` | `"codex"`、`"kimi"` 或兼容引擎 `"claude"` |
-| `model` | 否 | 引擎默认 | Session 模型覆盖 |
-| `visible` | 否 | `true` | 是否注册到 Agent Bus 供发现 |
-| `memoryPublic` | 否 | 粘性/默认策略 | 显式设置时固定 Bot 的默认 Memory 可见性 |
-| `workerTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 Worker Runner 凭证 |
-| `arcTools` | 否 | `false` | 安全相关开关：只为该 Bot 的非团队 `pm`/`user` 会话签发 ARC 凭证 |
-| `maxTurns` / `maxBudgetUsd` | 否 | 不限制 | Claude 兼容限制 |
-| `outputsBaseDir` | 否 | 用户临时目录 | 自动回传到聊天的文件目录 |
+| 字段                        | 必填 | 默认值        | 说明                                      |
+| --------------------------- | ---- | ------------- | ----------------------------------------- |
+| `name`                      | 是   | —             | 稳定的 Bot 标识                           |
+| `defaultWorkingDirectory`   | 是   | —             | Agent 可访问的工作区                      |
+| `engine`                    | 否   | `"codex"`     | `"codex"`、`"kimi"` 或兼容引擎 `"claude"` |
+| `model`                     | 否   | 引擎默认      | Session 模型覆盖                          |
+| `visible`                   | 否   | `true`        | 是否注册到 Agent Bus 供发现               |
+| `memoryPublic`              | 否   | 粘性/默认策略 | 显式设置时固定 Bot 的默认 Memory 可见性   |
+| `workerTools`               | 否   | `false`       | 为非团队 `pm`/`user` 会话启用 Worker Runner 能力 |
+| `arcTools`                  | 否   | `false`       | 为非团队 `pm`/`user` 会话启用 ARC 能力    |
+| `maxTurns` / `maxBudgetUsd` | 否   | 不限制        | Claude 兼容限制                           |
+| `outputsBaseDir`            | 否   | 用户临时目录  | 自动回传到聊天的文件目录                  |
 
 渠道凭证字段：
 
-| 渠道 | 字段 |
-|---|---|
-| 飞书/Lark | `feishuAppId`、`feishuAppSecret`；可选 `feishuDomain`（默认 `feishu`，国际版用 `lark`）和 `groupNoMention` |
-| Telegram | `telegramBotToken` |
-| 微信 | 可选 `wechatBotToken`；省略时扫码登录 |
-
-`feishuDomain` 只接受 `feishu` 和 `lark`。旧配置不写该字段时仍使用飞书。
-修改已有 Bot 前请阅读 [Lark 域名迁移](lark-domain-migration.md)，因为 ID 和 Wiki
-映射都只在各自租户内有效。
+| 渠道      | 字段                                                                           |
+| --------- | ------------------------------------------------------------------------------ |
+| 飞书/Lark | `feishuAppId`、`feishuAppSecret`，可选 `feishuDomain`（`feishu` 或 `lark`）和 `groupNoMention` |
+| Telegram  | `telegramBotToken`                                                             |
+| 微信      | 可选 `wechatBotToken`；省略时扫码登录                                          |
+| Slack     | `slackBotToken`、`slackSigningSecret`，可选 `slackBotUserId`、`groupNoMention` |
 
 ## Codex 配置
 
@@ -106,14 +111,14 @@ app-server 和原生执行中 steering 不属于当前公开行为。
 }
 ```
 
-| 字段 | 默认值 | 说明 |
-|---|---|---|
-| `kimi.model` | Kimi Code 配置默认 | 模型 ID 或已配置的短别名 |
-| `kimi.thinking` | Kimi Code 配置默认 | Thinking 覆盖 |
-| `kimi.permissionMode` | `auto` | 工具权限策略；`yolo` 仅限可信工作区显式启用 |
-| `kimi.executable` | `PATH` 中的 `kimi` | Kimi Code 可执行文件 |
-| `kimi.serverUrl` | `http://127.0.0.1:58627` | 已有 loopback Server 地址；否则按需启动 |
-| `kimi.contextWindow` | 当前 Kimi 默认 | 展示/上下文覆盖 |
+| 字段                  | 默认值                   | 说明                                        |
+| --------------------- | ------------------------ | ------------------------------------------- |
+| `kimi.model`          | Kimi Code 配置默认       | 模型 ID 或已配置的短别名                    |
+| `kimi.thinking`       | Kimi Code 配置默认       | Thinking 覆盖                               |
+| `kimi.permissionMode` | `auto`                   | 工具权限策略；`yolo` 仅限可信工作区显式启用 |
+| `kimi.executable`     | `PATH` 中的 `kimi`       | Kimi Code 可执行文件                        |
+| `kimi.serverUrl`      | `http://127.0.0.1:58627` | 已有 loopback Server 地址；否则按需启动     |
+| `kimi.contextWindow`  | 当前 Kimi 默认           | 展示/上下文覆盖                             |
 
 Kimi 需要 Kimi Code 0.27+：
 
@@ -152,8 +157,7 @@ MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久
   MCP 设置。Kimi 目前没有隔离的单会话 MCP 配置入口，因此即使开关已启用
   也不会获得这两个工具。
 
-设置 `BOTS_CONFIG` 后，单 Bot 的 `FEISHU_APP_ID` 和
-`FEISHU_APP_SECRET` 会被忽略。
+设置 `BOTS_CONFIG` 后，单 Bot 的渠道环境变量会被忽略。
 
 ## 单 Bot 模式
 
@@ -163,6 +167,15 @@ MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久
 METABOT_ENGINE=codex
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=...
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
+```
+
+Slack 单 Bot 模式：
+
+```bash
+METABOT_ENGINE=codex
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
 CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
 ```
 

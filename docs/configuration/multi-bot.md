@@ -1,6 +1,6 @@
 # Multi-Bot Mode
 
-Run multiple Feishu/Lark, Telegram, and WeChat bots in one MetaBot Bridge.
+Run multiple Feishu/Lark, Telegram, Slack, and WeChat bots in one MetaBot Bridge.
 Each bot has its own channel credentials, engine, workspace, sessions, and
 per-group reply settings.
 
@@ -26,7 +26,6 @@ Set `BOTS_CONFIG=./bots.json` in `.env`:
       "engine": "kimi",
       "feishuAppId": "cli_yyy",
       "feishuAppSecret": "...",
-      "feishuDomain": "lark",
       "defaultWorkingDirectory": "/home/me/project-b",
       "kimi": {
         "thinking": true
@@ -40,36 +39,42 @@ Set `BOTS_CONFIG=./bots.json` in `.env`:
       "telegramBotToken": "123456:ABC...",
       "defaultWorkingDirectory": "/home/me/personal"
     }
+  ],
+  "slackBots": [
+    {
+      "name": "slack-codex",
+      "engine": "codex",
+      "slackBotToken": "xoxb-...",
+      "slackSigningSecret": "...",
+      "defaultWorkingDirectory": "/home/me/slack-workspace"
+    }
   ]
 }
 ```
 
 ## Shared Bot Fields
 
-| Field | Required | Default | Description |
-|---|---|---|---|
-| `name` | Yes | — | Stable bot identifier |
-| `defaultWorkingDirectory` | Yes | — | Workspace available to the agent |
-| `engine` | No | `"codex"` | `"codex"`, `"kimi"`, or compatibility `"claude"` |
-| `model` | No | Engine default | Session model override |
-| `visible` | No | `true` | Register the bot for Agent Bus discovery |
-| `memoryPublic` | No | sticky/default policy | Pin the bot's default memory visibility when explicitly set |
-| `workerTools` | No | `false` | Security-relevant opt-in to mint Worker Runner capabilities for this bot's non-Team `pm`/`user` chats |
-| `arcTools` | No | `false` | Security-relevant opt-in to mint ARC capabilities for this bot's non-Team `pm`/`user` chats |
-| `maxTurns` / `maxBudgetUsd` | No | unlimited | Claude compatibility limits |
-| `outputsBaseDir` | No | temporary user directory | Files automatically returned to chat |
+| Field                       | Required | Default                  | Description                                                 |
+| --------------------------- | -------- | ------------------------ | ----------------------------------------------------------- |
+| `name`                      | Yes      | —                        | Stable bot identifier                                       |
+| `defaultWorkingDirectory`   | Yes      | —                        | Workspace available to the agent                            |
+| `engine`                    | No       | `"codex"`                | `"codex"`, `"kimi"`, or compatibility `"claude"`            |
+| `model`                     | No       | Engine default           | Session model override                                      |
+| `visible`                   | No       | `true`                   | Register the bot for Agent Bus discovery                    |
+| `memoryPublic`              | No       | sticky/default policy    | Pin the bot's default memory visibility when explicitly set |
+| `workerTools`               | No       | `false`                  | Opt in to Worker Runner capabilities for non-Team `pm`/`user` chats |
+| `arcTools`                  | No       | `false`                  | Opt in to ARC capabilities for non-Team `pm`/`user` chats   |
+| `maxTurns` / `maxBudgetUsd` | No       | unlimited                | Claude compatibility limits                                 |
+| `outputsBaseDir`            | No       | temporary user directory | Files automatically returned to chat                        |
 
 Channel-specific credentials:
 
-| Channel | Fields |
-|---|---|
-| Feishu/Lark | `feishuAppId`, `feishuAppSecret`; optional `feishuDomain` (`feishu` by default, or `lark`) and `groupNoMention` |
-| Telegram | `telegramBotToken` |
-| WeChat | optional `wechatBotToken`; omit it for QR login |
-
-`feishuDomain` is strict: only `feishu` and `lark` are accepted. Existing
-entries that omit it continue to use Feishu. See [Lark domain migration](lark-domain-migration.md)
-before changing an existing bot because identifiers and Wiki mappings are tenant-scoped.
+| Channel     | Fields                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| Feishu/Lark | `feishuAppId`, `feishuAppSecret`, optional `feishuDomain` (`feishu` or `lark`) and `groupNoMention` |
+| Telegram    | `telegramBotToken`                                                                          |
+| WeChat      | optional `wechatBotToken`; omit it for QR login                                             |
+| Slack       | `slackBotToken`, `slackSigningSecret`, optional `slackBotUserId`, optional `groupNoMention` |
 
 ## Codex Options
 
@@ -108,14 +113,14 @@ of the current public behavior.
 }
 ```
 
-| Field | Default | Description |
-|---|---|---|
-| `kimi.model` | Kimi Code config default | Model ID or configured short alias |
-| `kimi.thinking` | Kimi Code config default | Thinking override |
-| `kimi.permissionMode` | `auto` | Tool permission policy; `yolo` requires explicit trusted-workspace opt-in |
-| `kimi.executable` | `kimi` from `PATH` | Kimi Code executable |
-| `kimi.serverUrl` | `http://127.0.0.1:58627` | Existing loopback Server origin; otherwise started on demand |
-| `kimi.contextWindow` | current Kimi default | Display/context override |
+| Field                 | Default                  | Description                                                               |
+| --------------------- | ------------------------ | ------------------------------------------------------------------------- |
+| `kimi.model`          | Kimi Code config default | Model ID or configured short alias                                        |
+| `kimi.thinking`       | Kimi Code config default | Thinking override                                                         |
+| `kimi.permissionMode` | `auto`                   | Tool permission policy; `yolo` requires explicit trusted-workspace opt-in |
+| `kimi.executable`     | `kimi` from `PATH`       | Kimi Code executable                                                      |
+| `kimi.serverUrl`      | `http://127.0.0.1:58627` | Existing loopback Server origin; otherwise started on demand              |
+| `kimi.contextWindow`  | current Kimi default     | Display/context override                                                  |
 
 Kimi requires Kimi Code 0.27+:
 
@@ -157,8 +162,7 @@ personal-edition bots default to Codex when `engine` is omitted.
   overwritten. Kimi has no isolated per-session MCP surface and therefore
   receives neither tool even when a flag is enabled.
 
-When `BOTS_CONFIG` is set, single-bot `FEISHU_APP_ID` and
-`FEISHU_APP_SECRET` are ignored.
+When `BOTS_CONFIG` is set, single-bot channel environment variables are ignored.
 
 ## Single-Bot Mode
 
@@ -168,6 +172,15 @@ Without `BOTS_CONFIG`, configure one bot through environment variables:
 METABOT_ENGINE=codex
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=...
+CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
+```
+
+For Slack single-bot mode:
+
+```bash
+METABOT_ENGINE=codex
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
 CLAUDE_DEFAULT_WORKING_DIRECTORY=/home/me/project
 ```
 
