@@ -13,20 +13,45 @@ function createLogger() {
 // Mock Feishu wiki/docx API responses
 function createMockLarkClient() {
   let nodeCounter = 0;
+  const nodes = new Map<string, any>([
+    ['root_123', { space_id: 'space_123', node_token: 'root_123', parent_node_token: '', title: 'Host root' }],
+    ['root_other', { space_id: 'space_123', node_token: 'root_other', parent_node_token: '', title: 'Other root' }],
+  ]);
   return {
     wiki: {
       v2: {
         space: {
           get: vi.fn().mockResolvedValue({ data: { space: { space_id: 'space_123' } } }),
+          getNode: vi.fn().mockImplementation(({ params }: any) => Promise.resolve({
+            data: { node: nodes.get(params.token) },
+          })),
           list: vi.fn().mockResolvedValue({ data: { items: [{ space_id: 'space_123', name: 'MetaMemory' }] } }),
           create: vi.fn().mockResolvedValue({ data: { space: { space_id: 'space_new' } } }),
         },
         spaceNode: {
-          create: vi.fn().mockImplementation(() => {
+          create: vi.fn().mockImplementation(({ data }: any) => {
             nodeCounter++;
+            const node = {
+              space_id: 'space_123',
+              node_token: `node_${nodeCounter}`,
+              obj_token: `doc_${nodeCounter}`,
+              parent_node_token: data.parent_node_token || '',
+              title: data.title,
+            };
+            nodes.set(node.node_token, node);
             return Promise.resolve({
-              data: { node: { node_token: `node_${nodeCounter}`, obj_token: `doc_${nodeCounter}` } },
+              data: { node },
             });
+          }),
+          move: vi.fn().mockImplementation(({ path, data }: any) => {
+            const node = nodes.get(path.node_token);
+            if (node) node.parent_node_token = data.target_parent_token || '';
+            return Promise.resolve({ data: { node } });
+          }),
+          updateTitle: vi.fn().mockImplementation(({ path, data }: any) => {
+            const node = nodes.get(path.node_token);
+            if (node) node.title = data.title;
+            return Promise.resolve({ data: {} });
           }),
         },
       },
@@ -40,6 +65,14 @@ function createMockLarkClient() {
         },
       },
     },
+    drive: {
+      v1: {
+        file: {
+          delete: vi.fn().mockResolvedValue({ data: {} }),
+        },
+      },
+    },
+    __nodes: nodes,
   };
 }
 
@@ -93,7 +126,7 @@ describe('DocSync', () => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode) {
+  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode, overrides: Partial<DocSyncConfig> = {}) {
     mockClient = createMockLarkClient();
     mockMemory = createMockMemoryClient(docs, tree);
 
@@ -103,6 +136,7 @@ describe('DocSync', () => {
       databaseDir: tmpDir,
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
+      ...overrides,
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());
@@ -230,6 +264,89 @@ describe('DocSync', () => {
     expect(result.deleted).toBe(1);
   });
 
+  it('creates every top-level node under the configured Wiki root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+
+    const result = await docSync.syncAll();
+
+    expect(result.errors).toHaveLength(0);
+    expect(mockClient.wiki.v2.space.getNode).toHaveBeenCalledWith({
+      params: { token: 'root_123', obj_type: 'wiki' },
+    });
+    expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledWith(expect.objectContaining({
+      path: { space_id: 'space_123' },
+      data: expect.objectContaining({ parent_node_token: 'root_123' }),
+    }));
+    expect(docSync.getStats().rootNodeToken).toBe('root_123');
+  });
+
+  it('fails closed when the configured root belongs to another Space', async () => {
+    setup([makeSampleDoc()], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'foreign_root' });
+    mockClient.wiki.v2.space.getNode.mockResolvedValueOnce({
+      data: { node: { space_id: 'space_other', node_token: 'foreign_root' } },
+    });
+
+    const result = await docSync.syncAll();
+
+    expect(result.errors.join('\n')).toContain('does not belong to Wiki Space space_123');
+    expect(mockClient.wiki.v2.spaceNode.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects reusing populated state for another Wiki root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+    docSync.destroy();
+
+    mockClient = createMockLarkClient();
+    docSync = new DocSync({
+      feishuAppId: 'test_id',
+      feishuAppSecret: 'test_secret',
+      databaseDir: tmpDir,
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_other',
+      throttleMs: 0,
+    }, mockMemory, createLogger());
+    (docSync as any).client = mockClient;
+
+    const result = await docSync.syncAll();
+    expect(result.errors.join('\n')).toContain('use a new WIKI_SYNC_STATE_DIR');
+  });
+
+  it('deletes remote documents only after validating the configured root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, {
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_123',
+      deleteRemoteDocuments: true,
+    });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+
+    const result = await docSync.deleteDocument(doc.id);
+
+    expect(result.success).toBe(true);
+    expect(mockClient.drive.v1.file.delete).toHaveBeenCalledWith({
+      path: { file_token: 'doc_1' },
+      params: { type: 'docx' },
+    });
+    expect(docSync.getStats().documentCount).toBe(0);
+  });
+
+  it('refuses to update a mapped document moved outside the configured root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+    doc.content = 'changed after an external move';
+    mockClient.__nodes.get('node_1').parent_node_token = 'root_other';
+
+    const result = await docSync.syncDocument(doc.id);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('outside configured root root_123');
+    expect(mockClient.docx.v1.documentBlockChildren.get).not.toHaveBeenCalled();
+  });
+
   it('finds existing wiki space by name', async () => {
     setup();
     const spaceId = await (docSync as any).ensureWikiSpace();
@@ -256,6 +373,22 @@ describe('DocSync', () => {
 
     const result = await docSync.syncDocument('doc1');
     expect(result.success).toBe(true);
+  });
+
+  it('syncChanges validates one target and coalesces duplicate document IDs', async () => {
+    const docs = [
+      makeSampleDoc({ id: 'doc1', path: '/Doc 1', title: 'Doc 1' }),
+      makeSampleDoc({ id: 'doc2', path: '/Doc 2', title: 'Doc 2' }),
+    ];
+    setup(docs, undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+
+    const result = await docSync.syncChanges(['doc1', 'doc1', 'doc2']);
+
+    expect(result.success).toBe(true);
+    expect(mockClient.wiki.v2.space.get).toHaveBeenCalledTimes(1);
+    expect(mockClient.wiki.v2.space.getNode).toHaveBeenCalledTimes(1);
+    expect(mockMemory.listFolderTree).toHaveBeenCalledTimes(1);
+    expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledTimes(2);
   });
 
   it('syncDocument returns error for missing doc', async () => {

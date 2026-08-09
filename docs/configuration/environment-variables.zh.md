@@ -109,6 +109,9 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | `WIKI_SYNC_ENABLED` | `true` | 启用可选 Memory-to-Wiki 同步 |
 | `WIKI_SPACE_ID` | — | 已有 Wiki Space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki Space 名称 |
+| `WIKI_SYNC_ROOT_NODE_TOKEN` | — | 当前同步目标的固定父节点 |
+| `WIKI_SYNC_STATE_DIR` | `./data` | 目标绑定映射数据库目录 |
+| `WIKI_SYNC_DELETE_REMOTE` | `false` | 删除已映射 Wiki 页面；必须配置根节点 |
 | `VOLCENGINE_TTS_APPID` | — | 豆包 STT/TTS App ID |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包 STT/TTS Access Key |
 | `OPENAI_API_KEY` | — | 可选 Whisper/OpenAI TTS Fallback |
