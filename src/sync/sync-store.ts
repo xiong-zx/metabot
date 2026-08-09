@@ -28,6 +28,11 @@ export interface SyncConfig {
   lastFullSyncAt?: string;
 }
 
+export interface SyncTargetBinding {
+  wikiSpaceId: string;
+  rootNodeToken: string;
+}
+
 export class SyncStore {
   private db: Database.Database;
 
@@ -86,6 +91,39 @@ export class SyncStore {
 
   setWikiSpaceId(spaceId: string): void {
     this.setConfig('wiki_space_id', spaceId);
+  }
+
+  getRootNodeToken(): string | undefined {
+    return this.getConfig('root_node_token');
+  }
+
+  /**
+   * Bind populated sync state to one Wiki Space and root. Mappings must not be
+   * reused for a different target because doing so could update unrelated Wiki
+   * nodes. Empty state may be rebound safely.
+   */
+  bindTarget(target: SyncTargetBinding): void {
+    const currentSpaceId = this.getWikiSpaceId();
+    // State created before root isolation represents the Space root.
+    const currentRootNodeToken = this.getRootNodeToken() ?? '';
+    const hasMappings = this.hasMappings();
+
+    if (hasMappings && currentSpaceId !== target.wikiSpaceId) {
+      throw new Error(
+        `Wiki sync state is bound to Space ${currentSpaceId || '(unset)'}; use a new WIKI_SYNC_STATE_DIR for ${target.wikiSpaceId}`,
+      );
+    }
+    if (hasMappings && currentRootNodeToken !== target.rootNodeToken) {
+      throw new Error(
+        `Wiki sync state is bound to root ${currentRootNodeToken || '(space root)'}; use a new WIKI_SYNC_STATE_DIR for ${target.rootNodeToken || '(space root)'}`,
+      );
+    }
+
+    const transaction = this.db.transaction(() => {
+      this.setConfig('wiki_space_id', target.wikiSpaceId);
+      this.setConfig('root_node_token', target.rootNodeToken);
+    });
+    transaction();
   }
 
   // --- Document mappings ---
@@ -191,6 +229,12 @@ export class SyncStore {
       folderCount: folderCount,
       wikiSpaceId: this.getWikiSpaceId(),
     };
+  }
+
+  private hasMappings(): boolean {
+    const documents = (this.db.prepare('SELECT COUNT(*) as count FROM document_mappings').get() as { count: number }).count;
+    const folders = (this.db.prepare('SELECT COUNT(*) as count FROM folder_mappings').get() as { count: number }).count;
+    return documents > 0 || folders > 0;
   }
 
   /** Clear all mappings (for full re-sync). */

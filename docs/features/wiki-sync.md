@@ -10,6 +10,7 @@ When enabled, MetaMemory content automatically syncs to a Feishu Wiki space:
 - **Documents** become Feishu docx pages
 - **Change detection** uses hash comparison for incremental sync
 - **Auto-sync** triggers on MetaMemory changes (5-second debounce)
+- **Root isolation** optionally confines the sync target to one Wiki subtree
 
 ## Chat Commands
 
@@ -25,11 +26,21 @@ When enabled, MetaMemory content automatically syncs to a Feishu Wiki space:
 | `WIKI_SYNC_ENABLED` | `true` | Enable wiki sync |
 | `WIKI_SPACE_ID` | — | Feishu Wiki space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name (created if not exists) |
+| `WIKI_SYNC_ROOT_NODE_TOKEN` | — | Optional immutable root node for this sync target |
 | `WIKI_AUTO_SYNC` | `true` | Auto-sync on MetaMemory changes |
 | `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | Debounce delay |
 | `WIKI_SYNC_THROTTLE_MS` | `300` | Delay between API calls |
 | `FEISHU_SERVICE_APP_ID` | — | Dedicated Feishu app for sync (falls back to first bot) |
 | `FEISHU_SERVICE_APP_SECRET` | — | Service app secret |
+
+## Root Isolation
+
+Set `WIKI_SYNC_ROOT_NODE_TOKEN` to create all top-level folders and documents
+below an existing Wiki node. The node must belong to `WIKI_SPACE_ID`.
+
+Once mappings exist, their state directory is bound to the selected Space and
+root. Use a new empty `WIKI_SYNC_STATE_DIR` when changing either value. Existing
+state without a root token remains bound to the Space root.
 
 ## Required Feishu Permissions
 

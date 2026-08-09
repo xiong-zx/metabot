@@ -43,8 +43,21 @@ export interface DocSyncConfig {
   wikiSpaceName?: string;
   /** Optional: pre-existing wiki space ID (skips create/search). */
   wikiSpaceId?: string;
+  /** Optional Wiki node that contains this sync target. */
+  rootNodeToken?: string;
   /** Throttle delay between API calls (ms). Default 300. */
   throttleMs?: number;
+}
+
+interface WikiTarget {
+  spaceId: string;
+  rootNodeToken: string;
+}
+
+interface WikiNode {
+  space_id?: string;
+  node_token?: string;
+  parent_node_token?: string;
 }
 
 const DEFAULT_THROTTLE_MS = 300;
@@ -101,9 +114,9 @@ export class DocSync {
     const result: SyncResult = { created: 0, updated: 0, skipped: 0, deleted: 0, errors: [], durationMs: 0 };
 
     try {
-      // Step 1: Ensure wiki space exists
-      const spaceId = await this.ensureWikiSpace();
-      if (!spaceId) {
+      // Step 1: Resolve and validate the configured Wiki target.
+      const target = await this.ensureWikiTarget();
+      if (!target) {
         result.errors.push('Failed to create or find wiki space. Check that the Feishu app has wiki:wiki and docx:document permissions.');
         return result;
       }
@@ -112,10 +125,10 @@ export class DocSync {
       const folderTree = await this.memoryClient.listFolderTree();
 
       // Step 3: Sync folder structure (create wiki nodes for folders)
-      await this.syncFolders(spaceId, folderTree, '', result);
+      await this.syncFolders(target.spaceId, folderTree, target.rootNodeToken, result);
 
       // Step 4: Sync documents in each folder
-      await this.syncDocumentsInTree(spaceId, folderTree, result);
+      await this.syncDocumentsInTree(target.spaceId, folderTree, target.rootNodeToken, result);
 
       // Step 5: Clean up deleted documents
       await this.cleanupDeleted(result);
@@ -138,8 +151,8 @@ export class DocSync {
    */
   async syncDocument(docId: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const spaceId = await this.ensureWikiSpace();
-      if (!spaceId) {
+      const target = await this.ensureWikiTarget();
+      if (!target) {
         return { success: false, error: 'No wiki space configured' };
       }
 
@@ -150,9 +163,9 @@ export class DocSync {
 
       // Ensure parent folder is synced
       const folderTree = await this.memoryClient.listFolderTree();
-      const parentNodeToken = await this.resolveParentNodeToken(spaceId, doc.folder_id, folderTree);
+      const parentNodeToken = await this.resolveParentNodeToken(target, doc.folder_id, folderTree);
 
-      await this.syncSingleDocument(spaceId, doc, parentNodeToken);
+      await this.syncSingleDocument(target.spaceId, doc, parentNodeToken);
       return { success: true };
     } catch (err: any) {
       this.logger.error({ err, docId }, 'Failed to sync single document');
@@ -162,30 +175,47 @@ export class DocSync {
 
   // --- Wiki space management ---
 
+  private async ensureWikiTarget(): Promise<WikiTarget | undefined> {
+    const spaceId = await this.ensureWikiSpace();
+    if (!spaceId) return undefined;
+
+    const rootNodeToken = this.config.rootNodeToken?.trim() || '';
+    if (rootNodeToken) {
+      const root = await this.getWikiNode(rootNodeToken);
+      if (!root || root.space_id !== spaceId || root.node_token !== rootNodeToken) {
+        throw new Error(
+          `Configured WIKI_SYNC_ROOT_NODE_TOKEN ${rootNodeToken} does not belong to Wiki Space ${spaceId}`,
+        );
+      }
+    }
+
+    this.store.bindTarget({ wikiSpaceId: spaceId, rootNodeToken });
+    return { spaceId, rootNodeToken };
+  }
+
   private async ensureWikiSpace(): Promise<string | undefined> {
-    // Check stored space ID first
-    let spaceId = this.store.getWikiSpaceId();
+    // Explicit configuration wins. bindTarget() later rejects populated state
+    // that belongs to another Space.
+    let spaceId = this.config.wikiSpaceId?.trim();
     if (spaceId) {
-      // Verify it still exists
+      try {
+        await this.client.wiki.v2.space.get({ path: { space_id: spaceId } });
+        this.logger.info({ spaceId }, 'Using configured wiki space');
+        return spaceId;
+      } catch (err: any) {
+        this.logger.error({ spaceId, err: err.msg || err.message }, 'Configured WIKI_SPACE_ID is invalid or bot is not a member');
+        return undefined;
+      }
+    }
+
+    // Otherwise use the target already bound to this state directory.
+    spaceId = this.store.getWikiSpaceId();
+    if (spaceId) {
       try {
         await this.client.wiki.v2.space.get({ path: { space_id: spaceId } });
         return spaceId;
       } catch {
         this.logger.warn({ spaceId }, 'Stored wiki space not found, will search for one');
-        this.store.setConfig('wiki_space_id', '');
-      }
-    }
-
-    // Use pre-configured space ID from config/env
-    if (this.config.wikiSpaceId) {
-      spaceId = this.config.wikiSpaceId;
-      try {
-        await this.client.wiki.v2.space.get({ path: { space_id: spaceId } });
-        this.store.setWikiSpaceId(spaceId);
-        this.logger.info({ spaceId }, 'Using configured wiki space');
-        return spaceId;
-      } catch (err: any) {
-        this.logger.error({ spaceId, err: err.msg || err.message }, 'Configured WIKI_SPACE_ID is invalid or bot is not a member');
       }
     }
 
@@ -196,14 +226,12 @@ export class DocSync {
       const existing = spaces.find((s: any) => s.name === this.wikiSpaceName);
       if (existing) {
         spaceId = existing.space_id;
-        this.store.setWikiSpaceId(spaceId!);
         this.logger.info({ spaceId }, 'Found existing wiki space');
         return spaceId;
       }
       // If spaces exist but none match, use the first one
       if (spaces.length > 0) {
         spaceId = spaces[0].space_id;
-        this.store.setWikiSpaceId(spaceId!);
         this.logger.info({ spaceId, name: spaces[0].name }, 'Using first available wiki space');
         return spaceId;
       }
@@ -221,7 +249,6 @@ export class DocSync {
       });
       spaceId = (resp.data as any)?.space?.space_id;
       if (spaceId) {
-        this.store.setWikiSpaceId(spaceId);
         this.logger.info({ spaceId }, 'Created new wiki space');
         return spaceId;
       }
@@ -254,7 +281,9 @@ export class DocSync {
     // Check if folder already has a mapping
     let folderMapping = this.store.getFolderMapping(node.id);
 
-    if (!folderMapping) {
+    if (folderMapping) {
+      await this.assertNodeWithinRoot(spaceId, folderMapping.feishuNodeToken);
+    } else {
       // Create wiki node for this folder (as a shortcut page)
       try {
         const resp = await this.client.wiki.v2.spaceNode.create({
@@ -318,6 +347,7 @@ export class DocSync {
   private async syncDocumentsInTree(
     spaceId: string,
     node: FolderTreeNode,
+    rootNodeToken: string,
     result: SyncResult,
   ): Promise<void> {
     const isRoot = node.id === 'root' || node.path === '/';
@@ -326,7 +356,7 @@ export class DocSync {
     const folderId = isRoot ? undefined : node.id;
     try {
       const docs = await this.memoryClient.listDocuments(folderId, 200);
-      const parentNodeToken = this.resolveFolderNodeToken(node.id);
+      const parentNodeToken = this.resolveFolderNodeToken(node.id, rootNodeToken);
 
       for (const docSummary of docs) {
         // When listing from root, skip docs that belong to subfolders
@@ -354,7 +384,7 @@ export class DocSync {
 
     // Recurse into child folders
     for (const child of node.children || []) {
-      await this.syncDocumentsInTree(spaceId, child, result);
+      await this.syncDocumentsInTree(spaceId, child, rootNodeToken, result);
     }
   }
 
@@ -376,6 +406,7 @@ export class DocSync {
     if (existing) {
       // Update existing document
       try {
+        await this.assertNodeWithinRoot(spaceId, existing.feishuNodeToken);
         await this.updateDocumentContent(existing.feishuDocId, doc);
         this.store.upsertDocMapping({
           ...existing,
@@ -388,6 +419,7 @@ export class DocSync {
       } catch (err: any) {
         if (result) result.errors.push(`Document "${doc.title}": ${err.message || err}`);
         this.logger.error({ err, doc: doc.title, docId: existing.feishuDocId }, 'Failed to update wiki document');
+        if (!result) throw err;
       }
     } else {
       // Create new wiki page
@@ -535,31 +567,61 @@ export class DocSync {
 
   // --- Helpers ---
 
-  private resolveFolderNodeToken(folderId: string): string {
-    if (folderId === 'root' || !folderId) return '';
+  private async getWikiNode(nodeToken: string): Promise<WikiNode | undefined> {
+    const response = await this.client.wiki.v2.space.getNode({
+      params: { token: nodeToken, obj_type: 'wiki' },
+    });
+    return (response.data as any)?.node as WikiNode | undefined;
+  }
+
+  private async assertNodeWithinRoot(spaceId: string, nodeToken: string): Promise<void> {
+    const rootNodeToken = this.store.getRootNodeToken() ?? this.config.rootNodeToken?.trim() ?? '';
+    const visited = new Set<string>();
+    let currentToken = nodeToken;
+
+    for (let depth = 0; depth < 100; depth++) {
+      if (!currentToken || visited.has(currentToken)) break;
+      visited.add(currentToken);
+      const node = await this.getWikiNode(currentToken);
+      if (!node || node.space_id !== spaceId || node.node_token !== currentToken) {
+        throw new Error(`Wiki node ${currentToken} does not belong to configured Space ${spaceId}`);
+      }
+      if (!rootNodeToken || currentToken === rootNodeToken) return;
+      currentToken = node.parent_node_token || '';
+    }
+
+    throw new Error(`Wiki node ${nodeToken} is outside configured root ${rootNodeToken || '(space root)'}`);
+  }
+
+  private resolveFolderNodeToken(folderId: string, rootNodeToken: string): string {
+    if (folderId === 'root' || !folderId) return rootNodeToken;
     const mapping = this.store.getFolderMapping(folderId);
-    return mapping?.feishuNodeToken || '';
+    return mapping?.feishuNodeToken || rootNodeToken;
   }
 
   private async resolveParentNodeToken(
-    spaceId: string,
+    target: WikiTarget,
     folderId: string,
     folderTree: FolderTreeNode,
   ): Promise<string> {
-    if (!folderId || folderId === 'root') return '';
+    if (!folderId || folderId === 'root') return target.rootNodeToken;
 
     const existing = this.store.getFolderMapping(folderId);
-    if (existing) return existing.feishuNodeToken;
+    if (existing) {
+      await this.assertNodeWithinRoot(target.spaceId, existing.feishuNodeToken);
+      return existing.feishuNodeToken;
+    }
 
-    // Need to sync the folder first
+    // Need to sync the folder first, using the configured Wiki root as its
+    // fallback parent.
     const dummyResult: SyncResult = { created: 0, updated: 0, skipped: 0, deleted: 0, errors: [], durationMs: 0 };
     const folderNode = this.findFolderInTree(folderTree, folderId);
     if (folderNode) {
-      await this.syncFolders(spaceId, folderNode, '', dummyResult);
+      await this.syncFolders(target.spaceId, folderNode, target.rootNodeToken, dummyResult);
     }
 
     const afterSync = this.store.getFolderMapping(folderId);
-    return afterSync?.feishuNodeToken || '';
+    return afterSync?.feishuNodeToken || target.rootNodeToken;
   }
 
   private findFolderInTree(node: FolderTreeNode, folderId: string): FolderTreeNode | undefined {

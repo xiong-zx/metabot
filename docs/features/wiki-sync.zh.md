@@ -10,6 +10,7 @@ MetaMemory 文档单向同步到飞书知识库。MetaMemory 的文件夹树映�
 - **文档** 变成飞书 docx 页面
 - **变更检测** 使用 hash 对比实现增量同步
 - **自动同步** 在 MetaMemory 变更时触发（5 秒防抖）
+- **根节点隔离** 可将同步目标限制在指定的知识库子树中
 
 ## 聊天命令
 
@@ -25,11 +26,20 @@ MetaMemory 文档单向同步到飞书知识库。MetaMemory 的文件夹树映�
 | `WIKI_SYNC_ENABLED` | `true` | 启用知识库同步 |
 | `WIKI_SPACE_ID` | — | 飞书知识库空间 ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | 知识库空间名称（不存在则创建） |
+| `WIKI_SYNC_ROOT_NODE_TOKEN` | — | 此同步目标的可选固定根节点 |
 | `WIKI_AUTO_SYNC` | `true` | MetaMemory 变更时自动同步 |
 | `WIKI_AUTO_SYNC_DEBOUNCE_MS` | `5000` | 防抖延迟 |
 | `WIKI_SYNC_THROTTLE_MS` | `300` | API 调用间隔 |
 | `FEISHU_SERVICE_APP_ID` | — | 专用飞书应用（回退到第一个 Bot） |
 | `FEISHU_SERVICE_APP_SECRET` | — | 服务应用密钥 |
+
+## 根节点隔离
+
+设置 `WIKI_SYNC_ROOT_NODE_TOKEN` 后，所有顶层文件夹和文档都会在指定的
+Wiki 节点下创建。该节点必须属于 `WIKI_SPACE_ID`。
+
+映射产生后，其状态目录会绑定到选定的 Space 和根节点。更改任一目标时，
+应改用新的空 `WIKI_SYNC_STATE_DIR`。没有根节点配置的旧状态仍绑定到 Space 根目录。
 
 ## 所需飞书权限
 

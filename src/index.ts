@@ -395,6 +395,7 @@ async function main() {
         databaseDir: syncStateDir,
         wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
         wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
+        rootNodeToken: process.env.WIKI_SYNC_ROOT_NODE_TOKEN || undefined,
         throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
       },
       syncMemoryClient,

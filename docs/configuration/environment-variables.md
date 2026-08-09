@@ -80,6 +80,7 @@ Multi-bot deployments should store channel credentials in the protected
 | `WIKI_SYNC_ENABLED`          | `true`           | Enable optional Memory-to-Wiki sync     |
 | `WIKI_SPACE_ID`              | —                | Existing Wiki space ID                  |
 | `WIKI_SPACE_NAME`            | `MetaMemory`     | Wiki space name                         |
+| `WIKI_SYNC_ROOT_NODE_TOKEN`  | —                | Optional immutable root for this sync target |
 | `VOLCENGINE_TTS_APPID`       | —                | Doubao STT/TTS App ID                   |
 | `VOLCENGINE_TTS_ACCESS_KEY`  | —                | Doubao STT/TTS access key               |
 | `OPENAI_API_KEY`             | —                | Optional Whisper/OpenAI TTS fallback    |

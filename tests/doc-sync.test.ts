@@ -12,19 +12,34 @@ function createLogger() {
 // Mock Feishu wiki/docx API responses
 function createMockLarkClient() {
   let nodeCounter = 0;
+  const nodes = new Map<string, any>([
+    ['root_123', { space_id: 'space_123', node_token: 'root_123', parent_node_token: '' }],
+    ['root_other', { space_id: 'space_123', node_token: 'root_other', parent_node_token: '' }],
+  ]);
   return {
+    __nodes: nodes,
     wiki: {
       v2: {
         space: {
           get: vi.fn().mockResolvedValue({ data: { space: { space_id: 'space_123' } } }),
           list: vi.fn().mockResolvedValue({ data: { items: [{ space_id: 'space_123', name: 'MetaMemory' }] } }),
           create: vi.fn().mockResolvedValue({ data: { space: { space_id: 'space_new' } } }),
+          getNode: vi.fn().mockImplementation(({ params }: any) => Promise.resolve({
+            data: { node: nodes.get(params.token) },
+          })),
         },
         spaceNode: {
-          create: vi.fn().mockImplementation(() => {
+          create: vi.fn().mockImplementation((request: any) => {
             nodeCounter++;
+            const node = {
+              space_id: request.path.space_id,
+              node_token: `node_${nodeCounter}`,
+              obj_token: `doc_${nodeCounter}`,
+              parent_node_token: request.data.parent_node_token || '',
+            };
+            nodes.set(node.node_token, node);
             return Promise.resolve({
-              data: { node: { node_token: `node_${nodeCounter}`, obj_token: `doc_${nodeCounter}` } },
+              data: { node },
             });
           }),
         },
@@ -92,7 +107,11 @@ describe('DocSync', () => {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function setup(docs: FullDocument[] = [], tree?: FolderTreeNode) {
+  function setup(
+    docs: FullDocument[] = [],
+    tree?: FolderTreeNode,
+    configOverrides: Partial<DocSyncConfig> = {},
+  ) {
     mockClient = createMockLarkClient();
     mockMemory = createMockMemoryClient(docs, tree);
 
@@ -102,6 +121,7 @@ describe('DocSync', () => {
       databaseDir: tmpDir,
       wikiSpaceName: 'MetaMemory',
       throttleMs: 0, // no delay in tests
+      ...configOverrides,
     };
 
     docSync = new DocSync(config, mockMemory, createLogger());
@@ -210,6 +230,69 @@ describe('DocSync', () => {
 
     const result = await docSync.syncAll();
     expect(result.deleted).toBe(1);
+  });
+
+  it('creates top-level documents under the configured Wiki root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+
+    const result = await docSync.syncAll();
+
+    expect(result.errors).toHaveLength(0);
+    expect(mockClient.wiki.v2.space.getNode).toHaveBeenCalledWith({
+      params: { token: 'root_123', obj_type: 'wiki' },
+    });
+    expect(mockClient.wiki.v2.spaceNode.create).toHaveBeenCalledWith(expect.objectContaining({
+      path: { space_id: 'space_123' },
+      data: expect.objectContaining({ parent_node_token: 'root_123' }),
+    }));
+  });
+
+  it('fails closed when the configured root belongs to another Space', async () => {
+    setup([makeSampleDoc()], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'foreign_root' });
+    mockClient.wiki.v2.space.getNode.mockResolvedValueOnce({
+      data: { node: { space_id: 'space_other', node_token: 'foreign_root' } },
+    });
+
+    const result = await docSync.syncAll();
+
+    expect(result.errors.join('\n')).toContain('does not belong to Wiki Space space_123');
+    expect(mockClient.wiki.v2.spaceNode.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects reusing populated state for another Wiki root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+    docSync.destroy();
+
+    mockClient = createMockLarkClient();
+    docSync = new DocSync({
+      feishuAppId: 'test_id',
+      feishuAppSecret: 'test_secret',
+      databaseDir: tmpDir,
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_other',
+      throttleMs: 0,
+    }, mockMemory, createLogger());
+    (docSync as any).client = mockClient;
+
+    const result = await docSync.syncAll();
+    expect(result.errors.join('\n')).toContain('use a new WIKI_SYNC_STATE_DIR');
+  });
+
+  it('refuses to update a mapped document moved outside the configured root', async () => {
+    const doc = makeSampleDoc();
+    setup([doc], undefined, { wikiSpaceId: 'space_123', rootNodeToken: 'root_123' });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+    doc.content = 'changed after an external move';
+    mockClient.__nodes.get('node_1').parent_node_token = 'root_other';
+
+    const result = await docSync.syncDocument(doc.id);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('outside configured root root_123');
+    expect(mockClient.docx.v1.documentBlockChildren.get).not.toHaveBeenCalled();
   });
 
   it('finds existing wiki space by name', async () => {
