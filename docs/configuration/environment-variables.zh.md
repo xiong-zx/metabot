@@ -112,6 +112,13 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | `WIKI_SYNC_ROOT_NODE_TOKEN` | — | 当前同步目标的固定父节点 |
 | `WIKI_SYNC_STATE_DIR` | `./data` | 目标绑定映射数据库目录 |
 | `WIKI_SYNC_DELETE_REMOTE` | `false` | 删除已映射 Wiki 页面；必须配置根节点 |
+| `WIKI_AUTO_SYNC` | `false` | 自动消费持久化 Memory 变更流 |
+| `WIKI_AUTO_SYNC_CONSUMER` | 目标哈希 | 可选的持久化消费者游标名称 |
+| `WIKI_AUTO_SYNC_POLL_MS` | `5000` | 变更流轮询间隔 |
+| `WIKI_AUTO_SYNC_BATCH_SIZE` | `100` | 每轮最多处理的事件数 |
+| `WIKI_AUTO_SYNC_FULL_RECONCILE_MS` | `21600000` | 周期性全量对账间隔 |
+| `WIKI_AUTO_SYNC_MAX_ATTEMPTS` | `5` | 批次进入 dead-letter 前的重试次数 |
+| `WIKI_AUTO_SYNC_WATCH_ROOT` | `/` | 可选 MetaMemory 事件路径前缀 |
 | `VOLCENGINE_TTS_APPID` | — | 豆包 STT/TTS App ID |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包 STT/TTS Access Key |
 | `OPENAI_API_KEY` | — | 可选 Whisper/OpenAI TTS Fallback |
