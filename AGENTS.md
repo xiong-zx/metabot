@@ -55,8 +55,7 @@ These rules are mandatory for every Agent that changes MetaBot code.
 
 1. Treat `upstream/main` from `https://github.com/xvirobotics/metabot.git` as
    the code authority. Keep `origin/main` as a tested superset of the latest
-   accepted `upstream/main`, and keep `origin/dev` fast-forwarded to
-   `origin/main` rather than maintaining a second long-lived line.
+   accepted `upstream/main` and as the stable downstream release line.
 2. Before material code work, inspect the real worktree and run the equivalent
    of `git status --short --branch`, refresh both remotes, and compare
    `upstream/main...origin/main`. Do not start a feature from a stale
@@ -66,7 +65,14 @@ These rules are mandatory for every Agent that changes MetaBot code.
    upstream ancestry remains auditable. Do not rebase, squash, or force-push a
    shared `main`. When upstream accepts an earlier downstream fix, drop any
    patch-equivalent duplicate and retain only the still-required adaptation.
-4. Classify every change before implementation:
+4. Keep `origin/dev` as the long-lived integration and rehearsal branch. It
+   may be ahead of `origin/main`, but `origin/main` must always be its ancestor
+   after synchronization. Do not develop features directly on `dev`; merge
+   focused feature branches into it for combined testing. Upstream updates
+   enter `main` first and are then merged or fast-forwarded into `dev`. Promote
+   `dev` to `main` only after the required gates pass and the user explicitly
+   approves the promotion.
+5. Classify every change before implementation:
    - **Upstreamable:** generic, public behavior starts from `upstream/main`,
      has focused tests/docs, contains no private/downstream dependency, and is
      proposed upstream independently.
@@ -75,20 +81,20 @@ These rules are mandatory for every Agent that changes MetaBot code.
      files only through the thinnest practical hook.
    - **Mixed:** split into an upstreamable core change and a separate
      downstream adapter. Never combine both into one omnibus commit.
-5. Keep one important behavior per branch/commit. Use author and committer
+6. Keep one important behavior per branch/commit. Use author and committer
    `xzXiao <xiongzhixiao88@gmail.com>`. Update
    `config/downstream-features.json` and boundary tests for every retained
    downstream feature, including its owned roots, forbidden imports, reason,
    and validation surface.
-6. Use Node 22 and run risk-proportionate focused tests, full build/typecheck,
+7. Use Node 22 and run risk-proportionate focused tests, full build/typecheck,
    lint, downstream-boundary checks, and `git diff --check` before integration.
    Never commit credentials, local auth, PM2 state, generated runtime data,
    `node_modules`, or an untracked `node_modules` symlink.
-7. Code integration and runtime deployment are separate decisions. After code
+8. Code integration and runtime deployment are separate decisions. After code
    and tests, report the diff, test evidence, database migration steps, and
    rollback plan. Require explicit user authorization before deployment,
    runtime switching, restart, or replacing a live database.
-8. Record durable architectural decisions and the final upstream/downstream
+9. Record durable architectural decisions and the final upstream/downstream
    classification in shared Meta Memory. The canonical durable rule is
    `/cargo1/rules/metabot-upstream-first-development`.
 
