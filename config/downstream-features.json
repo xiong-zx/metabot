@@ -28,7 +28,23 @@
     {
       "id": "wiki-change-feed-adapter",
       "status": "required",
-      "roots": ["src/sync/wiki-auto-sync.ts", "src/sync/wiki-sync-runtime.ts"]
+      "roots": ["src/sync/wiki-auto-sync.ts", "src/sync/wiki-sync-runtime.ts"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/restart",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter"
+      ],
+      "reason": "Consume durable MetaMemory changes while keeping Wiki target selection and runtime wiring isolated from unrelated downstream services.",
+      "validationSurface": [
+        "tests/doc-sync.test.ts",
+        "tests/sync-store.test.ts",
+        "tests/wiki-auto-sync.test.ts",
+        "tests/wiki-sync-runtime.test.ts"
+      ]
     },
     {
       "id": "agent-team-governance",
