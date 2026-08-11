@@ -1,8 +1,9 @@
 /**
  * Core document sync service: MetaMemory → Feishu Wiki (one-way).
  *
- * Syncs the entire MetaMemory folder tree to a Feishu Wiki space,
- * creating wiki nodes for folders and docx pages for documents.
+ * Syncs one MetaMemory subtree to a Feishu Wiki root. The selected Memory
+ * folder is projected onto that root instead of being duplicated as a
+ * same-named child.
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import { createFeishuRestClient } from '../feishu/client-factory.js';
@@ -49,6 +50,8 @@ export interface DocSyncConfig {
   wikiSpaceId?: string;
   /** Optional Wiki node that acts as the immutable target root. */
   rootNodeToken?: string;
+  /** MetaMemory subtree projected directly onto the Wiki root. Default `/`. */
+  sourceRoot?: string;
   /** Delete the remote docx when its MetaMemory document is deleted. */
   deleteRemoteDocuments?: boolean;
   /** Throttle delay between API calls (ms). Default 300. */
@@ -76,6 +79,7 @@ export class DocSync {
   private store: SyncStore;
   private throttleMs: number;
   private wikiSpaceName: string;
+  private sourceRoot: string;
   private syncing = false;
   private nodeCache = new Map<string, WikiNode>();
 
@@ -92,6 +96,7 @@ export class DocSync {
     this.store = new SyncStore(config.databaseDir, logger);
     this.throttleMs = config.throttleMs ?? DEFAULT_THROTTLE_MS;
     this.wikiSpaceName = config.wikiSpaceName ?? WIKI_SPACE_NAME;
+    this.sourceRoot = normalizeMemoryRoot(config.sourceRoot);
   }
 
   /** Check if a sync is currently running. */
@@ -131,14 +136,16 @@ export class DocSync {
         return result;
       }
 
-      // Step 2: Fetch MetaMemory folder tree
+      // Step 2: Fetch MetaMemory folder tree and select the configured source.
       const folderTree = await this.memoryClient.listFolderTree();
+      const sourceTree = this.selectSourceTree(folderTree);
 
-      // Step 3: Sync folder structure (create wiki nodes for folders)
-      await this.syncFolders(target.spaceId, folderTree, target.rootNodeToken, result);
+      // Step 3: Sync descendants directly below the Wiki root. The selected
+      // source folder itself is a projection boundary, not another Wiki node.
+      await this.syncSourceFolders(target.spaceId, sourceTree, target.rootNodeToken, result);
 
-      // Step 4: Sync documents in each folder
-      await this.syncDocumentsInTree(target.spaceId, folderTree, target.rootNodeToken, result);
+      // Step 4: Sync documents in the selected folder and its descendants.
+      await this.syncDocumentsInTree(target.spaceId, sourceTree, target.rootNodeToken, result);
 
       // Step 5: Clean up deleted documents
       await this.cleanupDeleted(result);
@@ -177,10 +184,14 @@ export class DocSync {
       if (!doc) {
         return { success: false, error: 'Document not found in MetaMemory' };
       }
+      if (!this.isDocumentWithinSource(doc)) {
+        return { success: false, error: `Document ${doc.path} is outside WIKI_SYNC_SOURCE_ROOT ${this.sourceRoot}` };
+      }
 
       // Ensure parent folder is synced
       const folderTree = await this.memoryClient.listFolderTree();
-      const parentNodeToken = await this.resolveParentNodeToken(target, doc.folder_id, folderTree);
+      const sourceTree = this.selectSourceTree(folderTree);
+      const parentNodeToken = await this.resolveParentNodeToken(target, doc.folder_id, sourceTree);
 
       await this.syncSingleDocument(target.spaceId, doc, parentNodeToken);
       return { success: true };
@@ -210,7 +221,11 @@ export class DocSync {
           await this.deleteSingleDocument(target, docId);
           continue;
         }
-        folderTree ??= await this.memoryClient.listFolderTree();
+        if (!this.isDocumentWithinSource(doc)) {
+          await this.deleteSingleDocument(target, docId);
+          continue;
+        }
+        folderTree ??= this.selectSourceTree(await this.memoryClient.listFolderTree());
         const parentNodeToken = await this.resolveParentNodeToken(target, doc.folder_id, folderTree);
         await this.syncSingleDocument(target.spaceId, doc, parentNodeToken);
       }
@@ -259,7 +274,7 @@ export class DocSync {
       }
     }
 
-    this.store.bindTarget({ wikiSpaceId: spaceId, rootNodeToken });
+    this.store.bindTarget({ wikiSpaceId: spaceId, rootNodeToken, sourceRoot: this.sourceRoot });
     return { spaceId, rootNodeToken };
   }
 
@@ -333,6 +348,21 @@ export class DocSync {
   }
 
   // --- Folder sync ---
+
+  private async syncSourceFolders(
+    spaceId: string,
+    sourceTree: FolderTreeNode,
+    rootNodeToken: string,
+    result: SyncResult,
+  ): Promise<void> {
+    if (this.sourceRoot === '/') {
+      await this.syncFolders(spaceId, sourceTree, rootNodeToken, result);
+      return;
+    }
+    for (const child of sourceTree.children || []) {
+      await this.syncFolders(spaceId, child, rootNodeToken, result);
+    }
+  }
 
   private async syncFolders(
     spaceId: string,
@@ -674,7 +704,7 @@ export class DocSync {
     for (const mapping of allMappings) {
       try {
         const doc = await this.fetchDocument(mapping.memoryDocId);
-        if (!doc) {
+        if (!doc || !this.isDocumentWithinSource(doc)) {
           await this.deleteSingleDocument(target, mapping.memoryDocId);
           result.deleted++;
         }
@@ -752,9 +782,9 @@ export class DocSync {
   private async resolveParentNodeToken(
     target: WikiTarget,
     folderId: string,
-    folderTree: FolderTreeNode,
+    sourceTree: FolderTreeNode,
   ): Promise<string> {
-    if (!folderId || folderId === 'root') return target.rootNodeToken;
+    if (!folderId || folderId === 'root' || folderId === sourceTree.id) return target.rootNodeToken;
 
     const existing = this.store.getFolderMapping(folderId);
     if (existing) {
@@ -762,15 +792,32 @@ export class DocSync {
       return existing.feishuNodeToken;
     }
 
-    // Sync from the Memory root so every missing ancestor is created under the
-    // configured Wiki root before resolving the requested folder.
+    // Sync from the configured Memory source so every missing descendant is
+    // created under the configured Wiki root before resolving the folder.
     const dummyResult: SyncResult = { created: 0, updated: 0, skipped: 0, deleted: 0, errors: [], durationMs: 0 };
-    await this.syncFolders(target.spaceId, folderTree, target.rootNodeToken, dummyResult);
+    await this.syncSourceFolders(target.spaceId, sourceTree, target.rootNodeToken, dummyResult);
     if (dummyResult.errors.length > 0) throw new Error(dummyResult.errors.join('; '));
 
     const afterSync = this.store.getFolderMapping(folderId);
     if (!afterSync) throw new Error(`MetaMemory folder ${folderId} was not found in the folder tree`);
     return afterSync.feishuNodeToken;
+  }
+
+  private selectSourceTree(folderTree: FolderTreeNode): FolderTreeNode {
+    if (this.sourceRoot === '/') return folderTree;
+    const pending = [folderTree];
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      if (normalizeMemoryRoot(node.path) === this.sourceRoot) return node;
+      pending.push(...(node.children || []));
+    }
+    throw new Error(`WIKI_SYNC_SOURCE_ROOT ${this.sourceRoot} was not found in MetaMemory`);
+  }
+
+  private isDocumentWithinSource(doc: FullDocument): boolean {
+    return this.sourceRoot === '/'
+      || doc.path === this.sourceRoot
+      || doc.path.startsWith(`${this.sourceRoot}/`);
   }
 
   /** Fetch full document content from the central metabot-core service. */
@@ -788,4 +835,10 @@ export class DocSync {
   destroy(): void {
     this.store.close();
   }
+}
+
+function normalizeMemoryRoot(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '/') return '/';
+  return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
 }

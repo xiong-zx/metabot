@@ -83,6 +83,9 @@ describe('WikiAutoSync', () => {
   it('derives separate durable consumers for separate target roots', () => {
     expect(defaultWikiAutoSyncConsumer('space', 'imac')).not.toBe(defaultWikiAutoSyncConsumer('space', 'savio'));
     expect(defaultWikiAutoSyncConsumer('space', 'imac')).toBe(defaultWikiAutoSyncConsumer('space', 'imac'));
+    expect(defaultWikiAutoSyncConsumer('space', 'host', '/imac')).not.toBe(
+      defaultWikiAutoSyncConsumer('space', 'host', '/savio'),
+    );
   });
 
   it('initializes an empty consumer from a full snapshot without replaying history', async () => {

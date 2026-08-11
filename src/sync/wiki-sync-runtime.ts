@@ -40,6 +40,14 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
   const configuredStateDir = env.WIKI_SYNC_STATE_DIR?.trim();
   const wikiSpaceId = env.WIKI_SPACE_ID?.trim() || undefined;
   const rootNodeToken = env.WIKI_SYNC_ROOT_NODE_TOKEN?.trim() || undefined;
+  // WIKI_AUTO_SYNC_WATCH_ROOT was the original incremental-only option. Use it
+  // as a backward-compatible source root until deployments adopt the clearer
+  // WIKI_SYNC_SOURCE_ROOT name.
+  const sourceRoot = normalizeMemoryRoot(env.WIKI_SYNC_SOURCE_ROOT || env.WIKI_AUTO_SYNC_WATCH_ROOT);
+  const watchRoot = normalizeMemoryRoot(env.WIKI_AUTO_SYNC_WATCH_ROOT || sourceRoot);
+  if (sourceRoot !== watchRoot) {
+    throw new Error('WIKI_SYNC_SOURCE_ROOT and WIKI_AUTO_SYNC_WATCH_ROOT must match');
+  }
   if (autoSyncEnabled) {
     const missing = [
       !wikiSpaceId && 'WIKI_SPACE_ID',
@@ -67,6 +75,7 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
       wikiSpaceName: env.WIKI_SPACE_NAME || 'MetaMemory',
       wikiSpaceId,
       rootNodeToken,
+      sourceRoot,
       deleteRemoteDocuments: explicitTrue(env.WIKI_SYNC_DELETE_REMOTE),
       throttleMs: positiveInt(env.WIKI_SYNC_THROTTLE_MS, 300, 'WIKI_SYNC_THROTTLE_MS', options.logger),
     },
@@ -77,7 +86,9 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
   const wikiAutoSync = autoSyncEnabled
     ? new WikiAutoSync(
         {
-          consumer: env.WIKI_AUTO_SYNC_CONSUMER?.trim() || defaultWikiAutoSyncConsumer(wikiSpaceId!, rootNodeToken!),
+          consumer:
+            env.WIKI_AUTO_SYNC_CONSUMER?.trim() ||
+            defaultWikiAutoSyncConsumer(wikiSpaceId!, rootNodeToken!, sourceRoot),
           pollMs: positiveInt(env.WIKI_AUTO_SYNC_POLL_MS, 5_000, 'WIKI_AUTO_SYNC_POLL_MS', options.logger),
           batchSize: positiveInt(env.WIKI_AUTO_SYNC_BATCH_SIZE, 100, 'WIKI_AUTO_SYNC_BATCH_SIZE', options.logger),
           fullReconcileMs: positiveInt(
@@ -87,7 +98,7 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
             options.logger,
           ),
           maxAttempts: positiveInt(env.WIKI_AUTO_SYNC_MAX_ATTEMPTS, 5, 'WIKI_AUTO_SYNC_MAX_ATTEMPTS', options.logger),
-          watchRoot: env.WIKI_AUTO_SYNC_WATCH_ROOT?.trim() || '/',
+          watchRoot,
         },
         docSync,
         memoryClient,
@@ -96,7 +107,7 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
     : undefined;
 
   options.logger.info(
-    { autoSync: autoSyncEnabled, spaceId: wikiSpaceId, rootNodeToken },
+    { autoSync: autoSyncEnabled, spaceId: wikiSpaceId, rootNodeToken, sourceRoot },
     autoSyncEnabled
       ? 'Root-isolated Wiki sync service initialized with durable auto-sync'
       : 'Wiki sync service initialized for manual /sync',
@@ -106,6 +117,12 @@ export function createWikiSyncRuntime(options: WikiSyncRuntimeOptions): WikiSync
 
 function explicitTrue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === 'true';
+}
+
+function normalizeMemoryRoot(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === '/') return '/';
+  return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
 }
 
 function positiveInt(raw: string | undefined, fallback: number, name: string, logger: Logger): number {

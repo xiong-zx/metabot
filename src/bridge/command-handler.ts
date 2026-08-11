@@ -321,9 +321,11 @@ export class CommandHandler {
         const stats = this.docSync.getStats();
         const spaceId = stats.wikiSpaceId || 'Not configured';
         const rootNodeToken = stats.rootNodeToken || 'Space root';
+        const sourceRoot = stats.sourceRoot || '/';
         await this.sender.sendTextNotice(chatId, '📊 Sync Status', [
           `**Wiki Space:** \`${spaceId}\``,
           `**Wiki Root:** \`${rootNodeToken}\``,
+          `**Memory Source:** \`${sourceRoot}\``,
           `**Synced Documents:** ${stats.documentCount}`,
           `**Synced Folders:** ${stats.folderCount}`,
           `**Currently Syncing:** ${this.docSync.isSyncing() ? 'Yes' : 'No'}`,
