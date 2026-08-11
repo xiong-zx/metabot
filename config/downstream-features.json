@@ -26,6 +26,11 @@
       ]
     },
     {
+      "id": "wiki-change-feed-adapter",
+      "status": "required",
+      "roots": ["src/sync/wiki-auto-sync.ts", "src/sync/wiki-sync-runtime.ts"]
+    },
+    {
       "id": "agent-team-governance",
       "status": "required",
       "roots": ["src/agent-teams/governance-extension.ts"]

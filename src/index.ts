@@ -23,7 +23,7 @@ import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
-import { DocSync } from './sync/doc-sync.js';
+import { createWikiSyncRuntime } from './sync/wiki-sync-runtime.js';
 import { MemoryClient } from './memory/memory-client.js';
 import {
   MemoryIndexAutomation,
@@ -401,31 +401,13 @@ async function main() {
     logger.info('Feishu service client initialized (for wiki sync & doc reader)');
   }
 
-  // Initialize wiki sync service (uses dedicated service app credentials)
-  let docSync: DocSync | undefined;
-  if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
-    const syncMemoryClient = new MemoryClient(logger);
-    const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
-      ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
-      : path.join(process.cwd(), 'data');
-    docSync = new DocSync(
-      {
-        feishuAppId: appConfig.feishuService.appId,
-        feishuAppSecret: appConfig.feishuService.appSecret,
-        feishuDomain: appConfig.feishuService.domain,
-        databaseDir: syncStateDir,
-        wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
-        wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
-        throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
-      },
-      syncMemoryClient,
-      logger,
-    );
-    // Inject into all Feishu bot bridges
-    for (const handle of feishuHandles) {
-      handle.bridge.setDocSync(docSync);
-    }
-    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
+  // Keep downstream Wiki change-feed behavior behind one narrow startup hook.
+  const { docSync, wikiAutoSync } = createWikiSyncRuntime({
+    feishuService: appConfig.feishuService,
+    logger,
+  });
+  if (docSync) {
+    for (const handle of feishuHandles) handle.bridge.setDocSync(docSync);
   }
 
   const memoryIndexMode = parseMemoryIndexAutomationMode(
@@ -481,6 +463,7 @@ async function main() {
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
   });
+  wikiAutoSync?.start();
   memoryIndexAutomation?.start();
   logger.info(
     {
@@ -513,9 +496,8 @@ async function main() {
       peerManager.destroy();
     }
     apiServer.close();
-    if (docSync) {
-      docSync.destroy();
-    }
+    await wikiAutoSync?.destroy();
+    docSync?.destroy();
     memoryIndexAutomation?.destroy();
     sessionRegistry.close();
     const teardowns: Promise<void>[] = [];

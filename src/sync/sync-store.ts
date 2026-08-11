@@ -28,6 +28,11 @@ export interface SyncConfig {
   lastFullSyncAt?: string;
 }
 
+export interface SyncTargetBinding {
+  wikiSpaceId: string;
+  rootNodeToken: string;
+}
+
 export class SyncStore {
   private db: Database.Database;
 
@@ -86,6 +91,44 @@ export class SyncStore {
 
   setWikiSpaceId(spaceId: string): void {
     this.setConfig('wiki_space_id', spaceId);
+  }
+
+  getRootNodeToken(): string | undefined {
+    return this.getConfig('root_node_token');
+  }
+
+  getLastFullSyncAt(): string | undefined {
+    return this.getConfig('last_full_sync_at');
+  }
+
+  /**
+   * Permanently bind a populated mapping database to one Wiki subtree.
+   * Reusing mappings for another Space or root could update documents owned by
+   * another host, so target changes require an empty state directory.
+   */
+  bindTarget(target: SyncTargetBinding): void {
+    const currentSpaceId = this.getWikiSpaceId();
+    // Databases created before root isolation have no root_node_token key;
+    // normalize that legacy state to the Space root for compatibility.
+    const currentRootNodeToken = this.getRootNodeToken() ?? '';
+    const hasMappings = this.hasMappings();
+
+    if (hasMappings && currentSpaceId !== target.wikiSpaceId) {
+      throw new Error(
+        `Wiki sync state is bound to Space ${currentSpaceId || '(unset)'}; use a new WIKI_SYNC_STATE_DIR for ${target.wikiSpaceId}`,
+      );
+    }
+    if (hasMappings && currentRootNodeToken !== target.rootNodeToken) {
+      throw new Error(
+        `Wiki sync state is bound to root ${currentRootNodeToken || '(space root)'}; use a new WIKI_SYNC_STATE_DIR for ${target.rootNodeToken || '(space root)'}`,
+      );
+    }
+
+    const transaction = this.db.transaction(() => {
+      this.setConfig('wiki_space_id', target.wikiSpaceId);
+      this.setConfig('root_node_token', target.rootNodeToken);
+    });
+    transaction();
   }
 
   // --- Document mappings ---
@@ -183,14 +226,28 @@ export class SyncStore {
 
   // --- Stats ---
 
-  getStats(): { documentCount: number; folderCount: number; wikiSpaceId: string | undefined } {
+  getStats(): {
+    documentCount: number;
+    folderCount: number;
+    wikiSpaceId: string | undefined;
+    rootNodeToken: string | undefined;
+    lastFullSyncAt: string | undefined;
+  } {
     const docCount = (this.db.prepare('SELECT COUNT(*) as count FROM document_mappings').get() as { count: number }).count;
     const folderCount = (this.db.prepare('SELECT COUNT(*) as count FROM folder_mappings').get() as { count: number }).count;
     return {
       documentCount: docCount,
       folderCount: folderCount,
       wikiSpaceId: this.getWikiSpaceId(),
+      rootNodeToken: this.getRootNodeToken(),
+      lastFullSyncAt: this.getLastFullSyncAt(),
     };
+  }
+
+  private hasMappings(): boolean {
+    const documents = (this.db.prepare('SELECT COUNT(*) as count FROM document_mappings').get() as { count: number }).count;
+    const folders = (this.db.prepare('SELECT COUNT(*) as count FROM folder_mappings').get() as { count: number }).count;
+    return documents > 0 || folders > 0;
   }
 
   /** Clear all mappings (for full re-sync). */
