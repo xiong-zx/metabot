@@ -33,7 +33,7 @@ describe('skills installer', () => {
       installSkillsToWorkDir(workDir, logger);
 
       for (const root of ['.claude/skills', '.codex/skills', '.agents/skills']) {
-        for (const skill of ['metabot', 'metabot-team', 'metabot-todos', 'voice']) {
+        for (const skill of ['metabot', 'metabot-team', 'voice']) {
           expect(existsSync(join(workDir, root, skill))).toBe(false);
         }
       }
@@ -62,23 +62,19 @@ describe('skills installer', () => {
 
   it('retires project-level MetaBot mirrors into backups outside discovery roots', () => {
     const workDir = tempDir('metabot-mirrors-');
-    const oldBundles = ['metabot', 'metabot-todos'].map((skill) => join(workDir, '.codex/skills', skill));
-    for (const oldBundle of oldBundles) {
-      mkdirSync(oldBundle, { recursive: true });
-      writeFileSync(join(oldBundle, 'SKILL.md'), `custom old ${oldBundle}\n`);
-      writeFileSync(join(oldBundle, 'local.md'), 'preserve me\n');
-    }
+    const oldBundle = join(workDir, '.codex/skills/metabot');
+    mkdirSync(oldBundle, { recursive: true });
+    writeFileSync(join(oldBundle, 'SKILL.md'), 'custom old bundle\n');
+    writeFileSync(join(oldBundle, 'local.md'), 'preserve me\n');
 
     installSkillsToWorkDir(workDir, logger);
 
-    for (const oldBundle of oldBundles) expect(existsSync(oldBundle)).toBe(false);
+    expect(existsSync(oldBundle)).toBe(false);
     const backupRoot = join(workDir, '.metabot/skill-backups');
-    for (const skill of ['metabot', 'metabot-todos']) {
-      const backup = readdirSync(backupRoot).find((entry) => entry.startsWith(`${skill}.`));
-      expect(backup).toBeTruthy();
-      expect(readFileSync(join(backupRoot, backup!, 'SKILL.md'), 'utf-8')).toContain(`custom old`);
-      expect(readFileSync(join(backupRoot, backup!, 'local.md'), 'utf-8')).toBe('preserve me\n');
-    }
+    const backup = readdirSync(backupRoot).find((entry) => entry.startsWith('metabot.'));
+    expect(backup).toBeTruthy();
+    expect(readFileSync(join(backupRoot, backup!, 'SKILL.md'), 'utf-8')).toBe('custom old bundle\n');
+    expect(readFileSync(join(backupRoot, backup!, 'local.md'), 'utf-8')).toBe('preserve me\n');
   });
 
   it('mirrors the minimal user-managed Lark profile to Claude, Codex, and Kimi roots', () => {

@@ -1267,14 +1267,13 @@ for legacy in metamemory skill-hub memory; do
   fi
 done
 
-# Install the complete MetaBot-owned Skill bundles for Claude, Codex, and the
+# Install the complete MetaBot-owned skill bundles for Claude, Codex, and the
 # shared Agent Skills location used by Kimi Code 0.27+. Copying the full bundle
-# preserves required references, scripts, and Agent metadata.
-declare -a METABOT_SKILL_NAMES=("metabot" "metabot-team" "metabot-todos")
+# (rather than only SKILL.md) preserves required references and scripts.
+declare -a METABOT_SKILL_NAMES=("metabot" "metabot-team")
 declare -a METABOT_SKILL_SOURCES=(
   "$METABOT_HOME/packages/skills/metabot"
   "$METABOT_HOME/packages/skills/metabot-team"
-  "$METABOT_HOME/packages/skills/metabot-todos"
 )
 for skill_index in "${!METABOT_SKILL_NAMES[@]}"; do
   skill_name="${METABOT_SKILL_NAMES[$skill_index]}"
@@ -1406,7 +1405,7 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
 
   # MetaBot-owned Skills are global-only. Preserve and retire historical
   # project copies so stale snapshots cannot shadow newer global Skills.
-  for SKILL in metabot metabot-team metabot-todos voice; do
+  for SKILL in metabot metabot-team voice; do
     for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
       if [[ -e "$skill_dest/$SKILL" || -L "$skill_dest/$SKILL" ]]; then
         metabot_backup_existing_skill "$skill_dest/$SKILL" "$DEPLOY_WORK_DIR/.metabot/skill-backups"

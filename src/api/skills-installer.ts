@@ -6,7 +6,7 @@ import type { Logger } from '../utils/logger.js';
 import { parseFeishuDomain, type FeishuDomain } from '../feishu/domain.js';
 
 /** Historical project mirrors retired by the installer. */
-const PROJECT_METABOT_SKILL_MIRRORS = ['metabot', 'metabot-team', 'metabot-todos', 'voice'];
+const PROJECT_METABOT_SKILL_MIRRORS = ['metabot', 'metabot-team', 'voice'];
 
 /** Lark CLI Skills remain user-managed and may be mirrored into a workspace. */
 const LARK_CLI_SKILLS = [

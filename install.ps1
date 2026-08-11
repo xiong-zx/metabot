@@ -828,7 +828,6 @@ $GlobalSkillRoots = @($SkillsDir, $CodexSkillsDir, $AgentsSkillsDir)
 $MetaBotSkillSources = [ordered]@{
     "metabot" = (Join-Path $MetabotHome "packages\skills\metabot")
     "metabot-team" = (Join-Path $MetabotHome "packages\skills\metabot-team")
-    "metabot-todos" = (Join-Path $MetabotHome "packages\skills\metabot-todos")
 }
 
 # Install complete MetaBot-owned bundles for Claude, Codex, and Kimi Code's
@@ -899,7 +898,7 @@ if ($DeployWorkDir) {
     $WorkspaceSkillBackup = Join-Path $DeployWorkDir ".metabot\skill-backups"
     foreach ($workspaceSkillRoot in $WorkspaceSkillRoots) {
         New-Item -ItemType Directory -Path $workspaceSkillRoot -Force | Out-Null
-        foreach ($skill in @("metabot", "metabot-team", "metabot-todos", "voice")) {
+        foreach ($skill in @("metabot", "metabot-team", "voice")) {
             $skillDst = Join-Path $workspaceSkillRoot $skill
             $skillItem = Get-Item -LiteralPath $skillDst -Force -ErrorAction SilentlyContinue
             if ($null -ne $skillItem) {

@@ -197,9 +197,6 @@ describe('pack-metabot.sh', () => {
   it('tarball includes the packaged skill bundles', () => {
     expect(tarListing).toContain('packages/skills/metabot/SKILL.md');
     expect(tarListing).toContain('packages/skills/metabot-team/SKILL.md');
-    expect(tarListing).toContain('packages/skills/metabot-todos/SKILL.md');
-    expect(tarListing).toContain('packages/skills/metabot-todos/agents/openai.yaml');
-    expect(tarListing).toContain('packages/skills/metabot-todos/scripts/todo-display.mjs');
     for (const reference of ['memory', 'skills', 'agents', 't5t', 'runtime']) {
       expect(tarListing).toContain(`packages/skills/metabot/references/${reference}.md`);
     }

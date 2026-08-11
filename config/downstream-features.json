@@ -12,11 +12,6 @@
       "roots": ["src/feishu/domain.ts", "src/feishu/client-factory.ts"]
     },
     {
-      "id": "metabot-todos",
-      "status": "required",
-      "roots": ["packages/skills/metabot-todos"]
-    },
-    {
       "id": "metamemory-index-automation",
       "status": "required",
       "roots": [
