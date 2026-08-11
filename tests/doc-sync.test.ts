@@ -89,9 +89,10 @@ function createMockMemoryClient(docs: FullDocument[] = [], tree?: FolderTreeNode
     token: 'test-token',
     secret: 'test-token',
     listFolderTree: vi.fn().mockResolvedValue(tree || defaultTree),
-    listDocuments: vi.fn().mockResolvedValue(
-      docs.map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at })),
-    ),
+    listDocuments: vi.fn().mockImplementation(async (folderId?: string) =>
+      docs
+        .filter((d) => !folderId || d.folder_id === folderId)
+        .map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at }))),
     getDocument: vi.fn().mockImplementation(async (docId: string) => docs.find((d) => d.id === docId) || null),
   } as any;
 }
@@ -249,6 +250,67 @@ describe('DocSync', () => {
     expect(stats.folderCount).toBe(1);
   });
 
+  it('projects a configured Memory source directly onto the Wiki root', async () => {
+    const tree: FolderTreeNode = {
+      id: 'root',
+      name: 'Root',
+      path: '/',
+      children: [
+        { id: 'cargo', name: 'cargo1', path: '/cargo1', children: [], document_count: 1 },
+        {
+          id: 'imac',
+          name: 'imac',
+          path: '/imac',
+          children: [
+            { id: 'imac-research', name: 'research', path: '/imac/research', children: [], document_count: 1 },
+          ],
+          document_count: 1,
+        },
+      ],
+      document_count: 0,
+    };
+    const docs = [
+      makeSampleDoc({ id: 'cargo-doc', title: 'Cargo', folder_id: 'cargo', path: '/cargo1/Cargo' }),
+      makeSampleDoc({ id: 'overview', title: 'Overview', folder_id: 'imac', path: '/imac/Overview' }),
+      makeSampleDoc({ id: 'paper', title: 'Paper', folder_id: 'imac-research', path: '/imac/research/Paper' }),
+    ];
+    setup(docs, tree, {
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_123',
+      sourceRoot: '/imac/',
+    });
+
+    const result = await docSync.syncAll();
+    const creates = mockClient.wiki.v2.spaceNode.create.mock.calls.map(([request]: any[]) => request.data);
+
+    expect(result.errors).toHaveLength(0);
+    expect(result.created).toBe(2);
+    expect(creates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'research', parent_node_token: 'root_123' }),
+      expect.objectContaining({ title: 'Overview', parent_node_token: 'root_123' }),
+      expect.objectContaining({ title: 'Paper' }),
+    ]));
+    expect(creates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'imac' }),
+      expect.objectContaining({ title: 'cargo1' }),
+      expect.objectContaining({ title: 'Cargo' }),
+    ]));
+    expect(docSync.getStats()).toMatchObject({ documentCount: 2, folderCount: 1, sourceRoot: '/imac' });
+  });
+
+  it('fails closed when the configured Memory source does not exist', async () => {
+    setup([], undefined, {
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_123',
+      sourceRoot: '/missing',
+    });
+
+    const result = await docSync.syncAll();
+
+    expect(result.errors).toContain('WIKI_SYNC_SOURCE_ROOT /missing was not found in MetaMemory');
+    expect(mockClient.wiki.v2.spaceNode.create).not.toHaveBeenCalled();
+  });
+
   it('detects and cleans up deleted documents', async () => {
     const doc = makeSampleDoc();
     setup([doc]);
@@ -373,6 +435,49 @@ describe('DocSync', () => {
 
     const result = await docSync.syncDocument('doc1');
     expect(result.success).toBe(true);
+  });
+
+  it('refuses to sync a document outside the configured Memory source', async () => {
+    const doc = makeSampleDoc({ folder_id: 'cargo', path: '/cargo1/Outside' });
+    setup([doc], undefined, {
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_123',
+      sourceRoot: '/imac',
+    });
+
+    const result = await docSync.syncDocument(doc.id);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('outside WIKI_SYNC_SOURCE_ROOT /imac');
+    expect(mockClient.wiki.v2.spaceNode.create).not.toHaveBeenCalled();
+  });
+
+  it('drops a mapping when an incremental event moves a document outside the source', async () => {
+    const doc = makeSampleDoc({ folder_id: 'imac', path: '/imac/Tracked' });
+    const tree: FolderTreeNode = {
+      id: 'root',
+      name: 'Root',
+      path: '/',
+      children: [
+        { id: 'imac', name: 'imac', path: '/imac', children: [], document_count: 1 },
+      ],
+      document_count: 0,
+    };
+    setup([doc], tree, {
+      wikiSpaceId: 'space_123',
+      rootNodeToken: 'root_123',
+      sourceRoot: '/imac',
+    });
+    expect((await docSync.syncAll()).errors).toHaveLength(0);
+    expect(docSync.getStats().documentCount).toBe(1);
+
+    doc.path = '/cargo1/Moved';
+    doc.folder_id = 'cargo';
+    const result = await docSync.syncChanges([doc.id]);
+
+    expect(result.success).toBe(true);
+    expect(docSync.getStats().documentCount).toBe(0);
+    expect(mockClient.drive.v1.file.delete).not.toHaveBeenCalled();
   });
 
   it('syncChanges validates one target and coalesces duplicate document IDs', async () => {

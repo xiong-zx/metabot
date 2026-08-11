@@ -62,6 +62,19 @@ describe('createWikiSyncRuntime', () => {
     ).toThrow('WIKI_SYNC_DELETE_REMOTE=true requires WIKI_SYNC_ROOT_NODE_TOKEN');
   });
 
+  it('rejects different full-sync and incremental source boundaries', () => {
+    expect(() =>
+      createWikiSyncRuntime({
+        feishuService: service,
+        logger: logger(),
+        env: {
+          WIKI_SYNC_SOURCE_ROOT: '/imac',
+          WIKI_AUTO_SYNC_WATCH_ROOT: '/cargo1',
+        },
+      }),
+    ).toThrow('WIKI_SYNC_SOURCE_ROOT and WIKI_AUTO_SYNC_WATCH_ROOT must match');
+  });
+
   it('constructs root-isolated manual and automatic services from explicit config', async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wiki-runtime-test-'));
     const runtime = createWikiSyncRuntime({
@@ -73,16 +86,20 @@ describe('createWikiSyncRuntime', () => {
         WIKI_AUTO_SYNC: 'true',
         WIKI_SPACE_ID: 'space_123',
         WIKI_SYNC_ROOT_NODE_TOKEN: 'root_imac',
+        WIKI_SYNC_SOURCE_ROOT: '/imac/',
         WIKI_SYNC_STATE_DIR: 'state/imac',
         WIKI_AUTO_SYNC_CONSUMER: 'wiki-imac',
+        WIKI_AUTO_SYNC_WATCH_ROOT: '/imac',
       },
     });
 
     expect(runtime.docSync).toBeDefined();
     expect(runtime.wikiAutoSync).toBeDefined();
     expect((runtime.docSync as any).config.rootNodeToken).toBe('root_imac');
+    expect((runtime.docSync as any).config.sourceRoot).toBe('/imac');
     expect((runtime.docSync as any).config.databaseDir).toBe(path.join(tmpDir, 'state/imac'));
     expect((runtime.wikiAutoSync as any).config.consumer).toBe('wiki-imac');
+    expect((runtime.wikiAutoSync as any).config.watchRoot).toBe('/imac');
 
     await runtime.wikiAutoSync?.destroy();
     runtime.docSync?.destroy();

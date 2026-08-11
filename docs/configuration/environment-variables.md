@@ -117,6 +117,7 @@ Multi-bot deployments should store channel credentials in the protected
 | `WIKI_SPACE_ID` | — | Existing Wiki space ID |
 | `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name |
 | `WIKI_SYNC_ROOT_NODE_TOKEN` | — | Immutable parent node for this sync target |
+| `WIKI_SYNC_SOURCE_ROOT` | `/` | MetaMemory subtree projected directly onto the Wiki root |
 | `WIKI_SYNC_STATE_DIR` | `./data` | Target-bound mapping database directory |
 | `WIKI_SYNC_DELETE_REMOTE` | `false` | Delete mapped Wiki pages; requires a root node |
 | `WIKI_AUTO_SYNC` | `false` | Consume the durable Memory change feed automatically |
@@ -125,7 +126,7 @@ Multi-bot deployments should store channel credentials in the protected
 | `WIKI_AUTO_SYNC_BATCH_SIZE` | `100` | Maximum events processed per poll |
 | `WIKI_AUTO_SYNC_FULL_RECONCILE_MS` | `21600000` | Periodic full reconciliation interval |
 | `WIKI_AUTO_SYNC_MAX_ATTEMPTS` | `5` | Retries before a batch is dead-lettered |
-| `WIKI_AUTO_SYNC_WATCH_ROOT` | `/` | Optional MetaMemory event path prefix |
+| `WIKI_AUTO_SYNC_WATCH_ROOT` | source root | Legacy source-root alias; explicit values must match |
 | `VOLCENGINE_TTS_APPID` | — | Doubao STT/TTS App ID |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao STT/TTS access key |
 | `OPENAI_API_KEY` | — | Optional Whisper/OpenAI TTS fallback |

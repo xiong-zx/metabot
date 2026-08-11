@@ -66,6 +66,7 @@ export async function handleSyncRoutes(
       syncing: docSync.isSyncing(),
       wikiSpaceId: stats.wikiSpaceId,
       rootNodeToken: stats.rootNodeToken,
+      sourceRoot: stats.sourceRoot,
       lastFullSyncAt: stats.lastFullSyncAt,
       documentCount: stats.documentCount,
       folderCount: stats.folderCount,

@@ -17,9 +17,12 @@ const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_FULL_RECONCILE_MS = 6 * 60 * 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 
-/** Derive a stable, target-specific cursor so two Wiki roots never share it. */
-export function defaultWikiAutoSyncConsumer(spaceId: string, rootNodeToken: string): string {
-  const targetHash = createHash('sha256').update(`${spaceId}:${rootNodeToken}`).digest('hex').slice(0, 16);
+/** Derive a stable cursor so distinct Wiki targets or Memory sources never share it. */
+export function defaultWikiAutoSyncConsumer(spaceId: string, rootNodeToken: string, sourceRoot = '/'): string {
+  const targetHash = createHash('sha256')
+    .update(`${spaceId}:${rootNodeToken}:${normalizeRoot(sourceRoot)}`)
+    .digest('hex')
+    .slice(0, 16);
   return `wiki-sync-${targetHash}`;
 }
 
