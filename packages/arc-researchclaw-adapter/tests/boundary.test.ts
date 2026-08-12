@@ -13,6 +13,16 @@ describe('official ARC boundary', () => {
     expect(production).not.toMatch(/class\s+(?:Pipeline|Literature|Hypothesis|PeerReview)/);
     const bridge = readFileSync(path.join(root, 'python', 'bridge.py'), 'utf8');
     expect(bridge).toContain('from researchclaw.hitl.adapters.mcp_adapter import MCPHITLAdapter');
+    expect(bridge).toContain('from researchclaw.pipeline.stages import GATE_ROLLBACK, Stage');
     expect(bridge).not.toContain('def execute_pipeline');
+    const detachedRunner = readFileSync(path.join(root, 'python', 'detached_runner.py'), 'utf8');
+    expect(detachedRunner).toContain('from researchclaw.hitl.file_wait import poll_for_response');
+    expect(detachedRunner).toContain('from researchclaw.cli import main as researchclaw_main');
+    expect(detachedRunner).not.toContain('def execute_pipeline');
+    const compatibility = readFileSync(path.join(root, 'python', 'official_compat.py'), 'utf8');
+    expect(compatibility).toContain('inspect.getsource(function)');
+    expect(compatibility).toContain('_metabot_cached_acp_factory');
+    expect(compatibility).not.toContain('def execute_pipeline');
+    expect(compatibility).not.toMatch(/class\s+(?:Pipeline|Literature|Hypothesis|PeerReview)/);
   });
 });

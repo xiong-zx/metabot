@@ -18,6 +18,7 @@ import {
   RUNNER_STATE_VERSION,
   SUPERVISOR_REQUEST_VERSION,
   type OfficialProbe,
+  type OfficialRunnerStatus,
   type SupervisorRequest,
 } from './types.js';
 
@@ -81,7 +82,7 @@ export class OfficialResearchClawAdapter implements ArcRunner {
       getStatus: (handle) => this.callHitl(handle, 'hitl_get_status', {}),
       approveStage: (handle, message) =>
         this.callHitl(handle, 'hitl_approve_stage', message === undefined ? {} : { message }),
-      rejectStage: (handle, reason) => this.callHitl(handle, 'hitl_reject_stage', { reason }),
+      rejectStage: (handle, reason) => this.rejectHitlStage(handle, reason),
       injectGuidance: (handle, stage, guidance) =>
         this.callHitl(handle, 'hitl_inject_guidance', { stage, guidance }),
       viewOutput: (handle, stage, filename) => {
@@ -243,16 +244,27 @@ export class OfficialResearchClawAdapter implements ArcRunner {
     if (state.run_id !== details.runId || state.supervisor_pid !== details.supervisorPid) {
       throw new ArcError('runner_failure', 'Official ARC durable handle no longer matches its runner state');
     }
-    if (state.status === 'completed' || state.status === 'failed') return { state: 'finished' };
-    if (state.status === 'cancelled') return { state: 'cancelled' };
+    const terminal = terminalRunnerResult(state.status);
+    if (terminal) return terminal;
     if (!processAlive(details.supervisorPid)) {
       await delay(100);
       const refreshed = readRunnerState(details.statePath);
-      if (refreshed.status === 'completed' || refreshed.status === 'failed') return { state: 'finished' };
-      if (refreshed.status === 'cancelled') return { state: 'cancelled' };
+      const refreshedTerminal = terminalRunnerResult(refreshed.status);
+      if (refreshedTerminal) return refreshedTerminal;
       throw new ArcError('runner_failure', 'Official ARC supervisor exited without a terminal state');
     }
-    this.assertProcessIdentity(details);
+    try {
+      this.assertProcessIdentity(details);
+    } catch (error) {
+      // The supervisor can publish its terminal state immediately after the
+      // liveness probe and before `ps` verifies the PID. Re-read the durable
+      // state before treating that normal exit race as PID reuse.
+      await delay(100);
+      const refreshed = readRunnerState(details.statePath);
+      const refreshedTerminal = terminalRunnerResult(refreshed.status);
+      if (refreshedTerminal) return refreshedTerminal;
+      throw error;
+    }
     const waitingPath = path.join(details.runDir, 'hitl', 'waiting.json');
     const responsePath = path.join(details.runDir, 'hitl', 'response.json');
     if (existsSync(details.controlPath) || (existsSync(waitingPath) && !existsSync(responsePath))) {
@@ -277,6 +289,41 @@ export class OfficialResearchClawAdapter implements ArcRunner {
       throw new ArcError('runner_failure', `Official AutoResearchClaw HITL call failed: ${String(result.error ?? 'unknown error')}`);
     }
     return result;
+  }
+
+  private async rejectHitlStage(handle: ArcExecutionHandle, reason: string): Promise<Record<string, unknown>> {
+    const details = this.details(handle);
+    const status = await this.callHitl(handle, 'hitl_get_status', {});
+    const waiting = status.waiting;
+    const stage =
+      waiting && typeof waiting === 'object' && !Array.isArray(waiting)
+        ? Number((waiting as Record<string, unknown>).stage)
+        : Number.NaN;
+    if (!Number.isSafeInteger(stage) || stage < 1) {
+      throw new ArcError('invalid_transition', 'Official AutoResearchClaw is not waiting at a rejectable gate');
+    }
+    const rollback = await runJsonBridge(this.python, this.bridgePath, { action: 'gate_rollback', stage });
+    if (rollback.success !== true || typeof rollback.from_stage !== 'string' || !STAGE_NAME.test(rollback.from_stage)) {
+      throw new ArcError(
+        'runner_failure',
+        `Official AutoResearchClaw rollback resolution failed: ${String(rollback.error ?? 'invalid target')}`,
+      );
+    }
+    const markerPath = path.join(details.runDir, 'metabot-hitl-rejection.json');
+    atomicWriteJson(markerPath, {
+      contract_version: 'metabot.researchclaw.hitl-rejection.v1',
+      run_id: details.runId,
+      stage,
+      from_stage: rollback.from_stage,
+      reason,
+      requested_at: new Date().toISOString(),
+    });
+    try {
+      return await this.callHitl(handle, 'hitl_reject_stage', { reason });
+    } catch (error) {
+      unlinkSync(markerPath);
+      throw error;
+    }
   }
 
   private recoverIdempotentStart(
@@ -558,6 +605,12 @@ function optionalBoolean(value: unknown): boolean | undefined {
 
 function safeFilename(value: string): boolean {
   return value !== '.' && value !== '..' && path.basename(value) === value && !value.includes('\0');
+}
+
+function terminalRunnerResult(status: OfficialRunnerStatus): ArcRunnerResult | undefined {
+  if (status === 'completed' || status === 'failed') return { state: 'finished' };
+  if (status === 'cancelled') return { state: 'cancelled' };
+  return undefined;
 }
 
 function cleanToken(value: string, label: string): string {

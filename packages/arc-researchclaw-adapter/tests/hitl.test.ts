@@ -38,4 +38,29 @@ describe('official HITL delegation', () => {
     expect(await adapter.resume(handle)).toEqual({ state: 'running' });
     expect(await adapter.collect(handle)).toEqual({ state: 'finished' });
   });
+
+  it('restarts a rejected official gate from the official rollback target', async () => {
+    const kit = fixture();
+    roots.push(kit.root);
+    const adapter = new OfficialResearchClawAdapter({
+      python: kit.python,
+      bridgePath: kit.bridge,
+      supervisorPath: kit.supervisor,
+      pollIntervalMs: 20,
+    });
+    const handle = await adapter.start(input(kit.projectRoot, 'hitl-reject-e2e', 'WAIT_FOR_HITL'));
+    expect((await waitFor(() => adapter.recover(handle), (value) => value.state === 'paused')).state).toBe('paused');
+    expect(await adapter.hitl.rejectStage(handle, 'Revise the evidence boundary.')).toMatchObject({
+      success: true,
+      action: 'reject',
+    });
+    await adapter.resume(handle);
+    expect((await waitFor(() => adapter.recover(handle), (value) => value.state === 'paused')).state).toBe('paused');
+    expect(await adapter.hitl.approveStage(handle, 'Rollback output accepted.')).toMatchObject({
+      success: true,
+      action: 'approve',
+    });
+    await adapter.resume(handle);
+    expect(await adapter.collect(handle)).toEqual({ state: 'finished' });
+  });
 });
