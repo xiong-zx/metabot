@@ -23,6 +23,8 @@ describe('official AutoResearchClaw adapter', () => {
       pollIntervalMs: 20,
     });
     const handle = await adapter.start(input(kit.projectRoot, 'official-e2e', 'Run all official stages'));
+    const registeredState = JSON.parse(readFileSync(String(handle.metadata?.state_path), 'utf8'));
+    expect(registeredState.supervisor_pid).toBe(handle.metadata?.supervisor_pid);
     const result = await adapter.collect(handle);
     expect(result).toEqual({ state: 'finished' });
     const output = JSON.parse(

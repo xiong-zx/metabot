@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { ArcError } from '@xvirobotics/arc-mcp';
 
@@ -23,6 +23,14 @@ export function readRunnerState(statePath: string): OfficialRunnerState {
 
 export function processAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  if (process.platform === 'linux') {
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+      if (/^State:\s+[ZX]/m.test(status)) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    }
+  }
   try {
     process.kill(pid, 0);
     return true;

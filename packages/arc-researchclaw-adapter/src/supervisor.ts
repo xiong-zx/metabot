@@ -44,6 +44,11 @@ function writeState(patch: Partial<OfficialRunnerState>): void {
   } satisfies OfficialRunnerState);
 }
 
+// Register the detached supervisor before doing any work that can complete or
+// fail. The parent waits for this handshake instead of racing a second state
+// write against a fast official pipeline.
+writeState({ status: 'starting', child_pid: null, error: null });
+
 const args = [
   '-m',
   'researchclaw',
