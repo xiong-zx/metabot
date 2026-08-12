@@ -30,6 +30,7 @@ export class FakeArcRunner implements ArcRunner {
   private readonly completions = new Map<string, Deferred>();
   private readonly outputs = new Map<string, unknown>();
   private readonly omitArtifacts = new Set<string>();
+  private readonly collectFailures = new Map<string, Error[]>();
 
   async start(input: ArcExecutionInput): Promise<ArcExecutionHandle> {
     this.startCalls.push(input);
@@ -75,6 +76,9 @@ export class FakeArcRunner implements ArcRunner {
 
   async collect(handle: ArcExecutionHandle): Promise<ArcRunnerResult> {
     this.collectCalls.push(handle);
+    const failures = this.collectFailures.get(handle.id);
+    const failure = failures?.shift();
+    if (failure) throw failure;
     await this.completions.get(handle.id)?.promise;
     const state = this.requireState(handle);
     if (state === 'cancelled') return { state };
@@ -93,6 +97,12 @@ export class FakeArcRunner implements ArcRunner {
     this.omitArtifacts.add(handleId);
     this.states.set(handleId, 'finished');
     this.completions.get(handleId)?.resolve();
+  }
+
+  failNextCollect(handleId: string, error = new Error('Synthetic collect failure')): void {
+    const failures = this.collectFailures.get(handleId) ?? [];
+    failures.push(error);
+    this.collectFailures.set(handleId, failures);
   }
 
   inputForRun(runId: string): ArcExecutionInput | undefined {
