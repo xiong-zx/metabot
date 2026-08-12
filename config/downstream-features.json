@@ -81,7 +81,8 @@
       "validationSurface": [
         "packages/arc-mcp/tests/contract.test.ts",
         "packages/arc-mcp/tests/lifecycle.test.ts",
-        "packages/arc-mcp/tests/daemon-auth.test.ts"
+        "packages/arc-mcp/tests/daemon-auth.test.ts",
+        "packages/arc-mcp/tests/recovery-races.test.ts"
       ]
     },
     {

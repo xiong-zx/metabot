@@ -252,4 +252,39 @@ describe('ARC recovery and terminal races', () => {
     await coordinator.waitForTerminal(run.run_id);
     expect(runner.collectCalls.filter((call) => call.id === handleId(run))).toHaveLength(1);
   });
+
+  it('retries a transient collection failure and converges to the durable terminal artifact', async () => {
+    const temporary = temporaryDirectory();
+    cleanupDirectories.push(temporary);
+    const projectRoot = projectDirectory(temporary);
+    const store = new ArcRunStore(path.join(temporary, 'state'));
+    cleanupStores.push(store);
+    const artifacts = new ArcArtifactStore();
+    const runner = new FakeArcRunner();
+    const coordinator = new ArcCoordinator(store, artifacts, runner, {
+      artifactPollIntervalMs: 5,
+      artifactWaitTimeoutMs: 100,
+      collectionRetryMs: 10,
+      scope: scope(artifacts, projectRoot),
+    });
+    cleanupCoordinators.push(coordinator);
+    const runId = 'run-collect-retry';
+    runner.failNextCollect(`fake-${runId}`, new Error('Transient supervisor identity race'));
+
+    const run = await coordinator.start({
+      project_id: 'project-1',
+      project_root: projectRoot,
+      objective: 'Converge after a transient collection failure.',
+      idempotency_key: 'collect-retry',
+      run_id: runId,
+    });
+    runner.finish(handleId(run), validOutput('project-1', run.run_id));
+
+    await expect(coordinator.waitForTerminal(run.run_id)).resolves.toMatchObject({
+      status: 'completed',
+      phase: 'completed',
+      error: null,
+    });
+    expect(runner.collectCalls.filter((call) => call.id === handleId(run))).toHaveLength(2);
+  });
 });

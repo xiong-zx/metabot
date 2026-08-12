@@ -2,12 +2,16 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 
-if (process.argv[2] !== '-m') {
+if (process.argv[2] !== '-m' && !process.argv[2]?.endsWith('detached_runner.py')) {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
   const payload = JSON.parse(raw);
   if (payload.action === 'probe') {
     process.stdout.write(JSON.stringify({ success: true, version: '0.5.0', stage_count: 23, package_path: import.meta.filename }));
+    process.exit(0);
+  }
+  if (payload.action === 'gate_rollback') {
+    process.stdout.write(JSON.stringify({ success: true, stage: payload.stage, stage_name: 'LITERATURE_SCREEN', from_stage: 'LITERATURE_COLLECT' }));
     process.exit(0);
   }
   const args = payload.arguments;
@@ -52,7 +56,7 @@ if (process.argv[2] !== '-m') {
   process.exit(0);
 }
 
-const args = process.argv.slice(2);
+const args = process.argv.slice(process.argv[2]?.endsWith('detached_runner.py') ? 3 : 2);
 const value = (name) => args[args.indexOf(name) + 1];
 const runDir = value('--output');
 const topic = value('--topic');
@@ -66,8 +70,16 @@ if (topic.includes('WAIT_FOR_HITL')) {
   writeFileSync(path.join(hitlDir, 'session.json'), JSON.stringify({ mode: 'gate-only', state: 'waiting_human' }));
   writeFileSync(path.join(hitlDir, 'waiting.json'), JSON.stringify({ stage: 1, stage_name: 'TOPIC_INIT', reason: 'gate_approval' }));
   while (!existsSync(path.join(hitlDir, 'response.json'))) await new Promise((resolve) => setTimeout(resolve, 25));
+  const response = JSON.parse(readFileSync(path.join(hitlDir, 'response.json'), 'utf8'));
   unlinkSync(path.join(hitlDir, 'response.json'));
   unlinkSync(path.join(hitlDir, 'waiting.json'));
+  if (response.action === 'reject') {
+    writeFileSync(path.join(runDir, 'pipeline_summary.json'), JSON.stringify({
+      run_id: path.basename(runDir), stages_executed: 1, stages_done: 0, stages_paused: 0,
+      stages_failed: 0, final_stage: 5, final_status: 'rejected',
+    }));
+    process.exit(0);
+  }
 }
 
 if (topic.includes('LONG_RUNNING')) await new Promise((resolve) => setTimeout(resolve, 30_000));

@@ -69,6 +69,7 @@ export type ArcListRequest = z.infer<typeof arcListRequestSchema>;
 export interface ArcCoordinatorOptions {
   artifactPollIntervalMs?: number;
   artifactWaitTimeoutMs?: number;
+  collectionRetryMs?: number;
   now?: () => string;
   scope: ArcProjectScope;
 }
@@ -110,6 +111,7 @@ export class ArcCoordinator {
   private readonly launches = new Map<string, Promise<ArcRunRecord>>();
   private readonly artifactPollIntervalMs: number;
   private readonly artifactWaitTimeoutMs: number;
+  private readonly collectionRetryMs: number;
   private readonly now: () => string;
   private readonly scope: ArcProjectScope;
   private recoveryPromise?: Promise<ArcRunRecord[]>;
@@ -123,6 +125,7 @@ export class ArcCoordinator {
   ) {
     this.artifactPollIntervalMs = options.artifactPollIntervalMs ?? 25;
     this.artifactWaitTimeoutMs = options.artifactWaitTimeoutMs ?? 2_000;
+    this.collectionRetryMs = boundedInteger(options.collectionRetryMs ?? 1_000, 'collectionRetryMs', 1, 60_000);
     this.now = options.now ?? (() => new Date().toISOString());
     this.scope = options.scope;
   }
@@ -481,24 +484,35 @@ export class ArcCoordinator {
   }
 
   private async settle(run: ArcRunRecord): Promise<void> {
-    try {
-      const result = validateArcRunnerResult(await this.runner.collect(run.runner_handle!), 'collect');
-      if (this.disposed) return;
-      if (result.state === 'running') {
-        throw new ArcError('runner_failure', 'ARC runner collect returned before terminal state');
-      }
-      await this.synchronizeRunnerState(run.run_id, result, 'collect');
-    } catch (error) {
-      if (this.disposed) return;
-      const current = this.store.getRun(run.run_id);
-      if (!current) return;
+    while (!this.disposed) {
       try {
-        this.scope.authorizeRun(current);
-      } catch {
+        const result = validateArcRunnerResult(await this.runner.collect(run.runner_handle!), 'collect');
+        if (this.disposed) return;
+        if (result.state === 'running') {
+          throw new ArcError('runner_failure', 'ARC runner collect returned before terminal state');
+        }
+        await this.synchronizeRunnerState(run.run_id, result, 'collect');
         return;
+      } catch (error) {
+        if (this.disposed) return;
+        const current = this.store.getRun(run.run_id);
+        if (!current) return;
+        try {
+          this.scope.authorizeRun(current);
+        } catch {
+          return;
+        }
+        if (TERMINAL_STATUSES.has(current.status) || current.status === 'paused') return;
+        const failure = asArcError(error);
+        if (
+          current.phase !== 'collect_failed' ||
+          current.error?.code !== failure.code ||
+          current.error.message !== failure.message
+        ) {
+          this.recordOperationalFailure(run.run_id, ['running'], 'collect_failed', failure);
+        }
+        await delay(this.collectionRetryMs);
       }
-      if (TERMINAL_STATUSES.has(current.status) || current.status === 'paused') return;
-      this.recordOperationalFailure(run.run_id, ['running'], 'collect_failed', error);
     }
   }
 
@@ -583,4 +597,15 @@ export class ArcCoordinator {
     }
     return this.runner.hitl;
   }
+}
+
+function boundedInteger(value: number, name: string, min: number, max: number): number {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

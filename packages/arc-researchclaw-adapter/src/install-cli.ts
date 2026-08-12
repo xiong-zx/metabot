@@ -21,6 +21,7 @@ const source = path.join(home, 'source');
 const venv = path.join(home, 'venv');
 const python = path.join(venv, 'bin', 'python3');
 const bridge = fileURLToPath(new URL('../python/bridge.py', import.meta.url));
+const officialCompat = fileURLToPath(new URL('../python/official_compat.py', import.meta.url));
 
 if (command === 'install') {
   mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -60,6 +61,10 @@ async function doctor(): Promise<void> {
   if (revision !== OFFICIAL_RESEARCHCLAW_REVISION) throw new Error(`Official ARC source revision mismatch: ${revision}`);
   if (probe.stage_count !== OFFICIAL_RESEARCHCLAW_STAGE_COUNT || probe.version !== OFFICIAL_RESEARCHCLAW_VERSION) {
     throw new Error(`Official ARC compatibility check failed: ${JSON.stringify(probe)}`);
+  }
+  const compatibility = JSON.parse(output(python, [officialCompat])) as { success?: boolean };
+  if (compatibility.success !== true) {
+    throw new Error(`Official ARC downstream compatibility check failed: ${JSON.stringify(compatibility)}`);
   }
   const acpx = findCommand('acpx');
   const codex = findCommand(process.env.METABOT_ARC_ACP_AGENT?.trim() || 'codex');

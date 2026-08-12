@@ -21,6 +21,24 @@ def _probe() -> dict[str, object]:
     }
 
 
+def _gate_rollback(payload: dict[str, object]) -> dict[str, object]:
+    from researchclaw.pipeline.stages import GATE_ROLLBACK, Stage
+
+    stage = Stage(int(payload["stage"]))
+    target = GATE_ROLLBACK.get(stage)
+    if target is None:
+        return {
+            "success": False,
+            "error": f"Official ResearchClaw has no rollback target for {stage.name}",
+        }
+    return {
+        "success": True,
+        "stage": int(stage),
+        "stage_name": stage.name,
+        "from_stage": target.name,
+    }
+
+
 async def _hitl(payload: dict[str, object]) -> dict[str, object]:
     from researchclaw.hitl.adapters.mcp_adapter import MCPHITLAdapter
 
@@ -38,6 +56,8 @@ def main() -> int:
     action = payload.get("action")
     if action == "probe":
         result = _probe()
+    elif action == "gate_rollback":
+        result = _gate_rollback(payload)
     elif action == "hitl":
         result = asyncio.run(_hitl(payload))
     else:

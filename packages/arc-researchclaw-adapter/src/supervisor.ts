@@ -7,9 +7,11 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 import { atomicWriteJson, isInside, readJsonFile } from './files.js';
@@ -49,9 +51,9 @@ function writeState(patch: Partial<OfficialRunnerState>): void {
 // write against a fast official pipeline.
 writeState({ status: 'starting', child_pid: null, error: null });
 
-const args = [
-  '-m',
-  'researchclaw',
+const detachedRunner = fileURLToPath(new URL('../python/detached_runner.py', import.meta.url));
+let args = [
+  detachedRunner,
   'run',
   '--topic',
   request.input.objective,
@@ -71,27 +73,6 @@ if (request.skip_noncritical_stage) args.push('--skip-noncritical-stage');
 if (request.no_graceful_degradation) args.push('--no-graceful-degradation');
 if (request.incremental_experiment) args.push('--incremental-experiment');
 
-const stdoutFd = openSync(path.join(request.run_dir, 'researchclaw.stdout.log'), 'a', 0o600);
-const stderrFd = openSync(path.join(request.run_dir, 'researchclaw.stderr.log'), 'a', 0o600);
-let child;
-try {
-  child = spawn(request.python, args, {
-    cwd: request.input.project_root,
-    env: { ...process.env, NO_COLOR: '1', PYTHONUNBUFFERED: '1' },
-    stdio: ['ignore', stdoutFd, stderrFd],
-  });
-} catch (error) {
-  closeSync(stdoutFd);
-  closeSync(stderrFd);
-  writeState({ status: 'failed', error: error instanceof Error ? error.message : String(error), finished_at: now() });
-  writeEnvelope(request, 1, null, error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-  throw error;
-}
-closeSync(stdoutFd);
-closeSync(stderrFd);
-writeState({ status: 'running', child_pid: child.pid ?? null, error: null });
-
 let finalized = false;
 function finalize(exitCode: number, signal: NodeJS.Signals | null, error: string | null): void {
   if (finalized) return;
@@ -107,15 +88,75 @@ function finalize(exitCode: number, signal: NodeJS.Signals | null, error: string
   process.exitCode = exitCode === 0 ? 0 : 1;
 }
 
-child.once('error', (error) => {
-  finalize(1, null, error.message);
-});
+function launchChild(): void {
+  const stdoutFd = openSync(path.join(request.run_dir, 'researchclaw.stdout.log'), 'a', 0o600);
+  const stderrFd = openSync(path.join(request.run_dir, 'researchclaw.stderr.log'), 'a', 0o600);
+  let child;
+  try {
+    child = spawn(request.python, args, {
+      cwd: request.input.project_root,
+      env: { ...process.env, NO_COLOR: '1', PYTHONUNBUFFERED: '1' },
+      stdio: ['ignore', stdoutFd, stderrFd],
+    });
+  } catch (error) {
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+    const message = error instanceof Error ? error.message : String(error);
+    writeState({ status: 'failed', error: message, finished_at: now() });
+    writeEnvelope(request, 1, null, message);
+    process.exitCode = 1;
+    throw error;
+  }
+  closeSync(stdoutFd);
+  closeSync(stderrFd);
+  writeState({
+    status: 'running',
+    child_pid: child.pid ?? null,
+    error: null,
+    finished_at: null,
+    exit_code: null,
+    signal: null,
+  });
+  child.once('error', (error) => finalize(1, null, error.message));
+  child.once('close', (code, signal) => {
+    const exitCode = code ?? 1;
+    if (exitCode === 0 && restartRejectedGate()) return;
+    const error = exitCode === 0 ? null : `Official AutoResearchClaw exited with ${signal ? `signal ${signal}` : `code ${exitCode}`}`;
+    finalize(exitCode, signal, error);
+  });
+}
 
-child.once('close', (code, signal) => {
-  const exitCode = code ?? 1;
-  const error = exitCode === 0 ? null : `Official AutoResearchClaw exited with ${signal ? `signal ${signal}` : `code ${exitCode}`}`;
-  finalize(exitCode, signal, error);
-});
+function restartRejectedGate(): boolean {
+  const markerPath = path.join(request.run_dir, 'metabot-hitl-rejection.json');
+  const summaryPath = path.join(request.run_dir, 'pipeline_summary.json');
+  if (!existsSync(markerPath) || !existsSync(summaryPath)) return false;
+  const marker = readJsonFile(markerPath) as Record<string, unknown>;
+  const summary = readJsonFile(summaryPath) as Record<string, unknown>;
+  if (
+    marker.contract_version !== 'metabot.researchclaw.hitl-rejection.v1' ||
+    marker.run_id !== request.input.run_id ||
+    summary.final_status !== 'rejected' ||
+    typeof marker.from_stage !== 'string' ||
+    !/^[A-Z][A-Z0-9_]{0,80}$/.test(marker.from_stage)
+  ) {
+    return false;
+  }
+  args = replaceOption(args, '--from-stage', marker.from_stage);
+  writeState({ status: 'starting', child_pid: null, error: null, finished_at: null, exit_code: null, signal: null });
+  launchChild();
+  unlinkSync(markerPath);
+  return true;
+}
+
+function replaceOption(values: string[], option: string, value: string): string[] {
+  const result = [...values];
+  const index = result.indexOf(option);
+  if (index >= 0) result.splice(index, 2);
+  result.push(option, value);
+  return result;
+}
+
+launchChild();
 
 function writeEnvelope(
   item: SupervisorRequest,
