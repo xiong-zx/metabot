@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  TerminalEventDeferredError,
   TerminalEventDispatcher,
   TerminalEventStore,
 } from '../src/services/terminal-event-store.js';
@@ -134,6 +135,34 @@ describe('terminal callback durable inbox', () => {
       expect.objectContaining({ eventId: 'event-failed', attempts: 2 }),
       'Terminal callback wake exhausted its retry budget',
     );
+    dispatcher.stop();
+    store.close();
+  });
+
+  it('keeps a busy-chat wake durable without consuming the failure budget', async () => {
+    const store = new TerminalEventStore(logger, {
+      dbPath: tempDb('terminal-busy'),
+      maxAttempts: 1,
+    });
+    store.insert(envelope('event-busy'));
+    let busy = true;
+    const wake = vi.fn(async () => {
+      if (busy) throw new TerminalEventDeferredError('Chat is busy with another task', 10);
+    });
+    const dispatcher = new TerminalEventDispatcher({ store, logger, wake });
+
+    await dispatcher.sweep();
+    expect(store.get('event-busy')).toMatchObject({
+      state: 'received',
+      attempts: 0,
+      lastError: 'Chat is busy with another task',
+    });
+
+    busy = false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    await dispatcher.sweep();
+    expect(store.get('event-busy')).toMatchObject({ state: 'woken', attempts: 1 });
+    expect(wake).toHaveBeenCalledTimes(2);
     dispatcher.stop();
     store.close();
   });

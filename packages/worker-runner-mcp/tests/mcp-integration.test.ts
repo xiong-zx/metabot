@@ -40,6 +40,19 @@ describe('worker runner MCP trust boundary', () => {
       'worker_list',
       'worker_status',
     ]);
+    expect(tools.tools.find((tool) => tool.name === 'worker_list')?.annotations).toMatchObject({
+      readOnlyHint: true,
+      openWorldHint: false,
+    });
+    expect(tools.tools.find((tool) => tool.name === 'worker_dispatch')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+    expect(tools.tools.find((tool) => tool.name === 'worker_abort')?.annotations).toMatchObject({
+      destructiveHint: true,
+      idempotentHint: true,
+    });
 
     const schemas = JSON.stringify(WORKER_RUNNER_TOOLS.map((tool) => tool.inputSchema));
     expect(WORKER_RUNNER_TOOLS.every((tool) => tool.inputSchema.additionalProperties === false)).toBe(true);

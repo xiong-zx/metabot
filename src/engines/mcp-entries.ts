@@ -5,6 +5,8 @@ export interface McpEntry {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /** Codex-only policy for these generated, capability-scoped local tools. */
+  codexToolsApprovalMode?: 'approve';
 }
 
 export interface McpEntryInput {
@@ -39,12 +41,13 @@ export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
   ) {
     entries.push({
       name: 'metabot-worker',
-      command: path.join(input.runtimeRoot, 'node_modules', '.bin', 'metabot-worker-runner-proxy'),
-      args: [],
+      command: process.execPath,
+      args: [path.join(input.runtimeRoot, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js')],
       env: {
         METABOT_WORKER_PROXY_URL: workerEndpoint,
         METABOT_WORKER_PROXY_CAPABILITY_FILE: input.capabilityFiles.worker,
       },
+      codexToolsApprovalMode: 'approve',
     });
   }
 

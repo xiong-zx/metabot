@@ -92,6 +92,7 @@ describe('buildCodexArgs', () => {
           METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
           METABOT_WORKER_PROXY_CAPABILITY_FILE: '/private/token file',
         },
+        codexToolsApprovalMode: 'approve',
       },
     ];
     const args = buildCodexArgs(
@@ -107,6 +108,7 @@ describe('buildCodexArgs', () => {
 
     expect(joined).toContain('mcp_servers.metabot-worker.command="/runtime with spaces/node_modules/.bin/metabot-\\"worker\\""');
     expect(joined).toContain('mcp_servers.metabot-worker.args=["--path","C:\\\\private files\\\\proxy"]');
+    expect(joined).toContain('mcp_servers.metabot-worker.default_tools_approval_mode="approve"');
     expect(joined).toContain(
       'mcp_servers.metabot-worker.env.METABOT_WORKER_PROXY_CAPABILITY_FILE="/private/token file"',
     );

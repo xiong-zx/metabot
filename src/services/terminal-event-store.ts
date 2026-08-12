@@ -47,6 +47,14 @@ export interface TerminalEventStoreOptions {
   backoffMaxMs?: number;
 }
 
+/** A transient wake failure that must remain durable until the target is available. */
+export class TerminalEventDeferredError extends Error {
+  constructor(message: string, readonly retryAfterMs = 30_000) {
+    super(message);
+    this.name = 'TerminalEventDeferredError';
+  }
+}
+
 export class TerminalEventStore {
   private readonly db: Database.Database;
   readonly maxAttempts: number;
@@ -176,6 +184,23 @@ export class TerminalEventStore {
     return this.get(eventId);
   }
 
+  deferLease(
+    eventId: string,
+    error: unknown,
+    retryAfterMs: number,
+    now = Date.now(),
+  ): TerminalEventRecord | undefined {
+    const message = boundedError(error);
+    const delay = Math.max(1, Math.floor(retryAfterMs));
+    this.db.prepare(`
+      UPDATE terminal_events
+      SET state = 'received', attempts = MAX(0, attempts - 1),
+          lease_expires_at = NULL, next_attempt_at = ?, last_error = ?, updated_at = ?
+      WHERE event_id = ? AND state = 'leased'
+    `).run(now + delay, message, now, eventId);
+    return this.get(eventId);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -246,6 +271,14 @@ export class TerminalEventDispatcher {
           await this.options.wake(event.envelope);
           this.options.store.markWoken(event.eventId);
         } catch (error) {
+          if (error instanceof TerminalEventDeferredError) {
+            const next = this.options.store.deferLease(event.eventId, error, error.retryAfterMs);
+            this.options.logger.info(
+              { error, eventId: event.eventId, retryAt: next?.nextAttemptAt },
+              'Terminal callback wake deferred until the target chat is available',
+            );
+            continue;
+          }
           const next = this.options.store.failLease(event.eventId, error);
           if (next?.state === 'failed') {
             this.options.logger.error(

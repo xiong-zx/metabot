@@ -291,6 +291,9 @@ export function buildCodexArgs(
   if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
   for (const entry of mcpEntries) {
     args.push('-c', `mcp_servers.${entry.name}.command=${tomlString(entry.command)}`);
+    if (entry.codexToolsApprovalMode) {
+      args.push('-c', `mcp_servers.${entry.name}.default_tools_approval_mode=${tomlString(entry.codexToolsApprovalMode)}`);
+    }
     if (entry.args.length > 0) {
       args.push('-c', `mcp_servers.${entry.name}.args=[${entry.args.map(tomlString).join(',')}]`);
     }

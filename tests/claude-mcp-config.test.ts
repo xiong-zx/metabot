@@ -16,6 +16,7 @@ const entries: McpEntry[] = [
       METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
       METABOT_WORKER_PROXY_CAPABILITY_FILE: '/runtime/data/mcp-capabilities/worker.token',
     },
+    codexToolsApprovalMode: 'approve',
   },
 ];
 

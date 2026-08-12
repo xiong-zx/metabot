@@ -84,12 +84,13 @@ describe('buildExecutionMcpEntries', () => {
     })).toEqual([
       {
         name: 'metabot-worker',
-        command: path.join(runtimeRoot, 'node_modules/.bin/metabot-worker-runner-proxy'),
-        args: [],
+        command: process.execPath,
+        args: [path.join(runtimeRoot, 'packages/worker-runner-mcp/dist/proxy-cli.js')],
         env: {
           METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
           METABOT_WORKER_PROXY_CAPABILITY_FILE: capabilityFiles.worker,
         },
+        codexToolsApprovalMode: 'approve',
       },
       {
         name: 'metabot-arc',

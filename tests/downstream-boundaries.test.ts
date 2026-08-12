@@ -215,6 +215,35 @@ describe('downstream feature boundary gate', () => {
     expect(checkDownstreamBoundaries(root).failures).toContain('forbidden path exists: src/legacy');
   });
 
+  it('declares signed schedule capabilities inside the Agent Team governance boundary', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as {
+      features: Array<{
+        id: string;
+        roots?: string[];
+        forbiddenImports?: string[];
+        reason?: string;
+        validationSurface?: string[];
+      }>;
+    };
+    const governance = manifest.features.find((feature) => feature.id === 'agent-team-governance');
+
+    expect(governance).toMatchObject({
+      roots: expect.arrayContaining([
+        'src/agent-teams/governance-capability.ts',
+        'src/agent-teams/schedule-capability.ts',
+      ]),
+      forbiddenImports: expect.arrayContaining(['src/memory-core', 'src/workers']),
+      reason: expect.any(String),
+      validationSurface: expect.arrayContaining([
+        'tests/agent-team-http-auth.test.ts',
+        'tests/agent-team-cli-capability.test.ts',
+      ]),
+    });
+  });
+
   it('passes against the repository manifest', () => {
     expect(checkDownstreamBoundaries(path.resolve(import.meta.dirname, '..'))).toMatchObject({ ok: true });
   });

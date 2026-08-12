@@ -58,6 +58,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
       },
       required: ['workdir', 'prompt', 'engine'],
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
     name: 'worker_list',
@@ -71,6 +72,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
         all_scopes: { type: 'boolean' },
       },
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: 'worker_status',
@@ -81,6 +83,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
       properties: { id: { type: 'string' } },
       required: ['id'],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: 'worker_abort',
@@ -91,6 +94,7 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
       properties: { id: { type: 'string' } },
       required: ['id'],
     },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
 ];
 
