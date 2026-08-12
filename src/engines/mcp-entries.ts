@@ -6,7 +6,7 @@ export interface McpEntry {
   args: string[];
   env: Record<string, string>;
   /** Codex-only policy for these generated, capability-scoped local tools. */
-  codexToolsApprovalMode?: 'approve';
+  codexToolsApprovalMode: 'approve';
 }
 
 export interface McpEntryInput {
@@ -59,12 +59,13 @@ export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
   ) {
     entries.push({
       name: 'metabot-arc',
-      command: path.join(input.runtimeRoot, 'node_modules', '.bin', 'metabot-arc-proxy'),
-      args: [],
+      command: process.execPath,
+      args: [path.join(input.runtimeRoot, 'packages', 'arc-mcp', 'dist', 'proxy-cli.js')],
       env: {
         METABOT_ARC_PROXY_URL: arcEndpoint,
         METABOT_ARC_PROXY_CAPABILITY_FILE: input.capabilityFiles.arc,
       },
+      codexToolsApprovalMode: 'approve',
     });
   }
   return entries;

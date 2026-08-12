@@ -37,6 +37,24 @@ export const arcStartRequestSchema = z
 
 export const arcRunIdRequestSchema = z.object({ run_id: nonEmpty.max(200) }).strict();
 
+export const arcHitlApproveRequestSchema = arcRunIdRequestSchema.extend({
+  message: z.string().max(16 * 1024).optional(),
+});
+
+export const arcHitlRejectRequestSchema = arcRunIdRequestSchema.extend({
+  reason: nonEmpty.max(16 * 1024),
+});
+
+export const arcHitlGuidanceRequestSchema = arcRunIdRequestSchema.extend({
+  stage: z.number().int().min(1).max(23),
+  guidance: nonEmpty.max(64 * 1024),
+});
+
+export const arcHitlViewRequestSchema = arcRunIdRequestSchema.extend({
+  stage: z.number().int().min(1).max(23),
+  filename: nonEmpty.max(512).optional(),
+});
+
 export const arcListRequestSchema = z
   .object({
     project_id: nonEmpty.max(200).optional(),
@@ -248,6 +266,40 @@ export class ArcCoordinator {
     return this.synchronizeRunnerState(current.run_id, result, 'cancel');
   }
 
+  async hitlGetStatus(value: unknown): Promise<Record<string, unknown>> {
+    const request = parsedRequest(arcRunIdRequestSchema, value, 'ARC HITL status');
+    const current = this.requireRunnableHitlRun(request.run_id);
+    return this.requireHitlController().getStatus(current.runner_handle!);
+  }
+
+  async hitlApproveStage(value: unknown): Promise<{ run: ArcRunRecord; hitl: Record<string, unknown> }> {
+    const request = parsedRequest(arcHitlApproveRequestSchema, value, 'ARC HITL approval');
+    const current = this.requireRunnableHitlRun(request.run_id);
+    const hitl = await this.requireHitlController().approveStage(current.runner_handle!, request.message);
+    const result = validateArcRunnerResult(await this.runner.resume(current.runner_handle!), 'HITL approval');
+    return { run: await this.synchronizeRunnerState(current.run_id, result, 'resume'), hitl };
+  }
+
+  async hitlRejectStage(value: unknown): Promise<{ run: ArcRunRecord; hitl: Record<string, unknown> }> {
+    const request = parsedRequest(arcHitlRejectRequestSchema, value, 'ARC HITL rejection');
+    const current = this.requireRunnableHitlRun(request.run_id);
+    const hitl = await this.requireHitlController().rejectStage(current.runner_handle!, request.reason);
+    const result = validateArcRunnerResult(await this.runner.resume(current.runner_handle!), 'HITL rejection');
+    return { run: await this.synchronizeRunnerState(current.run_id, result, 'resume'), hitl };
+  }
+
+  async hitlInjectGuidance(value: unknown): Promise<Record<string, unknown>> {
+    const request = parsedRequest(arcHitlGuidanceRequestSchema, value, 'ARC HITL guidance');
+    const current = this.requireRunnableHitlRun(request.run_id);
+    return this.requireHitlController().injectGuidance(current.runner_handle!, request.stage, request.guidance);
+  }
+
+  async hitlViewOutput(value: unknown): Promise<Record<string, unknown>> {
+    const request = parsedRequest(arcHitlViewRequestSchema, value, 'ARC HITL output');
+    const current = this.requireRunnableHitlRun(request.run_id);
+    return this.requireHitlController().viewOutput(current.runner_handle!, request.stage, request.filename);
+  }
+
   readOutput(runId: string): ArcOutput {
     const run = this.requireScopedRun(runId);
     return this.artifacts.readOutput({
@@ -432,7 +484,7 @@ export class ArcCoordinator {
     try {
       const result = validateArcRunnerResult(await this.runner.collect(run.runner_handle!), 'collect');
       if (this.disposed) return;
-      if (result.state !== 'finished' && result.state !== 'cancelled') {
+      if (result.state === 'running') {
         throw new ArcError('runner_failure', 'ARC runner collect returned before terminal state');
       }
       await this.synchronizeRunnerState(run.run_id, result, 'collect');
@@ -513,5 +565,22 @@ export class ArcCoordinator {
 
   private requireScopedRun(runId: string): ArcRunRecord {
     return this.scope.authorizeRun(this.store.requireRun(runId));
+  }
+
+  private requireRunnableHitlRun(runId: string): ArcRunRecord {
+    const current = this.requireScopedRun(runId);
+    if (TERMINAL_STATUSES.has(current.status) || !current.runner_handle) {
+      throw new ArcError('invalid_transition', `ARC HITL is unavailable from ${current.status}`, {
+        details: { runId: current.run_id, phase: current.phase },
+      });
+    }
+    return current;
+  }
+
+  private requireHitlController() {
+    if (!this.runner.hitl) {
+      throw new ArcError('runner_unconfigured', 'The configured ARC runner does not expose official HITL controls');
+    }
+    return this.runner.hitl;
   }
 }

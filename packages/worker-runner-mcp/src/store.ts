@@ -468,6 +468,17 @@ export class WorkerStore {
       .run(deliveredAt, id);
   }
 
+  markNotificationSuppressed(id: string, deliveredAt: number): void {
+    this.db
+      .prepare(
+        `UPDATE worker_jobs
+         SET notification_state = 'delivered', notification_delivered_at = ?,
+             notification_next_attempt_at = NULL, notification_last_error = NULL
+         WHERE id = ? AND notification_state IN ('pending', 'failed')`,
+      )
+      .run(deliveredAt, id);
+  }
+
   markNotificationFailed(id: string, error: string, nextAttemptAt: number): WorkerRecord | undefined {
     const result = this.db
       .prepare(

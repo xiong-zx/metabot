@@ -85,6 +85,9 @@ function makeRuntime(root: string, label: string): void {
     interpreter_args: label === 'source' ? '--no-warnings' : '--trace-warnings',
     env: {
       RUNTIME_LABEL: label,
+      ...(app === 'metabot-arcd' ? {
+        METABOT_ARC_RUNNER_MODULE: join(root, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+      } : {}),
       ...(label === 'source' ? {
         HTTP_PROXY: 'http://source-proxy.invalid:8080',
         http_proxy: 'http://source-proxy.invalid:8080',
@@ -122,6 +125,9 @@ function writeState(file: string, runtime: string): void {
       no_proxy: 'source.internal',
       SESSION_STORE_DIR: '/var/lib/metabot-state',
       API_SECRET: 'must-not-be-printed',
+      ...(app === 'metabot-arcd' ? {
+        METABOT_ARC_RUNNER_MODULE: join(runtime, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+      } : {}),
     },
   }))));
 }
@@ -163,6 +169,10 @@ describe('protected PM2 runtime switch helper', () => {
         node_args: ['--trace-warnings'],
       });
     }
+    const arc = rows.find((row: { name: string }) => row.name === 'metabot-arcd');
+    expect(arc.pm2_env.METABOT_ARC_RUNNER_MODULE).toBe(
+      join(kit.target, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+    );
   });
 
   it('plans secret-safe expectations without changing PM2 state', () => {

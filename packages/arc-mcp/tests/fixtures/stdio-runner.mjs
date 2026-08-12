@@ -7,6 +7,23 @@ const handles = new Map();
 
 export function createArcRunner() {
   return {
+    hitl: {
+      async getStatus(handle) {
+        return { success: true, run_id: handle.id, needs_input: true, stage: 5 };
+      },
+      async approveStage(handle, message) {
+        return { success: true, run_id: handle.id, action: 'approve', message: message ?? null };
+      },
+      async rejectStage(handle, reason) {
+        return { success: true, run_id: handle.id, action: 'reject', reason };
+      },
+      async injectGuidance(handle, stage, guidance) {
+        return { success: true, run_id: handle.id, stage, guidance };
+      },
+      async viewOutput(handle, stage, filename) {
+        return { success: true, run_id: handle.id, stage, filename: filename ?? null };
+      },
+    },
     async start(input) {
       const existing = handles.get(input.run_id);
       if (existing) return existing;

@@ -117,8 +117,14 @@ module.exports = {
         ),
         METABOT_ARC_RUNNER_MODULE: configured(
           'METABOT_ARC_RUNNER_MODULE',
-          path.join(__dirname, 'packages', 'arc-worker-runner-adapter', 'dist', 'factory.js'),
+          path.join(__dirname, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
         ),
+        METABOT_ARC_RESEARCHCLAW_PYTHON: configured(
+          'METABOT_ARC_RESEARCHCLAW_PYTHON',
+          path.join(stateRoot, 'arc-official', 'venv', 'bin', 'python3'),
+        ),
+        METABOT_ARC_DEFAULT_HITL_MODE: configured('METABOT_ARC_DEFAULT_HITL_MODE', 'gate-only'),
+        METABOT_ARC_ACP_AGENT: configured('METABOT_ARC_ACP_AGENT', 'codex'),
         METABOT_ARC_LISTEN: arcEndpoint,
         METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE: configured(
           'METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE',
@@ -129,12 +135,6 @@ module.exports = {
           'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE',
           path.join(keysDir, 'arc-callback.key'),
         ),
-        METABOT_ARC_WORKER_ENDPOINT: workerEndpoint,
-        METABOT_ARC_WORKER_CAPABILITY_FILE: configured(
-          'METABOT_ARC_WORKER_CAPABILITY_FILE',
-          path.join(keysDir, 'arc-service.cap'),
-        ),
-        METABOT_ARC_WORKER_ENGINE: configured('METABOT_ARC_WORKER_ENGINE', 'codex'),
         ...proxyEnv,
       },
     },

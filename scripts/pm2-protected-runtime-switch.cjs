@@ -29,6 +29,10 @@ const SHARED_PREFIXES = [
 const EXCLUDED_SHARED_KEYS = new Set([
   'METABOT_HOME',
   'METABOT_REEXEC',
+  // This path is owned by the selected checkout. Carrying it across a
+  // protected switch silently loads the runner adapter from the old runtime.
+  // A user override remains supported through the target runtime's .env.
+  'METABOT_ARC_RUNNER_MODULE',
 ]);
 const DEPLOYMENT_KEYS = [
   'METABOT_RESTART_REQUEST_ID',

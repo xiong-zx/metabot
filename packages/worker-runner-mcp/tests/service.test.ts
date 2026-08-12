@@ -11,6 +11,7 @@ import {
 import { normalizeTrustedPrincipal, WorkerService } from '../src/service.js';
 import { WorkerStore } from '../src/store.js';
 import {
+  ARC_SERVICE_PRINCIPAL,
   TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
   TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   type DispatchWorkerInput,
@@ -254,6 +255,29 @@ describe('WorkerService restart recovery', () => {
 });
 
 describe('WorkerService durable notifications', () => {
+  it('marks ARC-internal worker notifications delivered without calling the Bridge', async () => {
+    const { store, dir } = makeStore();
+    const runner = new FakeProcessRunner();
+    const notifier = new RecordingNotifier();
+    const service = new WorkerService(store, runner, notifier, ARC_SERVICE_PRINCIPAL, testConfig(), {
+      makeId: () => 'wrk-arc-internal',
+      makeLaunchId: () => 'launch-arc-internal',
+    });
+    services.push(service);
+
+    const dispatched = await service.dispatch(input(dir), undefined, 'arc-service-capability');
+    await vi.waitFor(() => expect(store.require(dispatched.worker.id).status).toBe('running'));
+    runner.complete(4_000, SUCCESS_RESULT);
+
+    await vi.waitFor(() => {
+      expect(store.require(dispatched.worker.id)).toMatchObject({
+        status: 'completed',
+        notificationState: 'delivered',
+      });
+    });
+    expect(notifier.notifications).toHaveLength(0);
+  });
+
   it('delivers a small metadata-only callback when stored output exceeds the Bridge request limit', async () => {
     const { store, dir } = makeStore();
     const runner = new FakeProcessRunner();

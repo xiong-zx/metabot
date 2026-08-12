@@ -244,6 +244,28 @@ describe('downstream feature boundary gate', () => {
     });
   });
 
+  it('documents validation surfaces for every detached runtime package', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as {
+      features: Array<{ id: string; reason?: string; validationSurface?: string[] }>;
+    };
+
+    for (const id of [
+      'arc-mcp',
+      'worker-runner-mcp',
+      'arc-worker-runner-adapter',
+      'arc-researchclaw-adapter',
+    ]) {
+      const feature = manifest.features.find((candidate) => candidate.id === id);
+      expect(feature).toMatchObject({
+        reason: expect.any(String),
+        validationSurface: expect.arrayContaining([expect.stringMatching(/\.test\.ts$/)]),
+      });
+    }
+  });
+
   it('passes against the repository manifest', () => {
     expect(checkDownstreamBoundaries(path.resolve(import.meta.dirname, '..'))).toMatchObject({ ok: true });
   });

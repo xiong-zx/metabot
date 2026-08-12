@@ -228,6 +228,7 @@ cmd_update() {
   npm run build -w @xvirobotics/cli
   npm run build -w @xvirobotics/worker-runner-mcp
   npm run build -w @xvirobotics/arc-mcp
+  npm run build -w @xvirobotics/arc-researchclaw-adapter
   npm run build -w @xvirobotics/arc-worker-runner-adapter
 
   # A personal-edition git checkout updates Core only when PM2 proves that the
@@ -687,7 +688,8 @@ _ensure_runtime_artifacts() {
     scripts/pm2-protected-runtime-switch.cjs \
     packages/worker-runner-mcp/dist/daemon-cli.js \
     packages/arc-mcp/dist/daemon-cli.js \
-    packages/arc-worker-runner-adapter/dist/factory.js; do
+    packages/arc-researchclaw-adapter/dist/factory.js \
+    packages/arc-researchclaw-adapter/python/bridge.py; do
     if [[ ! -f "$runtime_root/$artifact" ]]; then
       error "Missing built runtime artifact: $runtime_root/$artifact"
       missing=true

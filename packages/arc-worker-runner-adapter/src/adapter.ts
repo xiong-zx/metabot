@@ -1,4 +1,5 @@
 import {
+  ARC_OUTPUT_JSON_SCHEMA,
   ArcError,
   type ArcExecutionHandle,
   type ArcExecutionInput,
@@ -49,7 +50,7 @@ export class ArcWorkerRunnerAdapter implements ArcRunner {
         output_contract: {
           format: 'json',
           description: `Write autoresearchclaw.output.v2 atomically to ${input.artifact_path}`,
-          json_schema: { type: 'object', required: ['contract_version', 'project_id', 'run_id', 'status'] },
+          json_schema: ARC_OUTPUT_JSON_SCHEMA,
         },
       });
     } catch (error) {

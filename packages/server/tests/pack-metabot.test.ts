@@ -84,6 +84,7 @@ describe('pack-metabot.sh', () => {
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(installSh).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(installSh).not.toContain('npm run build --workspaces');
@@ -103,7 +104,7 @@ describe('pack-metabot.sh', () => {
     expect(ecosystem).toContain("name: 'metabot-arcd'");
     expect(ecosystem).toContain('packages/worker-runner-mcp/dist/daemon-cli.js');
     expect(ecosystem).toContain('packages/arc-mcp/dist/daemon-cli.js');
-    expect(ecosystem).toContain("'packages', 'arc-worker-runner-adapter', 'dist', 'factory.js'");
+    expect(ecosystem).toContain("'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'");
     for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
       expect(ecosystem).toContain(proxyName);
     }
@@ -117,10 +118,11 @@ describe('pack-metabot.sh', () => {
     expect(uninstallSh).toContain('Leaving metabot-core untouched');
     expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(metabot).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(daemonHealth).toContain('StreamableHTTPClientTransport');
-    expect(daemonHealth).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
-    expect(daemonHealth).not.toMatch(/packages\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter)/);
+    expect(daemonHealth).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
+    expect(daemonHealth).not.toMatch(/packages\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
   });
 
   it('rewrites root manifests for the runtime-only workspace subset', () => {
@@ -135,6 +137,7 @@ describe('pack-metabot.sh', () => {
       'packages/metamemory',
       'packages/skill-hub',
       'packages/arc-mcp',
+      'packages/arc-researchclaw-adapter',
       'packages/arc-worker-runner-adapter',
       'packages/worker-runner-mcp',
     ]);

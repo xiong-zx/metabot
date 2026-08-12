@@ -1,4 +1,4 @@
-import type { ArcExecutionInput } from '@xvirobotics/arc-mcp';
+import { validateArcOutput, type ArcExecutionInput } from '@xvirobotics/arc-mcp';
 import { describe, expect, it } from 'vitest';
 
 import { ArcWorkerRunnerAdapter, mapWorkerState } from '../src/adapter.js';
@@ -30,6 +30,29 @@ describe('ArcWorkerRunnerAdapter', () => {
         dedupe_ttl_ms: 0,
         retry_terminal: false,
         recovery_policy: { restart: 'manual', idempotent: false },
+        output_contract: {
+          format: 'json',
+          json_schema: {
+            type: 'object',
+            required: expect.arrayContaining([
+              'contract_version',
+              'project_id',
+              'run_id',
+              'status',
+              'summary',
+              'hypotheses',
+              'experiments',
+              'findings',
+              'negative_results',
+              'decisions',
+              'artifacts',
+              'open_questions',
+              'recommended_followups',
+              'tool_trace',
+            ]),
+            additionalProperties: false,
+          },
+        },
       },
     });
   });
@@ -40,6 +63,17 @@ describe('ArcWorkerRunnerAdapter', () => {
     const prompt = renderArcWorkerPrompt(executionInput());
     expect(prompt).toContain('autoresearchclaw.input.v1');
     expect(prompt).toContain('ARC_INPUT_JSON_BEGIN');
+    expect(prompt).toContain('ARC_OUTPUT_TEMPLATE_BEGIN');
+    expect(prompt).toContain('"summary": "Replace with a concise evidence-supported result summary."');
+    expect(prompt).toContain('"hypothesis_ids": [');
+    expect(prompt).toContain('"uri": ".metabot-arc/runs/run-1/output.json"');
+    expect(prompt).toContain('do not invent, rename, or add fields');
+    const template = prompt.match(/ARC_OUTPUT_TEMPLATE_BEGIN\n([\s\S]+?)\nARC_OUTPUT_TEMPLATE_END/)?.[1];
+    expect(template).toBeTruthy();
+    expect(() => validateArcOutput(JSON.parse(template!), {
+      expectedProjectId: 'project-1',
+      expectedRunId: 'run-1',
+    })).not.toThrow();
     expect(prompt).toContain('Do not dispatch workers');
     expect(prompt).not.toContain('/secret/callback.key');
     expect(prompt).not.toContain('never-render-this');

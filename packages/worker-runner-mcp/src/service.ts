@@ -355,6 +355,12 @@ export class WorkerService {
 
   private scheduleNotification(worker: WorkerRecord): void {
     if (!['pending', 'failed'].includes(worker.notificationState)) return;
+    if (isArcServicePrincipal({ role: 'pm', botName: worker.botName, chatId: worker.chatId })) {
+      // ARC owns and polls these internal workers. Only ARC's outer run sends a
+      // user-facing completion callback to the real originator.
+      this.store.markNotificationSuppressed(worker.id, this.now());
+      return;
+    }
     const existing = this.notificationTimers.get(worker.id);
     if (existing) clearTimeout(existing);
     const dueAt = worker.notificationNextAttemptAt ?? worker.finishedAt ?? this.now();

@@ -7,6 +7,14 @@ export interface ArcRunnerResult {
   state: ArcRunnerState;
 }
 
+export interface ArcHitlController {
+  getStatus(handle: ArcExecutionHandle): Promise<Record<string, unknown>>;
+  approveStage(handle: ArcExecutionHandle, message?: string): Promise<Record<string, unknown>>;
+  rejectStage(handle: ArcExecutionHandle, reason: string): Promise<Record<string, unknown>>;
+  injectGuidance(handle: ArcExecutionHandle, stage: number, guidance: string): Promise<Record<string, unknown>>;
+  viewOutput(handle: ArcExecutionHandle, stage: number, filename?: string): Promise<Record<string, unknown>>;
+}
+
 export function validateArcRunnerResult(value: unknown, operation: string): ArcRunnerResult {
   const state = (value as { state?: unknown } | null)?.state;
   if (!['running', 'paused', 'finished', 'cancelled'].includes(String(state))) {
@@ -16,9 +24,10 @@ export function validateArcRunnerResult(value: unknown, operation: string): ArcR
 }
 
 /**
- * The only execution dependency owned by ARC. The independent
- * @xvirobotics/arc-worker-runner-adapter implements this interface over MCP;
- * ARC itself does not import Worker Runner, WorkerManager, or bridge code.
+ * The only execution dependency owned by ARC. The default independent
+ * @xvirobotics/arc-researchclaw-adapter implements this interface over the
+ * pinned official Python pipeline and its HITL adapter. ARC itself does not
+ * import ResearchClaw, Worker Runner, WorkerManager, or bridge code.
  *
  * Contract:
  * - start is idempotent by input.run_id and returns the same durable handle
@@ -35,6 +44,11 @@ export function validateArcRunnerResult(value: unknown, operation: string): ArcR
  *   collect the same durable handle after recovery.
  */
 export interface ArcRunner {
+  /**
+   * Optional official AutoResearchClaw HITL surface. The lifecycle shell keeps
+   * this generic and delegates every operation to the configured runner.
+   */
+  readonly hitl?: ArcHitlController;
   start(input: ArcExecutionInput): Promise<ArcExecutionHandle>;
   recover(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;
   pause(handle: ArcExecutionHandle): Promise<ArcRunnerResult>;

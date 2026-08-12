@@ -94,12 +94,13 @@ describe('buildExecutionMcpEntries', () => {
       },
       {
         name: 'metabot-arc',
-        command: path.join(runtimeRoot, 'node_modules/.bin/metabot-arc-proxy'),
-        args: [],
+        command: process.execPath,
+        args: [path.join(runtimeRoot, 'packages/arc-mcp/dist/proxy-cli.js')],
         env: {
           METABOT_ARC_PROXY_URL: 'http://[::1]:9312/mcp',
           METABOT_ARC_PROXY_CAPABILITY_FILE: capabilityFiles.arc,
         },
+        codexToolsApprovalMode: 'approve',
       },
     ]);
   });

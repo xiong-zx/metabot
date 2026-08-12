@@ -1,7 +1,7 @@
 {
-  "name": "@xvirobotics/arc-mcp",
-  "version": "0.3.0",
-  "description": "Independent official AutoResearchClaw lifecycle, HITL, and MCP gateway",
+  "name": "@xvirobotics/arc-researchclaw-adapter",
+  "version": "0.1.0",
+  "description": "Isolated MetaBot runner adapter for the official AutoResearchClaw pipeline and HITL MCP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,12 +12,11 @@
     }
   },
   "bin": {
-    "metabot-arc-mcp": "dist/bin.js",
-    "metabot-arcd": "dist/daemon-cli.js",
-    "metabot-arc-proxy": "dist/proxy-cli.js"
+    "metabot-arc-official": "dist/install-cli.js"
   },
   "files": [
     "dist",
+    "python",
     "README.md"
   ],
   "scripts": {
@@ -28,14 +27,10 @@
     "lint": "eslint src/ tests/"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^12.6.2",
-    "zod": "^4.0.0"
+    "@xvirobotics/arc-mcp": "*"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },

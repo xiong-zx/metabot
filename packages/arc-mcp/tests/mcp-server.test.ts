@@ -20,7 +20,7 @@ function runFrom(result: { structuredContent?: Record<string, unknown> }): Recor
 }
 
 describe('ARC stdio MCP server', () => {
-  it('lists and calls all six lifecycle tools over a spawned stdio transport', async () => {
+  it('lists lifecycle and official HITL tools over a spawned stdio transport', async () => {
     const temporary = temporaryDirectory('arc-mcp-stdio-');
     cleanup.push(temporary);
     const projectRoot = projectDirectory(temporary);
@@ -52,6 +52,11 @@ describe('ARC stdio MCP server', () => {
         'arc_run_pause',
         'arc_run_resume',
         'arc_run_start',
+        'hitl_approve_stage',
+        'hitl_get_status',
+        'hitl_inject_guidance',
+        'hitl_reject_stage',
+        'hitl_view_output',
       ]);
 
       const denied = await client.callTool({
@@ -79,6 +84,33 @@ describe('ARC stdio MCP server', () => {
         },
       });
       expect(runFrom(started).status).toBe('running');
+
+      const hitlStatus = await client.callTool({
+        name: 'hitl_get_status',
+        arguments: { run_id: 'stdio-run-1' },
+      });
+      expect(hitlStatus.structuredContent?.hitl).toMatchObject({ success: true, needs_input: true, stage: 5 });
+
+      const hitlOutput = await client.callTool({
+        name: 'hitl_view_output',
+        arguments: { run_id: 'stdio-run-1', stage: 5, filename: 'review.md' },
+      });
+      expect(hitlOutput.structuredContent?.hitl).toMatchObject({ success: true, stage: 5, filename: 'review.md' });
+
+      const guided = await client.callTool({
+        name: 'hitl_inject_guidance',
+        arguments: { run_id: 'stdio-run-1', stage: 5, guidance: 'Add the requested baseline.' },
+      });
+      expect(guided.structuredContent?.hitl).toMatchObject({ success: true, stage: 5 });
+
+      const approved = await client.callTool({
+        name: 'hitl_approve_stage',
+        arguments: { run_id: 'stdio-run-1', message: 'Continue.' },
+      });
+      expect(approved.structuredContent).toMatchObject({
+        run: { run_id: 'stdio-run-1', status: 'running' },
+        hitl: { success: true, action: 'approve', message: 'Continue.' },
+      });
 
       const fetched = await client.callTool({
         name: 'arc_run_get',
@@ -128,6 +160,14 @@ describe('ARC stdio MCP server', () => {
           idempotency_key: 'stdio-start-2',
           run_id: 'stdio-run-2',
         },
+      });
+      const rejected = await client.callTool({
+        name: 'hitl_reject_stage',
+        arguments: { run_id: 'stdio-run-2', reason: 'Revise the experimental design.' },
+      });
+      expect(rejected.structuredContent).toMatchObject({
+        run: { run_id: 'stdio-run-2', status: 'running' },
+        hitl: { success: true, action: 'reject', reason: 'Revise the experimental design.' },
       });
       const cancelled = await client.callTool({
         name: 'arc_run_cancel',

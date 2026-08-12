@@ -2,7 +2,7 @@
 
 `@xvirobotics/arc-mcp` is an independent AutoResearchClaw (ARC) lifecycle
 service. It owns versioned input, output, and run contracts, project-local
-artifacts, durable SQLite run state, and six MCP tools:
+artifacts, durable SQLite run state, and eleven MCP tools:
 
 - `arc_run_start`
 - `arc_run_get`
@@ -10,13 +10,20 @@ artifacts, durable SQLite run state, and six MCP tools:
 - `arc_run_pause`
 - `arc_run_resume`
 - `arc_run_cancel`
+- `hitl_get_status`
+- `hitl_approve_stage`
+- `hitl_reject_stage`
+- `hitl_inject_guidance`
+- `hitl_view_output`
 
 The package does not import MetaBot Bridge, Memory Core, Wiki ingest,
 WorkerManager, Agent Team, or engine-specific code. It never promotes a result
-to memory. A runner is supplied through the small `ArcRunner` interface; the
-independent `@xvirobotics/arc-worker-runner-adapter` implements it over the
-Worker Runner MCP wire. A future Memory MCP may consume the validated output
-through the separate `ArcResultConsumer` interface.
+to memory. A runner is supplied through the small `ArcRunner` interface. The
+default independent `@xvirobotics/arc-researchclaw-adapter` starts the pinned
+official 23-stage Python pipeline and delegates the five official HITL tools.
+The older Worker Runner adapter remains available only as an explicit legacy
+fallback; it is no longer the runtime default. A future Memory MCP may consume
+the validated output through the separate `ArcResultConsumer` interface.
 
 It ships three executables: `metabot-arc-mcp` keeps the original standalone
 stdio mode; `metabot-arcd` is the long-lived authenticated loopback daemon; and

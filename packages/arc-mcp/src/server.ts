@@ -5,6 +5,10 @@ import { z } from 'zod';
 
 import {
   arcListRequestSchema,
+  arcHitlApproveRequestSchema,
+  arcHitlGuidanceRequestSchema,
+  arcHitlRejectRequestSchema,
+  arcHitlViewRequestSchema,
   arcRunIdRequestSchema,
   arcStartRequestSchema,
   type ArcCoordinator,
@@ -33,6 +37,10 @@ export interface ArcMcpServerOptions {
 
 const runOutputSchema = z.object({ run: arcRunRecordSchema }).strict();
 const listOutputSchema = z.object({ runs: z.array(arcRunRecordSchema) }).strict();
+const hitlOutputSchema = z.object({ hitl: z.record(z.string(), z.unknown()) }).strict();
+const hitlMutationOutputSchema = z
+  .object({ run: arcRunRecordSchema, hitl: z.record(z.string(), z.unknown()) })
+  .strict();
 
 function success(data: Record<string, unknown>): CallToolResult {
   return {
@@ -61,7 +69,7 @@ async function invoke(operation: () => unknown | Promise<unknown>): Promise<Call
 
 export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpServerOptions = {}): McpServer {
   const principal = options.principal ? normalizeArcPrincipal(options.principal) : undefined;
-  const server = new McpServer({ name: 'metabot-arc-mcp', version: '0.2.0' }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: 'metabot-arc-mcp', version: '0.3.0' }, { capabilities: { tools: {} } });
 
   server.registerTool(
     'arc_run_start',
@@ -149,6 +157,72 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
         authorizeArcMutation(principal);
         return { run: await coordinator.cancel(request) };
       }),
+  );
+
+  server.registerTool(
+    'hitl_get_status',
+    {
+      description: 'Get the official AutoResearchClaw HITL session and waiting-stage status.',
+      inputSchema: arcRunIdRequestSchema,
+      outputSchema: hitlOutputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    (request) => invoke(async () => ({ hitl: await coordinator.hitlGetStatus(request) })),
+  );
+
+  server.registerTool(
+    'hitl_approve_stage',
+    {
+      description: 'Approve the official AutoResearchClaw stage currently waiting for review.',
+      inputSchema: arcHitlApproveRequestSchema,
+      outputSchema: hitlMutationOutputSchema,
+      annotations: { idempotentHint: true },
+    },
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return coordinator.hitlApproveStage(request);
+      }),
+  );
+
+  server.registerTool(
+    'hitl_reject_stage',
+    {
+      description: 'Reject the official AutoResearchClaw stage and request its configured rollback path.',
+      inputSchema: arcHitlRejectRequestSchema,
+      outputSchema: hitlMutationOutputSchema,
+      annotations: { idempotentHint: true, destructiveHint: true },
+    },
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return coordinator.hitlRejectStage(request);
+      }),
+  );
+
+  server.registerTool(
+    'hitl_inject_guidance',
+    {
+      description: 'Inject guidance through the official AutoResearchClaw HITL adapter.',
+      inputSchema: arcHitlGuidanceRequestSchema,
+      outputSchema: hitlOutputSchema,
+    },
+    (request) =>
+      invoke(async () => {
+        authorizeArcMutation(principal);
+        return { hitl: await coordinator.hitlInjectGuidance(request) };
+      }),
+  );
+
+  server.registerTool(
+    'hitl_view_output',
+    {
+      description: 'List or read a bounded stage output through the official AutoResearchClaw HITL adapter.',
+      inputSchema: arcHitlViewRequestSchema,
+      outputSchema: hitlOutputSchema,
+      annotations: { readOnlyHint: true },
+    },
+    (request) => invoke(async () => ({ hitl: await coordinator.hitlViewOutput(request) })),
   );
 
   return server;

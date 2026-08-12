@@ -551,7 +551,7 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-#   - independent ARC MCP, Worker Runner MCP, and their MCP-wire adapter
+#   - independent ARC MCP, Worker Runner MCP, and official ResearchClaw adapter
 #     (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
@@ -568,6 +568,7 @@ else
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
     --workspace=@xvirobotics/arc-mcp \
+    --workspace=@xvirobotics/arc-researchclaw-adapter \
     --workspace=@xvirobotics/arc-worker-runner-adapter \
     --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
@@ -1583,6 +1584,14 @@ if npm run build -w @xvirobotics/arc-mcp; then
   success "ARC MCP build complete"
 else
   error "ARC MCP build failed. MetaBot was not started."
+  exit 1
+fi
+
+info "Building official AutoResearchClaw adapter..."
+if npm run build -w @xvirobotics/arc-researchclaw-adapter; then
+  success "Official AutoResearchClaw adapter build complete"
+else
+  error "Official AutoResearchClaw adapter build failed. MetaBot was not started."
   exit 1
 fi
 

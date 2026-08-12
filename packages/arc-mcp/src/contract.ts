@@ -264,6 +264,9 @@ export const arcOutputSchema = z
     });
   });
 
+/** Complete structural contract passed to detached workers for first-try conformance. */
+export const ARC_OUTPUT_JSON_SCHEMA = z.toJSONSchema(arcOutputSchema);
+
 export const arcRunErrorSchema = z
   .object({
     code: nonEmpty,

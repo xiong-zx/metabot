@@ -31,7 +31,8 @@
         "src/restart",
         "@xvirobotics/arc-mcp",
         "@xvirobotics/worker-runner-mcp",
-        "@xvirobotics/arc-worker-runner-adapter"
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
       ],
       "reason": "Consume durable MetaMemory changes while keeping Wiki target selection and runtime wiring isolated from unrelated downstream services.",
       "validationSurface": [
@@ -52,6 +53,7 @@
       "forbiddenImports": [
         "src/memory-core",
         "src/workers",
+        "@xvirobotics/arc-mcp",
         "@xvirobotics/worker-runner-mcp"
       ],
       "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
@@ -74,6 +76,12 @@
         "src/engines",
         "src/bridge",
         "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Keep the AutoResearchClaw lifecycle, contract, durable state, and local daemon independently testable outside the upstream Bridge runtime.",
+      "validationSurface": [
+        "packages/arc-mcp/tests/contract.test.ts",
+        "packages/arc-mcp/tests/lifecycle.test.ts",
+        "packages/arc-mcp/tests/daemon-auth.test.ts"
       ]
     },
     {
@@ -95,6 +103,25 @@
       ]
     },
     {
+      "id": "arc-researchclaw-adapter",
+      "status": "required",
+      "roots": ["packages/arc-researchclaw-adapter"],
+      "importRoots": ["packages/arc-researchclaw-adapter/src"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Delegate execution and HITL controls to a pinned external official AutoResearchClaw checkout without importing Bridge, Worker Runner, or MetaMemory internals.",
+      "validationSurface": [
+        "packages/arc-researchclaw-adapter/tests/adapter.test.ts",
+        "packages/arc-researchclaw-adapter/tests/hitl.test.ts",
+        "packages/arc-researchclaw-adapter/tests/boundary.test.ts"
+      ]
+    },
+    {
       "id": "arc-worker-runner-adapter",
       "status": "required",
       "roots": ["packages/arc-worker-runner-adapter"],
@@ -106,6 +133,12 @@
         "src/engines",
         "better-sqlite3",
         "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Adapt ARC to Worker Runner only through the public MCP wire without importing either daemon implementation.",
+      "validationSurface": [
+        "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
+        "packages/arc-worker-runner-adapter/tests/integration.test.ts",
+        "packages/arc-worker-runner-adapter/tests/boundary.test.ts"
       ]
     }
   ],
@@ -116,7 +149,8 @@
       "forbiddenImports": [
         "@xvirobotics/arc-mcp",
         "@xvirobotics/worker-runner-mcp",
-        "@xvirobotics/arc-worker-runner-adapter"
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
       ]
     }
   ],
