@@ -166,8 +166,9 @@ export class OfficialResearchClawAdapter implements ArcRunner {
       env: process.env,
     });
     if (!supervisor.pid) throw new ArcError('runner_failure', 'Could not start the official ARC supervisor');
+    const supervisorPid = supervisor.pid;
     supervisor.unref();
-    atomicWriteJson(statePath, { ...initialState, supervisor_pid: supervisor.pid, updated_at: new Date().toISOString() });
+    await this.awaitSupervisorRegistration(supervisorPid, statePath);
     return this.handle({
       runId: input.run_id,
       projectRoot,
@@ -176,7 +177,7 @@ export class OfficialResearchClawAdapter implements ArcRunner {
       statePath,
       requestPath,
       controlPath,
-      supervisorPid: supervisor.pid,
+      supervisorPid,
     });
   }
 
@@ -403,6 +404,22 @@ export class OfficialResearchClawAdapter implements ArcRunner {
     }
   }
 
+  private async awaitSupervisorRegistration(supervisorPid: number, statePath: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const state = readRunnerState(statePath);
+      if (state.supervisor_pid === supervisorPid) return;
+      if (state.supervisor_pid !== 0) {
+        this.signalGroup(supervisorPid, 'SIGTERM');
+        throw new ArcError('runner_failure', 'Official ARC supervisor registered an unexpected process identity');
+      }
+      if (!processAlive(supervisorPid)) break;
+      await delay(10);
+    }
+    this.signalGroup(supervisorPid, 'SIGTERM');
+    throw new ArcError('runner_failure', 'Official ARC supervisor did not register its process identity');
+  }
+
   private assertProcessIdentity(details: HandleDetails): void {
     if (process.platform === 'win32') return;
     try {
@@ -410,6 +427,10 @@ export class OfficialResearchClawAdapter implements ArcRunner {
         encoding: 'utf8',
         timeout: 2_000,
       });
+      // A detached child can briefly remain as a zombie until PID 1 reaps it.
+      // It cannot execute or be PID-reused during that window, so the durable
+      // state remains authoritative and the next poll will observe terminal.
+      if (command.includes('<defunct>')) return;
       if (!command.includes(details.requestPath) || !command.includes(this.supervisorPath)) {
         throw new ArcError('runner_failure', 'Official ARC supervisor PID was reused by another process');
       }
