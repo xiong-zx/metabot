@@ -145,7 +145,9 @@ describe('signed terminal callback route', () => {
     let wakeCount = 0;
     const executeApiTask = vi.fn(async (_options: any) => {
       wakeCount += 1;
-      return wakeCount === 1 ? firstWake : { success: true as const };
+      return wakeCount === 1
+        ? firstWake
+        : { success: false as const, cancelled: true, responseText: '', error: 'Task was stopped' };
     });
     registry.register({
       name: 'pm-codex',
@@ -273,6 +275,11 @@ describe('signed terminal callback route', () => {
       const second = await postEnvelope(baseUrl, keysDir, makeEnvelope(capabilities, { event_id: 'event-2' }));
       expect(second.status).toBe(200);
       await waitFor(() => terminalStore.get('event-2')?.state === 'woken');
+      expect(terminalStore.get('event-2')).toMatchObject({ state: 'woken', attempts: 1 });
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ eventId: 'event-2', botName: 'pm-codex', chatId: 'chat-1' }),
+        'Terminal callback wake cancelled by the user; event acknowledged',
+      );
       const limited = await postEnvelope(baseUrl, keysDir, makeEnvelope(capabilities, { event_id: 'event-3' }));
       expect(limited.status).toBe(429);
       expect(terminalStore.has('event-3')).toBe(false);

@@ -65,6 +65,28 @@
       ]
     },
     {
+      "id": "terminal-callback-inbox",
+      "status": "required",
+      "roots": [
+        "src/services/terminal-event-store.ts",
+        "src/api/routes/worker-events-routes.ts",
+        "src/api/http-server.ts"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Durably deliver detached Worker and ARC terminal metadata to the authorized chat without coupling upstream core to either runner package.",
+      "validationSurface": [
+        "tests/terminal-event-store.test.ts",
+        "tests/worker-events-route.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
       "id": "arc-mcp",
       "status": "required",
       "roots": ["packages/arc-mcp"],
