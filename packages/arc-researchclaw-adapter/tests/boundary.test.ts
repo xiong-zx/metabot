@@ -22,6 +22,8 @@ describe('official ARC boundary', () => {
     const compatibility = readFileSync(path.join(root, 'python', 'official_compat.py'), 'utf8');
     expect(compatibility).toContain('inspect.getsource(function)');
     expect(compatibility).toContain('_metabot_cached_acp_factory');
+    expect(compatibility).toContain('_metabot_post_review_smoke_test');
+    expect(compatibility).toContain('CodeAgent post-review smoke test failed');
     expect(compatibility).not.toContain('def execute_pipeline');
     expect(compatibility).not.toMatch(/class\s+(?:Pipeline|Literature|Hypothesis|PeerReview)/);
   });

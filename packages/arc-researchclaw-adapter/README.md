@@ -6,11 +6,12 @@ research stages. It launches the pinned official
 pipeline and delegates the five HITL MCP operations to the official
 `MCPHITLAdapter`.
 
-The detached launcher also applies three fail-closed compatibility shims for
+The detached launcher also applies four fail-closed compatibility shims for
 the audited `0.5.0` revision: file-backed HITL input, correction of the Stage 4
-`os` scope defect, and reuse of one ACP client/session across all stages. The
-official checkout remains unmodified, and `doctor` verifies the expected
-official function shapes before the runtime is considered ready.
+`os` scope defect, reuse of one ACP client/session across all stages, and a
+post-review smoke test for Stage 10 generated code. The official checkout
+remains unmodified, and `doctor` verifies the expected official function shapes
+before the runtime is considered ready.
 
 The MetaBot ARC daemon remains the outer control plane for signed local access,
 trusted project roots, idempotency, durable run records, recovery, cancellation,

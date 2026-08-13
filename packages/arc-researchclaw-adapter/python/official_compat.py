@@ -118,12 +118,50 @@ def _patch_acp_client_lifetime() -> bool:
     return True
 
 
+def _patch_code_agent_review_smoke_test() -> bool:
+    """Re-run generated code after the review dialog mutates its files.
+
+    ResearchClaw v0.5.0 runs its execution-fix loop before Phase 4 review.
+    Review repairs can therefore introduce runtime-only failures that Stage 10
+    incorrectly accepts and Stage 12 discovers much later. Reuse the official
+    execution-fix loop, then fail closed if its final files still do not run.
+    """
+    from researchclaw.pipeline.code_agent import CodeAgent
+
+    function = CodeAgent._phase4_review
+    if getattr(function, "_metabot_post_review_smoke_test", False):
+        return False
+    replacement = _replace_function_source(
+        function,
+        ((
+            "    return files, rounds\n",
+            "    files = self._exec_fix_loop(files)\n"
+            "    if self._sandbox_factory:\n"
+            "        final_result = self._run_in_sandbox(files)\n"
+            "        if final_result.returncode != 0 or final_result.timed_out:\n"
+            "            stderr_tail = (final_result.stderr or '')[-1000:]\n"
+            "            raise RuntimeError(\n"
+            "                'CodeAgent post-review smoke test failed: '\n"
+            "                f'rc={final_result.returncode}, '\n"
+            "                f'timed_out={final_result.timed_out}, '\n"
+            "                f'stderr={stderr_tail}'\n"
+            "            )\n"
+            "    return files, rounds\n",
+            1,
+        ),),
+    )
+    replacement._metabot_post_review_smoke_test = True  # type: ignore[attr-defined]
+    CodeAgent._phase4_review = replacement
+    return True
+
+
 def apply_official_compatibility() -> dict[str, bool]:
     """Apply the audited v0.5.0 shims before the official CLI starts."""
     return {
         "literature_os_scope": _patch_literature_collection(),
         "acp_session_timeout": _patch_acp_session_initialization(),
         "acp_session_lifetime": _patch_acp_client_lifetime(),
+        "code_agent_review_smoke_test": _patch_code_agent_review_smoke_test(),
     }
 
 
@@ -133,6 +171,7 @@ def check_official_compatibility() -> dict[str, object]:
 
     from researchclaw.llm.acp_client import ACPClient
     from researchclaw.pipeline import executor
+    from researchclaw.pipeline.code_agent import CodeAgent
     from researchclaw.pipeline.stage_impls import _literature
     from researchclaw.pipeline.stages import Stage
 
@@ -157,6 +196,7 @@ def check_official_compatibility() -> dict[str, object]:
         and executor._STAGE_EXECUTORS[Stage.LITERATURE_COLLECT]
         is _literature._execute_literature_collect
         and getattr(executor.create_llm_client, "_metabot_cached_acp_factory", False)
+        and getattr(CodeAgent._phase4_review, "_metabot_post_review_smoke_test", False)
         and first_client is second_client
     )
     return {"success": healthy, "applied": applied}
