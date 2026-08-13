@@ -154,6 +154,7 @@ export function resolvePersistentExecutorEnvDefault(envVal: string | undefined):
 
 interface RunningTask {
   abortController: AbortController;
+  cancelled: boolean;
   startTime: number;
   executionHandle: ExecutionHandle;
   pendingQuestion: PendingQuestion | null;
@@ -216,6 +217,8 @@ export interface ApiTaskOptions {
 
 export interface ApiTaskResult {
   success: boolean;
+  /** True when an explicit stop/reset cancelled the API task. */
+  cancelled?: boolean;
   responseText: string;
   sessionId?: string;
   costUsd?: number;
@@ -694,6 +697,7 @@ export class MessageBridge {
       task.questionCardMessageId = undefined;
     }
     task.executionHandle.finish();
+    task.cancelled = true;
     task.abortController.abort();
     // Clear the busy flag immediately so a follow-up after /stop or /reset can
     // start a fresh turn while the old stream winds down. executeQuery's
@@ -2386,6 +2390,7 @@ export class MessageBridge {
     const startTime = Date.now();
     runningTask = {
       abortController,
+      cancelled: false,
       startTime,
       executionHandle,
       pendingQuestion: null,
@@ -2867,7 +2872,7 @@ export class MessageBridge {
     if (!this.isChatBusy(options.chatId)) {
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
     }
-    return { success: false, responseText: '', error: state.errorMessage };
+    return { success: false, cancelled: true, responseText: '', error: state.errorMessage };
   }
 
   private async executeReservedApiTask(
@@ -2977,6 +2982,7 @@ export class MessageBridge {
     const startTime = Date.now();
     runningTask = {
       abortController,
+      cancelled: false,
       startTime,
       executionHandle,
       pendingQuestion: null,
@@ -3175,6 +3181,7 @@ export class MessageBridge {
 
       return {
         success: lastState.status === 'complete',
+        ...(runningTask.cancelled ? { cancelled: true } : {}),
         responseText: lastState.responseText,
         sessionId: processor.getSessionId(),
         costUsd: lastState.costUsd,
@@ -3233,6 +3240,7 @@ export class MessageBridge {
 
           return {
             success: lastState.status === 'complete',
+            ...(runningTask.cancelled ? { cancelled: true } : {}),
             responseText: lastState.responseText,
             sessionId: processor.getSessionId(),
             costUsd: lastState.costUsd,
@@ -3273,6 +3281,7 @@ export class MessageBridge {
 
       return {
         success: false,
+        ...(runningTask.cancelled ? { cancelled: true } : {}),
         responseText: lastState.responseText,
         error: err.message || 'Unknown error',
       };
