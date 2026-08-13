@@ -474,7 +474,12 @@ describe('MessageBridge between-turn questions', () => {
     await vi.waitFor(() => expect(bridge.runningTasks.has('chat-1')).toBe(true));
 
     releases[0]();
-    await first;
+    const firstResult = await first;
+    expect(firstResult).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'Task was stopped',
+    });
     expect(bridge.isBusy('chat-1')).toBe(true);
 
     releases[1]();
