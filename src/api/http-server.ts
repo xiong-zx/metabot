@@ -239,6 +239,13 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         maxTurns: 1,
       });
       if (!result.success) {
+        if (result.cancelled) {
+          logger.info(
+            { eventId: envelope.event_id, botName: envelope.bot_name, chatId: envelope.chat_id },
+            'Terminal callback wake cancelled by the user; event acknowledged',
+          );
+          return;
+        }
         if (result.error === 'Chat is busy with another task') {
           throw new TerminalEventDeferredError(result.error);
         }
