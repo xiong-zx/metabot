@@ -64,7 +64,9 @@ Failed-run handling:
 
 The bridge builds a team snapshot from the Agent Teams store:
 
-- The **Team** panel shows active agents, their working or idle state, and visible tasks.
+- The **Team** panel stays compact: it shows a shortened Team label, a
+  `working/total` count, at most two active-agent lines, and one collapsed
+  all-idle line. Visible task counts and task ownership remain available.
 - The **Background activity** panel shows runs with status and the latest output or error.
 - Task statuses shown on cards are `pending`, `in_progress`, and `completed`; deleted tasks are hidden.
 

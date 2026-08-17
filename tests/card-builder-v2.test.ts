@@ -50,7 +50,7 @@ describe('buildCardV2', () => {
     expect(goal.content).toContain('Ship the persistent executor PR');
   });
 
-  it('renders 🧑‍🤝‍🧑 Team panel with teammates and tasks (regression)', () => {
+  it('renders a compact Agent Team panel with active teammates and tasks', () => {
     const state: CardState = {
       status:       'running',
       userPrompt:   'investigate',
@@ -70,22 +70,66 @@ describe('buildCardV2', () => {
     };
     const elements = findElements(JSON.parse(buildCardV2(state)));
     const team = elements.find(
-      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content) && /Teammates/.test(e.content),
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content),
     );
     expect(team).toBeDefined();
-    // Team name
     expect(team.content).toContain('feishu-ux-review');
-    // Teammates with both statuses
+    expect(team.content).toContain('1/2 working');
     expect(team.content).toContain('ux-researcher');
-    expect(team.content).toContain('arch-reviewer');
-    expect(team.content).toContain('⏳');                  // working icon
-    expect(team.content).toContain('💤');                  // idle icon
-    expect(team.content).toContain('auditing card UX');     // lastSubject
-    // Tasks summary line
+    expect(team.content).not.toContain('💤 `arch-reviewer`');
+    expect(team.content).toContain('⏳');
+    expect(team.content).toContain('auditing card UX');
     expect(team.content).toContain('1 in progress');
     expect(team.content).toContain('1 done');
     expect(team.content).toContain('UX audit');
     expect(team.content).toContain('Arch review');
+  });
+
+  it('shortens long Team labels, caps active lines, and collapses all-idle members', () => {
+    const longName = 'research-codex@chat:oc_agent_team_e2e_b_20260717-ce4e7233';
+    const workingState: CardState = {
+      status: 'running',
+      userPrompt: 'x',
+      responseText: '',
+      toolCalls: [],
+      teamState: {
+        name: longName,
+        teammates: [
+          { name: 'planner', status: 'working' },
+          { name: 'coder', status: 'working' },
+          { name: 'reviewer', status: 'working' },
+          { name: 'experiment', status: 'idle' },
+        ],
+        tasks: [],
+      },
+    };
+    const workingElements = findElements(JSON.parse(buildCardV2(workingState)));
+    const workingPanel = workingElements.find(
+      (element) => element.tag === 'markdown' && typeof element.content === 'string' && /Team/.test(element.content),
+    );
+    expect(workingPanel?.content).toContain('3/4 working');
+    expect(workingPanel?.content).not.toContain(longName);
+    expect(workingPanel?.content).toContain('planner');
+    expect(workingPanel?.content).toContain('coder');
+    expect(workingPanel?.content).not.toContain('reviewer');
+    expect(workingPanel?.content).not.toContain('experiment');
+    expect(workingPanel?.content).toContain('+1 more working');
+
+    const idleState: CardState = {
+      ...workingState,
+      teamState: {
+        name: 'idle-team',
+        teammates: workingState.teamState!.teammates.map((member) => ({ ...member, status: 'idle' as const })),
+        tasks: [],
+      },
+    };
+    const idleElements = findElements(JSON.parse(buildCardV2(idleState)));
+    const idlePanel = idleElements.find(
+      (element) => element.tag === 'markdown' && typeof element.content === 'string' && /Team/.test(element.content),
+    );
+    expect(idlePanel?.content).toContain('0/4 working');
+    expect(idlePanel?.content).toContain('All teammates idle');
+    expect(idlePanel?.content).not.toContain('planner');
   });
 
   it('renders pending Agent Team tasks', () => {

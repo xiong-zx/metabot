@@ -64,7 +64,8 @@ metabot teams runs stop metabot-dev <runId>
 
 Bridge 会从 Agent Teams store 构建团队快照：
 
-- **Team** 面板展示 active agents、working/idle 状态和可见任务。
+- **Team** 面板保持紧凑：展示缩短后的 Team 标签、`working/total` 计数、最多两行活跃
+  Agent；全员 idle 时折叠为一行。可见任务计数和任务归属仍然保留。
 - **Background activity** 面板展示 runs、状态以及最新 output 或 error。
 - 卡片展示的任务状态包括 `pending`、`in_progress` 和 `completed`；`deleted` 任务会隐藏。
 
