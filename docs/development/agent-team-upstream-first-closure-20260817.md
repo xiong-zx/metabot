@@ -91,13 +91,28 @@ manifest entries after upstream accepts equivalent commits.
 
 ## Remaining Live Gate
 
-Code integration and runtime deployment are separate decisions. Before these
-items return to done, an explicitly authorized staging or test-chat run must
-hold a foreground PM turn while triggering both a scheduled task and Agent
-Team completion activity. Acceptance requires delayed, exactly-once delivery,
-compact v1/v2 cards, no duplicate taskless Run, and no cross-chat schedule
-visibility. Promotion, runtime switching, and restart require separate user
-authorization.
+The authorized current-chat E2E completed on runtime `816922a`:
+
+- deploy request `agent-team-e2e-20260817-002` reached `healthy` for Bridge,
+  Worker Runner, ARC, and Core;
+- signed scheduling rejected a cross-chat create and listed only the signed
+  bot/chat scope;
+- governed Run `run-msxkbdu9-ngi7so` returned `TARGET-YES ROLE-YES` without
+  the non-target `TARGET-NO`, with one task-bound Run and no duplicate;
+- compact-card message `om_x100b6701643e30a1084ad822a0315e2`
+  rendered a shortened Team label, `0/4 working`, and one all-idle line;
+- pm holder `db196995` made schedule
+  `62d505ac-8890-4845-b961-382aba848809` persist one busy retry before the
+  same task completed with `SCHEDULE-FIRED`;
+- deployed MessageBridge logged six bounded activity deferrals, and the same
+  production `DeferredActivityDelivery` class delivered interactive card
+  `om_x100b670114aa74a10870afb1fa6f01c` exactly once after busy cleared.
+
+The E2E also found that Supervisor activity used the global bot instead of the
+instance `pmBot`. Commit `0fe67ae` fixes that route and passed the final full
+gate; `cead4cc` documents it on `origin/dev`. Per restart-continuation policy,
+the runtime was not restarted a second time solely to reload this follow-up.
+Its live route check remains for the next approved deployment cycle.
 
 ## Rollback
 
