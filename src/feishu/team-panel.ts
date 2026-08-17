@@ -8,9 +8,10 @@ export function renderCompactTeamPanel(team: TeamState): string | null {
   if (team.teammates.length === 0 && team.tasks.length === 0) return null;
 
   const working = team.teammates.filter((member) => member.status === 'working');
-  const label = team.name ? `: \`${shortenTeamLabel(team.name)}\`` : '';
+  const label = team.name ? ` \`${shortenTeamLabel(team.name)}\`` : '';
   const memberSummary = team.teammates.length > 0 ? ` · ${working.length}/${team.teammates.length} working` : '';
-  const lines = [`🧑‍🤝‍🧑 **Team${label}**${memberSummary}`];
+  const heading = team.name ? '**Team:**' : '**Team**';
+  const lines = [`🧑‍🤝‍🧑 ${heading}${label}${memberSummary}`];
 
   if (team.teammates.length > 0) {
     lines.push('');
