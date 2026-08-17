@@ -110,9 +110,12 @@ The authorized current-chat E2E completed on runtime `816922a`:
 
 The E2E also found that Supervisor activity used the global bot instead of the
 instance `pmBot`. Commit `0fe67ae` fixes that route and passed the final full
-gate; `cead4cc` documents it on `origin/dev`. Per restart-continuation policy,
-the runtime was not restarted a second time solely to reload this follow-up.
-Its live route check remains for the next approved deployment cycle.
+gate. A live harness using the real Governance, Supervisor, BotRegistry, pm
+Lark app, and current group sent card
+`om_x100b67013c0a24a1086b416c9db1af8` with `pmCalls=1` and
+`adminCalls=0`. Per restart-continuation policy, PM2 runtime `816922a` was not
+restarted a second time solely to reload this follow-up; only the normal
+runtime rollout of the already-tested `origin/dev` fix remains.
 
 ## Rollback
 
