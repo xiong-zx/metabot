@@ -48,6 +48,42 @@
       ]
     },
     {
+      "id": "agent-team-compact-card-upstream-gap",
+      "status": "required",
+      "roots": ["src/feishu/team-panel.ts"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Track the generic compact Agent Team card renderer as a removable upstreamable patch until upstream accepts it.",
+      "validationSurface": [
+        "tests/card-builder.test.ts",
+        "tests/card-builder-v2.test.ts",
+        "tests/feishu-event-handler.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-busy-chat-reliability-upstream-gap",
+      "status": "required",
+      "roots": [
+        "src/scheduler/busy-retry-policy.ts",
+        "src/bridge/deferred-activity-delivery.ts"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Track generic bounded busy-chat retry and activity delivery as removable upstreamable patches until upstream accepts them.",
+      "validationSurface": [
+        "tests/busy-retry-policy.test.ts",
+        "tests/task-scheduler-one-time.test.ts",
+        "tests/deferred-activity-delivery.test.ts",
+        "tests/message-bridge.test.ts"
+      ]
+    },
+    {
       "id": "arc-mcp",
       "status": "required",
       "roots": ["packages/arc-mcp"],
