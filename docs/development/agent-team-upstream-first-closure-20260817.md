@@ -10,7 +10,8 @@ migration and isolates one existing downstream governance capability:
 - compact Agent Team cards;
 - reliable scheduled and background delivery while the PM chat is busy;
 - schedule management limited to an `admin`, `user`, or `pm` principal's
-  signed bot and chat scope.
+  signed bot and chat scope;
+- exact Agent/role RuleSet targeting without silent broadcast.
 
 No legacy Team Store, Worker Manager, Memory Core, or customized Agent Team UI
 was restored.
@@ -23,6 +24,7 @@ was restored.
 | Busy schedule retry | Upstreamable | `src/scheduler/busy-retry-policy.ts` | `TaskScheduler.fireTask()` |
 | Deferred activity delivery | Upstreamable | `src/bridge/deferred-activity-delivery.ts` | `MessageBridge` enqueue/deliver hooks |
 | Scoped schedule management | Downstream-only W01 | `src/agent-teams/schedule-capability.ts` | HTTP capability gate, schedule routes, CLI forwarding |
+| Exact RuleSet targeting | Downstream-only W01 | `src/agent-teams/governance-extension.ts` | Supervisor execution subject |
 
 The upstreamable roots remain listed in `config/downstream-features.json`
 only while downstream carries them ahead of upstream. Remove those temporary
@@ -58,12 +60,20 @@ manifest entries after upstream accepts equivalent commits.
 - the CLI never forwards the Bridge administrator secret from an engine
   session.
 
+### RuleSet target truthfulness
+
+- omitted targets apply to every Agent in the governed instance;
+- `agent:<name>` and `role:<role>` match the exact execution subject;
+- legacy unprefixed targets normalize to exact Agent names;
+- wildcard or unknown target syntax is rejected, never silently broadcast;
+- provenance records both total and selected rule counts.
+
 ## Validation
 
-- stable-main focused Agent Team integration: 19 files, 230 tests;
-- stable-main root and workspace test run: 1,549 passed, 1 expected skip;
-- `origin/dev` combined Agent Team integration: 20 files, 258 tests;
-- `origin/dev` root and workspace test run: 1,578 passed, 1 expected skip;
+- stable-main focused Agent Team integration: 19 files, 231 tests;
+- stable-main root and workspace test run: 1,550 passed, 1 expected skip;
+- `origin/dev` combined Agent Team integration: 20 files, 259 tests;
+- `origin/dev` root and workspace test run: 1,579 passed, 1 expected skip;
 - full build and release packaging passed;
 - lint passed with no errors and six unrelated baseline warnings;
 - release downstream-boundary gate and `git diff --check` passed;
@@ -81,7 +91,7 @@ authorization.
 
 ## Rollback
 
-Revert the four focused feature commits or their integration merges. No schema
+Revert the focused feature commits or their integration merges. No schema
 migration is required: the scheduler fields are optional JSON properties, and
 the activity queue is in-memory only. Existing Team, Task, Message, Run,
 Template, RuleSet, and schedule records remain compatible.

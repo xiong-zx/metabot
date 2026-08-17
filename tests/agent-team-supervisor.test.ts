@@ -75,13 +75,18 @@ describe('AgentTeamSupervisor', () => {
       actor: { role: 'pm', id: 'pm' },
       name: 'runtime',
       scope: 'team-instance',
-      rules: [{ text: 'Use the pinned runtime rule.' }],
+      rules: [
+        { text: 'Use the pinned runtime rule.' },
+        { text: 'Use the worker-only rule.', target: 'agent:worker' },
+        { text: 'Use the implementation-role rule.', target: 'role:implementation' },
+        { text: 'Never leak the reviewer rule.', target: 'agent:reviewer' },
+      ],
     });
     governance.publishTemplate({
       actor: { role: 'pm', id: 'pm' },
       name: 'runtime',
       body: {
-        agents: [{ name: 'worker', engine: 'codex' }],
+        agents: [{ name: 'worker', role: 'implementation', engine: 'codex' }],
         ruleSetRefs: [{ name: 'runtime' }],
       },
     });
@@ -113,6 +118,10 @@ describe('AgentTeamSupervisor', () => {
         prompt: expect.stringContaining('Use the pinned runtime rule.'),
       }),
     );
+    const governedPrompt = executeApiTask.mock.calls[0][0].prompt;
+    expect(governedPrompt).toContain('Use the worker-only rule.');
+    expect(governedPrompt).toContain('Use the implementation-role rule.');
+    expect(governedPrompt).not.toContain('Never leak the reviewer rule.');
     expect(touchAgent).toHaveBeenCalled();
     await waitFor(() => {
       expect(store.listRuns(instance.teamName)[0]).toMatchObject({ status: 'completed' });
