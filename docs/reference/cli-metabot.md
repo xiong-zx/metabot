@@ -148,6 +148,11 @@ metabot schedule resume <id>                                   # resume a task
 metabot schedule cancel <id>                                   # cancel a task
 ```
 
+When the target chat is busy, scheduled work remains pending with persisted
+exponential backoff for up to 30 minutes. A bridge restart preserves the
+remaining retry window. Exhausted recurring occurrences are logged without a
+repeated failure card; an exhausted one-time task sends one failure notice.
+
 ### Stats, metrics & health
 
 ```bash
