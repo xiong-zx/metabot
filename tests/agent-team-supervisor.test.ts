@@ -63,6 +63,54 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('AgentTeamSupervisor', () => {
+  it('routes governed activity cards through the instance-scoped PM bot', async () => {
+    const store = makeStore();
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-supervisor-activity-pmbot-'));
+    const governance = new AgentTeamGovernanceExtension(
+      createAgentTeamGovernanceHost(store),
+      logger,
+      join(dir, 'governance.db'),
+    );
+    governance.publishTemplate({
+      actor: { role: 'pm', id: 'pm' },
+      name: 'activity-pmbot',
+      body: { agents: [{ name: 'worker', engine: 'codex' }] },
+    });
+    const instance = governance.resolveInstance({
+      actor: { role: 'pm', id: 'pm' },
+      templateName: 'activity-pmbot',
+      chatId: 'oc_activity',
+      pmBot: 'pinned-pm',
+    })!;
+
+    const globalActivity = vi.fn().mockResolvedValue(undefined);
+    const pinnedActivity = vi.fn().mockResolvedValue(undefined);
+    const { registry } = makeRegistry(vi.fn(), vi.fn(), globalActivity);
+    registry.register({
+      name: 'pinned-pm',
+      platform: 'feishu',
+      bridge: { sendAgentActivityCard: pinnedActivity },
+      sender: {},
+      config: {
+        name: 'pinned-pm',
+        engine: 'codex',
+        claude: { defaultWorkingDirectory: process.cwd() },
+      },
+    } as any);
+    const supervisor = new AgentTeamSupervisor({ registry, store, governance, logger, intervalMs: 60_000 });
+
+    (supervisor as any).notifyTeamActivity(instance.teamName, 'worker', 'activity complete');
+    await vi.waitFor(() => expect(pinnedActivity).toHaveBeenCalledWith(
+      'oc_activity',
+      expect.stringContaining('activity complete'),
+    ));
+    expect(globalActivity).not.toHaveBeenCalled();
+
+    supervisor.destroy();
+    governance.close();
+    store.close();
+  });
+
   it('uses governed run preparation, pinned rules and bot, quota guard, activity touch, and reap execution', async () => {
     const store = makeStore();
     const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-supervisor-governance-'));

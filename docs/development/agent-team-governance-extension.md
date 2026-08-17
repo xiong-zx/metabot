@@ -35,7 +35,8 @@ of truth for Teams, Agents, Tasks, Messages, Runs, and supervisor execution.
   quota denials are auditable.
 - Each instance may pin its owning PM bot. `prepareRun()` returns that bot and
   a stable `teaminst:<instance>:<agent>` chat id without changing
-  upstream session records.
+  upstream session records. Supervisor activity cards use the same pinned PM
+  bot before falling back to the global execution bot.
 - Rule targets are exact and fail closed. An omitted target applies to every
   Agent in the instance; `agent:<name>` and `role:<role>` match only the
   current governed execution subject. Legacy unprefixed targets normalize to
