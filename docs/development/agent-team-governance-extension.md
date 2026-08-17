@@ -64,12 +64,15 @@ the local secret. Only an external CLI request authenticated by the bridge API
 secret and carrying no engine markers is treated as local admin. Request-body
 `role` or `actorRole` fields never select the caller's authority.
 
-The same capability may authenticate exactly four non-Team, read-only Bridge
-requests: `GET /api/bots`, `GET /api/peers`, `GET /api/stats`, and
-`GET /api/metrics`. It does not authenticate bot details or profiles, talk,
-schedules, Workers, service operations, peer/bot mutations, or any other
-Bridge route. A request carrying any engine capability/bot/chat header cannot
-fall back to the local administrator secret or cross-bridge token validation.
+The same capability may authenticate four non-Team, read-only Bridge requests:
+`GET /api/bots`, `GET /api/peers`, `GET /api/stats`, and `GET /api/metrics`.
+An `admin`, `user`, or `pm` principal may also list and manage schedules only
+when both `botName` and `chatId` match its signed execution scope. Managers,
+agents, and cross-scope IDs fail closed. The capability does not authenticate
+bot details or profiles, talk, Workers, service operations, peer/bot
+mutations, or any other Bridge route. A request carrying any engine
+capability/bot/chat header cannot fall back to the local administrator secret
+or cross-bridge token validation.
 Human and local management mutations require `API_SECRET`; loopback access is
 not an unauthenticated management path.
 

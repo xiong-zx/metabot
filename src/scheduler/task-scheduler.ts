@@ -6,6 +6,7 @@ import type { Logger } from '../utils/logger.js';
 import type { BotRegistry } from '../api/bot-registry.js';
 import type { WebSocketHandle } from '../web/ws-server.js';
 import type { CardState } from '../types.js';
+import { decideBusyRetry } from './busy-retry-policy.js';
 import { isValidCron, nextCronOccurrence, getDefaultTimezone } from './cron-utils.js';
 
 // --- One-time task types (unchanged) ---
@@ -21,6 +22,8 @@ export interface ScheduledTask {
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
+  /** First observed busy time; persisted so restart cannot reset the retry window. */
+  busySince?: number;
   /** Stable idempotency key for system-created tasks such as restart recovery. */
   dedupeKey?: string;
   parentRecurringId?: string;  // set if spawned by a recurring task
@@ -88,8 +91,6 @@ interface PersistedData {
 
 // --- Constants ---
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 30_000; // 30 seconds
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
 // Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
@@ -218,6 +219,8 @@ export class TaskScheduler {
 
     if (input.delaySeconds !== undefined) {
       task.executeAt = Date.now() + input.delaySeconds * 1000;
+      task.retryCount = 0;
+      task.busySince = undefined;
       // Reset timer
       const timer = this.timers.get(id);
       if (timer) clearTimeout(timer);
@@ -421,26 +424,40 @@ export class TaskScheduler {
       return;
     }
 
-    // If chat is busy, retry
+    // Keep scheduled work pending while a foreground turn owns the chat.
+    // executeAt and busySince are persisted, so a bridge restart continues
+    // the same bounded window instead of restarting or collapsing retries.
     if (bot.bridge.isBusy(task.chatId)) {
-      if (task.retryCount < MAX_RETRIES) {
-        task.retryCount++;
-        this.logger.info({ taskId: id, retryCount: task.retryCount }, 'Chat busy, retrying scheduled task');
-        const timer = setTimeout(() => this.fireTask(id), RETRY_DELAY_MS);
-        this.timers.set(id, timer);
+      const now = Date.now();
+      const decision = decideBusyRetry(now, task);
+      task.busySince = decision.busySince;
+      if (decision.kind === 'defer') {
+        task.retryCount = decision.retryCount;
+        task.executeAt = decision.executeAt;
+        this.logger.info(
+          {
+            taskId: id,
+            retryCount: task.retryCount,
+            retryDelayMs: decision.retryDelayMs,
+            remainingMs: decision.remainingMs,
+          },
+          'Chat busy, deferring scheduled task',
+        );
+        this.setTimer(task);
         this.saveToDisk();
         return;
       }
 
-      // Max retries exceeded — notify user and mark failed
-      this.logger.warn({ taskId: id }, 'Scheduled task failed after max retries (chat busy)');
+      this.logger.warn({ taskId: id, busySince: task.busySince }, 'Scheduled task busy retry window exhausted');
       task.status = 'failed';
       this.saveToDisk();
+      if (task.parentRecurringId) return;
+
       try {
         await bot.sender.sendTextNotice(
           task.chatId,
           'Scheduled Task Failed',
-          `Task "${task.label || task.prompt.slice(0, 50)}" could not run because the chat was busy. Please retry manually.`,
+          `Task "${task.label || task.prompt.slice(0, 50)}" waited 30 minutes but the chat remained busy. Please retry manually.`,
           'red',
         );
       } catch (err) {
@@ -450,6 +467,7 @@ export class TaskScheduler {
     }
 
     // Execute the task
+    task.busySince = undefined;
     task.status = 'executing';
     this.saveToDisk();
     this.logger.info({ taskId: id, botName: task.botName, chatId: task.chatId }, 'Firing scheduled task');

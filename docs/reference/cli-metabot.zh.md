@@ -191,6 +191,10 @@ metabot schedule resume <id>                                   # 恢复
 metabot schedule cancel <id>                                   # 取消
 ```
 
+目标 chat 忙碌时，定时任务会保持 pending，并使用持久化指数退避等待最多 30 分钟；
+Bridge 重启不会重置剩余等待窗口。周期任务的单次 occurrence 超时后只记录日志，不重复
+发送失败卡片；一次性任务超时后只发送一条失败通知。
+
 ### 统计、指标与健康
 
 ```bash
