@@ -200,6 +200,20 @@
         "packages/arc-worker-runner-adapter/tests/integration.test.ts",
         "packages/arc-worker-runner-adapter/tests/boundary.test.ts"
       ]
+    },
+    {
+      "id": "ci-runtime-prerequisites",
+      "status": "required",
+      "roots": [
+        ".github/workflows/ci.yml",
+        "tests/ci-workflow.test.ts"
+      ],
+      "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
+      "validationSurface": [
+        "tests/ci-workflow.test.ts",
+        "tests/metabot-controlled-restart-cli.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
     }
   ],
   "reverseBoundaries": [
