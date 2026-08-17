@@ -81,11 +81,10 @@ _load_bridge_api_config() {
 
 _json() { python3 -m json.tool 2>/dev/null || cat; }
 
-# Issue one of the four Bridge reads allowed to an Agent Team engine session.
-# Capability mode deliberately sends only the signed scoped token plus its
-# runtime bot/chat binding; bridge-wide administrator secrets are never used.
-_bridge_scoped_read() {
-  local path="$1"
+# Issue a Bridge request as the current engine session. Capability mode
+# deliberately sends only the signed scoped token plus its runtime bot/chat
+# binding; bridge-wide administrator secrets are never used.
+_bridge_scoped_request() {
   local -a headers=(-H "$METABOT_AUTH")
   if [[ -n "${METABOT_TEAM_CAPABILITY:-}" ]]; then
     headers+=(
@@ -94,7 +93,12 @@ _bridge_scoped_read() {
       -H "X-MetaBot-Chat-Id: ${METABOT_CHAT_ID:-${METABOT_CHAT:-}}"
     )
   fi
-  curl -s "${headers[@]}" "$METABOT_URL$path"
+  curl -s "${headers[@]}" "$@"
+}
+
+_bridge_scoped_read() {
+  local path="$1"
+  _bridge_scoped_request "$METABOT_URL$path"
 }
 
 cmd_update() {
@@ -1768,7 +1772,7 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.a
       local subcmd="${1:-list}"; shift 2>/dev/null || true
       case "$subcmd" in
         list|ls)
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/schedule" | _json
+          _bridge_scoped_read "/api/schedule" | _json
           ;;
         add|a)
           local bot="$1" chat="$2" delay="$3"; shift 3 2>/dev/null || true
@@ -1781,8 +1785,8 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.a
 import json, sys
 print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'delaySeconds': int(sys.argv[3]), 'prompt': sys.argv[4]}))
 " "$bot" "$chat" "$delay" "$prompt" | \
-          curl -s -X POST "$METABOT_URL/api/schedule" \
-            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+          _bridge_scoped_request -X POST "$METABOT_URL/api/schedule" \
+            -H "Content-Type: application/json" \
             -d @- | _json
           ;;
         cron|c)
@@ -1797,21 +1801,21 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'delaySeconds':
 import json, sys
 print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys.argv[3], 'prompt': sys.argv[4]}))
 " "$bot" "$chat" "$cron_expr" "$prompt" | \
-          curl -s -X POST "$METABOT_URL/api/schedule" \
-            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+          _bridge_scoped_request -X POST "$METABOT_URL/api/schedule" \
+            -H "Content-Type: application/json" \
             -d @- | _json
           ;;
         pause|p)
           if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule pause <id>"; exit 1; fi
-          curl -s -X POST "$METABOT_URL/api/schedule/$1/pause" -H "$METABOT_AUTH" | _json
+          _bridge_scoped_request -X POST "$METABOT_URL/api/schedule/$1/pause" | _json
           ;;
         resume|r)
           if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule resume <id>"; exit 1; fi
-          curl -s -X POST "$METABOT_URL/api/schedule/$1/resume" -H "$METABOT_AUTH" | _json
+          _bridge_scoped_request -X POST "$METABOT_URL/api/schedule/$1/resume" | _json
           ;;
         cancel|rm)
           if [[ -z "${1:-}" ]]; then echo "Usage: metabot schedule cancel <id>"; exit 1; fi
-          curl -s -X DELETE "$METABOT_URL/api/schedule/$1" -H "$METABOT_AUTH" | _json
+          _bridge_scoped_request -X DELETE "$METABOT_URL/api/schedule/$1" | _json
           ;;
         *)
           echo "metabot schedule - Task scheduling"

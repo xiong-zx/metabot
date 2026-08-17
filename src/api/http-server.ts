@@ -29,6 +29,7 @@ import { ActivityStore } from './activity-store.js';
 import { AgentTeamStore } from '../agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
 import { AgentTeamGovernanceExtension, createAgentTeamGovernanceHost } from '../agent-teams/governance-extension.js';
+import { isAgentTeamCapabilityScheduleRoute } from '../agent-teams/schedule-capability.js';
 import {
   AGENT_TEAM_BOT_HEADER,
   AGENT_TEAM_CAPABILITY_ENV,
@@ -541,6 +542,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const hasExecutionCapabilityHeaders = !!capability || !!capabilityBotName || !!capabilityChatId;
       const acceptsExecutionCapability = url.startsWith('/api/agent-team')
         || isAgentTeamCapabilityReadRoute(method, url)
+        || isAgentTeamCapabilityScheduleRoute(method, url)
         || isAgentTeamCapabilityRestartRoute(method, url);
       let executionCapabilityOk = false;
       let executionCapabilityError: AgentTeamCapabilityError | undefined;

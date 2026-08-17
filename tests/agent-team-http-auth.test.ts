@@ -183,7 +183,6 @@ describe('Agent Team HTTP capability gate', () => {
         ['GET', '/api/bots/pm-codex'],
         ['GET', '/api/bots/pm-codex/profile'],
         ['GET', '/api/status'],
-        ['GET', '/api/schedule'],
         ['POST', '/api/talk'],
         ['POST', '/api/tasks'],
         ['POST', '/api/peers'],
@@ -211,6 +210,141 @@ describe('Agent Team HTTP capability gate', () => {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
       governance.close();
       store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows user capabilities to manage only schedules in their signed bot and chat scope', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-schedule-capability-auth-'));
+    vi.stubEnv('SESSION_STORE_DIR', dir);
+    vi.stubEnv('METABOT_RATE_LIMIT_DISABLED', '1');
+    const capabilities = new AgentTeamExecutionCapabilityService('schedule-capability-test-key');
+    const registry = new BotRegistry();
+    const bridge = {
+      getPersistentRegistry: vi.fn(),
+      setAgentTeamStore: vi.fn(),
+      setExecutionEnvProvider: vi.fn(),
+    };
+    registry.register({ name: 'pm-codex', platform: 'feishu', bridge, sender: {}, config: {} } as any);
+    const oneTimeTasks = [
+      {
+        id: 'own-task', botName: 'pm-codex', chatId: 'oc_schedule', prompt: 'own prompt',
+        executeAt: Date.now() + 60_000, sendCards: true, status: 'pending', createdAt: Date.now(),
+      },
+      {
+        id: 'other-task', botName: 'pm-codex', chatId: 'oc_other', prompt: 'other prompt',
+        executeAt: Date.now() + 60_000, sendCards: true, status: 'pending', createdAt: Date.now(),
+      },
+    ];
+    const recurringTasks = [
+      {
+        id: 'own-recurring', botName: 'pm-codex', chatId: 'oc_schedule', prompt: 'own recurring',
+        cronExpr: '0 8 * * *', timezone: 'UTC', nextExecuteAt: Date.now() + 60_000,
+        sendCards: true, status: 'active', createdAt: Date.now(),
+      },
+      {
+        id: 'other-recurring', botName: 'other-bot', chatId: 'oc_schedule', prompt: 'other recurring',
+        cronExpr: '0 8 * * *', timezone: 'UTC', nextExecuteAt: Date.now() + 60_000,
+        sendCards: true, status: 'active', createdAt: Date.now(),
+      },
+    ];
+    const scheduler = {
+      setWebSocketHandle: () => {},
+      taskCount: () => oneTimeTasks.length,
+      recurringTaskCount: () => recurringTasks.length,
+      listTasks: vi.fn(() => oneTimeTasks),
+      listRecurringTasks: vi.fn(() => recurringTasks),
+      scheduleTask: vi.fn((input: { botName: string; chatId: string; prompt: string; delaySeconds: number }) => ({
+        id: 'created-task', ...input, executeAt: Date.now() + input.delaySeconds * 1_000,
+        sendCards: true, status: 'pending', createdAt: Date.now(),
+      })),
+      cancelTask: vi.fn(() => true),
+      cancelRecurring: vi.fn(() => false),
+    } as any;
+    const server = startApiServer({
+      port: 0,
+      secret: 'bridge-admin-secret',
+      registry,
+      scheduler,
+      logger,
+      agentTeamCapabilityService: capabilities,
+    });
+    if (!server.listening) await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const markerHeaders = {
+      authorization: 'Bearer execution-capability',
+      'content-type': 'application/json',
+      'x-metabot-bot-name': 'pm-codex',
+      'x-metabot-chat-id': 'oc_schedule',
+    };
+    const capability = (role: 'user' | 'agent') => capabilities.issue({
+      role,
+      botName: 'pm-codex',
+      chatId: 'oc_schedule',
+      ttlMs: 60_000,
+    });
+    const userHeaders = { ...markerHeaders, 'x-metabot-team-capability': capability('user') };
+
+    try {
+      const listed = await fetch(`${baseUrl}/api/schedule`, { headers: userHeaders });
+      expect(listed.status).toBe(200);
+      await expect(listed.json()).resolves.toMatchObject({
+        tasks: [{ id: 'own-task', botName: 'pm-codex', chatId: 'oc_schedule' }],
+        recurringTasks: [{ id: 'own-recurring', botName: 'pm-codex', chatId: 'oc_schedule' }],
+      });
+
+      const deniedRole = await fetch(`${baseUrl}/api/schedule`, {
+        headers: { ...markerHeaders, 'x-metabot-team-capability': capability('agent') },
+      });
+      expect(deniedRole.status).toBe(403);
+
+      const deniedScope = await fetch(`${baseUrl}/api/schedule`, {
+        method: 'POST',
+        headers: userHeaders,
+        body: JSON.stringify({
+          botName: 'pm-codex', chatId: 'oc_other', prompt: 'must not be scheduled', delaySeconds: 60,
+        }),
+      });
+      expect(deniedScope.status).toBe(403);
+      expect(scheduler.scheduleTask).not.toHaveBeenCalled();
+
+      const created = await fetch(`${baseUrl}/api/schedule`, {
+        method: 'POST',
+        headers: userHeaders,
+        body: JSON.stringify({
+          botName: 'pm-codex', chatId: 'oc_schedule', prompt: 'allowed task', delaySeconds: 60,
+        }),
+      });
+      expect(created.status).toBe(201);
+      expect(scheduler.scheduleTask).toHaveBeenCalledWith(expect.objectContaining({
+        botName: 'pm-codex',
+        chatId: 'oc_schedule',
+      }));
+
+      const hiddenMutation = await fetch(`${baseUrl}/api/schedule/other-task`, {
+        method: 'DELETE',
+        headers: userHeaders,
+      });
+      expect(hiddenMutation.status).toBe(404);
+      expect(scheduler.cancelTask).not.toHaveBeenCalled();
+
+      const ownMutation = await fetch(`${baseUrl}/api/schedule/own-task`, {
+        method: 'DELETE',
+        headers: userHeaders,
+      });
+      expect(ownMutation.status).toBe(200);
+      expect(scheduler.cancelTask).toHaveBeenCalledWith('own-task');
+
+      const administratorList = await fetch(`${baseUrl}/api/schedule`, {
+        headers: { authorization: 'Bearer bridge-admin-secret' },
+      });
+      expect(administratorList.status).toBe(200);
+      const administratorBody = await administratorList.json() as { tasks: Array<{ id: string }> };
+      expect(administratorBody.tasks.map((task) => task.id)).toEqual(['own-task', 'other-task']);
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
       rmSync(dir, { recursive: true, force: true });
     }
   });
