@@ -67,6 +67,8 @@ Bridge 会从 Agent Teams store 构建团队快照：
 - **Team** 面板展示 active agents、working/idle 状态和可见任务。
 - **Background activity** 面板展示 runs、状态以及最新 output 或 error。
 - 卡片展示的任务状态包括 `pending`、`in_progress` 和 `completed`；`deleted` 任务会隐藏。
+- Chat 存在前台 turn 时，Agent Team 与 spontaneous activity 会精确去重并通过指数退避延迟
+  投递。队列最多保留 25 个 body；达到 30 分钟上限时仍会投递，不会丢弃完成结果。
 
 这些卡片状态来自 `/api/agent-teams/<team>` 数据，因此 CLI 更新会立即影响 bridge 可渲染的内容。
 

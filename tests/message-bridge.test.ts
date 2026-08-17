@@ -104,6 +104,29 @@ function deferFirstSendCard(sender: ReturnType<typeof makeSender>) {
   return { entered, release };
 }
 
+describe('MessageBridge deferred Agent activity', () => {
+  it('delivers an Agent Team activity card after the foreground turn drains', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any);
+    const internals = bridge as any;
+    internals.runningTasks.set('chat-1', {});
+
+    await bridge.sendAgentActivityCard('chat-1', 'member completed');
+    await bridge.sendAgentActivityCard('chat-1', 'member completed');
+    expect(sender.sent).toHaveLength(0);
+
+    internals.runningTasks.delete('chat-1');
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0].chatId).toBe('chat-1');
+    expect(sender.sent[0].state.status).toBe('agent_activity');
+    expect(sender.sent[0].state.responseText).toBe('member completed');
+    bridge.destroy();
+  });
+});
+
 describe('isStaleSessionError', () => {
   it('matches the GitHub issue error text', () => {
     expect(
