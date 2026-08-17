@@ -231,7 +231,13 @@ export interface GovernedRulesContext {
     digest: string;
     scope: GovernanceRuleScope;
     ruleCount: number;
+    selectedRuleCount: number;
   }>;
+}
+
+export interface GovernedRulesSubject {
+  agentName: string;
+  agentRole?: string;
 }
 
 export interface GovernanceReconciliationReport {
@@ -1018,7 +1024,7 @@ export class AgentTeamGovernanceExtension {
     };
   }
 
-  buildRulesContext(instanceId: string): GovernedRulesContext {
+  buildRulesContext(instanceId: string, subject: GovernedRulesSubject): GovernedRulesContext {
     const instance = this.requireInstance(instanceId);
     const sections: string[] = [];
     const provenance: GovernedRulesContext['provenance'] = [];
@@ -1031,16 +1037,20 @@ export class AgentTeamGovernanceExtension {
           'PINNED_RULE_SET_INVALID',
         );
       }
-      sections.push(
-        `## ${ruleSet.scope}:${ruleSet.name}@v${ruleSet.version}`,
-        ...ruleSet.rules.map((rule) => `- ${rule.text}`),
-      );
+      const selectedRules = ruleSet.rules.filter((rule) => governanceRuleMatchesSubject(rule, subject));
+      if (selectedRules.length > 0) {
+        sections.push(
+          `## ${ruleSet.scope}:${ruleSet.name}@v${ruleSet.version}`,
+          ...selectedRules.map((rule) => `- ${rule.text}`),
+        );
+      }
       provenance.push({
         name: ruleSet.name,
         version: ruleSet.version,
         digest: ruleSet.digest,
         scope: ruleSet.scope,
         ruleCount: ruleSet.rules.length,
+        selectedRuleCount: selectedRules.length,
       });
     }
     return { text: sections.join('\n'), provenance };
@@ -1636,12 +1646,39 @@ function normalizeRules(rules: GovernanceRule[]): GovernanceRule[] {
     if (!text) {
       throw new AgentTeamGovernanceError(`Rule ${index + 1} requires text`, 400, 'INVALID_RULE');
     }
+    const target = rule.target?.trim();
     return {
       ...(rule.id?.trim() ? { id: rule.id.trim() } : {}),
       text,
-      ...(rule.target?.trim() ? { target: rule.target.trim() } : {}),
+      ...(target ? { target: normalizeGovernanceRuleTarget(target, index) } : {}),
     };
   });
+}
+
+function normalizeGovernanceRuleTarget(target: string, index: number): string {
+  const prefixed = target.match(/^(agent|role):([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/);
+  if (prefixed) return `${prefixed[1]}:${prefixed[2]}`;
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(target)) return `agent:${target}`;
+  throw new AgentTeamGovernanceError(
+    `Rule ${index + 1} has unsupported target: ${target}`,
+    400,
+    'INVALID_RULE_TARGET',
+  );
+}
+
+function governanceRuleMatchesSubject(rule: GovernanceRule, subject: GovernedRulesSubject): boolean {
+  if (!rule.target) return true;
+  const parsed = rule.target.match(/^(agent|role):([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/);
+  if (!parsed) {
+    throw new AgentTeamGovernanceError(
+      `Stored Agent Team rule has unsupported target: ${rule.target}`,
+      500,
+      'PINNED_RULE_TARGET_INVALID',
+    );
+  }
+  return parsed[1] === 'agent'
+    ? parsed[2] === subject.agentName
+    : parsed[2] === subject.agentRole;
 }
 
 function mergeQuotas(...inputs: Array<Partial<AgentTeamGovernanceQuotas> | undefined>): AgentTeamGovernanceQuotas {

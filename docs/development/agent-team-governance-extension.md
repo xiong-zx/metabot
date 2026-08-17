@@ -36,6 +36,11 @@ of truth for Teams, Agents, Tasks, Messages, Runs, and supervisor execution.
 - Each instance may pin its owning PM bot. `prepareRun()` returns that bot and
   a stable `teaminst:<instance>:<agent>` chat id without changing
   upstream session records.
+- Rule targets are exact and fail closed. An omitted target applies to every
+  Agent in the instance; `agent:<name>` and `role:<role>` match only the
+  current governed execution subject. Legacy unprefixed targets normalize to
+  exact Agent names. Wildcards and unknown target syntax are rejected when a
+  RuleSet is published, and invalid pinned legacy data blocks execution.
 - Governed upstream Team names use only `[a-z0-9._-]` and reserve the `atg-`
   prefix. Startup reconciliation recreates missing upstream rows, restores the
   governed active/stopped state, repairs missing pinned Template members, and
