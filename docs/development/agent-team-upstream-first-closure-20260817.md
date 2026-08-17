@@ -11,7 +11,9 @@ migration and isolates one existing downstream governance capability:
 - reliable scheduled and background delivery while the PM chat is busy;
 - schedule management limited to an `admin`, `user`, or `pm` principal's
   signed bot and chat scope;
-- exact Agent/role RuleSet targeting without silent broadcast.
+- exact Agent/role RuleSet targeting without silent broadcast;
+- activity cards routed through the same instance-pinned PM bot as governed
+  Agent execution.
 
 No legacy Team Store, Worker Manager, Memory Core, or customized Agent Team UI
 was restored.
@@ -25,6 +27,7 @@ was restored.
 | Deferred activity delivery | Upstreamable | `src/bridge/deferred-activity-delivery.ts` | `MessageBridge` enqueue/deliver hooks |
 | Scoped schedule management | Downstream-only W01 | `src/agent-teams/schedule-capability.ts` | HTTP capability gate, schedule routes, CLI forwarding |
 | Exact RuleSet targeting | Downstream-only W01 | `src/agent-teams/governance-extension.ts` | Supervisor execution subject |
+| Pinned activity routing | Downstream-only W01 | `src/agent-teams/governance-extension.ts` | Supervisor activity bot selection |
 
 The upstreamable roots remain listed in `config/downstream-features.json`
 only while downstream carries them ahead of upstream. Remove those temporary
@@ -68,12 +71,19 @@ manifest entries after upstream accepts equivalent commits.
 - wildcard or unknown target syntax is rejected, never silently broadcast;
 - provenance records both total and selected rule counts.
 
+### Instance-pinned activity routing
+
+- governed member execution and activity cards use the same instance `pmBot`;
+- an unavailable pinned bot is logged before the existing global fallback is
+  used;
+- unrelated global bots do not receive activity when the pinned bot exists.
+
 ## Validation
 
 - stable-main focused Agent Team integration: 19 files, 231 tests;
 - stable-main root and workspace test run: 1,550 passed, 1 expected skip;
-- `origin/dev` combined Agent Team integration: 20 files, 259 tests;
-- `origin/dev` root and workspace test run: 1,579 passed, 1 expected skip;
+- `origin/dev` combined Agent Team integration: 20 files, 260 tests;
+- `origin/dev` root and workspace test run: 1,580 passed, 1 expected skip;
 - full build and release packaging passed;
 - lint passed with no errors and six unrelated baseline warnings;
 - release downstream-boundary gate and `git diff --check` passed;
