@@ -6,6 +6,7 @@ import type { Logger } from '../utils/logger.js';
 import type { BotRegistry } from '../api/bot-registry.js';
 import type { WebSocketHandle } from '../web/ws-server.js';
 import type { CardState } from '../types.js';
+import { decideBusyRetry } from './busy-retry-policy.js';
 import { isValidCron, nextCronOccurrence, getDefaultTimezone } from './cron-utils.js';
 
 // --- One-time task types (unchanged) ---
@@ -90,9 +91,6 @@ interface PersistedData {
 
 // --- Constants ---
 
-const BUSY_RETRY_INITIAL_DELAY_MS = 30_000;
-const BUSY_RETRY_MAX_DELAY_MS = 5 * 60_000;
-const BUSY_RETRY_WINDOW_MS = 30 * 60_000;
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
 // Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
@@ -387,15 +385,18 @@ export class TaskScheduler {
     // the same bounded window instead of restarting or collapsing retries.
     if (bot.bridge.isBusy(task.chatId)) {
       const now = Date.now();
-      task.busySince ??= now;
-      const remainingMs = task.busySince + BUSY_RETRY_WINDOW_MS - now;
-      if (remainingMs > 0) {
-        const exponentialDelay = BUSY_RETRY_INITIAL_DELAY_MS * 2 ** Math.min(task.retryCount, 10);
-        const retryDelayMs = Math.min(exponentialDelay, BUSY_RETRY_MAX_DELAY_MS, remainingMs);
-        task.retryCount += 1;
-        task.executeAt = now + retryDelayMs;
+      const decision = decideBusyRetry(now, task);
+      task.busySince = decision.busySince;
+      if (decision.kind === 'defer') {
+        task.retryCount = decision.retryCount;
+        task.executeAt = decision.executeAt;
         this.logger.info(
-          { taskId: id, retryCount: task.retryCount, retryDelayMs, remainingMs },
+          {
+            taskId: id,
+            retryCount: task.retryCount,
+            retryDelayMs: decision.retryDelayMs,
+            remainingMs: decision.remainingMs,
+          },
           'Chat busy, deferring scheduled task',
         );
         this.setTimer(task);
