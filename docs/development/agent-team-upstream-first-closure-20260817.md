@@ -60,8 +60,8 @@ manifest entries after upstream accepts equivalent commits.
 
 ## Validation
 
-- focused Agent Team integration: 18 files, 227 tests;
-- complete root and workspace test run: 1,546 passed, 1 expected skip;
+- focused Agent Team integration: 19 files, 230 tests;
+- complete root and workspace test run: 1,549 passed, 1 expected skip;
 - full build and release packaging passed;
 - lint passed with no errors and six unrelated baseline warnings;
 - release downstream-boundary gate and `git diff --check` passed;
