@@ -73,6 +73,9 @@ The bridge builds a team snapshot from the Agent Teams store:
   with exponential backoff while the chat has a foreground turn. The queue is
   bounded to 25 bodies and delivers at the 30-minute cap instead of dropping
   completion output.
+- Activity emitted in one short burst is coalesced into one card. Later
+  activity within 30 minutes updates that same card; an update failure falls
+  back to a new card so delivery remains reliable.
 
 This card state is derived from `/api/agent-teams/<team>` data, so CLI updates immediately affect what the bridge can render.
 

@@ -16,6 +16,29 @@ afterEach(() => {
 });
 
 describe('DeferredActivityDelivery', () => {
+  it('coalesces an idle burst into one delivery when configured', async () => {
+    vi.useFakeTimers();
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const queue = new DeferredActivityDelivery({
+      isBusy: () => false,
+      deliver,
+      logger,
+      coalesceMs: 250,
+    });
+
+    await queue.enqueue('chat', 'first event');
+    await queue.enqueue('chat', 'second event');
+    await queue.enqueue('chat', 'second event');
+    expect(deliver).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0][1]).toContain('first event');
+    expect(deliver.mock.calls[0][1]).toContain('second event');
+    queue.destroy();
+  });
+
   it('deduplicates activity and delivers it once the chat becomes idle', async () => {
     vi.useFakeTimers();
     let busy = true;

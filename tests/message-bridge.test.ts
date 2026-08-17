@@ -122,12 +122,90 @@ describe('MessageBridge deferred Agent activity', () => {
     expect(sender.sent).toHaveLength(0);
 
     internals.runningTasks.delete('chat-1');
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_250);
 
     expect(sender.sent).toHaveLength(1);
     expect(sender.sent[0].chatId).toBe('chat-1');
     expect(sender.sent[0].state.status).toBe('agent_activity');
     expect(sender.sent[0].state.responseText).toBe('member completed');
+    bridge.destroy();
+  });
+
+  it('coalesces one activity burst and reuses the existing card for later activity', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any);
+
+    await bridge.sendAgentActivityCard('chat-1', 'member completed');
+    await bridge.sendAgentActivityCard('chat-1', 'member report');
+    await bridge.sendAgentActivityCard('chat-1', 'team idle');
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.updated).toHaveLength(0);
+    expect(sender.sent[0].state.responseText).toContain('member completed');
+    expect(sender.sent[0].state.responseText).toContain('member report');
+    expect(sender.sent[0].state.responseText).toContain('team idle');
+
+    await bridge.sendAgentActivityCard('chat-1', 'later activity');
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.updated).toHaveLength(1);
+    expect(sender.updated[0]).toMatchObject({
+      messageId: 'msg-1',
+      state: { status: 'agent_activity', responseText: 'later activity' },
+    });
+    bridge.destroy();
+  });
+
+  it('sends a replacement card when activity card reuse is rejected', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any);
+
+    await bridge.sendAgentActivityCard('chat-1', 'initial activity');
+    await vi.advanceTimersByTimeAsync(250);
+    sender.updateCard = vi.fn(async (messageId: string, state: CardState) => {
+      sender.updated.push({ messageId, state });
+      return false;
+    });
+
+    await bridge.sendAgentActivityCard('chat-1', 'replacement activity');
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(sender.updated).toHaveLength(1);
+    expect(sender.updated[0].messageId).toBe('msg-1');
+    expect(sender.sent).toHaveLength(2);
+    expect(sender.sent[1]).toMatchObject({
+      chatId: 'chat-1',
+      state: { status: 'agent_activity', responseText: 'replacement activity' },
+    });
+    bridge.destroy();
+  });
+
+  it('serializes activity card writes while the initial send is in flight', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const { entered, release } = deferFirstSendCard(sender);
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any);
+
+    await bridge.sendAgentActivityCard('chat-1', 'initial activity');
+    await vi.advanceTimersByTimeAsync(250);
+    await entered;
+
+    await bridge.sendAgentActivityCard('chat-1', 'activity during send');
+    await vi.advanceTimersByTimeAsync(250);
+    const pendingDelivery = (bridge as any).agentActivityCardDeliveries.get('chat-1');
+    release();
+    await pendingDelivery;
+
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.updated).toHaveLength(1);
+    expect(sender.updated[0]).toMatchObject({
+      messageId: 'msg-1',
+      state: { status: 'agent_activity', responseText: 'activity during send' },
+    });
     bridge.destroy();
   });
 });

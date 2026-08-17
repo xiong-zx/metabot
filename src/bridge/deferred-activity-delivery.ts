@@ -22,6 +22,7 @@ interface DeferredActivityDeliveryOptions {
   maxDelayMs?: number;
   maxDeferralMs?: number;
   maxItems?: number;
+  coalesceMs?: number;
 }
 
 /**
@@ -35,12 +36,14 @@ export class DeferredActivityDelivery {
   private readonly maxDelayMs: number;
   private readonly maxDeferralMs: number;
   private readonly maxItems: number;
+  private readonly coalesceMs: number;
 
   constructor(private readonly options: DeferredActivityDeliveryOptions) {
     this.initialDelayMs = options.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
     this.maxDeferralMs = options.maxDeferralMs ?? DEFAULT_MAX_DEFERRAL_MS;
     this.maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
+    this.coalesceMs = options.coalesceMs ?? 0;
   }
 
   async enqueue(chatId: string, body: string): Promise<void> {
@@ -66,7 +69,17 @@ export class DeferredActivityDelivery {
       }
     }
 
-    if (!entry.timer) await this.flush(chatId);
+    if (!entry.timer) {
+      if (this.coalesceMs > 0) {
+        entry.timer = setTimeout(() => {
+          entry.timer = undefined;
+          void this.flush(chatId);
+        }, this.coalesceMs);
+        entry.timer.unref?.();
+      } else {
+        await this.flush(chatId);
+      }
+    }
   }
 
   destroy(): void {

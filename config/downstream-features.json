@@ -93,7 +93,7 @@
         "src/workers",
         "@xvirobotics/worker-runner-mcp"
       ],
-      "reason": "Track generic bounded busy-chat retry and activity delivery as removable upstreamable patches until upstream accepts them.",
+      "reason": "Track generic bounded busy-chat retry, burst coalescing, and reusable activity-card delivery as removable upstreamable patches until upstream accepts them.",
       "validationSurface": [
         "tests/busy-retry-policy.test.ts",
         "tests/task-scheduler-one-time.test.ts",
