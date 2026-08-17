@@ -69,6 +69,10 @@ The bridge builds a team snapshot from the Agent Teams store:
   all-idle line. Visible task counts and task ownership remain available.
 - The **Background activity** panel shows runs with status and the latest output or error.
 - Task statuses shown on cards are `pending`, `in_progress`, and `completed`; deleted tasks are hidden.
+- Between-turn Agent Team and spontaneous activity is deduplicated and deferred
+  with exponential backoff while the chat has a foreground turn. The queue is
+  bounded to 25 bodies and delivers at the 30-minute cap instead of dropping
+  completion output.
 
 This card state is derived from `/api/agent-teams/<team>` data, so CLI updates immediately affect what the bridge can render.
 
