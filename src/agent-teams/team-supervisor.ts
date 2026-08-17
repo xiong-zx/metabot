@@ -251,7 +251,10 @@ export class AgentTeamSupervisor {
       preparation?.chatId ??
       (isolatedSession ? `team:${teamName}:${agent.name}:${run.id}` : `team:${teamName}:${agent.name}`);
     const rulesContext = preparation
-      ? this.options.governance!.buildRulesContext(preparation.instanceId).text
+      ? this.options.governance!.buildRulesContext(preparation.instanceId, {
+          agentName: agent.name,
+          agentRole: agent.role,
+        }).text
       : undefined;
     this.inFlightRuns.set(run.id, {
       teamName,
