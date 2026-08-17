@@ -9,6 +9,8 @@ migration and isolates one existing downstream governance capability:
 
 - compact Agent Team cards;
 - reliable scheduled and background delivery while the PM chat is busy;
+- update-oriented activity cards that coalesce short bursts and reuse one
+  message per chat;
 - schedule management limited to an `admin`, `user`, or `pm` principal's
   signed bot and chat scope;
 - exact Agent/role RuleSet targeting without silent broadcast;
@@ -24,7 +26,7 @@ was restored.
 | --- | --- | --- | --- |
 | Compact Team cards | Upstreamable | `src/feishu/team-panel.ts` | v1/v2 card builders |
 | Busy schedule retry | Upstreamable | `src/scheduler/busy-retry-policy.ts` | `TaskScheduler.fireTask()` |
-| Deferred activity delivery | Upstreamable | `src/bridge/deferred-activity-delivery.ts` | `MessageBridge` enqueue/deliver hooks |
+| Deferred activity and card lifecycle | Upstreamable | `src/bridge/deferred-activity-delivery.ts` | per-chat `MessageBridge` enqueue, card-reference, and serialized update hooks |
 | Scoped schedule management | Downstream-only W01 | `src/agent-teams/schedule-capability.ts` | HTTP capability gate, schedule routes, CLI forwarding |
 | Exact RuleSet targeting | Downstream-only W01 | `src/agent-teams/governance-extension.ts` | Supervisor execution subject |
 | Pinned activity routing | Downstream-only W01 | `src/agent-teams/governance-extension.ts` | Supervisor activity bot selection |
@@ -52,6 +54,16 @@ manifest entries after upstream accepts equivalent commits.
   failure notice;
 - Agent Team and spontaneous activity share a deduplicated, 25-item bounded
   queue and deliver no later than the 30-minute cap.
+
+### Activity-card lifecycle
+
+- activity arriving in one 250 ms window is delivered as one combined body;
+- subsequent activity within 30 minutes updates the existing card instead of
+  creating another message;
+- writes for one chat are serialized so activity arriving during the initial
+  network send updates that message after it is created;
+- a rejected or failed update falls back to a new card without losing the
+  activity body.
 
 ### Scoped scheduling
 
@@ -83,13 +95,14 @@ manifest entries after upstream accepts equivalent commits.
 - stable-main focused Agent Team integration: 19 files, 231 tests;
 - stable-main root and workspace test run: 1,550 passed, 1 expected skip;
 - `origin/dev` combined Agent Team integration: 20 files, 260 tests;
-- `origin/dev` root and workspace test run: 1,580 passed, 1 expected skip;
+- final activity-card targeted suite: 2 files, 60 tests;
+- final `origin/dev` root and workspace test run: 1,585 passed, 1 expected skip;
 - full build and release packaging passed;
 - lint passed with no errors and six unrelated baseline warnings;
 - release downstream-boundary gate and `git diff --check` passed;
 - `upstream/main` remains an ancestor of the integration branch.
 
-## Remaining Live Gate
+## Live Acceptance
 
 The authorized current-chat E2E completed on runtime `816922a`:
 
@@ -109,17 +122,32 @@ The authorized current-chat E2E completed on runtime `816922a`:
   `om_x100b670114aa74a10870afb1fa6f01c` exactly once after busy cleared.
 
 The E2E also found that Supervisor activity used the global bot instead of the
-instance `pmBot`. Commit `0fe67ae` fixes that route and passed the final full
-gate. A live harness using the real Governance, Supervisor, BotRegistry, pm
-Lark app, and current group sent card
-`om_x100b67013c0a24a1086b416c9db1af8` with `pmCalls=1` and
-`adminCalls=0`. Per restart-continuation policy, PM2 runtime `816922a` was not
-restarted a second time solely to reload this follow-up; only the normal
-runtime rollout of the already-tested `origin/dev` fix remains.
+instance `pmBot`. Commit `0fe67ae` fixed that route. Protected deployment
+`agent-team-at007-deploy-20260817-001` loaded runtime `8489160`; governed Run
+`run-msxqzoo6-ht47qt` completed as `AT007-DEPLOYED-DONE` and every activity
+delivery was logged with `bot: "pm"`.
+
+That deployed check exposed AT-003: one completion created three activity
+cards. Commit `c43aea4` added burst coalescing, message reuse, serialized
+per-chat writes, and fallback delivery. Protected deployment
+`agent-team-at003-deploy-20260817-001` reached `healthy` with Bridge, Worker
+Runner, ARC, and Core all pinned to that worktree. In the current group:
+
+- Run `run-msxrl7kp-e127nz` completed as `AT003-BURST-ONE`;
+- Run `run-msxrmhvy-i324ov` completed as `AT003-UPDATE-TWO`;
+- exactly one new card was sent,
+  `om_x100b670c586024a1085c76c8ae497da`;
+- the three later deliveries updated that same message ID, with no additional
+  card creation;
+- all Run execution and activity-card logs used the instance-pinned `pm` bot.
+
+The temporary governed E2E instance and its generated Team were deleted after
+the acceptance run. No Agent Team live gate remains.
 
 ## Rollback
 
-Revert the focused feature commits or their integration merges. No schema
-migration is required: the scheduler fields are optional JSON properties, and
-the activity queue is in-memory only. Existing Team, Task, Message, Run,
-Template, RuleSet, and schedule records remain compatible.
+Revert the focused feature commits or switch PM2 back to the prior tested
+`8489160` worktree. No schema migration is required: scheduler fields are
+optional JSON properties, while the activity queue and card-reference cache
+are in-memory only. Existing Team, Task, Message, Run, Template, RuleSet, and
+schedule records remain compatible.
