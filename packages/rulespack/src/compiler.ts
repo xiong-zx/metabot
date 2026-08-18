@@ -4,16 +4,19 @@ import { matchRule } from './matcher.js';
 import {
   COMPILER_VERSION,
   PACK_SCHEMA_VERSION,
+  type CompileBudget,
   type CompileExplanation,
   type CompileRequest,
   type CompiledRulesPack,
   type RuleDecision,
   type RuleV1,
+  type RulesMode,
   type SelectedRule,
+  type SourceGeneration,
 } from './model.js';
 import { AUTHORITY_RANK, compareRulePrecedence, isMandatory, precedenceDescription } from './precedence.js';
 import { renderRules } from './render.js';
-import { validateExecutionSubject, validateRule } from './validate.js';
+import { validateExecutionSubject, validateRule, validateSourceGeneration } from './validate.js';
 
 interface Candidate {
   rule: RuleV1;
@@ -149,6 +152,71 @@ export function sourceSnapshotDigest(request: Pick<CompileRequest, 'sourceGenera
         required,
         health,
       })),
+  );
+}
+
+interface CompileIdentityInput {
+  compilerVersion: string;
+  subjectFingerprint: string;
+  sourceGenerations: readonly SourceGeneration[];
+  budget: CompileBudget;
+  mode: RulesMode;
+  degradationReasons: readonly string[];
+}
+
+function normalizedCompileIdentity(input: CompileIdentityInput): unknown {
+  const sourceGenerations = input.sourceGenerations
+    .map(validateSourceGeneration)
+    .sort((left, right) => left.sourceId.localeCompare(right.sourceId))
+    .map(({ sourceId, kind, generation, revision, snapshotDigest, required, health, ruleCount }) => ({
+      sourceId,
+      kind,
+      generation,
+      revision,
+      snapshotDigest,
+      required,
+      health,
+      ruleCount,
+    }));
+  return {
+    compilerVersion: input.compilerVersion,
+    mode: input.mode,
+    budget: {
+      maxTokens: input.budget.maxTokens,
+      maxCharacters: input.budget.maxCharacters,
+    },
+    subjectFingerprint: input.subjectFingerprint,
+    sourceSnapshotDigest: sourceSnapshotDigest({ sourceGenerations: input.sourceGenerations }),
+    sourceGenerations,
+    degradationReasons: [...input.degradationReasons],
+  };
+}
+
+export function compileIdentityDigest(
+  request: Pick<CompileRequest, 'subject' | 'sourceGenerations' | 'budget' | 'mode' | 'degradationReasons'>,
+): string {
+  return digestObject(
+    normalizedCompileIdentity({
+      compilerVersion: COMPILER_VERSION,
+      subjectFingerprint: subjectFingerprint(request.subject),
+      sourceGenerations: request.sourceGenerations,
+      budget: request.budget,
+      mode: request.mode ?? 'enforce',
+      degradationReasons: request.degradationReasons ?? [],
+    }),
+  );
+}
+
+export function compiledPackIdentityDigest(pack: CompiledRulesPack): string {
+  return digestObject(
+    normalizedCompileIdentity({
+      compilerVersion: pack.compilerVersion,
+      subjectFingerprint: subjectFingerprint(pack.target),
+      sourceGenerations: pack.sourceGenerations,
+      budget: pack.budget,
+      mode: pack.mode,
+      degradationReasons: pack.degradationReasons,
+    }),
   );
 }
 
@@ -356,9 +424,10 @@ export function compileRules(request: CompileRequest): CompiledRulesPack {
   }
   decisions.sort((left, right) => left.ruleId.localeCompare(right.ruleId) || left.disposition.localeCompare(right.disposition));
   const rendered = renderRules(renderedSelected);
-  const expiryCandidates = renderedSelected
-    .map((rule) => rule.lifecycle.expiresAt)
+  const expiryCandidates = normalized
+    .flatMap((rule) => [rule.lifecycle.validFrom, rule.lifecycle.expiresAt])
     .filter((value): value is string => value !== undefined)
+    .filter((value) => Date.parse(value) > nowMs)
     .sort();
   const packDigest = digestObject(packDigestPayload({
     compilerVersion: COMPILER_VERSION,
@@ -429,6 +498,10 @@ export function verifyCompiledPack(pack: CompiledRulesPack, now = new Date().toI
   const fingerprint = subjectFingerprint(pack.target);
   if (fingerprint !== pack.subjectFingerprint) {
     throw new RulesPackError('TARGET_MISMATCH', 'CompiledRulesPack subject fingerprint is invalid');
+  }
+  const sourceGenerations = pack.sourceGenerations.map(validateSourceGeneration);
+  if (sourceSnapshotDigest({ sourceGenerations }) !== pack.sourceSnapshotDigest) {
+    throw new RulesPackError('VALIDATION_ERROR', 'CompiledRulesPack source snapshot digest is invalid');
   }
   for (const rule of pack.rules) {
     const { selectionReason, dependencyOf: _dependencyOf, ...baseRule } = rule;

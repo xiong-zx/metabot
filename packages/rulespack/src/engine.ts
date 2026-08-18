@@ -2,9 +2,10 @@ import { performance } from 'node:perf_hooks';
 import { digestObject } from './canonical.js';
 import { LruCache } from './cache.js';
 import {
+  compileIdentityDigest,
   compileRules,
+  compiledPackIdentityDigest,
   recomputePackDigest,
-  sourceSnapshotDigest,
   subjectFingerprint,
   verifyCompiledPack,
 } from './compiler.js';
@@ -222,14 +223,12 @@ export class RulesPackEngine {
       return { pack, telemetry, injectionText: '' };
     }
     const sourceState = this.#effectiveSourceState(options.sourceState ?? this.#storedSourceState(now, false), now);
-    const snapshotDigest = sourceSnapshotDigest({ sourceGenerations: sourceState.generations });
-    const cacheKey = digestObject({
-      compilerVersion: COMPILER_VERSION,
-      subjectFingerprint: fingerprint,
-      sourceSnapshotDigest: snapshotDigest,
-      generations: sourceState.generations.map(({ sourceId, generation }) => ({ sourceId, generation })),
+    const cacheKey = compileIdentityDigest({
+      subject: options.subject,
+      sourceGenerations: sourceState.generations,
       budget,
       mode,
+      degradationReasons: sourceState.degradationReasons,
     });
     const candidateCount = sourceState.rules?.length ?? this.store.counts().currentRules;
     const cacheEnabled = options.provisional !== true;
@@ -335,7 +334,7 @@ export class RulesPackEngine {
       this.#assertCurrentSourceSafety(currentRules, sourceState.generations);
       this.#assertLkgCurrentLifecycle(currentRules, now);
       const lkg = this.store.getLastKnownGood(fingerprint, now);
-      if (!lkg) throw error;
+      if (!lkg || compiledPackIdentityDigest(lkg) !== cacheKey) throw error;
       const pack = recomputePackDigest({
         ...lkg,
         compiledAt: now,

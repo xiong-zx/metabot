@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { RulesPackEngine } from '../src/engine.js';
-import { compileRules } from '../src/compiler.js';
+import { compileRules, recomputePackDigest } from '../src/compiler.js';
 import { configSource } from '../src/sources.js';
 import { verifyCompiledPack } from '../src/compiler.js';
 import { RulesPackError } from '../src/errors.js';
@@ -105,10 +105,12 @@ test('LKG fallback is limited to an explicit transient compiler failure after cu
   const store = new RulesStore(':memory:');
   const current = makeRule({ id: 'transient-lkg', text: 'Known safe Rule.' });
   store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
-  const first = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 }).compile({
-    subject,
-    now: NOW,
-  });
+  const first = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    cacheTtlMs: 500,
+    lastKnownGoodTtlMs: 60_000,
+  }).compile({ subject, now: NOW });
   const transient = new RulesPackEngine({
     store,
     mode: 'enforce',
@@ -122,7 +124,7 @@ test('LKG fallback is limited to an explicit transient compiler failure after cu
     now: '2026-08-18T06:00:01.000Z',
     sourceState: {
       rules: [current],
-      generations: [sourceGeneration('transient-generation', [current])],
+      generations: [sourceGeneration('gen-1', [current])],
       degradationReasons: [],
       usedLastKnownGood: false,
     },
@@ -134,6 +136,169 @@ test('LKG fallback is limited to an explicit transient compiler failure after cu
   assert.equal(fallback.pack.lastKnownGood, true);
   assert.equal(fallback.telemetry.usedLastKnownGood, true);
   assert.equal(verifyCompiledPack(fallback.pack, '2026-08-18T06:00:01.000Z'), fallback.pack);
+  store.close();
+});
+
+test('LKG rejects a changed generation that adds an applicable mandatory Rule', () => {
+  const store = new RulesStore(':memory:');
+  const baseline = makeRule({ id: 'baseline', text: 'Keep the baseline Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [baseline]), rules: [baseline] });
+  new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 }).compile({ subject, now: NOW });
+
+  const mandatory = makeRule({
+    id: 'new-mandatory',
+    text: 'New mandatory current policy.',
+    mandatory: true,
+    overridable: false,
+    priority: 100,
+  });
+  store.replaceSourceSnapshot({
+    source: sourceGeneration('gen-2', [baseline, mandatory]),
+    rules: [baseline, mandatory],
+  });
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    lastKnownGoodTtlMs: 60_000,
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  assert.throws(
+    () => transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+  );
+  store.close();
+});
+
+test('cache and LKG expire before an unchanged snapshot makes a mandatory Rule newly applicable', () => {
+  const store = new RulesStore(':memory:');
+  const baseline = makeRule({ id: 'timed-baseline', text: 'Baseline before the activation time.' });
+  const futureMandatory = makeRule({
+    id: 'timed-mandatory',
+    text: 'Mandatory after activation.',
+    mandatory: true,
+    overridable: false,
+    lifecycle: { status: 'approved', validFrom: '2026-08-18T06:00:00.500Z' },
+  });
+  store.replaceSourceSnapshot({
+    source: sourceGeneration('gen-1', [baseline, futureMandatory]),
+    rules: [baseline, futureMandatory],
+  });
+  const initial = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    cacheTtlMs: 60_000,
+    lastKnownGoodTtlMs: 60_000,
+  }).compile({ subject, now: NOW });
+  assert.deepEqual(
+    initial.pack.rules.map((rule) => rule.id),
+    ['timed-baseline'],
+  );
+  assert.equal(initial.pack.expiresAt, '2026-08-18T06:00:00.500Z');
+
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    lastKnownGoodTtlMs: 60_000,
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  assert.throws(
+    () => transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+  );
+  store.close();
+});
+
+test('LKG rejects a snapshot that removes a nonselected conflict participant', () => {
+  const store = new RulesStore(':memory:');
+  const selected = makeRule({
+    id: 'selected-conflict',
+    text: 'Selected conflict winner.',
+    conflictKey: 'style',
+    priority: 10,
+  });
+  const nonselected = makeRule({ id: 'nonselected-conflict', text: 'Lower conflict candidate.', conflictKey: 'style' });
+  store.replaceSourceSnapshot({
+    source: sourceGeneration('gen-1', [selected, nonselected]),
+    rules: [selected, nonselected],
+  });
+  const initial = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 }).compile({
+    subject,
+    now: NOW,
+  });
+  assert.deepEqual(
+    initial.pack.rules.map((rule) => rule.id),
+    ['selected-conflict'],
+  );
+
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-2', [selected]), rules: [selected] });
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    lastKnownGoodTtlMs: 60_000,
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  assert.throws(
+    () => transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+  );
+  store.close();
+});
+
+test('LKG rejects mode, budget, subject, and source-generation identity changes', () => {
+  const store = new RulesStore(':memory:');
+  const current = makeRule({ id: 'identity-bound', text: 'Identity-bound Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
+  new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 }).compile({ subject, now: NOW });
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    lastKnownGoodTtlMs: 60_000,
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  const changedRequests = [
+    { subject, mode: 'shadow' as const },
+    { subject, budget: { maxTokens: 1_999, maxCharacters: 8_000 } },
+    { subject: { ...subject, taskId: 'different-task' } },
+    {
+      subject,
+      sourceState: {
+        rules: [current],
+        generations: [sourceGeneration('gen-2', [current])],
+        degradationReasons: [],
+        usedLastKnownGood: false,
+      },
+    },
+  ];
+  for (const request of changedRequests) {
+    assert.throws(
+      () => transient.compile({ ...request, now: '2026-08-18T06:00:01.000Z' }),
+      (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+    );
+  }
+  store.close();
+});
+
+test('compiled pack verification recomputes the declared source snapshot identity', () => {
+  const store = new RulesStore(':memory:');
+  const current = makeRule({ id: 'pack-snapshot', text: 'Snapshot-bound Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
+  const result = new RulesPackEngine({ store, mode: 'enforce' }).compile({ subject, now: NOW });
+  const selfConsistentlyTampered = recomputePackDigest({
+    ...result.pack,
+    sourceSnapshotDigest: 'sha256:pack-declared-but-not-recomputed',
+  });
+  assert.throws(
+    () => verifyCompiledPack(selfConsistentlyTampered, NOW),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'VALIDATION_ERROR',
+  );
   store.close();
 });
 

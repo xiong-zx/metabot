@@ -116,7 +116,7 @@ describe('downstream feature boundary gate', () => {
     ]);
   });
 
-  it('can scan a source-only import root while retaining tests under the feature root', () => {
+  it('recursively scans source files anywhere under an owned directory root', () => {
     const root = fixture({
       schemaVersion: 1,
       forbiddenPaths: [],
@@ -131,38 +131,86 @@ describe('downstream feature boundary gate', () => {
       ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'packages/adapter/tests'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'packages/adapter/extra'), { recursive: true });
     fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export const adapter = true;\n');
-    fs.writeFileSync(path.join(root, 'packages/adapter/tests/integration.test.ts'), "import '@example/runtime';\n");
-    expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
-
-    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), "import '@example/runtime';\n");
+    fs.writeFileSync(path.join(root, 'packages/adapter/extra/worker.ts'), "import '@example/runtime';\n");
     expect(checkDownstreamBoundaries(root).failures).toEqual([
-      "adapter: packages/adapter/src/index.ts imports forbidden '@example/runtime'",
+      "adapter: packages/adapter/extra/worker.ts imports forbidden '@example/runtime'",
     ]);
   });
 
-  it('also scans every declared owned source-file root omitted from importRoots', () => {
+  it('recursively scans nested tests under an owned directory root', () => {
     const root = fixture({
       schemaVersion: 1,
       forbiddenPaths: [],
       features: [
         {
-          id: 'multi-root-adapter',
+          id: 'adapter',
           status: 'required',
-          roots: ['packages/adapter', 'src/extensions/hook.ts'],
+          roots: ['packages/adapter'],
           importRoots: ['packages/adapter/src'],
           forbiddenImports: ['@example/runtime'],
         },
       ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'src/extensions'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'packages/adapter/tests/nested'), { recursive: true });
     fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export {}\n');
-    fs.writeFileSync(path.join(root, 'src/extensions/hook.ts'), "import '@example/runtime';\n");
+    fs.writeFileSync(
+      path.join(root, 'packages/adapter/tests/nested/integration.test.ts'),
+      "import '@example/runtime';\n",
+    );
     expect(checkDownstreamBoundaries(root).failures).toEqual([
-      "multi-root-adapter: src/extensions/hook.ts imports forbidden '@example/runtime'",
+      "adapter: packages/adapter/tests/nested/integration.test.ts imports forbidden '@example/runtime'",
     ]);
+  });
+
+  it('supports an explicit separate test-root import policy', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter-production',
+          status: 'required',
+          roots: ['packages/adapter/src'],
+          forbiddenImports: ['@example/runtime'],
+        },
+        {
+          id: 'adapter-tests',
+          status: 'required',
+          roots: ['packages/adapter/tests'],
+          forbiddenImports: ['@example/internal'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'packages/adapter/tests'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export {}\n');
+    fs.writeFileSync(path.join(root, 'packages/adapter/tests/integration.test.ts'), "import '@example/runtime';\n");
+    expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
+  });
+
+  it('ignores unrelated roots and generated dependency or output directories', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter',
+          status: 'required',
+          roots: ['packages/adapter'],
+          forbiddenImports: ['@example/runtime'],
+        },
+      ],
+    });
+    for (const directory of ['node_modules', 'dist', 'build', 'coverage']) {
+      fs.mkdirSync(path.join(root, 'packages/adapter', directory), { recursive: true });
+      fs.writeFileSync(path.join(root, 'packages/adapter', directory, 'generated.js'), "import '@example/runtime';\n");
+    }
+    fs.mkdirSync(path.join(root, 'packages/unrelated'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/unrelated/index.ts'), "import '@example/runtime';\n");
+    expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
   });
 
   it('rejects import roots outside the declared feature roots', () => {

@@ -82,21 +82,14 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
     } else if (importRoots.some((item) => !roots.some((featureRoot) => containsPath(featureRoot, item)))) {
       failures.push(`${feature.id}: importRoots must stay within declared roots`);
     } else {
-      const declaredSourceFiles = roots.filter((item) => {
-        const resolved = resolveInside(root, item);
-        return (
-          pathEntryExists(resolved) && fs.lstatSync(resolved).isFile() && SOURCE_EXTENSIONS.has(path.extname(resolved))
-        );
-      });
-      const effectiveImportRoots = [...new Set([...importRoots, ...declaredSourceFiles])];
-      const existingImportRoots = effectiveImportRoots.filter((item) => pathEntryExists(resolveInside(root, item)));
+      const existingImportRoots = importRoots.filter((item) => pathEntryExists(resolveInside(root, item)));
       assertSourceRootsAreNotSymlinks(root, existingImportRoots);
-      if (feature.status === 'required' && existingImportRoots.length !== effectiveImportRoots.length) {
-        const missing = effectiveImportRoots.filter((item) => !existingImportRoots.includes(item));
+      if (feature.status === 'required' && existingImportRoots.length !== importRoots.length) {
+        const missing = importRoots.filter((item) => !existingImportRoots.includes(item));
         failures.push(`${feature.id}: missing required importRoots: ${missing.join(', ')}`);
       }
-      if (existingImportRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
-        scanForbiddenImports(root, feature.id, existingImportRoots, feature.forbiddenImports, failures);
+      if (existingRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
+        scanForbiddenImports(root, feature.id, existingRoots, feature.forbiddenImports, failures);
       }
     }
     checkedFeatures.push({ id: feature.id, status: feature.status, presentRoots: existingRoots.length });
@@ -150,13 +143,12 @@ function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, f
     failures.push(`${boundaryId}: forbiddenImports must contain non-empty strings`);
     return;
   }
-  for (const sourceRoot of sourceRoots) {
-    for (const file of walkSourceFiles(resolveInside(root, sourceRoot))) {
-      if (allowedImporters.some((allowed) => file === allowed || file.startsWith(`${allowed}${path.sep}`))) continue;
-      for (const specifier of collectModuleSpecifiers(file)) {
-        const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
-        if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);
-      }
+  const sourceFiles = new Set(sourceRoots.flatMap((sourceRoot) => walkSourceFiles(resolveInside(root, sourceRoot))));
+  for (const file of [...sourceFiles].sort()) {
+    if (allowedImporters.some((allowed) => file === allowed || file.startsWith(`${allowed}${path.sep}`))) continue;
+    for (const specifier of collectModuleSpecifiers(file)) {
+      const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
+      if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);
     }
   }
 }
@@ -248,7 +240,7 @@ function walkSourceFiles(entry) {
   if (stat.isFile()) return SOURCE_EXTENSIONS.has(path.extname(entry)) ? [entry] : [];
   const files = [];
   for (const name of fs.readdirSync(entry).sort()) {
-    if (name === 'node_modules' || name === 'dist' || name === 'coverage') continue;
+    if (name === 'node_modules' || name === 'dist' || name === 'build' || name === 'coverage') continue;
     const child = path.join(entry, name);
     const childStat = fs.lstatSync(child);
     if (childStat.isSymbolicLink()) throw new Error(`source tree cannot contain a symlink: ${child}`);

@@ -57,7 +57,7 @@ compiled pack. It must not read the dispatcher's MetaMemory namespace.
 | Corrupt/unauthorized Rule, delimiter/credential risk, path escape | Fail closed; do not use LKG to bypass the guard.                                                                                                                                                                               |
 | Wrong subject/audience, expired/tampered pack                     | Fail closed with `TARGET_MISMATCH` or validation error; no injection.                                                                                                                                                          |
 | Mandatory Rule/dependency/budget failure                          | Fail closed; never silently omit or truncate it.                                                                                                                                                                               |
-| Explicit transient `COMPILE_UNAVAILABLE`                          | Use bounded LKG only after the complete current source snapshot passes safety and store-integrity validation and `RulesStore.isPackSafe` confirms every selected Rule is current, unrevoked, and unexpired; mark degraded/LKG. |
+| Explicit transient `COMPILE_UNAVAILABLE`                          | Use bounded LKG only when its recomputed complete compile identity exactly matches the current request, after the complete current source snapshot passes safety and store-integrity validation and `RulesStore.isPackSafe` confirms every selected Rule is current, unrevoked, and unexpired; mark degraded/LKG. |
 | Any other compile/store/validation failure                        | Fail closed; LKG must not mask it.                                                                                                                                                                                             |
 
 Audit data is bounded and redacts content/secret-shaped fields. Receipts never
@@ -75,8 +75,14 @@ claim `injected` or `consumed` until the corresponding adapter action succeeds.
 - Cache reads always run revocation/expiry/current-digest checks. A revocation
   immediately invalidates persistent cache/LKG and makes stale in-memory hits
   fail safety validation.
-- `sourceGeneration + subjectFingerprint + compilerVersion + budget + mode`
-  prevents unchanged turns from rescanning source content.
+- The deterministic compile/cache identity includes compiler version, effective
+  mode, normalized budget, subject fingerprint, recomputed complete source
+  snapshot digest, normalized source kind/ID/generation/revision/digest/
+  required/health/rule-count state, and degradation reasons. LKG compares the
+  recomputed identity rather than trusting pack-declared identity fields.
+- Packs expire at the next Rule `validFrom` or `expiresAt` transition, including
+  nonselected Rules, so an unchanged snapshot cannot hide newly applicable or
+  newly inapplicable conflict/dependency participants.
 
 ## Database migration and rollback
 

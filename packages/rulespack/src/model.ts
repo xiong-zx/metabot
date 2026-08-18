@@ -1,6 +1,6 @@
 export const RULE_SCHEMA_VERSION = 1 as const;
 export const PACK_SCHEMA_VERSION = 1 as const;
-export const COMPILER_VERSION = 'rulespack-compiler/1.1.0';
+export const COMPILER_VERSION = 'rulespack-compiler/1.1.1';
 
 export type RuleScope = 'global' | 'user' | 'project' | 'chat' | 'task';
 export type RuleAuthority =

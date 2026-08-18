@@ -176,7 +176,10 @@ state. Required-source, path escape, unsafe Rule text, mandatory budget,
 dependency, target, expiry, tamper, and replay failures fail closed. Only the
 explicit transient `COMPILE_UNAVAILABLE` failure may use engine-verified
 bounded LKG, and only after the complete current source snapshot passes schema,
-digest, authority, lifecycle, target, text, and store integrity validation.
+digest, authority, lifecycle, target, text, and store integrity validation and
+its recomputed compiler/mode/budget/subject/source identity exactly matches the
+current compile request. Packs expire before any Rule lifecycle transition,
+including transitions of Rules that were not selected in the old pack.
 Mode `off` resolves before source fail-closed checks and continues with a
 degraded empty pack even when required source state is stale, unavailable, or
 corrupt.

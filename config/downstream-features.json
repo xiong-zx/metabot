@@ -168,8 +168,14 @@
     {
       "id": "arc-worker-runner-adapter",
       "status": "required",
-      "roots": ["packages/arc-worker-runner-adapter"],
-      "importRoots": ["packages/arc-worker-runner-adapter/src"],
+      "roots": [
+        "packages/arc-worker-runner-adapter/src",
+        "packages/arc-worker-runner-adapter/README.md",
+        "packages/arc-worker-runner-adapter/eslint.config.js",
+        "packages/arc-worker-runner-adapter/package.json",
+        "packages/arc-worker-runner-adapter/tsconfig.json",
+        "packages/arc-worker-runner-adapter/vitest.config.ts"
+      ],
       "forbiddenImports": [
         "src/memory-core",
         "src/agent-teams",
@@ -183,6 +189,19 @@
         "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
         "packages/arc-worker-runner-adapter/tests/integration.test.ts",
         "packages/arc-worker-runner-adapter/tests/boundary.test.ts"
+      ]
+    },
+    {
+      "id": "arc-worker-runner-adapter-tests",
+      "status": "required",
+      "roots": ["packages/arc-worker-runner-adapter/tests"],
+      "forbiddenImports": ["src/memory-core", "src/agent-teams", "src/bridge", "src/engines", "better-sqlite3"],
+      "reason": "Keep adapter tests in an explicit owned root that may exercise the Worker Runner public API without weakening production isolation.",
+      "validationSurface": [
+        "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
+        "packages/arc-worker-runner-adapter/tests/integration.test.ts",
+        "packages/arc-worker-runner-adapter/tests/boundary.test.ts",
+        "tests/downstream-boundaries.test.ts"
       ]
     },
     {
