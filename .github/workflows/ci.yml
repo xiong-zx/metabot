@@ -29,11 +29,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Root TypeScript and adapter sources resolve workspace packages through
+      # their published dist entrypoints. Build the engine first, then the
+      # adapter, before the repository-wide no-emit check.
+      - name: Build RulesPack entrypoints
+        run: npm run build -w @metabot/rulespack -w @metabot/rulespack-adapter
+
       - name: Type check
         run: |
           npx tsc --noEmit
-          npm run typecheck -w @metabot/rulespack
-          npm run typecheck -w @metabot/rulespack-adapter
           npm run typecheck -w @xvirobotics/arc-mcp
           npm run typecheck -w @xvirobotics/worker-runner-mcp
 
@@ -52,8 +56,6 @@ jobs:
           -w @xvirobotics/cli-core
           -w @xvirobotics/metamemory
           -w @xvirobotics/skill-hub
-          -w @metabot/rulespack
-          -w @metabot/rulespack-adapter
           -w @xvirobotics/arc-mcp
           -w @xvirobotics/worker-runner-mcp
           -w @xvirobotics/arc-researchclaw-adapter
