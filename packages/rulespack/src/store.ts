@@ -22,6 +22,29 @@ import {
 
 const SCHEMA_VERSION = 3;
 
+/**
+ * Tables owned by the standalone RulesPack store. Adapters use this exported
+ * contract when validating that a configured database contains no foreign
+ * application schema, so schema migrations cannot drift from a duplicated
+ * hand-maintained allowlist.
+ */
+export const RULESPACK_STORE_TABLES = Object.freeze([
+  'schema_meta',
+  'rule_versions',
+  'current_rules',
+  'revocations',
+  'source_generations',
+  'pack_cache',
+  'pack_cache_sources',
+  'authoritative_compiles',
+  'last_known_good_v3',
+  'cache_metadata',
+  'last_known_good',
+  'audit_events',
+  'delivery_receipts',
+  'feedback',
+] as const);
+
 function parseJson<T>(value: unknown, label: string): T {
   try {
     return JSON.parse(String(value)) as T;

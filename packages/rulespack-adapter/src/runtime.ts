@@ -7,6 +7,7 @@ import {
   MetaMemorySource,
   RulesPackEngine,
   RulesPackError,
+  RULESPACK_STORE_TABLES,
   RulesStore,
   configSource,
   curatedSource,
@@ -49,18 +50,7 @@ const DEFAULT_MAX_ENVELOPE_TTL_MS = 15 * 60_000;
 const DEFAULT_REPLAY_LEASE_MS = 30_000;
 const RESERVED_DATABASE_BASENAMES = new Set(['sessions.db', 'agent-teams.db', 'workers.sqlite', 'arc-runs.sqlite']);
 const RULESPACK_TABLES = new Set([
-  'schema_meta',
-  'rule_versions',
-  'current_rules',
-  'revocations',
-  'source_generations',
-  'pack_cache',
-  'pack_cache_sources',
-  'cache_metadata',
-  'last_known_good',
-  'audit_events',
-  'delivery_receipts',
-  'feedback',
+  ...RULESPACK_STORE_TABLES,
   'rulespack_adapter_settings',
   'rulespack_replay_claims',
   'rulespack_replay_claims_v2',
