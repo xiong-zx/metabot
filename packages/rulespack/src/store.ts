@@ -59,17 +59,20 @@ export interface StoreCounts {
 export class RulesStore {
   readonly filename: string;
   readonly #db: DatabaseSync;
+  readonly #ownsDatabase: boolean;
+  #transactionDepth = 0;
 
-  constructor(filename: string) {
+  constructor(filename: string, database?: DatabaseSync) {
     this.filename = filename;
-    this.#db = new DatabaseSync(filename);
+    this.#db = database ?? new DatabaseSync(filename);
+    this.#ownsDatabase = database === undefined;
     this.#db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     if (filename !== ':memory:') this.#db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
     this.#migrate();
   }
 
   close(): void {
-    this.#db.close();
+    if (this.#ownsDatabase) this.#db.close();
   }
 
   #migrate(): void {
@@ -193,15 +196,39 @@ export class RulesStore {
   }
 
   transaction<T>(operation: () => T): T {
-    this.#db.exec('BEGIN IMMEDIATE');
+    const outermost = this.#transactionDepth === 0;
+    const savepoint = `rulespack_nested_${this.#transactionDepth}`;
+    if (outermost) this.#db.exec('BEGIN IMMEDIATE');
+    else this.#db.exec(`SAVEPOINT ${savepoint}`);
+    this.#transactionDepth += 1;
+    let result: T;
     try {
-      const result = operation();
-      this.#db.exec('COMMIT');
-      return result;
+      result = operation();
     } catch (error) {
-      this.#db.exec('ROLLBACK');
+      this.#transactionDepth -= 1;
+      if (outermost) this.#db.exec('ROLLBACK');
+      else this.#db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
       throw error;
     }
+    this.#transactionDepth -= 1;
+    try {
+      if (outermost) this.#db.exec('COMMIT');
+      else this.#db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+    } catch (error) {
+      try {
+        if (outermost) this.#db.exec('ROLLBACK');
+        else this.#db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+      } catch {
+        // Preserve the original commit/release failure.
+      }
+      throw error;
+    }
+    return result;
+  }
+
+  /** Run an adapter extension update in the same transaction as engine-owned state. */
+  extensionTransaction<T>(operation: (database: DatabaseSync) => T): T {
+    return this.transaction(() => operation(this.#db));
   }
 
   upsertRule(ruleValue: RuleV1, now = new Date().toISOString(), updateGeneration = true): RuleV1 {
@@ -210,9 +237,7 @@ export class RulesStore {
       return this.transaction(() => {
         const stored = this.upsertRule(rule, now, false);
         const currentRules = this.listRules(rule.source.adapterId);
-        const snapshotDigest = digestObject(
-          currentRules.map(({ id, version, digest }) => ({ id, version, digest })),
-        );
+        const snapshotDigest = digestObject(currentRules.map(({ id, version, digest }) => ({ id, version, digest })));
         const manualGeneration = `manual:${snapshotDigest.replace(/^sha256:/u, '')}`;
         this.upsertSourceGeneration({
           sourceId: rule.source.adapterId,
@@ -236,19 +261,33 @@ export class RulesStore {
       throw new RulesPackError('STORE_ERROR', `Rule ID ${rule.id} is already owned by source ${existing.source_id}`);
     }
     this.#db
-      .prepare(`INSERT OR IGNORE INTO rule_versions(id, version, digest, source_id, status, rule_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(rule.id, rule.version, rule.digest, rule.source.adapterId, rule.lifecycle.status, stableStringify(rule), now);
+      .prepare(
+        `INSERT OR IGNORE INTO rule_versions(id, version, digest, source_id, status, rule_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        rule.id,
+        rule.version,
+        rule.digest,
+        rule.source.adapterId,
+        rule.lifecycle.status,
+        stableStringify(rule),
+        now,
+      );
     this.#db
-      .prepare(`INSERT INTO current_rules(id, version, digest, source_id, rule_json, updated_at)
+      .prepare(
+        `INSERT INTO current_rules(id, version, digest, source_id, rule_json, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET version=excluded.version, digest=excluded.digest,
-          source_id=excluded.source_id, rule_json=excluded.rule_json, updated_at=excluded.updated_at`)
+          source_id=excluded.source_id, rule_json=excluded.rule_json, updated_at=excluded.updated_at`,
+      )
       .run(rule.id, rule.version, rule.digest, rule.source.adapterId, stableStringify(rule), now);
     if (rule.lifecycle.status === 'revoked') {
       this.#db
-        .prepare(`INSERT OR REPLACE INTO revocations(rule_id, version, digest, source_id, revoked_at, reason)
-          VALUES (?, ?, ?, ?, ?, ?)`)
+        .prepare(
+          `INSERT OR REPLACE INTO revocations(rule_id, version, digest, source_id, revoked_at, reason)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+        )
         .run(
           rule.id,
           rule.version,
@@ -263,18 +302,29 @@ export class RulesStore {
 
   replaceSourceSnapshot(snapshot: SourceSnapshot): void {
     const sourceId = snapshot.source.sourceId;
+    const source = validateSourceGeneration(snapshot.source);
     const rules = snapshot.rules.map(validateRule);
     if (rules.some((rule) => rule.source.adapterId !== sourceId)) {
       throw new RulesPackError('STORE_ERROR', 'Snapshot contains a rule owned by another source', { sourceId });
     }
+    const snapshotDigest = digestObject(
+      [...rules]
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map(({ id, version, digest }) => ({ id, version, digest })),
+    );
+    if (source.ruleCount !== rules.length || source.snapshotDigest !== snapshotDigest) {
+      throw new RulesPackError('STORE_ERROR', 'Source snapshot integrity check failed', { sourceId });
+    }
     this.transaction(() => {
       const keep = new Set(rules.map((rule) => rule.id));
-      const existing = this.#db.prepare('SELECT id FROM current_rules WHERE source_id = ?').all(sourceId) as Array<{ id: string }>;
+      const existing = this.#db.prepare('SELECT id FROM current_rules WHERE source_id = ?').all(sourceId) as Array<{
+        id: string;
+      }>;
       for (const row of existing) {
         if (!keep.has(row.id)) this.#db.prepare('DELETE FROM current_rules WHERE id = ?').run(row.id);
       }
       for (const rule of rules) this.upsertRule(rule, snapshot.source.observedAt, false);
-      this.upsertSourceGeneration(snapshot.source);
+      this.upsertSourceGeneration(source);
       this.invalidateSourceCache(sourceId);
     });
   }
@@ -283,13 +333,15 @@ export class RulesStore {
     source = validateSourceGeneration(source);
     if (source.error) source = { ...source, error: redactDiagnostic(source.error) };
     this.#db
-      .prepare(`INSERT INTO source_generations(
+      .prepare(
+        `INSERT INTO source_generations(
         source_id, kind, generation, revision, snapshot_digest, observed_at, fresh_until, required, health, error, rule_count
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind, generation=excluded.generation,
         revision=excluded.revision, snapshot_digest=excluded.snapshot_digest,
         observed_at=excluded.observed_at, fresh_until=excluded.fresh_until, required=excluded.required,
-        health=excluded.health, error=excluded.error, rule_count=excluded.rule_count`)
+        health=excluded.health, error=excluded.error, rule_count=excluded.rule_count`,
+      )
       .run(
         source.sourceId,
         source.kind,
@@ -313,27 +365,33 @@ export class RulesStore {
   }
 
   listRules(sourceId?: string): readonly RuleV1[] {
-    const rows = (sourceId
-      ? this.#db.prepare('SELECT rule_json FROM current_rules WHERE source_id = ? ORDER BY id').all(sourceId)
-      : this.#db.prepare('SELECT rule_json FROM current_rules ORDER BY id').all()) as Array<{ rule_json: string }>;
+    const rows = (
+      sourceId
+        ? this.#db.prepare('SELECT rule_json FROM current_rules WHERE source_id = ? ORDER BY id').all(sourceId)
+        : this.#db.prepare('SELECT rule_json FROM current_rules ORDER BY id').all()
+    ) as Array<{ rule_json: string }>;
     return rows.map((row) => validateRule(parseJson(row.rule_json, 'current_rules.rule_json')));
   }
 
   listSourceGenerations(): readonly SourceGeneration[] {
-    const rows = this.#db.prepare('SELECT * FROM source_generations ORDER BY source_id').all() as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
-      sourceId: String(row.source_id),
-      kind: row.kind as SourceGeneration['kind'],
-      generation: String(row.generation),
-      revision: String(row.revision),
-      snapshotDigest: String(row.snapshot_digest),
-      observedAt: String(row.observed_at),
-      ...(row.fresh_until ? { freshUntil: String(row.fresh_until) } : {}),
-      required: Number(row.required) === 1,
-      health: row.health as SourceGeneration['health'],
-      ...(row.error ? { error: String(row.error) } : {}),
-      ruleCount: Number(row.rule_count),
-    }));
+    const rows = this.#db.prepare('SELECT * FROM source_generations ORDER BY source_id').all() as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) =>
+      validateSourceGeneration({
+        sourceId: String(row.source_id),
+        kind: row.kind as SourceGeneration['kind'],
+        generation: String(row.generation),
+        revision: String(row.revision),
+        snapshotDigest: String(row.snapshot_digest),
+        observedAt: String(row.observed_at),
+        ...(row.fresh_until ? { freshUntil: String(row.fresh_until) } : {}),
+        required: Number(row.required) === 1,
+        health: row.health as SourceGeneration['health'],
+        ...(row.error ? { error: String(row.error) } : {}),
+        ruleCount: Number(row.rule_count),
+      }),
+    );
   }
 
   revokeRule(id: string, reason: string, revokedAt = new Date().toISOString()): RuleV1 {
@@ -363,12 +421,22 @@ export class RulesStore {
   putCachedPack(cacheKey: string, pack: CompiledRulesPack, validUntil: string): void {
     this.transaction(() => {
       this.#db
-        .prepare(`INSERT INTO pack_cache(cache_key, pack_digest, subject_fingerprint, source_snapshot_digest, pack_json, created_at, valid_until)
+        .prepare(
+          `INSERT INTO pack_cache(cache_key, pack_digest, subject_fingerprint, source_snapshot_digest, pack_json, created_at, valid_until)
           VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(cache_key) DO UPDATE SET pack_digest=excluded.pack_digest,
             subject_fingerprint=excluded.subject_fingerprint, source_snapshot_digest=excluded.source_snapshot_digest,
-            pack_json=excluded.pack_json, created_at=excluded.created_at, valid_until=excluded.valid_until`)
-        .run(cacheKey, pack.packDigest, pack.subjectFingerprint, pack.sourceSnapshotDigest, stableStringify(pack), pack.compiledAt, validUntil);
+            pack_json=excluded.pack_json, created_at=excluded.created_at, valid_until=excluded.valid_until`,
+        )
+        .run(
+          cacheKey,
+          pack.packDigest,
+          pack.subjectFingerprint,
+          pack.sourceSnapshotDigest,
+          stableStringify(pack),
+          pack.compiledAt,
+          validUntil,
+        );
       this.#db.prepare('DELETE FROM pack_cache_sources WHERE cache_key = ?').run(cacheKey);
       const insert = this.#db.prepare('INSERT INTO pack_cache_sources(cache_key, source_id) VALUES (?, ?)');
       for (const source of pack.sourceGenerations) insert.run(cacheKey, source.sourceId);
@@ -392,12 +460,21 @@ export class RulesStore {
 
   putLastKnownGood(pack: CompiledRulesPack, validUntil: string): void {
     this.#db
-      .prepare(`INSERT INTO last_known_good(subject_fingerprint, pack_digest, source_snapshot_digest, pack_json, stored_at, valid_until)
+      .prepare(
+        `INSERT INTO last_known_good(subject_fingerprint, pack_digest, source_snapshot_digest, pack_json, stored_at, valid_until)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(subject_fingerprint) DO UPDATE SET pack_digest=excluded.pack_digest,
           source_snapshot_digest=excluded.source_snapshot_digest, pack_json=excluded.pack_json,
-          stored_at=excluded.stored_at, valid_until=excluded.valid_until`)
-      .run(pack.subjectFingerprint, pack.packDigest, pack.sourceSnapshotDigest, stableStringify(pack), pack.compiledAt, validUntil);
+          stored_at=excluded.stored_at, valid_until=excluded.valid_until`,
+      )
+      .run(
+        pack.subjectFingerprint,
+        pack.packDigest,
+        pack.sourceSnapshotDigest,
+        stableStringify(pack),
+        pack.compiledAt,
+        validUntil,
+      );
   }
 
   getLastKnownGood(subjectFingerprint: string, now = new Date().toISOString()): CompiledRulesPack | undefined {
@@ -417,13 +494,18 @@ export class RulesStore {
 
   invalidateSourceCache(sourceId: string): number {
     const result = this.#db
-      .prepare('DELETE FROM pack_cache WHERE cache_key IN (SELECT cache_key FROM pack_cache_sources WHERE source_id = ?)')
+      .prepare(
+        'DELETE FROM pack_cache WHERE cache_key IN (SELECT cache_key FROM pack_cache_sources WHERE source_id = ?)',
+      )
       .run(sourceId);
     return Number(result.changes);
   }
 
   invalidateAllPacksContaining(ruleId: string): number {
-    const rows = this.#db.prepare('SELECT cache_key, pack_json FROM pack_cache').all() as Array<{ cache_key: string; pack_json: string }>;
+    const rows = this.#db.prepare('SELECT cache_key, pack_json FROM pack_cache').all() as Array<{
+      cache_key: string;
+      pack_json: string;
+    }>;
     let removed = 0;
     for (const row of rows) {
       const pack = parseJson<CompiledRulesPack>(row.pack_json, 'pack_cache.pack_json');
@@ -446,7 +528,9 @@ export class RulesStore {
   }
 
   clearCache(): number {
-    const count = Number((this.#db.prepare('SELECT COUNT(*) AS count FROM pack_cache').get() as { count: number }).count);
+    const count = Number(
+      (this.#db.prepare('SELECT COUNT(*) AS count FROM pack_cache').get() as { count: number }).count,
+    );
     this.transaction(() => {
       this.#db.exec('DELETE FROM pack_cache; DELETE FROM last_known_good;');
     });
@@ -455,8 +539,10 @@ export class RulesStore {
 
   recordAudit(event: AuditEvent): void {
     this.#db
-      .prepare(`INSERT INTO audit_events(event_id, type, occurred_at, subject_fingerprint, pack_digest, rule_id, source_id, data_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(
+        `INSERT INTO audit_events(event_id, type, occurred_at, subject_fingerprint, pack_digest, rule_id, source_id, data_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(
         event.eventId,
         event.type,
@@ -469,12 +555,18 @@ export class RulesStore {
       );
   }
 
-  audit(type: AuditEvent['type'], data: AuditEvent['data'], fields: Partial<Omit<AuditEvent, 'eventId' | 'type' | 'occurredAt' | 'data'>> = {}): void {
+  audit(
+    type: AuditEvent['type'],
+    data: AuditEvent['data'],
+    fields: Partial<Omit<AuditEvent, 'eventId' | 'type' | 'occurredAt' | 'data'>> = {},
+  ): void {
     this.recordAudit({ eventId: eventId('audit'), type, occurredAt: new Date().toISOString(), data, ...fields });
   }
 
   listAudit(limit = 100): readonly AuditEvent[] {
-    const rows = this.#db.prepare('SELECT * FROM audit_events ORDER BY occurred_at DESC LIMIT ?').all(limit) as Array<Record<string, unknown>>;
+    const rows = this.#db.prepare('SELECT * FROM audit_events ORDER BY occurred_at DESC LIMIT ?').all(limit) as Array<
+      Record<string, unknown>
+    >;
     return rows.map((row) => ({
       eventId: String(row.event_id),
       type: row.type as AuditEvent['type'],
@@ -490,8 +582,10 @@ export class RulesStore {
   recordReceipt(receipt: DeliveryReceipt): void {
     receipt = validateDeliveryReceipt(receipt);
     this.#db
-      .prepare(`INSERT INTO delivery_receipts(receipt_id, pack_digest, subject_fingerprint, target_json, status,
-        channel, occurred_at, issuer, audience, replay_id, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(
+        `INSERT INTO delivery_receipts(receipt_id, pack_digest, subject_fingerprint, target_json, status,
+        channel, occurred_at, issuer, audience, replay_id, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(
         receipt.receiptId,
         receipt.packDigest,
@@ -505,16 +599,24 @@ export class RulesStore {
         receipt.replayId ?? null,
         receipt.details ? stableStringify(safeAuditData(receipt.details)) : null,
       );
-    this.audit('receipt', { status: receipt.status, receiptId: receipt.receiptId }, {
-      subjectFingerprint: receipt.subjectFingerprint,
-      packDigest: receipt.packDigest,
-    });
+    this.audit(
+      'receipt',
+      { status: receipt.status, receiptId: receipt.receiptId },
+      {
+        subjectFingerprint: receipt.subjectFingerprint,
+        packDigest: receipt.packDigest,
+      },
+    );
   }
 
   listReceipts(packDigest?: string, limit = 100): readonly DeliveryReceipt[] {
-    const rows = (packDigest
-      ? this.#db.prepare('SELECT * FROM delivery_receipts WHERE pack_digest = ? ORDER BY occurred_at DESC LIMIT ?').all(packDigest, limit)
-      : this.#db.prepare('SELECT * FROM delivery_receipts ORDER BY occurred_at DESC LIMIT ?').all(limit)) as Array<Record<string, unknown>>;
+    const rows = (
+      packDigest
+        ? this.#db
+            .prepare('SELECT * FROM delivery_receipts WHERE pack_digest = ? ORDER BY occurred_at DESC LIMIT ?')
+            .all(packDigest, limit)
+        : this.#db.prepare('SELECT * FROM delivery_receipts ORDER BY occurred_at DESC LIMIT ?').all(limit)
+    ) as Array<Record<string, unknown>>;
     return rows.map((row) => ({
       receiptId: String(row.receipt_id),
       packDigest: String(row.pack_digest),
@@ -536,8 +638,10 @@ export class RulesStore {
       throw new RulesPackError('VALIDATION_ERROR', 'Feedback message must contain 1 to 4096 characters');
     }
     this.#db
-      .prepare(`INSERT INTO feedback(feedback_id, pack_digest, kind, message, rule_id, actor, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .prepare(
+        `INSERT INTO feedback(feedback_id, pack_digest, kind, message, rule_id, actor, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(
         feedback.feedbackId,
         feedback.packDigest,
@@ -555,9 +659,13 @@ export class RulesStore {
   }
 
   listFeedback(packDigest?: string, limit = 100): readonly RulesFeedback[] {
-    const rows = (packDigest
-      ? this.#db.prepare('SELECT * FROM feedback WHERE pack_digest = ? ORDER BY created_at DESC LIMIT ?').all(packDigest, limit)
-      : this.#db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT ?').all(limit)) as Array<Record<string, unknown>>;
+    const rows = (
+      packDigest
+        ? this.#db
+            .prepare('SELECT * FROM feedback WHERE pack_digest = ? ORDER BY created_at DESC LIMIT ?')
+            .all(packDigest, limit)
+        : this.#db.prepare('SELECT * FROM feedback ORDER BY created_at DESC LIMIT ?').all(limit)
+    ) as Array<Record<string, unknown>>;
     return rows.map((row) => ({
       feedbackId: String(row.feedback_id),
       packDigest: String(row.pack_digest),
@@ -570,15 +678,32 @@ export class RulesStore {
   }
 
   counts(): StoreCounts {
-    const currentRules = Number((this.#db.prepare('SELECT COUNT(*) AS count FROM current_rules').get() as { count: number }).count);
-    const revokedRules = Number((this.#db.prepare("SELECT COUNT(*) AS count FROM current_rules WHERE json_extract(rule_json, '$.lifecycle.status') = 'revoked'").get() as { count: number }).count);
-    const persistentCacheEntries = Number((this.#db.prepare('SELECT COUNT(*) AS count FROM pack_cache').get() as { count: number }).count);
+    const currentRules = Number(
+      (this.#db.prepare('SELECT COUNT(*) AS count FROM current_rules').get() as { count: number }).count,
+    );
+    const revokedRules = Number(
+      (
+        this.#db
+          .prepare(
+            `SELECT COUNT(*) AS count FROM current_rules AS current
+      INNER JOIN revocations AS revoked ON revoked.rule_id = current.id
+        AND revoked.version = current.version AND revoked.digest = current.digest`,
+          )
+          .get() as { count: number }
+      ).count,
+    );
+    const persistentCacheEntries = Number(
+      (this.#db.prepare('SELECT COUNT(*) AS count FROM pack_cache').get() as { count: number }).count,
+    );
     return { currentRules, revokedRules, persistentCacheEntries };
   }
 
   setCacheMetadata(key: string, value: unknown): void {
-    this.#db.prepare(`INSERT INTO cache_metadata(key, value_json, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`)
+    this.#db
+      .prepare(
+        `INSERT INTO cache_metadata(key, value_json, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at`,
+      )
       .run(key, stableStringify(value) as SQLInputValue, new Date().toISOString());
   }
 }

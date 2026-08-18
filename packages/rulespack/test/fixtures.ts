@@ -1,4 +1,5 @@
 import type { ExecutionSubject, RuleInputV1, RuleV1 } from '../src/model.js';
+import { digestObject } from '../src/canonical.js';
 import { normalizeRule } from '../src/validate.js';
 
 export const NOW = '2026-08-18T06:00:00.000Z';
@@ -46,16 +47,23 @@ export function makeRule(overrides: Partial<RuleInputV1> & Pick<RuleInputV1, 'id
   return normalizeRule(input);
 }
 
-export function sourceGeneration(generation = 'gen-1') {
+export function sourceGeneration(generation = 'gen-1', rules?: readonly RuleV1[]) {
+  const snapshotDigest = rules
+    ? digestObject(
+        [...rules]
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map(({ id, version, digest }) => ({ id, version, digest })),
+      )
+    : `snapshot-${generation}`;
   return {
     sourceId: 'test-config',
     kind: 'config' as const,
     generation,
     revision: generation,
-    snapshotDigest: `snapshot-${generation}`,
+    snapshotDigest,
     observedAt: NOW,
     required: false,
     health: 'fresh' as const,
-    ruleCount: 1,
+    ruleCount: rules?.length ?? 1,
   };
 }

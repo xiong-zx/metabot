@@ -129,12 +129,7 @@ const CONTAINER_IFACE_PATTERNS = [
 // hands out a 172.31.x address on utun*/wg*), so they are skipped only by the
 // generic rank-based fallback — the intranet-CIDR pass below still considers
 // them, which is what lets a tunnel-delivered intranet IP win.
-const VPN_IFACE_PATTERNS = [
-  /^tailscale/i,
-  /^wg/i,
-  /^utun/i,
-  /^tun/i,
-];
+const VPN_IFACE_PATTERNS = [/^tailscale/i, /^wg/i, /^utun/i, /^tun/i];
 
 const VIRTUAL_IFACE_PATTERNS = [...CONTAINER_IFACE_PATTERNS, ...VPN_IFACE_PATTERNS];
 
@@ -301,9 +296,8 @@ export class PeerManager {
         // Known intranet segment — an address inside this CIDR is preferred even
         // when it lives on a VPN tunnel interface. Defaults to the org intranet
         // (172.31.0.0/16); set METABOT_INTRANET_CIDR='' to disable the override.
-        const intranetCidr = process.env.METABOT_INTRANET_CIDR !== undefined
-          ? process.env.METABOT_INTRANET_CIDR.trim()
-          : '172.31.0.0/16';
+        const intranetCidr =
+          process.env.METABOT_INTRANET_CIDR !== undefined ? process.env.METABOT_INTRANET_CIDR.trim() : '172.31.0.0/16';
         const privateIp = pickPrivateIPv4(os.networkInterfaces(), intranetCidr);
         if (privateIp) {
           this.selfUrl = `http://${privateIp}:${port}`;
@@ -474,10 +468,7 @@ export class PeerManager {
     this.syncRelayPollers();
     for (const r of data.results || []) {
       if (r.status >= 400) {
-        this.logger.warn(
-          { botName: r.botName, status: r.status, error: r.error },
-          'bulk-register entry rejected',
-        );
+        this.logger.warn({ botName: r.botName, status: r.status, error: r.error }, 'bulk-register entry rejected');
       }
     }
     return { registered: data.registered ?? this.registeredBotNames.size };
@@ -533,25 +524,34 @@ export class PeerManager {
         unchanged && sameHost
           ? { ...prev, relay: false }
           : unchanged
-            ? { ...prev, relay: true, healthy: true, lastChecked: Date.now(), lastHealthy: Date.now(), error: undefined }
-          : {
-              config: newConfig,
-              healthy: !sameHost,
-              lastChecked: sameHost ? 0 : Date.now(),
-              lastHealthy: sameHost ? 0 : Date.now(),
-              bots: sameHost
-                ? []
-                : [{
-                    name: entry.botName,
-                    platform: 'agent-bus',
-                    engine: 'codex',
-                    workingDirectory: '',
-                    peerUrl: normalizedUrl,
-                    peerName: entry.botName,
-                  }],
-              skills: [],
-              relay: !sameHost,
-            },
+            ? {
+                ...prev,
+                relay: true,
+                healthy: true,
+                lastChecked: Date.now(),
+                lastHealthy: Date.now(),
+                error: undefined,
+              }
+            : {
+                config: newConfig,
+                healthy: !sameHost,
+                lastChecked: sameHost ? 0 : Date.now(),
+                lastHealthy: sameHost ? 0 : Date.now(),
+                bots: sameHost
+                  ? []
+                  : [
+                      {
+                        name: entry.botName,
+                        platform: 'agent-bus',
+                        engine: 'codex',
+                        workingDirectory: '',
+                        peerUrl: normalizedUrl,
+                        peerName: entry.botName,
+                      },
+                    ],
+                skills: [],
+                relay: !sameHost,
+              },
       );
     }
 
@@ -608,9 +608,7 @@ export class PeerManager {
   }
 
   async refreshAll(): Promise<void> {
-    const tasks = Array.from(this.peers.values()).map((state) =>
-      this.refreshPeer(state),
-    );
+    const tasks = Array.from(this.peers.values()).map((state) => this.refreshPeer(state));
     await Promise.allSettled(tasks);
   }
 
@@ -622,14 +620,16 @@ export class PeerManager {
       state.lastHealthy = Date.now();
       state.error = undefined;
       if (state.bots.length === 0) {
-        state.bots = [{
-          name: config.name,
-          platform: 'agent-bus',
-          engine: 'codex',
-          workingDirectory: '',
-          peerUrl: 'inbox:',
-          peerName: config.name,
-        }];
+        state.bots = [
+          {
+            name: config.name,
+            platform: 'agent-bus',
+            engine: 'codex',
+            workingDirectory: '',
+            peerUrl: 'inbox:',
+            peerName: config.name,
+          },
+        ];
       }
       return;
     }
@@ -733,10 +733,7 @@ export class PeerManager {
       state.bots = [];
       state.skills = [];
 
-      this.logger.warn(
-        { peerName: config.name, peerUrl: config.url, err: err.message },
-        'Peer unreachable',
-      );
+      this.logger.warn({ peerName: config.name, peerUrl: config.url, err: err.message }, 'Peer unreachable');
     }
   }
 
@@ -829,7 +826,9 @@ export class PeerManager {
       let host = peer.url;
       try {
         host = new URL(peer.url).host;
-      } catch { /* keep raw url in log */ }
+      } catch {
+        /* keep raw url in log */
+      }
       this.logger.warn(
         { peerName: peer.name, peerUrl: peer.url, targetHost: host, reason: rejection },
         'refusing to forward task to unverified/disallowed peer target (possible SSRF)',
@@ -855,7 +854,11 @@ export class PeerManager {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TASK_FORWARD_TIMEOUT_MS),
     });
-
+    if (dispatch) {
+      const data = (await response.json().catch(() => ({}))) as object;
+      if (!response.ok) throw new Error(`peer task failed with HTTP ${response.status}`);
+      return data;
+    }
     return (await response.json()) as object;
   }
 
@@ -873,9 +876,8 @@ export class PeerManager {
 
   private async enqueueRelayTask(peer: PeerConfig, body: any): Promise<object> {
     if (!this.agentBusUrl) throw new Error('agent bus URL is not configured');
-    const prompt = typeof body?.prompt === 'string'
-      ? body.prompt
-      : (typeof body?.content === 'string' ? body.content : '');
+    const prompt =
+      typeof body?.prompt === 'string' ? body.prompt : typeof body?.content === 'string' ? body.content : '';
     if (!prompt) throw new Error('relay task prompt is required');
     const chatId = typeof body?.chatId === 'string' ? body.chatId : '';
     const targetBot = typeof body?.botName === 'string' && body.botName ? body.botName : peer.name;
@@ -970,7 +972,10 @@ export class PeerManager {
   }
 
   /** Fetch a full skill record from a peer by peer name. */
-  async fetchPeerSkill(peerName: string, skillName: string): Promise<{ skillMd: string; referencesTar?: Buffer } | null> {
+  async fetchPeerSkill(
+    peerName: string,
+    skillName: string,
+  ): Promise<{ skillMd: string; referencesTar?: Buffer } | null> {
     const state = this.peers.get(peerName);
     if (!state || !state.healthy) return null;
 

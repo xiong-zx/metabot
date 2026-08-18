@@ -57,17 +57,23 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
         const missingHooks = thinHooks.filter((item) => !pathEntryExists(resolveInside(root, item)));
         if (missingHooks.length > 0) failures.push(`${feature.id}: missing thinHooks: ${missingHooks.join(', ')}`);
         const ownedHooks = thinHooks.filter((item) => roots.some((featureRoot) => containsPath(featureRoot, item)));
-        if (ownedHooks.length > 0) failures.push(`${feature.id}: thinHooks must remain outside owned roots: ${ownedHooks.join(', ')}`);
+        if (ownedHooks.length > 0)
+          failures.push(`${feature.id}: thinHooks must remain outside owned roots: ${ownedHooks.join(', ')}`);
       }
     }
     if (allowedImporters !== undefined) {
-      if (!Array.isArray(allowedImporters) || allowedImporters.some((item) => typeof item !== 'string' || item.trim() === '')) {
+      if (
+        !Array.isArray(allowedImporters) ||
+        allowedImporters.some((item) => typeof item !== 'string' || item.trim() === '')
+      ) {
         failures.push(`${feature.id}: allowedImporters must contain non-empty relative paths`);
       } else {
         const missingImporters = allowedImporters.filter((item) => !pathEntryExists(resolveInside(root, item)));
-        if (missingImporters.length > 0) failures.push(`${feature.id}: missing allowedImporters: ${missingImporters.join(', ')}`);
+        if (missingImporters.length > 0)
+          failures.push(`${feature.id}: missing allowedImporters: ${missingImporters.join(', ')}`);
         const undeclared = allowedImporters.filter((item) => !Array.isArray(thinHooks) || !thinHooks.includes(item));
-        if (undeclared.length > 0) failures.push(`${feature.id}: allowedImporters must also be declared thinHooks: ${undeclared.join(', ')}`);
+        if (undeclared.length > 0)
+          failures.push(`${feature.id}: allowedImporters must also be declared thinHooks: ${undeclared.join(', ')}`);
       }
     }
     const importRoots = feature.importRoots ?? roots;
@@ -76,10 +82,17 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
     } else if (importRoots.some((item) => !roots.some((featureRoot) => containsPath(featureRoot, item)))) {
       failures.push(`${feature.id}: importRoots must stay within declared roots`);
     } else {
-      const existingImportRoots = importRoots.filter((item) => pathEntryExists(resolveInside(root, item)));
+      const declaredSourceFiles = roots.filter((item) => {
+        const resolved = resolveInside(root, item);
+        return (
+          pathEntryExists(resolved) && fs.lstatSync(resolved).isFile() && SOURCE_EXTENSIONS.has(path.extname(resolved))
+        );
+      });
+      const effectiveImportRoots = [...new Set([...importRoots, ...declaredSourceFiles])];
+      const existingImportRoots = effectiveImportRoots.filter((item) => pathEntryExists(resolveInside(root, item)));
       assertSourceRootsAreNotSymlinks(root, existingImportRoots);
-      if (feature.status === 'required' && existingImportRoots.length !== importRoots.length) {
-        const missing = importRoots.filter((item) => !existingImportRoots.includes(item));
+      if (feature.status === 'required' && existingImportRoots.length !== effectiveImportRoots.length) {
+        const missing = effectiveImportRoots.filter((item) => !existingImportRoots.includes(item));
         failures.push(`${feature.id}: missing required importRoots: ${missing.join(', ')}`);
       }
       if (existingImportRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {

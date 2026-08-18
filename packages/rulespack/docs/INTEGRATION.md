@@ -47,17 +47,18 @@ compiled pack. It must not read the dispatcher's MetaMemory namespace.
 
 ## Failure and degraded semantics
 
-| Condition | Required behavior |
-| --- | --- |
-| Mode `off` | Continue with empty injection and `bypass-off` telemetry. |
-| Cache miss | Compile deterministically, persist cache/LKG, report miss. |
-| Optional advisory source unavailable | Use bounded stored generation when available; mark degraded/stale and report. |
-| No stored optional generation | Continue without it; mark degraded/unavailable and report. |
-| Required source unavailable | Raise `SOURCE_UNAVAILABLE`; adapter decides task-level fail/rollback policy. |
-| Corrupt/unauthorized Rule, delimiter/credential risk, path escape | Fail closed; do not use LKG to bypass the guard. |
-| Wrong subject/audience, expired/tampered pack | Fail closed with `TARGET_MISMATCH` or validation error; no injection. |
-| Mandatory Rule/dependency/budget failure | Fail closed; never silently omit or truncate it. |
-| Other compile failure | Use bounded LKG only when `RulesStore.isPackSafe` confirms every Rule is current, unrevoked, and unexpired; mark degraded/LKG. |
+| Condition                                                         | Required behavior                                                                                                                                                                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Mode `off`                                                        | Continue with empty injection and `bypass-off` telemetry.                                                                                                                                                                      |
+| Cache miss                                                        | Compile deterministically, persist cache/LKG, report miss.                                                                                                                                                                     |
+| Optional advisory source unavailable                              | Use bounded stored generation when available; mark degraded/stale and report.                                                                                                                                                  |
+| No stored optional generation                                     | Continue without it; mark degraded/unavailable and report.                                                                                                                                                                     |
+| Required source unavailable                                       | Raise `SOURCE_UNAVAILABLE`; adapter decides task-level fail/rollback policy.                                                                                                                                                   |
+| Corrupt/unauthorized Rule, delimiter/credential risk, path escape | Fail closed; do not use LKG to bypass the guard.                                                                                                                                                                               |
+| Wrong subject/audience, expired/tampered pack                     | Fail closed with `TARGET_MISMATCH` or validation error; no injection.                                                                                                                                                          |
+| Mandatory Rule/dependency/budget failure                          | Fail closed; never silently omit or truncate it.                                                                                                                                                                               |
+| Explicit transient `COMPILE_UNAVAILABLE`                          | Use bounded LKG only after the complete current source snapshot passes safety and store-integrity validation and `RulesStore.isPackSafe` confirms every selected Rule is current, unrevoked, and unexpired; mark degraded/LKG. |
+| Any other compile/store/validation failure                        | Fail closed; LKG must not mask it.                                                                                                                                                                                             |
 
 Audit data is bounded and redacts content/secret-shaped fields. Receipts never
 claim `injected` or `consumed` until the corresponding adapter action succeeds.

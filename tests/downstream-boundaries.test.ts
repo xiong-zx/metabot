@@ -132,13 +132,36 @@ describe('downstream feature boundary gate', () => {
     });
     fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
     fs.mkdirSync(path.join(root, 'packages/adapter/tests'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), "export const adapter = true;\n");
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export const adapter = true;\n');
     fs.writeFileSync(path.join(root, 'packages/adapter/tests/integration.test.ts'), "import '@example/runtime';\n");
     expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
 
     fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), "import '@example/runtime';\n");
     expect(checkDownstreamBoundaries(root).failures).toEqual([
       "adapter: packages/adapter/src/index.ts imports forbidden '@example/runtime'",
+    ]);
+  });
+
+  it('also scans every declared owned source-file root omitted from importRoots', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'multi-root-adapter',
+          status: 'required',
+          roots: ['packages/adapter', 'src/extensions/hook.ts'],
+          importRoots: ['packages/adapter/src'],
+          forbiddenImports: ['@example/runtime'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src/extensions'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export {}\n');
+    fs.writeFileSync(path.join(root, 'src/extensions/hook.ts'), "import '@example/runtime';\n");
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      "multi-root-adapter: src/extensions/hook.ts imports forbidden '@example/runtime'",
     ]);
   });
 
@@ -157,9 +180,7 @@ describe('downstream feature boundary gate', () => {
       ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter'), { recursive: true });
-    expect(checkDownstreamBoundaries(root).failures).toContain(
-      'adapter: importRoots must stay within declared roots',
-    );
+    expect(checkDownstreamBoundaries(root).failures).toContain('adapter: importRoots must stay within declared roots');
   });
 
   it('enforces reverse boundaries from upstream roots to downstream packages', () => {
@@ -190,12 +211,14 @@ describe('downstream feature boundary gate', () => {
       schemaVersion: 1,
       forbiddenPaths: [],
       features: [],
-      reverseBoundaries: [{
-        id: 'thin-hooks',
-        roots: ['src'],
-        forbiddenImports: ['@example/downstream'],
-        allowedImporters: ['src/hook.ts'],
-      }],
+      reverseBoundaries: [
+        {
+          id: 'thin-hooks',
+          roots: ['src'],
+          forbiddenImports: ['@example/downstream'],
+          allowedImporters: ['src/hook.ts'],
+        },
+      ],
     });
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });
     fs.writeFileSync(path.join(root, 'src/hook.ts'), "import '@example/downstream';\n");
@@ -209,13 +232,15 @@ describe('downstream feature boundary gate', () => {
     const root = fixture({
       schemaVersion: 1,
       forbiddenPaths: [],
-      features: [{
-        id: 'adapter',
-        status: 'required',
-        roots: ['packages/adapter'],
-        thinHooks: ['src/hook.ts', 'src/missing.ts'],
-        allowedImporters: ['src/importer.ts'],
-      }],
+      features: [
+        {
+          id: 'adapter',
+          status: 'required',
+          roots: ['packages/adapter'],
+          thinHooks: ['src/hook.ts', 'src/missing.ts'],
+          allowedImporters: ['src/importer.ts'],
+        },
+      ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter'), { recursive: true });
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });
@@ -294,12 +319,7 @@ describe('downstream feature boundary gate', () => {
       features: Array<{ id: string; reason?: string; validationSurface?: string[] }>;
     };
 
-    for (const id of [
-      'arc-mcp',
-      'worker-runner-mcp',
-      'arc-worker-runner-adapter',
-      'arc-researchclaw-adapter',
-    ]) {
+    for (const id of ['arc-mcp', 'worker-runner-mcp', 'arc-worker-runner-adapter', 'arc-researchclaw-adapter']) {
       const feature = manifest.features.find((candidate) => candidate.id === id);
       expect(feature).toMatchObject({
         reason: expect.any(String),
@@ -312,18 +332,14 @@ describe('downstream feature boundary gate', () => {
     expect(checkDownstreamBoundaries(path.resolve(import.meta.dirname, '..'))).toMatchObject({ ok: true });
   });
 
-  it('declares RulesPack as an isolated downstream feature with explicit thin hooks', () => {
+  it('declares separately scanned RulesPack engine, adapter, Worker, and extension boundaries', () => {
     const repositoryRoot = path.resolve(import.meta.dirname, '..');
     const manifest = JSON.parse(
       fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
     ) as { features: Array<{ id: string; roots?: string[]; thinHooks?: string[]; validationSurface?: string[] }> };
-    const feature = manifest.features.find((candidate) => candidate.id === 'rulespack-codex-adapter');
-    expect(feature).toMatchObject({
-      roots: expect.arrayContaining([
-        'packages/rulespack',
-        'packages/rulespack-adapter',
-        'packages/worker-runner-mcp/src/rulespack.ts',
-      ]),
+    const adapter = manifest.features.find((candidate) => candidate.id === 'rulespack-metabot-adapter');
+    expect(adapter).toMatchObject({
+      roots: ['packages/rulespack-adapter'],
       thinHooks: expect.arrayContaining([
         'src/bridge/message-bridge.ts',
         'src/engines/codex/executor.ts',
@@ -334,5 +350,17 @@ describe('downstream feature boundary gate', () => {
         'tests/rulespack-codex-integration.test.ts',
       ]),
     });
+    for (const [id, root] of [
+      ['rulespack-engine', 'packages/rulespack'],
+      ['rulespack-worker-adapter', 'packages/worker-runner-mcp/src/rulespack.ts'],
+      ['rulespack-operator-routes', 'src/extensions/rulespack-routes.ts'],
+      ['rulespack-api-principal', 'src/extensions/rulespack-api-principal.ts'],
+      ['rulespack-peer-dispatch', 'src/extensions/rulespack-peer-dispatch.ts'],
+    ]) {
+      expect(manifest.features.find((candidate) => candidate.id === id)).toMatchObject({
+        roots: expect.arrayContaining([root]),
+        forbiddenImports: expect.any(Array),
+      });
+    }
   });
 });

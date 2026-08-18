@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { digestObject, RulesPackError, type MetaMemoryRuleReader, type RuleInputV1 } from '@metabot/rulespack';
 
@@ -20,17 +21,7 @@ export class CoreMetaMemoryRuleReader implements MetaMemoryRuleReader {
   private readonly baseUrl: string;
 
   constructor(baseUrl = process.env.METABOT_CORE_URL ?? 'http://127.0.0.1:9200') {
-    const parsed = new URL(baseUrl);
-    const host = parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase();
-    if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
-      !(host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/u.test(host))
-    ) {
-      throw new RulesPackError(
-        'PATH_ESCAPE',
-        'RulesPack MetaMemory Core must be host-local/loopback; remote Core identity is not configured',
-      );
-    }
+    const parsed = assertLoopbackUrl(new URL(baseUrl));
     this.baseUrl = parsed.toString().replace(/\/+$/u, '');
   }
 
@@ -46,8 +37,8 @@ export class CoreMetaMemoryRuleReader implements MetaMemoryRuleReader {
     const documents: MetaMemoryDocument[] = [];
     const rules: RuleInputV1[] = [];
     for (const memoryPath of paths) {
-      const response = await fetch(
-        `${this.baseUrl.replace(/\/+$/u, '')}/api/memory/documents/${encodeURIComponent(memoryPath)}`,
+      const response = await fetchLoopback(
+        new URL(`${this.baseUrl.replace(/\/+$/u, '')}/api/memory/documents/${encodeURIComponent(memoryPath)}`),
         {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           signal,
@@ -79,6 +70,39 @@ export class CoreMetaMemoryRuleReader implements MetaMemoryRuleReader {
     );
     return { revision, generation: digestObject({ revision, rules }), rules };
   }
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_LOOPBACK_REDIRECTS = 5;
+
+async function fetchLoopback(url: URL, init: RequestInit): Promise<Response> {
+  let current = assertLoopbackUrl(url);
+  for (let redirects = 0; redirects <= MAX_LOOPBACK_REDIRECTS; redirects += 1) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    if (response.url) assertLoopbackUrl(new URL(response.url));
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+    if (redirects === MAX_LOOPBACK_REDIRECTS) {
+      throw new RulesPackError('SOURCE_UNAVAILABLE', 'MetaMemory redirect limit exceeded');
+    }
+    const location = response.headers.get('location');
+    if (!location) throw new RulesPackError('SOURCE_UNAVAILABLE', 'MetaMemory redirect omitted Location');
+    current = assertLoopbackUrl(new URL(location, current));
+  }
+  throw new RulesPackError('SOURCE_UNAVAILABLE', 'MetaMemory redirect limit exceeded');
+}
+
+function assertLoopbackUrl(url: URL): URL {
+  const host = url.hostname.replace(/^\[|\]$/gu, '').toLowerCase();
+  const ipVersion = isIP(host);
+  const loopback =
+    host === 'localhost' || (ipVersion === 4 && host.startsWith('127.')) || (ipVersion === 6 && host === '::1');
+  if (!['http:', 'https:'].includes(url.protocol) || !loopback || url.username || url.password) {
+    throw new RulesPackError(
+      'PATH_ESCAPE',
+      'RulesPack MetaMemory Core must be host-local/loopback; remote Core identity is not configured',
+    );
+  }
+  return url;
 }
 
 async function tokenFromFile(): Promise<string> {

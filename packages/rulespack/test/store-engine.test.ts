@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { RulesPackEngine } from '../src/engine.js';
+import { compileRules } from '../src/compiler.js';
 import { configSource } from '../src/sources.js';
 import { verifyCompiledPack } from '../src/compiler.js';
 import { RulesPackError } from '../src/errors.js';
@@ -15,7 +17,7 @@ test('SQLite persists normalized Rules, generations, audit, receipts, feedback, 
   const directory = await mkdtemp(join(tmpdir(), 'rulespack-store-'));
   const filename = join(directory, 'state.sqlite');
   const rule = makeRule({ id: 'persisted', text: 'Persist this rule.' });
-  const source = sourceGeneration();
+  const source = sourceGeneration('gen-1', [rule]);
   let store = new RulesStore(filename);
   store.replaceSourceSnapshot({ source, rules: [rule] });
   const engine = new RulesPackEngine({ store, mode: 'enforce', cacheTtlMs: 60_000, lastKnownGoodTtlMs: 60_000 });
@@ -51,7 +53,7 @@ test('SQLite persists normalized Rules, generations, audit, receipts, feedback, 
 test('cache hits, source generation invalidation, and revocation-first safety work', () => {
   const store = new RulesStore(':memory:');
   const original = makeRule({ id: 'cached', text: 'Original cached rule.' });
-  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1'), rules: [original] });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [original]), rules: [original] });
   const engine = new RulesPackEngine({ store, mode: 'enforce' });
   const first = engine.compile({ subject, now: NOW });
   const second = engine.compile({ subject, now: NOW });
@@ -59,7 +61,7 @@ test('cache hits, source generation invalidation, and revocation-first safety wo
   assert.equal(second.telemetry.cache, 'hit-memory');
 
   const changed = makeRule({ id: 'cached', text: 'Changed generation rule.', version: '2' });
-  store.replaceSourceSnapshot({ source: sourceGeneration('gen-2'), rules: [changed] });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-2', [changed]), rules: [changed] });
   engine.invalidateSource('test-config');
   const third = engine.compile({ subject, now: NOW });
   assert.equal(third.telemetry.cache, 'miss');
@@ -72,38 +74,159 @@ test('cache hits, source generation invalidation, and revocation-first safety wo
   store.close();
 });
 
-test('bounded last-known-good is used only for non-safety compile failure and never resurrects revocation', () => {
+test('corrupt current Rule state never activates LKG and never resurrects revocation', () => {
   const store = new RulesStore(':memory:');
   const original = makeRule({ id: 'lkg', text: 'Known good rule.' });
-  store.replaceSourceSnapshot({ source: sourceGeneration(), rules: [original] });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [original]), rules: [original] });
   const engine = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 });
   const first = engine.compile({ subject, now: NOW });
   const corrupt = { ...original, digest: 'sha256:corrupt' };
-  const fallback = engine.compile({
-    subject,
-    now: '2026-08-18T06:00:01.000Z',
-    sourceState: {
-      rules: [corrupt],
-      generations: [sourceGeneration('corrupt-gen')],
-      degradationReasons: ['test source corruption'],
-      usedLastKnownGood: false,
-    },
-  });
-  assert.notEqual(fallback.pack.packDigest, first.pack.packDigest);
-  assert.deepEqual(fallback.pack.rules.map((rule) => rule.id), first.pack.rules.map((rule) => rule.id));
-  assert.equal(fallback.pack.lastKnownGood, true);
-  assert.equal(fallback.telemetry.usedLastKnownGood, true);
-  assert.equal(verifyCompiledPack(fallback.pack, '2026-08-18T06:00:01.000Z'), fallback.pack);
+  assert.throws(
+    () =>
+      engine.compile({
+        subject,
+        now: '2026-08-18T06:00:01.000Z',
+        sourceState: {
+          rules: [corrupt],
+          generations: [sourceGeneration('corrupt-gen', [original])],
+          degradationReasons: ['test source corruption'],
+          usedLastKnownGood: false,
+        },
+      }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'VALIDATION_ERROR',
+  );
 
   store.revokeRule('lkg', 'revoked before retry', '2026-08-18T06:00:02.000Z');
   assert.equal(store.getLastKnownGood(first.pack.subjectFingerprint, '2026-08-18T06:00:03.000Z'), undefined);
   store.close();
 });
 
+test('LKG fallback is limited to an explicit transient compiler failure after current safety validation', () => {
+  const store = new RulesStore(':memory:');
+  const current = makeRule({ id: 'transient-lkg', text: 'Known safe Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
+  const first = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 60_000 }).compile({
+    subject,
+    now: NOW,
+  });
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    lastKnownGoodTtlMs: 60_000,
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler resource unavailable');
+    },
+  });
+  const fallback = transient.compile({
+    subject,
+    now: '2026-08-18T06:00:01.000Z',
+    sourceState: {
+      rules: [current],
+      generations: [sourceGeneration('transient-generation', [current])],
+      degradationReasons: [],
+      usedLastKnownGood: false,
+    },
+  });
+  assert.deepEqual(
+    fallback.pack.rules.map((rule) => rule.id),
+    first.pack.rules.map((rule) => rule.id),
+  );
+  assert.equal(fallback.pack.lastKnownGood, true);
+  assert.equal(fallback.telemetry.usedLastKnownGood, true);
+  assert.equal(verifyCompiledPack(fallback.pack, '2026-08-18T06:00:01.000Z'), fallback.pack);
+  store.close();
+});
+
+test('tampered schema and source snapshot integrity fail closed without LKG', () => {
+  const store = new RulesStore(':memory:');
+  const current = makeRule({ id: 'integrity', text: 'Integrity checked Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
+  new RulesPackEngine({ store, mode: 'enforce' }).compile({ subject, now: NOW });
+  const engine = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    compiler: compileRules,
+  });
+  assert.throws(
+    () =>
+      engine.compile({
+        subject,
+        now: '2026-08-18T06:00:01.000Z',
+        sourceState: {
+          rules: [{ ...current, schemaVersion: 2 } as any],
+          generations: [sourceGeneration('schema-tampered', [current])],
+          degradationReasons: [],
+          usedLastKnownGood: false,
+        },
+      }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'VALIDATION_ERROR',
+  );
+  assert.throws(
+    () =>
+      engine.compile({
+        subject,
+        now: '2026-08-18T06:00:01.000Z',
+        sourceState: {
+          rules: [current],
+          generations: [{ ...sourceGeneration('store-tampered', [current]), snapshotDigest: 'sha256:tampered' }],
+          degradationReasons: [],
+          usedLastKnownGood: false,
+        },
+      }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'STORE_ERROR',
+  );
+  const expired = makeRule({
+    id: current.id,
+    text: current.text,
+    version: '2',
+    lifecycle: { status: 'approved', expiresAt: '2026-08-18T06:00:00.500Z' },
+  });
+  const unavailable = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  assert.throws(
+    () =>
+      unavailable.compile({
+        subject,
+        now: '2026-08-18T06:00:01.000Z',
+        sourceState: {
+          rules: [expired],
+          generations: [sourceGeneration('expired-current', [expired])],
+          degradationReasons: [],
+          usedLastKnownGood: false,
+        },
+      }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'VALIDATION_ERROR',
+  );
+  store.close();
+});
+
+test('tampered persisted store JSON is a non-recoverable STORE_ERROR even when LKG exists', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rulespack-corrupt-store-'));
+  const filename = join(directory, 'state.sqlite');
+  const store = new RulesStore(filename);
+  const current = makeRule({ id: 'stored-integrity', text: 'Persisted integrity Rule.' });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [current]), rules: [current] });
+  new RulesPackEngine({ store, mode: 'enforce' }).compile({ subject, now: NOW });
+  const raw = new DatabaseSync(filename);
+  raw.prepare("UPDATE current_rules SET rule_json = '{corrupt' WHERE id = ?").run(current.id);
+  raw.prepare("UPDATE source_generations SET generation = 'tampered-store' WHERE source_id = 'test-config'").run();
+  raw.close();
+  assert.throws(
+    () => new RulesPackEngine({ store, mode: 'enforce' }).compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'STORE_ERROR',
+  );
+  store.close();
+});
+
 test('optional source generations use bounded stored state and then degrade without expired LKG', async () => {
   const store = new RulesStore(':memory:');
   const original = makeRule({ id: 'source-lkg', text: 'Stored source Rule.' });
-  store.replaceSourceSnapshot({ source: sourceGeneration(), rules: [original] });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [original]), rules: [original] });
   const failing: RuleSourceAdapter = {
     id: 'test-config',
     kind: 'config',
@@ -115,7 +238,10 @@ test('optional source generations use bounded stored state and then degrade with
   const engine = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 1_000 });
   const within = await engine.refreshSources([failing], { now: '2026-08-18T06:00:00.500Z' });
   assert.equal(within.usedLastKnownGood, true);
-  assert.deepEqual(within.rules.map((rule) => rule.id), ['source-lkg']);
+  assert.deepEqual(
+    within.rules.map((rule) => rule.id),
+    ['source-lkg'],
+  );
 
   const expired = await engine.refreshSources([failing], { now: '2026-08-18T06:00:02.000Z' });
   assert.equal(expired.usedLastKnownGood, false);
@@ -151,7 +277,7 @@ test('default hot-path cache hit does not reload the Rule set', () => {
   }
   const store = new CountingStore(':memory:');
   const rule = makeRule({ id: 'indexed', text: 'Use indexed cache.' });
-  store.replaceSourceSnapshot({ source: sourceGeneration(), rules: [rule] });
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', [rule]), rules: [rule] });
   const engine = new RulesPackEngine({ store, mode: 'enforce' });
   engine.compile({ subject, now: NOW });
   const afterMiss = store.listCalls;
@@ -163,16 +289,23 @@ test('default hot-path cache hit does not reload the Rule set', () => {
 test('freshness deadlines are evaluated at every compile/cache decision and expired optional Rules are not injected', async () => {
   const store = new RulesStore(':memory:');
   const engine = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 500 });
-  await engine.refreshSources([configSource({
-    id: 'fresh-config',
-    revision: '1',
-    freshForMs: 1_000,
-    rules: [makeRule({
-      id: 'fresh-only',
-      text: 'Inject only while source is usable.',
-      source: { kind: 'config', adapterId: 'fresh-config', ref: 'test', revision: '1' },
-    })],
-  })], { now: NOW });
+  await engine.refreshSources(
+    [
+      configSource({
+        id: 'fresh-config',
+        revision: '1',
+        freshForMs: 1_000,
+        rules: [
+          makeRule({
+            id: 'fresh-only',
+            text: 'Inject only while source is usable.',
+            source: { kind: 'config', adapterId: 'fresh-config', ref: 'test', revision: '1' },
+          }),
+        ],
+      }),
+    ],
+    { now: NOW },
+  );
   const fresh = engine.compile({ subject, now: '2026-08-18T06:00:00.500Z' });
   const cached = engine.compile({ subject, now: '2026-08-18T06:00:00.600Z' });
   assert.match(fresh.injectionText, /Inject only/u);
@@ -190,10 +323,23 @@ test('freshness deadlines are evaluated at every compile/cache decision and expi
 test('expired optional source uses only bounded stale generation and expired required source fails closed', async () => {
   const optionalStore = new RulesStore(':memory:');
   const optional = new RulesPackEngine({ store: optionalStore, mode: 'enforce', lastKnownGoodTtlMs: 2_000 });
-  await optional.refreshSources([configSource({
-    id: 'optional', revision: '1', freshForMs: 1_000,
-    rules: [makeRule({ id: 'optional-rule', text: 'Bounded stale Rule.', source: { kind: 'config', adapterId: 'optional', ref: 'test', revision: '1' } })],
-  })], { now: NOW });
+  await optional.refreshSources(
+    [
+      configSource({
+        id: 'optional',
+        revision: '1',
+        freshForMs: 1_000,
+        rules: [
+          makeRule({
+            id: 'optional-rule',
+            text: 'Bounded stale Rule.',
+            source: { kind: 'config', adapterId: 'optional', ref: 'test', revision: '1' },
+          }),
+        ],
+      }),
+    ],
+    { now: NOW },
+  );
   const stale = optional.compile({ subject, now: '2026-08-18T06:00:01.500Z' });
   assert.match(stale.injectionText, /Bounded stale/u);
   assert.equal(stale.telemetry.sourceFreshness[0]?.health, 'stale');
@@ -202,7 +348,10 @@ test('expired optional source uses only bounded stale generation and expired req
 
   const requiredStore = new RulesStore(':memory:');
   const required = new RulesPackEngine({ store: requiredStore, mode: 'enforce' });
-  await required.refreshSources([configSource({ id: 'required', revision: '1', required: true, freshForMs: 1_000, rules: [] })], { now: NOW });
+  await required.refreshSources(
+    [configSource({ id: 'required', revision: '1', required: true, freshForMs: 1_000, rules: [] })],
+    { now: NOW },
+  );
   assert.throws(
     () => required.compile({ subject, now: '2026-08-18T06:00:01.001Z' }),
     (error: unknown) => error instanceof RulesPackError && error.code === 'SOURCE_UNAVAILABLE',

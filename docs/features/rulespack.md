@@ -124,11 +124,19 @@ For authenticated peer/Agent Bus work, the dispatcher compiles an exact
 remote-host subject and sends `RulesPackDispatchEnvelopeV1`. The receiver
 requires its already-authenticated transport marker, exact issuer allowlist,
 audience, target fingerprint, bounded lifetime, verified pack digest, and a
-one-time replay ID. The receiver stores the verified pack's selected Rule
-objects as an envelope-expiring, namespaced temporary source rebound to the
-complete target subject fingerprint, then compiles exactly once for the local
-subject. A different chat/project/agent/worker/task/host never inherits those
-Rules from the shared database; it needs its own authenticated exact envelope.
+one-time replay ID. The receiver first claims a bounded replay lease and
+compiles the verified pack's selected Rule objects as an in-memory provisional
+source rebound to the complete target subject fingerprint. It writes neither
+the source nor a cache/LKG containing those Rules before target acceptance. On
+exact target input acceptance, one SQLite transaction persists the
+envelope-expiring, namespaced temporary source and moves the replay to
+`accepted`; explicit spawn/stdin/transport rejection moves it to `rejected` so
+the same authenticated envelope may be retried before expiry. Concurrent
+prepared claims and accepted replays remain rejected. A stale `prepared` lease
+can be reclaimed only by the byte-equivalent envelope after the bounded lease
+and before envelope expiry. A different chat/project/agent/worker/task/host
+never inherits those Rules from the shared database; it needs its own
+authenticated exact envelope.
 This lets local mandatory policy overlay
 through normal engine precedence without editing received rendered text. The
 same database lets later turns and detached Worker/ARC children compile their
@@ -150,7 +158,7 @@ database by basename, canonical path, symlink/inode, or contains a foreign
 application schema. Engine schema v1 owns Rule history/current pointers, revocations,
 source generations, persistent cache/source index, cache metadata, LKG,
 redacted audit, receipts, and feedback. Adapter tables add only settings and
-replay claims. Worker storage receives additive `principal_role` and
+prepared/accepted/rejected replay leases. Worker storage receives additive `principal_role` and
 `execution_kind` columns so restart recovery reconstructs the same child
 subject. Legacy rows without identity evidence remain `unknown`/degraded and
 do not default to ordinary Worker targeting.
@@ -165,10 +173,13 @@ the corresponding target acceptance, and `rejected` on failure.
 
 Optional-source failures use a bounded stored generation and report degraded
 state. Required-source, path escape, unsafe Rule text, mandatory budget,
-dependency, target, expiry, tamper, and replay failures fail closed. General
-compile failures may use engine-verified bounded LKG only when every selected
-Rule remains current, unrevoked, and unexpired. Mode `off` continues with an
-empty injection even when a source refresh is unavailable.
+dependency, target, expiry, tamper, and replay failures fail closed. Only the
+explicit transient `COMPILE_UNAVAILABLE` failure may use engine-verified
+bounded LKG, and only after the complete current source snapshot passes schema,
+digest, authority, lifecycle, target, text, and store integrity validation.
+Mode `off` resolves before source fail-closed checks and continues with a
+degraded empty pack even when required source state is stale, unavailable, or
+corrupt.
 Every compile/cache decision re-evaluates `freshUntil`; pre-expiry timers
 refresh configured sources, including Meta Memory, outside the turn hot path.
 RulesPack Meta Memory Core URLs are loopback-only without an explicit
