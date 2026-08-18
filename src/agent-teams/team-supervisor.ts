@@ -251,7 +251,10 @@ export class AgentTeamSupervisor {
       preparation?.chatId ??
       (isolatedSession ? `team:${teamName}:${agent.name}:${run.id}` : `team:${teamName}:${agent.name}`);
     const rulesContext = preparation
-      ? this.options.governance!.buildRulesContext(preparation.instanceId).text
+      ? this.options.governance!.buildRulesContext(preparation.instanceId, {
+          agentName: agent.name,
+          agentRole: agent.role,
+        }).text
       : undefined;
     this.inFlightRuns.set(run.id, {
       teamName,
@@ -499,7 +502,14 @@ export class AgentTeamSupervisor {
     if (!team || team.status !== 'active') return;
     const chatIds = team.displayChatIds;
     if (chatIds.length === 0) return;
-    const bot = this.selectExecutionBot();
+    const pinnedPmBot = this.options.governance?.findInstanceByTeamName(teamName)?.pmBot;
+    const bot = (pinnedPmBot ? this.options.registry.get(pinnedPmBot) : undefined) ?? this.selectExecutionBot();
+    if (pinnedPmBot && bot?.config.name !== pinnedPmBot) {
+      this.logger.warn(
+        { teamName, pinnedPmBot, fallbackBot: bot?.config.name },
+        'Pinned Agent Team PM bot unavailable for activity card; using fallback',
+      );
+    }
     const bridge = bot?.bridge as MessageBridge & { sendAgentActivityCard?: (chatId: string, body: string) => Promise<void> };
     if (!bridge?.sendAgentActivityCard) return;
     const cardBody = [

@@ -234,7 +234,7 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
       chatId: `teaminst:${chat.id}:coder`,
       executionBot: 'pm-codex',
     });
-    expect(governance.buildRulesContext(chat.id)).toMatchObject({
+    expect(governance.buildRulesContext(chat.id, { agentName: 'coder' })).toMatchObject({
       text: expect.stringContaining('Keep changes focused.'),
       provenance: [{ name: 'implementation-policy', version: rulesV1.version, digest: rulesV1.digest }],
     });
@@ -277,7 +277,7 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
     expect(sameChat.id).toBe(chat.id);
     expect(sameChat.templateVersion).toBe(templateV1.version);
     expect(sameChat.ruleSetRefs[0].version).toBe(rulesV1.version);
-    expect(governance.buildRulesContext(sameChat.id).text).not.toContain('focused and tested');
+    expect(governance.buildRulesContext(sameChat.id, { agentName: 'coder' }).text).not.toContain('focused and tested');
 
     const otherChat = governance.resolveInstance({
       actor: pm,
@@ -344,6 +344,61 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
         includeGlobal: true,
       })?.id,
     ).toBe(global.id);
+    close();
+  });
+
+  it('filters exact Agent and role targets and rejects ambiguous target syntax', () => {
+    const { governance, close } = makeHarness();
+    governance.publishRuleSet({
+      actor: pm,
+      name: 'targeted-policy',
+      scope: 'team-instance',
+      rules: [
+        { id: 'all', text: 'Visible to every Agent.' },
+        { id: 'coder', text: 'Coder only.', target: 'coder' },
+        { id: 'review-role', text: 'Review role only.', target: 'role:review' },
+        { id: 'other', text: 'Other Agent only.', target: 'agent:other' },
+      ],
+    });
+    governance.publishTemplate({
+      actor: pm,
+      name: 'targeted-team',
+      body: {
+        agents: [
+          { name: 'coder', role: 'implementation' },
+          { name: 'reviewer', role: 'review' },
+        ],
+        ruleSetRefs: [{ name: 'targeted-policy' }],
+      },
+    });
+    const instance = governance.resolveInstance({
+      actor: pm,
+      templateName: 'targeted-team',
+      chatId: 'oc_targeted',
+    })!;
+
+    const coder = governance.buildRulesContext(instance.id, { agentName: 'coder', agentRole: 'implementation' });
+    expect(coder.text).toContain('Visible to every Agent.');
+    expect(coder.text).toContain('Coder only.');
+    expect(coder.text).not.toContain('Review role only.');
+    expect(coder.text).not.toContain('Other Agent only.');
+    expect(coder.provenance[0]).toMatchObject({ ruleCount: 4, selectedRuleCount: 2 });
+
+    const reviewer = governance.buildRulesContext(instance.id, { agentName: 'reviewer', agentRole: 'review' });
+    expect(reviewer.text).toContain('Visible to every Agent.');
+    expect(reviewer.text).toContain('Review role only.');
+    expect(reviewer.text).not.toContain('Coder only.');
+    expect(reviewer.provenance[0]).toMatchObject({ ruleCount: 4, selectedRuleCount: 2 });
+
+    expectGovernanceError(
+      () => governance.publishRuleSet({
+        actor: pm,
+        name: 'invalid-target',
+        scope: 'team-instance',
+        rules: [{ text: 'Must not broadcast.', target: 'agent:*' }],
+      }),
+      { statusCode: 400, code: 'INVALID_RULE_TARGET' },
+    );
     close();
   });
 

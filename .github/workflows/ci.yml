@@ -31,11 +31,21 @@ jobs:
       # Workspace test suites (packages/cli, metamemory, skill-hub) import the
       # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
       # exports -> dist/). `tsc --noEmit` above does not emit, so build them
-      # before running tests or the imports fail to resolve. Build both MCP
-      # packages and their adapters here too so runtime artifact checks and
-      # independently shipped binaries are covered from a clean checkout.
-      - name: Build workspace libraries
-        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub -w @xvirobotics/arc-mcp -w @xvirobotics/worker-runner-mcp -w @xvirobotics/arc-researchclaw-adapter -w @xvirobotics/arc-worker-runner-adapter
+      # before running tests or the imports fail to resolve. Build the retained
+      # runtime packages here too so their independently shipped binaries and
+      # restart preflight are covered.
+      # The controlled-restart CLI tests run the production runtime-artifact
+      # preflight, which requires both compiled ARC adapters.
+      - name: Build workspace libraries and restart prerequisites
+        run: >-
+          npm run build
+          -w @xvirobotics/cli-core
+          -w @xvirobotics/metamemory
+          -w @xvirobotics/skill-hub
+          -w @xvirobotics/arc-mcp
+          -w @xvirobotics/worker-runner-mcp
+          -w @xvirobotics/arc-researchclaw-adapter
+          -w @xvirobotics/arc-worker-runner-adapter
 
       - name: Run tests
         run: npm test

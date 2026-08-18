@@ -35,7 +35,13 @@ of truth for Teams, Agents, Tasks, Messages, Runs, and supervisor execution.
   quota denials are auditable.
 - Each instance may pin its owning PM bot. `prepareRun()` returns that bot and
   a stable `teaminst:<instance>:<agent>` chat id without changing
-  upstream session records.
+  upstream session records. Supervisor activity cards use the same pinned PM
+  bot before falling back to the global execution bot.
+- Rule targets are exact and fail closed. An omitted target applies to every
+  Agent in the instance; `agent:<name>` and `role:<role>` match only the
+  current governed execution subject. Legacy unprefixed targets normalize to
+  exact Agent names. Wildcards and unknown target syntax are rejected when a
+  RuleSet is published, and invalid pinned legacy data blocks execution.
 - Governed upstream Team names use only `[a-z0-9._-]` and reserve the `atg-`
   prefix. Startup reconciliation recreates missing upstream rows, restores the
   governed active/stopped state, repairs missing pinned Template members, and
@@ -64,12 +70,15 @@ the local secret. Only an external CLI request authenticated by the bridge API
 secret and carrying no engine markers is treated as local admin. Request-body
 `role` or `actorRole` fields never select the caller's authority.
 
-The same capability may authenticate exactly four non-Team, read-only Bridge
-requests: `GET /api/bots`, `GET /api/peers`, `GET /api/stats`, and
-`GET /api/metrics`. It does not authenticate bot details or profiles, talk,
-schedules, Workers, service operations, peer/bot mutations, or any other
-Bridge route. A request carrying any engine capability/bot/chat header cannot
-fall back to the local administrator secret or cross-bridge token validation.
+The same capability may authenticate four non-Team, read-only Bridge requests:
+`GET /api/bots`, `GET /api/peers`, `GET /api/stats`, and `GET /api/metrics`.
+An `admin`, `user`, or `pm` principal may also list and manage schedules only
+when both `botName` and `chatId` match its signed execution scope. Managers,
+agents, and cross-scope IDs fail closed. The capability does not authenticate
+bot details or profiles, talk, Workers, service operations, peer/bot
+mutations, or any other Bridge route. A request carrying any engine
+capability/bot/chat header cannot fall back to the local administrator secret
+or cross-bridge token validation.
 Human and local management mutations require `API_SECRET`; loopback access is
 not an unauthenticated management path.
 

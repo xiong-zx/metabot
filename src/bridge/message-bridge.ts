@@ -53,6 +53,7 @@ import { sendCompletionNotice } from './notification-policy.js';
 import { normalizePromptForEngine } from './prompt-normalizer.js';
 import { SlashPickerController } from './slash-picker-controller.js';
 import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
+import { DeferredActivityDelivery } from './deferred-activity-delivery.js';
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
@@ -239,6 +240,9 @@ export interface ActivityEventData {
   timestamp: number;
 }
 
+const AGENT_ACTIVITY_COALESCE_MS = 250;
+const AGENT_ACTIVITY_CARD_REUSE_MS = 30 * 60 * 1000;
+
 export class MessageBridge {
   private engine: Engine;
   private executor: Executor;
@@ -277,10 +281,12 @@ export class MessageBridge {
    * 'spontaneous' event handler, flushed by a timer.
    */
   private spontaneousBuffers = new Map<string, {
-    teamState: TeamState;
     snippets: string[];
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private readonly deferredActivityDelivery: DeferredActivityDelivery;
+  private readonly agentActivityCards = new Map<string, { messageId: string; updatedAt: number }>();
+  private readonly agentActivityCardDeliveries = new Map<string, Promise<void>>();
   /**
    * In-flight continuation cards — main-line agent bursts triggered by an
    * SDK `<task-notification>` injection (background bash returns etc.).
@@ -353,6 +359,12 @@ export class MessageBridge {
     this.outputsManager = new OutputsManager(config.claude.outputsBaseDir, logger);
     this.audit = new AuditLogger(logger);
     this.costTracker = new CostTracker();
+    this.deferredActivityDelivery = new DeferredActivityDelivery({
+      isBusy: (chatId) => this.isChatBusy(chatId),
+      deliver: (chatId, body) => this.deliverAgentActivityCard(chatId, body),
+      logger: this.logger,
+      coalesceMs: AGENT_ACTIVITY_COALESCE_MS,
+    });
 
     const memoryClient = new MemoryClient(logger);
 
@@ -420,8 +432,21 @@ export class MessageBridge {
         evicted++;
       }
     }
+    for (const [chatId, entry] of this.agentActivityCards) {
+      if (now - entry.updatedAt > AGENT_ACTIVITY_CARD_REUSE_MS) {
+        this.agentActivityCards.delete(chatId);
+        evicted++;
+      }
+    }
     if (evicted > 0) {
-      this.logger.info({ evicted, remaining: this.recentQuestionCard.size }, 'MessageBridge: swept stale chatId entries');
+      this.logger.info(
+        {
+          evicted,
+          remainingQuestionCards: this.recentQuestionCard.size,
+          remainingActivityCards: this.agentActivityCards.size,
+        },
+        'MessageBridge: swept stale chatId entries',
+      );
     }
   }
 
@@ -530,13 +555,53 @@ export class MessageBridge {
 
   /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
   async sendAgentActivityCard(chatId: string, body: string): Promise<void> {
+    await this.deferredActivityDelivery.enqueue(chatId, body);
+  }
+
+  private async deliverAgentActivityCard(chatId: string, body: string): Promise<void> {
+    const previous = this.agentActivityCardDeliveries.get(chatId) ?? Promise.resolve();
+    const delivery = previous
+      .catch(() => undefined)
+      .then(() => this.upsertAgentActivityCard(chatId, body));
+    this.agentActivityCardDeliveries.set(chatId, delivery);
+    try {
+      await delivery;
+    } finally {
+      if (this.agentActivityCardDeliveries.get(chatId) === delivery) {
+        this.agentActivityCardDeliveries.delete(chatId);
+      }
+    }
+  }
+
+  private async upsertAgentActivityCard(chatId: string, body: string): Promise<void> {
     const card: CardState = this.enrichWithAgentTeams({
       status: 'agent_activity',
       userPrompt: '(agent activity)',
       responseText: body,
       toolCalls: [],
     }, chatId);
-    await this.sender.sendCard(chatId, card);
+    const now = Date.now();
+    const existing = this.agentActivityCards.get(chatId);
+    if (existing && now - existing.updatedAt <= AGENT_ACTIVITY_CARD_REUSE_MS) {
+      try {
+        if (await this.sender.updateCard(existing.messageId, card)) {
+          existing.updatedAt = now;
+          this.logger.info(
+            { chatId, messageId: existing.messageId },
+            'Updated agent activity card',
+          );
+          return;
+        }
+      } catch (err) {
+        this.logger.warn({ err, chatId, messageId: existing.messageId }, 'Agent activity card update failed');
+      }
+      this.agentActivityCards.delete(chatId);
+    }
+    const messageId = await this.sender.sendCard(chatId, card);
+    if (messageId) {
+      this.agentActivityCards.set(chatId, { messageId, updatedAt: now });
+      this.logger.info({ chatId, messageId }, 'Sent agent activity card');
+    }
   }
 
   /** Expose session manager for cross-platform session linking. */
@@ -1163,7 +1228,6 @@ export class MessageBridge {
     let buf = this.spontaneousBuffers.get(chatId);
     if (!buf) {
       buf = {
-        teamState: { teammates: [], tasks: [] },
         snippets: [],
         timer: setTimeout(() => {
           void this.flushSpontaneous(chatId);
@@ -1177,9 +1241,9 @@ export class MessageBridge {
   }
 
   /**
-   * Flush any accumulated spontaneous activity for chatId as a single
-   * "agent activity" Feishu card. No-op if buffer is empty or there's
-   * an active user turn (we'd rather merge into the live card than spam).
+   * Flush accumulated spontaneous activity into the shared deferred delivery
+   * queue. The queue waits for an active user turn to drain, then delivers a
+   * deduplicated card; it never discards the batch merely because chat is busy.
    *
    * Uses the `agent_activity` status, which renders a blue header with
    * an "Agent activity" title — that's the entire visual signal that
@@ -1194,13 +1258,6 @@ export class MessageBridge {
     this.spontaneousBuffers.delete(chatId);
     clearTimeout(buf.timer);
 
-    // If a user turn just started, drop the spontaneous batch — its content
-    // is about to land in the live card anyway.
-    if (this.isChatBusy(chatId)) {
-      this.logger.debug({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: drop spontaneous (active turn)');
-      return;
-    }
-
     // Nothing user-meaningful to surface — buffer might exist because a
     // teammate ping landed but extractSpontaneousSnippet filtered all of
     // its blocks (e.g. tool-only burst). Silently skip the card.
@@ -1211,16 +1268,9 @@ export class MessageBridge {
 
     const responseText = formatSpontaneousCardBody(buf.snippets);
 
-    const card: CardState = {
-      status: 'agent_activity',
-      userPrompt: '(agent activity)',
-      responseText,
-      toolCalls: [],
-      teamState: buf.teamState,
-    };
     try {
-      await this.sender.sendCard(chatId, card);
-      this.logger.info({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: sent spontaneous card');
+      await this.sendAgentActivityCard(chatId, responseText);
+      this.logger.info({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: queued spontaneous card');
     } catch (err) {
       this.logger.warn({ err, chatId }, 'MessageBridge: failed to send spontaneous card');
     }
@@ -3387,6 +3437,9 @@ export class MessageBridge {
       clearTimeout(buf.timer);
     }
     this.spontaneousBuffers.clear();
+    this.deferredActivityDelivery.destroy();
+    this.agentActivityCards.clear();
+    this.agentActivityCardDeliveries.clear();
     this.spontaneousSubscribed.clear();
     // Clear any in-flight between-turn question timers + the per-chat card
     // bookkeeping maps that are otherwise only freed on executor-removed.

@@ -59,9 +59,46 @@
       "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
       "validationSurface": [
         "tests/agent-team-governance-capability.test.ts",
+        "tests/agent-team-schedule-capability.test.ts",
         "tests/agent-team-http-auth.test.ts",
         "tests/agent-team-cli-capability.test.ts",
         "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-compact-card-upstream-gap",
+      "status": "required",
+      "roots": ["src/feishu/team-panel.ts"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Track the generic compact Agent Team card renderer as a removable upstreamable patch until upstream accepts it.",
+      "validationSurface": [
+        "tests/card-builder.test.ts",
+        "tests/card-builder-v2.test.ts",
+        "tests/feishu-event-handler.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-busy-chat-reliability-upstream-gap",
+      "status": "required",
+      "roots": [
+        "src/scheduler/busy-retry-policy.ts",
+        "src/bridge/deferred-activity-delivery.ts"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Track generic bounded busy-chat retry, burst coalescing, and reusable activity-card delivery as removable upstreamable patches until upstream accepts them.",
+      "validationSurface": [
+        "tests/busy-retry-policy.test.ts",
+        "tests/task-scheduler-one-time.test.ts",
+        "tests/deferred-activity-delivery.test.ts",
+        "tests/message-bridge.test.ts"
       ]
     },
     {
@@ -162,6 +199,20 @@
         "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
         "packages/arc-worker-runner-adapter/tests/integration.test.ts",
         "packages/arc-worker-runner-adapter/tests/boundary.test.ts"
+      ]
+    },
+    {
+      "id": "ci-runtime-prerequisites",
+      "status": "required",
+      "roots": [
+        ".github/workflows/ci.yml",
+        "tests/ci-workflow.test.ts"
+      ],
+      "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
+      "validationSurface": [
+        "tests/ci-workflow.test.ts",
+        "tests/metabot-controlled-restart-cli.test.ts",
+        "tests/downstream-boundaries.test.ts"
       ]
     }
   ],

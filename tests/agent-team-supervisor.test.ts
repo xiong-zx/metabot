@@ -63,6 +63,54 @@ async function waitFor(assertion: () => void): Promise<void> {
 }
 
 describe('AgentTeamSupervisor', () => {
+  it('routes governed activity cards through the instance-scoped PM bot', async () => {
+    const store = makeStore();
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-supervisor-activity-pmbot-'));
+    const governance = new AgentTeamGovernanceExtension(
+      createAgentTeamGovernanceHost(store),
+      logger,
+      join(dir, 'governance.db'),
+    );
+    governance.publishTemplate({
+      actor: { role: 'pm', id: 'pm' },
+      name: 'activity-pmbot',
+      body: { agents: [{ name: 'worker', engine: 'codex' }] },
+    });
+    const instance = governance.resolveInstance({
+      actor: { role: 'pm', id: 'pm' },
+      templateName: 'activity-pmbot',
+      chatId: 'oc_activity',
+      pmBot: 'pinned-pm',
+    })!;
+
+    const globalActivity = vi.fn().mockResolvedValue(undefined);
+    const pinnedActivity = vi.fn().mockResolvedValue(undefined);
+    const { registry } = makeRegistry(vi.fn(), vi.fn(), globalActivity);
+    registry.register({
+      name: 'pinned-pm',
+      platform: 'feishu',
+      bridge: { sendAgentActivityCard: pinnedActivity },
+      sender: {},
+      config: {
+        name: 'pinned-pm',
+        engine: 'codex',
+        claude: { defaultWorkingDirectory: process.cwd() },
+      },
+    } as any);
+    const supervisor = new AgentTeamSupervisor({ registry, store, governance, logger, intervalMs: 60_000 });
+
+    (supervisor as any).notifyTeamActivity(instance.teamName, 'worker', 'activity complete');
+    await vi.waitFor(() => expect(pinnedActivity).toHaveBeenCalledWith(
+      'oc_activity',
+      expect.stringContaining('activity complete'),
+    ));
+    expect(globalActivity).not.toHaveBeenCalled();
+
+    supervisor.destroy();
+    governance.close();
+    store.close();
+  });
+
   it('uses governed run preparation, pinned rules and bot, quota guard, activity touch, and reap execution', async () => {
     const store = makeStore();
     const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-team-supervisor-governance-'));
@@ -75,13 +123,18 @@ describe('AgentTeamSupervisor', () => {
       actor: { role: 'pm', id: 'pm' },
       name: 'runtime',
       scope: 'team-instance',
-      rules: [{ text: 'Use the pinned runtime rule.' }],
+      rules: [
+        { text: 'Use the pinned runtime rule.' },
+        { text: 'Use the worker-only rule.', target: 'agent:worker' },
+        { text: 'Use the implementation-role rule.', target: 'role:implementation' },
+        { text: 'Never leak the reviewer rule.', target: 'agent:reviewer' },
+      ],
     });
     governance.publishTemplate({
       actor: { role: 'pm', id: 'pm' },
       name: 'runtime',
       body: {
-        agents: [{ name: 'worker', engine: 'codex' }],
+        agents: [{ name: 'worker', role: 'implementation', engine: 'codex' }],
         ruleSetRefs: [{ name: 'runtime' }],
       },
     });
@@ -113,6 +166,10 @@ describe('AgentTeamSupervisor', () => {
         prompt: expect.stringContaining('Use the pinned runtime rule.'),
       }),
     );
+    const governedPrompt = executeApiTask.mock.calls[0][0].prompt;
+    expect(governedPrompt).toContain('Use the worker-only rule.');
+    expect(governedPrompt).toContain('Use the implementation-role rule.');
+    expect(governedPrompt).not.toContain('Never leak the reviewer rule.');
     expect(touchAgent).toHaveBeenCalled();
     await waitFor(() => {
       expect(store.listRuns(instance.teamName)[0]).toMatchObject({ status: 'completed' });
