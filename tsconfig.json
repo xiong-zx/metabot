@@ -3,8 +3,6 @@
   "references": [
     { "path": "./tsconfig.bridge.json" },
     { "path": "./packages/arc-mcp" },
-    { "path": "./packages/arc-researchclaw-adapter" },
-    { "path": "./packages/arc-worker-runner-adapter" },
     { "path": "./packages/rulespack" },
     { "path": "./packages/rulespack-adapter" },
     { "path": "./packages/cli-core" },

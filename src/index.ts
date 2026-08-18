@@ -31,6 +31,8 @@ import {
   shouldInitializeMemoryIndexAutomation,
 } from './memory/index-automation.js';
 import { SessionRegistry } from './session/session-registry.js';
+import { sweepExpiredCapabilityFiles } from './engines/mcp-materialize.js';
+import { assertDistinctMcpServers } from './services/mcp-registry.js';
 
 interface FeishuBotHandle {
   name: string;
@@ -262,6 +264,21 @@ async function main() {
     { feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount, slackBots: slackCount },
     'Starting MetaBot bridge...',
   );
+
+  // A crash between leasing an MCP capability file and cleaning it up leaves
+  // credential material with nothing left to remove it, so the new process
+  // sweeps leftovers before any bot can start a turn. Registry validation runs
+  // here too: two servers sharing an audience or environment variable is a
+  // startup defect, not something to discover mid-turn.
+  try {
+    assertDistinctMcpServers();
+    const swept = sweepExpiredCapabilityFiles(process.env.METABOT_HOME ?? process.cwd(), logger);
+    if (swept.removed.length > 0) {
+      logger.info({ removed: swept.removed.length, kept: swept.kept }, 'Swept stale execution MCP capability material');
+    }
+  } catch (err) {
+    logger.error({ err }, 'Execution MCP registry is invalid; external tools stay unavailable');
+  }
 
   // Create bot registry
   const registry = new BotRegistry();

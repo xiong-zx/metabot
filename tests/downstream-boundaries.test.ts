@@ -367,7 +367,7 @@ describe('downstream feature boundary gate', () => {
       features: Array<{ id: string; reason?: string; validationSurface?: string[] }>;
     };
 
-    for (const id of ['arc-mcp', 'worker-runner-mcp', 'arc-worker-runner-adapter', 'arc-researchclaw-adapter']) {
+    for (const id of ['arc-mcp', 'worker-runner-mcp']) {
       const feature = manifest.features.find((candidate) => candidate.id === id);
       expect(feature).toMatchObject({
         reason: expect.any(String),
@@ -409,6 +409,56 @@ describe('downstream feature boundary gate', () => {
         roots: expect.arrayContaining([root]),
         forbiddenImports: expect.any(Array),
       });
+    }
+  });
+
+  it('declares ARC as an independent product server with a truthful registry boundary', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as {
+      features: Array<{
+        id: string;
+        roots: string[];
+        reason?: string;
+        validation?: string;
+        forbiddenImports?: string[];
+      }>;
+    };
+    const feature = (id: string) => manifest.features.find((entry) => entry.id === id)!;
+
+    const arc = feature('arc-mcp');
+    expect(arc.roots).toEqual(['packages/arc-mcp']);
+    expect(arc.reason).toBeTruthy();
+    expect(arc.validation).toBeTruthy();
+    // ARC must not gain a dependency on MetaClaw or on a unified gateway.
+    expect(arc.forbiddenImports).toEqual(
+      expect.arrayContaining(['@xvirobotics/research-stack-mcp', '@xvirobotics/metaclaw-mcp']),
+    );
+
+    // The registry stays generic: it configures product servers without
+    // importing any of them, so it can never become a product gateway.
+    const registry = feature('execution-mcp-registry');
+    expect(registry.roots).toEqual(
+      expect.arrayContaining(['src/engines/mcp-entries.ts', 'src/engines/mcp-materialize.ts']),
+    );
+    expect(registry.forbiddenImports).toEqual(
+      expect.arrayContaining(['@xvirobotics/arc-mcp', '@xvirobotics/research-stack-mcp']),
+    );
+    for (const root of registry.roots) expect(fs.existsSync(path.join(repositoryRoot, root))).toBe(true);
+  });
+
+  it('forbids the retired ARC adapter packages and declarations', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as { features: Array<{ id: string }>; forbiddenPaths: string[] };
+    const retired = ['arc-researchclaw-adapter', 'arc-worker-runner-adapter'];
+
+    for (const id of retired) {
+      expect(manifest.features.some((feature) => feature.id === id || feature.id.startsWith(`${id}-`))).toBe(false);
+      expect(manifest.forbiddenPaths).toContain(`packages/${id}`);
+      expect(fs.existsSync(path.join(repositoryRoot, 'packages', id))).toBe(false);
     }
   });
 });

@@ -22,9 +22,6 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'packages/rulespack-adapter/dist',
     'packages/worker-runner-mcp/dist',
     'packages/arc-mcp/dist',
-    'packages/arc-researchclaw-adapter/dist',
-    'packages/arc-researchclaw-adapter/python',
-    'packages/arc-worker-runner-adapter/dist',
     'packages/server/dist',
     'node_modules',
   ]) mkdirSync(join(runtime, path), { recursive: true });
@@ -41,9 +38,6 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'src/services/local-daemon-health.ts',
     'packages/worker-runner-mcp/dist/daemon-cli.js',
     'packages/arc-mcp/dist/daemon-cli.js',
-    'packages/arc-researchclaw-adapter/dist/factory.js',
-    'packages/arc-researchclaw-adapter/python/bridge.py',
-    'packages/arc-worker-runner-adapter/dist/factory.js',
     'ecosystem.config.cjs',
     'ecosystem.core.config.cjs',
   ]) writeFileSync(join(runtime, path), '// fixture\n');
@@ -342,7 +336,7 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(health).toContain("name: 'worker_list'");
     expect(health).toContain("name: 'arc_run_list'");
     expect(health).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
-    for (const workspace of ['worker-runner-mcp', 'arc-mcp', 'arc-worker-runner-adapter', 'arc-researchclaw-adapter']) {
+    for (const workspace of ['worker-runner-mcp', 'arc-mcp']) {
       expect(cli).toContain(`npm run build -w @xvirobotics/${workspace}`);
     }
     expect(uninstall).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');

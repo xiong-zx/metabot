@@ -230,8 +230,6 @@ cmd_update() {
   npm run build -w @xvirobotics/cli
   npm run build -w @xvirobotics/worker-runner-mcp
   npm run build -w @xvirobotics/arc-mcp
-  npm run build -w @xvirobotics/arc-researchclaw-adapter
-  npm run build -w @xvirobotics/arc-worker-runner-adapter
 
   # A personal-edition git checkout updates Core only when PM2 proves that the
   # same exact checkout owns its cwd and script. A sibling/external Core is not
@@ -691,9 +689,7 @@ _ensure_runtime_artifacts() {
     packages/rulespack/dist/index.js \
     packages/rulespack-adapter/dist/index.js \
     packages/worker-runner-mcp/dist/daemon-cli.js \
-    packages/arc-mcp/dist/daemon-cli.js \
-    packages/arc-researchclaw-adapter/dist/factory.js \
-    packages/arc-researchclaw-adapter/python/bridge.py; do
+    packages/arc-mcp/dist/daemon-cli.js; do
     if [[ ! -f "$runtime_root/$artifact" ]]; then
       error "Missing built runtime artifact: $runtime_root/$artifact"
       missing=true

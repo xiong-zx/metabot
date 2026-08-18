@@ -7,9 +7,28 @@ import {
   readArcPrivateKeyFile,
   readArcPublicKeyFile,
 } from './local-auth.js';
-import { createArcRuntime, integerEnv, requiredAnyEnv, requiredEnv } from './runtime.js';
+import {
+  createArcRuntime,
+  integerEnv,
+  parseBoundedRuntimeArguments,
+  requiredAnyEnv,
+  requiredEnv,
+  type BoundedRuntimeRequest,
+} from './runtime.js';
 
 const env = process.env;
+
+// Argv rather than environment on purpose: an exported variable outlives the
+// one run it was meant for, and this is the switch that decides whether a
+// daemon may launch a locally patched candidate and spend real money. With
+// neither flag this is the production daemon it has always been.
+let bounded: BoundedRuntimeRequest | undefined;
+try {
+  bounded = parseBoundedRuntimeArguments(process.argv.slice(2));
+} catch (error) {
+  process.stderr.write(`metabot-arcd: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(2);
+}
 const capabilityPublicKeyPath = requiredEnv(env, 'METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE');
 const capabilityPublicKeys = [
   readArcPublicKeyFile(
@@ -29,7 +48,12 @@ if (env.METABOT_ARC_CALLBACK_URL) {
   );
   assertArcDistinctKeys(capabilityPublicKeys, callbackPrivateKey);
 }
-const runtime = await createArcRuntime({ env });
+const runtime = await createArcRuntime({ env, ...(bounded ? { bounded } : {}) });
+if (bounded) {
+  process.stderr.write(
+    `metabot-arcd: bounded run selected: release ${bounded.specName}, budget policy ${bounded.policyId}\n`,
+  );
+}
 const daemon = new ArcDaemon(runtime.coordinator, {
   endpoint: requiredAnyEnv(env, ['METABOT_ARC_LISTEN', 'METABOT_ARC_DAEMON_URL']),
   capabilityVerifier: new ArcCapabilityVerifier(capabilityPublicKeys),

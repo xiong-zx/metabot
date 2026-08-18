@@ -7,8 +7,6 @@
   "type": "module",
   "workspaces": [
     "packages/arc-mcp",
-    "packages/arc-researchclaw-adapter",
-    "packages/arc-worker-runner-adapter",
     "packages/rulespack",
     "packages/rulespack-adapter",
     "packages/cli",

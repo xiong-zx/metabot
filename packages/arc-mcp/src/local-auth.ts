@@ -14,9 +14,26 @@ import {
   type ArcTrustedRole,
 } from './server.js';
 
+/**
+ * The only audience this server accepts.
+ *
+ * Every MCP server in the workspace verifies its own audience before it
+ * evaluates any scope, so a capability minted for another product can never be
+ * replayed here even if it was signed by the same issuer.
+ */
+export const ARC_CAPABILITY_AUDIENCE = 'arc' as const;
+
 export interface ArcCapabilityClaims {
   v: 1;
   purpose: 'arc';
+  /**
+   * Mandatory audience. A capability minted for another product server, or
+   * minted before audiences existed, is refused: the issuer and this verifier
+   * moved to the audience contract together, and a legacy token stays valid for
+   * up to an hour, so continuing to accept one would only hold the replay
+   * window open.
+   */
+  aud: typeof ARC_CAPABILITY_AUDIENCE;
   role: ArcTrustedRole;
   botName: string;
   chatId: string;
@@ -145,11 +162,17 @@ function normalizePrivateKey(value: KeyObject | string | Buffer, label: string):
 function validateClaims(value: unknown, now?: number): ArcCapabilityClaims {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw denied('ARC capability claims are invalid');
   const claims = value as Partial<ArcCapabilityClaims>;
-  const expectedKeys = ['botName', 'chatId', 'exp', 'purpose', 'role', 'v'];
-  if (Object.keys(claims).sort().join(',') !== expectedKeys.join(',')) {
-    throw denied('ARC capability claims do not match the v2.1 contract');
+  const actualKeys = Object.keys(claims).sort().join(',');
+  const expectedKeys = ['aud', 'botName', 'chatId', 'exp', 'purpose', 'role', 'v'].join(',');
+  if (actualKeys !== expectedKeys) {
+    throw denied('ARC capability claims do not match the v3 contract');
   }
   if (claims.v !== 1 || claims.purpose !== 'arc') throw denied('ARC capability has the wrong version or purpose');
+  // Checked before any role or scope evaluation, so another server's capability
+  // is refused on identity alone.
+  if (claims.aud !== ARC_CAPABILITY_AUDIENCE) {
+    throw denied('ARC capability was minted for another audience');
+  }
   if (!Number.isSafeInteger(claims.exp) || (claims.exp as number) < 1 || (now !== undefined && (claims.exp as number) <= now)) {
     throw denied('ARC capability is expired or has an invalid expiry');
   }

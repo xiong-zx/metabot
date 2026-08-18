@@ -86,7 +86,7 @@ function makeRuntime(root: string, label: string): void {
     env: {
       RUNTIME_LABEL: label,
       ...(app === 'metabot-arcd' ? {
-        METABOT_ARC_RUNNER_MODULE: join(root, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+        METABOT_ARC_RELEASE_ROOT: join(root, 'official', 'autoresearchclaw'),
       } : {}),
       ...(label === 'source' ? {
         HTTP_PROXY: 'http://source-proxy.invalid:8080',
@@ -126,7 +126,7 @@ function writeState(file: string, runtime: string): void {
       SESSION_STORE_DIR: '/var/lib/metabot-state',
       API_SECRET: 'must-not-be-printed',
       ...(app === 'metabot-arcd' ? {
-        METABOT_ARC_RUNNER_MODULE: join(runtime, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+        METABOT_ARC_RELEASE_ROOT: join(runtime, 'official', 'autoresearchclaw'),
       } : {}),
     },
   }))));
@@ -170,8 +170,8 @@ describe('protected PM2 runtime switch helper', () => {
       });
     }
     const arc = rows.find((row: { name: string }) => row.name === 'metabot-arcd');
-    expect(arc.pm2_env.METABOT_ARC_RUNNER_MODULE).toBe(
-      join(kit.target, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+    expect(arc.pm2_env.METABOT_ARC_RELEASE_ROOT).toBe(
+      join(kit.source, 'official', 'autoresearchclaw'),
     );
   });
 

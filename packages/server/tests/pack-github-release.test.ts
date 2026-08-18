@@ -52,9 +52,8 @@ describe('GitHub release package', () => {
     expect(listing).toContain('packages/rulespack/package.json');
     expect(listing).toContain('packages/rulespack-adapter/package.json');
     expect(listing).toContain('packages/arc-mcp/package.json');
-    expect(listing).toContain('packages/arc-researchclaw-adapter/package.json');
-    expect(listing).toContain('packages/arc-researchclaw-adapter/python/bridge.py');
-    expect(listing).toContain('packages/arc-worker-runner-adapter/package.json');
+    expect(listing).not.toContain('packages/arc-researchclaw-adapter/');
+    expect(listing).not.toContain('packages/arc-worker-runner-adapter/');
     expect(listing).toContain('packages/worker-runner-mcp/package.json');
     expect(listing).toContain('scripts/pm2-protected-runtime-switch.cjs');
     expect(listing).toContain('src/runtime/restart-state-cli.ts');
@@ -77,8 +76,8 @@ describe('GitHub release package', () => {
     expect(packageJson.workspaces).toContain('packages/rulespack');
     expect(packageJson.workspaces).toContain('packages/rulespack-adapter');
     expect(packageJson.workspaces).toContain('packages/arc-mcp');
-    expect(packageJson.workspaces).toContain('packages/arc-researchclaw-adapter');
-    expect(packageJson.workspaces).toContain('packages/arc-worker-runner-adapter');
+    expect(packageJson.workspaces).not.toContain('packages/arc-researchclaw-adapter');
+    expect(packageJson.workspaces).not.toContain('packages/arc-worker-runner-adapter');
     expect(packageJson.workspaces).toContain('packages/worker-runner-mcp');
     expect(packageJson.metabotEdition).toBe('personal');
   });
@@ -91,8 +90,8 @@ describe('GitHub release package', () => {
     expect(source).toContain('npm run build -w @metabot/rulespack');
     expect(source).toContain('npm run build -w @metabot/rulespack-adapter');
     expect(source).toContain('npm run build -w @xvirobotics/arc-mcp');
-    expect(source).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
-    expect(source).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(source).not.toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
+    expect(source).not.toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(source).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(source).toContain('pm2 start ecosystem.core.config.cjs --only metabot-core');
     expect(source).toContain('Local Core token saved to $token_file (mode 600)');

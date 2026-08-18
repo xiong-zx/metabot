@@ -2,7 +2,8 @@
 
 `@xvirobotics/arc-mcp` is an independent AutoResearchClaw (ARC) lifecycle
 service. It owns versioned input, output, and run contracts, project-local
-artifacts, durable SQLite run state, and eleven MCP tools:
+artifacts, durable SQLite run state, official external execution, and eight MCP
+tools:
 
 - `arc_run_start`
 - `arc_run_get`
@@ -10,24 +11,158 @@ artifacts, durable SQLite run state, and eleven MCP tools:
 - `arc_run_pause`
 - `arc_run_resume`
 - `arc_run_cancel`
-- `hitl_get_status`
-- `hitl_approve_stage`
-- `hitl_reject_stage`
-- `hitl_inject_guidance`
-- `hitl_view_output`
+- `arc_hitl_submit`
+- `arc_run_manifest`
 
 The package does not import MetaBot Bridge, Memory Core, Wiki ingest,
-WorkerManager, Agent Team, or engine-specific code. It never promotes a result
-to memory. A runner is supplied through the small `ArcRunner` interface. The
-default independent `@xvirobotics/arc-researchclaw-adapter` starts the pinned
-official 23-stage Python pipeline and delegates the five official HITL tools.
-The older Worker Runner adapter remains available only as an explicit legacy
-fallback; it is no longer the runtime default. A future Memory MCP may consume
-the validated output through the separate `ArcResultConsumer` interface.
+WorkerManager, Agent Team, or engine-specific code, and it does not depend on
+MetaClaw or on any unified research gateway. It never promotes a result to
+memory. A future Memory MCP may consume the validated output through the
+separate `ArcResultConsumer` interface.
 
-It ships three executables: `metabot-arc-mcp` keeps the original standalone
-stdio mode; `metabot-arcd` is the long-lived authenticated loopback daemon; and
-`metabot-arc-proxy` is a thin stdio relay for one engine session.
+The production runner is `OfficialArcDriver`, which re-verifies a sealed
+official release and then delegates to a detached process supervisor. The small
+`ArcRunner` interface remains the only execution seam, so tests and an
+operator-pinned experiment can supply their own implementation through
+`METABOT_ARC_RUNNER_MODULE`. There is no silent fallback: if a release root is
+configured and its release does not verify, the run fails.
+
+It ships five executables: `metabot-arc-mcp` keeps the original standalone
+stdio mode; `metabot-arcd` is the long-lived authenticated loopback daemon;
+`metabot-arc-proxy` is a thin stdio relay for one engine session;
+`metabot-arc-supervisor` is the detached official run owner; and
+`metabot-arc-release` is a read-only release doctor and selector planner.
+
+## Official AutoResearchClaw execution
+
+Official AutoResearchClaw stays an independently installed application outside
+this repository. ARC records the exact revision it is paired with and refuses to
+launch anything else. Two pins exist side by side:
+
+- MCP execution is pinned to `v0.5.0-45` (`e2e23c9`), the commit the
+  `python/official_compat.py` shims were audited against.
+- Direct shell use is pinned to the exact published `v0.5.0` tag.
+
+They resolve to different release ids, so both can be sealed under one release
+root without either being presented as the other. The current MCP execution pin
+is append-only v2,
+`0.5.0-e2e23c93b494-arc-mcp-0.3.0-v2`; it supersedes the historical
+source-only `0.5.0-e2e23c93b494-arc-mcp-0.3.0` pairing without editing it.
+
+Before every official launch, ARC re-verifies the pinned origin, exact revision,
+detached and clean checkout, source-tree hash, dependency-freeze digest,
+downstream compatibility probe, and the version of the mutable global `acpx`
+install. `acpx` lives outside every sealed release, so it is the one pinned
+dependency that can drift between two otherwise identical runs and is therefore
+checked on the launch path rather than only at seal time.
+
+```text
+METABOT_ARC_RELEASE_ROOT=/absolute/path/to/research-stack/autoresearchclaw
+METABOT_ARC_OFFICIAL_HITL_MODE=gate-only
+METABOT_ARC_OFFICIAL_ACP_AGENT=codex
+```
+
+The official pipeline outlives the daemon by design, so the authority is a
+detached supervisor process plus its atomic on-disk state, not an in-memory
+child handle. The supervisor runs in its own process group, which is what makes
+group-wide pause, resume, and cancel safe, and it publishes exactly one terminal
+artifact. A coordinator restart re-attaches through the state file alone.
+
+### Immutable releases
+
+A sealed release's source *and* virtualenv are made recursively read-only at
+install time. Sealing only the source left the half that actually executes —
+every third-party package, every console script and the editable install of the
+source itself — writable by the same user that runs the daemon, so a stray
+`pip install` could change what the release executes while every identity the
+manifest records still matched.
+
+Read and execute bits are preserved exactly, so a sealed console script is still
+an executable console script; only write permission is dropped. The install
+proves it: the structural probe is re-run through the sealed interpreter and
+`researchclaw --help` is executed from the sealed virtualenv before the manifest
+is written, so an install that sealed a release into something unusable fails
+instead of being recorded.
+
+The manifest records the census that sealing produced, and both trees are
+re-walked before every launch. Verification fails closed on a writable file or
+directory, on any symlink other than a virtualenv's own `bin/python*`
+interpreter links, on a node that is neither a file nor a directory, and on a
+census that no longer matches. A bounded run additionally refuses any release
+that is not sealed this way: a guard living in a writable tree bounds nothing.
+
+Releases sealed before this existed carry no immutability block. That absence is
+reported rather than repaired — their permissions are part of the evidence they
+are — so they stay verifiable as rollback assets while being ineligible for
+installation, launch, current selection, or a bounded run once a replacement is
+pinned.
+
+### Sealed release provenance
+
+Sealed manifests are append-only evidence, never configuration. A package
+rename or a correction produces a new release id; the old manifest stays intact
+so it remains a usable rollback asset. Manifests sealed by the retired
+`@xvirobotics/arc-researchclaw-adapter` or by the rejected unified
+`@xvirobotics/research-stack-mcp` are accepted by exact identity and reported as
+`superseded` rather than rewritten, and a superseded pairing never claims that
+this driver's bridge revision sealed the release.
+
+`metabot-arc-release doctor` reports the sealed releases, the current selector,
+both pins, and whether the paired release still verifies.
+`metabot-arc-release selector-plan [path]` prints the exact `researchclaw`
+selector script it would write, without touching the filesystem. Installing a
+release and installing a selector are operator actions: neither the daemon nor
+any MCP tool performs them.
+
+The public install pins are `mcp-execution` and `hard-budget-candidate`. Both
+create new recursively sealed v2 releases. The latter is explicitly unofficial
+and resolves to
+`unofficial-0.5.0-8fa6d66d1b8f-hard-budget-guard-v2`; its manifest carries
+`official: false`, its exact patch series, and a machine-readable `supersedes`
+record naming the already installed source-only candidate. The historical
+`mcp-execution-v1` and `hard-budget-candidate-v1` names are verification-only:
+install, launch, bounded selection, and production-current selection fail
+closed, while `verify` continues to validate their recorded bytes and hashes.
+
+```bash
+METABOT_ARC_BOOTSTRAP_PYTHON=/opt/homebrew/bin/python3.11 \
+  metabot-arc-release install mcp-execution
+METABOT_ARC_BOOTSTRAP_PYTHON=/opt/homebrew/bin/python3.11 \
+  metabot-arc-release install hard-budget-candidate \
+  --patch-source /absolute/path/to/autoresearchclaw-cost-guard
+metabot-arc-release verify mcp-execution
+metabot-arc-release verify hard-budget-candidate
+```
+
+These commands do not write the production `current` selector or the direct
+`researchclaw` selector. Repeating an install for the same release id performs
+verification and returns the existing manifest without changing its bytes.
+
+The generated selector is a plain POSIX script that `exec`s the release's own
+console entry point. It contains no Node, no MetaBot path, no daemon URL, and no
+capability, so `researchclaw` keeps working with every MetaBot and MCP process
+stopped. Selecting a release never starts, configures, or activates anything.
+
+### Human-in-the-loop gates
+
+Official AutoResearchClaw owns `run_dir/hitl/waiting.json` and consumes
+`run_dir/hitl/response.json`. ARC's MCP surface owns
+`.metabot-arc/runs/<run>/hitl/<request>.request.json` and its `.response.json`
+sibling. The detached supervisor is the only writer that bridges them, so
+neither side learns the other's schema and no gate decision is invented by this
+package. One official gate maps to exactly one request id derived from the
+gate's own identity, so a supervisor restart republishes the same id instead of
+opening a second gate. `arc_hitl_submit` records one decision; submitting twice
+for the same gate is a conflict, not a silent overwrite.
+
+### Result provenance
+
+`arc_run_manifest` returns a provenance-first manifest plus the gates still
+awaiting a decision. It claims `official_external_cli` only when a sealed
+release manifest proved the exact pinned revision drove that run; otherwise the
+execution path is `unproven` with an explicit fallback reason. Semantic
+extraction stays `not_extracted` with an empty findings array until a separately
+validated extractor exists: empty means "not extracted", never "no findings".
 
 ## Contracts and artifacts
 
@@ -99,7 +234,11 @@ server policy described above.
 
 Capabilities use the frozen v2.1 Ed25519 form
 `base64url(JSON claims).base64url(signature)` with exact claims
-`{v:1,purpose:'arc',role,botName,chatId,exp}`. The daemon holds the current
+`{v:1,purpose:'arc',role,botName,chatId,exp}` and an optional `aud:'arc'`
+audience claim. The audience is checked before any role or scope evaluation, so
+a capability minted for another product server is refused on identity alone even
+when the same issuer signed it. The claim stays optional so capabilities minted
+before audiences existed keep working. The daemon holds the current
 capability public key and may also accept one previous public key during
 rotation (`<current>.prev` is discovered automatically); it signs callbacks
 with a distinct daemon-private Ed25519 key. Key
@@ -189,9 +328,22 @@ does not promote or ingest memory automatically.
 MetaBot release packages build this workspace and register `metabot-arcd` as a
 PM2 sibling of Bridge and Worker Runner. Production configuration supplies the
 trusted project roots; the safe default is the dedicated
-`~/.metabot/arc-projects` directory. The daemon loads the packaged runner
-adapter, and lifecycle health uses an authenticated read-only MCP call. Engine
-session materialization remains a separate, default-off integration.
+`~/.metabot/arc-projects` directory. Lifecycle health uses an authenticated
+read-only MCP call. Engine session materialization remains a separate,
+default-off integration.
+
+## Direct client registration
+
+MetaBot, Codex, and Claude each register `metabot-arc` directly. There is no
+intermediate product gateway and no shared research audience: every client gets
+the same entry name, the same loopback daemon endpoint, and its own per-turn
+`aud=arc` capability file, so all three observe identical run state.
+
+Entries materialize independently. A missing proxy, a non-loopback endpoint, or
+a failed credential lease removes only that entry, so an unavailable ARC can
+never disable Worker Runner and an unavailable Worker Runner can never disable
+ARC. A proxy path reaches an engine configuration only after it is proven to be
+a real executable confined to the runtime root.
 
 ## Development
 

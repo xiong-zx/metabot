@@ -26,6 +26,7 @@ describe('ARC local capability', () => {
     const token = issueArcCapability(keys.privateKey, {
       v: 1,
       purpose: 'arc',
+      aud: 'arc',
       role: PRINCIPAL.role,
       botName: PRINCIPAL.botName,
       chatId: PRINCIPAL.chatId,
@@ -45,6 +46,7 @@ describe('ARC local capability', () => {
     const token = issueArcCapability(previous.privateKey, {
       v: 1,
       purpose: 'arc',
+      aud: 'arc',
       role: 'pm',
       botName: 'research-pm',
       chatId: 'chat-a',
@@ -59,6 +61,7 @@ describe('ARC local capability', () => {
       JSON.stringify({
         v: 1,
         purpose: 'arc',
+        aud: 'arc',
         role: 'pm',
         botName: 'research-pm',
         chatId: 'chat-a',

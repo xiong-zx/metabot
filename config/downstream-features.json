@@ -110,7 +110,10 @@
     {
       "id": "arc-mcp",
       "status": "required",
+      "reason": "Independent AutoResearchClaw MCP server: sole ARC lifecycle database writer, official external release verifier, detached execution supervisor, HITL gate bridge, and provenance manifest. It is a standalone product server rather than a MetaBot subsystem, and must stay usable without any other research product.",
+      "validation": "npm run test -w @xvirobotics/arc-mcp; npm run typecheck -w @xvirobotics/arc-mcp; npm run lint -w @xvirobotics/arc-mcp",
       "roots": ["packages/arc-mcp"],
+      "importRoots": ["packages/arc-mcp/src"],
       "forbiddenImports": [
         "src/memory-core",
         "src/mcp/worker-manager",
@@ -118,14 +121,39 @@
         "src/api/routes/research-memory",
         "src/engines",
         "src/bridge",
-        "@xvirobotics/worker-runner-mcp"
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/research-stack-mcp",
+        "@xvirobotics/metaclaw-mcp"
       ],
-      "reason": "Keep the AutoResearchClaw lifecycle, contract, durable state, and local daemon independently testable outside the upstream Bridge runtime.",
       "validationSurface": [
         "packages/arc-mcp/tests/contract.test.ts",
         "packages/arc-mcp/tests/lifecycle.test.ts",
         "packages/arc-mcp/tests/daemon-auth.test.ts",
-        "packages/arc-mcp/tests/recovery-races.test.ts"
+        "packages/arc-mcp/tests/recovery-races.test.ts",
+        "packages/arc-mcp/tests/official-supervisor.test.ts",
+        "packages/arc-mcp/tests/releases.test.ts",
+        "packages/arc-mcp/tests/provenance.test.ts"
+      ]
+    },
+    {
+      "id": "execution-mcp-registry",
+      "status": "required",
+      "reason": "Downstream-only MCP registry, capability issuance, and per-turn materialization for the independent product servers. These files are absent from upstream/main, so they are declared here instead of staying undeclared roots under src/. Servers are described by data in src/services/mcp-registry.ts: each carries its own audience, signing keys, opt-in flag, and failure boundary, so registering one never widens a union in core and never edits a product package. This root builds configuration and leases credentials only: no product package is imported and no unified product gateway is introduced.",
+      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-mcp-registry.test.ts tests/arc-mcp-client-registration.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts",
+      "roots": [
+        "src/engines/mcp-entries.ts",
+        "src/engines/mcp-materialize.ts",
+        "src/services/mcp-registry.ts",
+        "src/services/execution-capabilities.ts",
+        "src/services/execution-principal.ts"
+      ],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/research-stack-mcp",
+        "@xvirobotics/metaclaw-mcp"
       ]
     },
     {
@@ -144,64 +172,6 @@
         "packages/worker-runner-mcp/tests/mcp-integration.test.ts",
         "packages/worker-runner-mcp/tests/service.test.ts",
         "packages/worker-runner-mcp/tests/notifier.test.ts"
-      ]
-    },
-    {
-      "id": "arc-researchclaw-adapter",
-      "status": "required",
-      "roots": ["packages/arc-researchclaw-adapter"],
-      "importRoots": ["packages/arc-researchclaw-adapter/src"],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/agent-teams",
-        "src/bridge",
-        "src/engines",
-        "@xvirobotics/worker-runner-mcp"
-      ],
-      "reason": "Delegate execution and HITL controls to a pinned external official AutoResearchClaw checkout without importing Bridge, Worker Runner, or MetaMemory internals.",
-      "validationSurface": [
-        "packages/arc-researchclaw-adapter/tests/adapter.test.ts",
-        "packages/arc-researchclaw-adapter/tests/hitl.test.ts",
-        "packages/arc-researchclaw-adapter/tests/boundary.test.ts"
-      ]
-    },
-    {
-      "id": "arc-worker-runner-adapter",
-      "status": "required",
-      "roots": [
-        "packages/arc-worker-runner-adapter/src",
-        "packages/arc-worker-runner-adapter/README.md",
-        "packages/arc-worker-runner-adapter/eslint.config.js",
-        "packages/arc-worker-runner-adapter/package.json",
-        "packages/arc-worker-runner-adapter/tsconfig.json",
-        "packages/arc-worker-runner-adapter/vitest.config.ts"
-      ],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/agent-teams",
-        "src/bridge",
-        "src/engines",
-        "better-sqlite3",
-        "@xvirobotics/worker-runner-mcp"
-      ],
-      "reason": "Adapt ARC to Worker Runner only through the public MCP wire without importing either daemon implementation.",
-      "validationSurface": [
-        "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
-        "packages/arc-worker-runner-adapter/tests/integration.test.ts",
-        "packages/arc-worker-runner-adapter/tests/boundary.test.ts"
-      ]
-    },
-    {
-      "id": "arc-worker-runner-adapter-tests",
-      "status": "required",
-      "roots": ["packages/arc-worker-runner-adapter/tests"],
-      "forbiddenImports": ["src/memory-core", "src/agent-teams", "src/bridge", "src/engines", "better-sqlite3"],
-      "reason": "Keep adapter tests in an explicit owned root that may exercise the Worker Runner public API without weakening production isolation.",
-      "validationSurface": [
-        "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
-        "packages/arc-worker-runner-adapter/tests/integration.test.ts",
-        "packages/arc-worker-runner-adapter/tests/boundary.test.ts",
-        "tests/downstream-boundaries.test.ts"
       ]
     },
     {
@@ -384,6 +354,8 @@
     "src/workers/worker-manager.ts",
     "src/engines/home-instructions.ts",
     "src/workspace",
+    "packages/arc-researchclaw-adapter",
+    "packages/arc-worker-runner-adapter",
     "web"
   ]
 }

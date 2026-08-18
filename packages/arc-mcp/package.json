@@ -1,7 +1,7 @@
 {
   "name": "@xvirobotics/arc-mcp",
   "version": "0.3.0",
-  "description": "Independent official AutoResearchClaw lifecycle, HITL, and MCP gateway",
+  "description": "Independent AutoResearchClaw lifecycle, official execution supervisor, HITL, and stdio MCP server",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,10 +14,13 @@
   "bin": {
     "metabot-arc-mcp": "dist/bin.js",
     "metabot-arcd": "dist/daemon-cli.js",
-    "metabot-arc-proxy": "dist/proxy-cli.js"
+    "metabot-arc-proxy": "dist/proxy-cli.js",
+    "metabot-arc-supervisor": "dist/official-supervisor-cli.js",
+    "metabot-arc-release": "dist/release-cli.js"
   },
   "files": [
     "dist",
+    "python",
     "README.md"
   ],
   "scripts": {
