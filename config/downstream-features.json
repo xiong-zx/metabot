@@ -50,12 +50,7 @@
         "src/agent-teams/governance-capability.ts",
         "src/agent-teams/schedule-capability.ts"
       ],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/arc-mcp",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/arc-mcp", "@xvirobotics/worker-runner-mcp"],
       "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
       "validationSurface": [
         "tests/agent-team-governance-capability.test.ts",
@@ -69,11 +64,7 @@
       "id": "agent-team-compact-card-upstream-gap",
       "status": "required",
       "roots": ["src/feishu/team-panel.ts"],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
       "reason": "Track the generic compact Agent Team card renderer as a removable upstreamable patch until upstream accepts it.",
       "validationSurface": [
         "tests/card-builder.test.ts",
@@ -84,15 +75,8 @@
     {
       "id": "agent-team-busy-chat-reliability-upstream-gap",
       "status": "required",
-      "roots": [
-        "src/scheduler/busy-retry-policy.ts",
-        "src/bridge/deferred-activity-delivery.ts"
-      ],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "roots": ["src/scheduler/busy-retry-policy.ts", "src/bridge/deferred-activity-delivery.ts"],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
       "reason": "Track generic bounded busy-chat retry, burst coalescing, and reusable activity-card delivery as removable upstreamable patches until upstream accepts them.",
       "validationSurface": [
         "tests/busy-retry-policy.test.ts",
@@ -184,8 +168,14 @@
     {
       "id": "arc-worker-runner-adapter",
       "status": "required",
-      "roots": ["packages/arc-worker-runner-adapter"],
-      "importRoots": ["packages/arc-worker-runner-adapter/src"],
+      "roots": [
+        "packages/arc-worker-runner-adapter/src",
+        "packages/arc-worker-runner-adapter/README.md",
+        "packages/arc-worker-runner-adapter/eslint.config.js",
+        "packages/arc-worker-runner-adapter/package.json",
+        "packages/arc-worker-runner-adapter/tsconfig.json",
+        "packages/arc-worker-runner-adapter/vitest.config.ts"
+      ],
       "forbiddenImports": [
         "src/memory-core",
         "src/agent-teams",
@@ -202,12 +192,159 @@
       ]
     },
     {
+      "id": "arc-worker-runner-adapter-tests",
+      "status": "required",
+      "roots": ["packages/arc-worker-runner-adapter/tests"],
+      "forbiddenImports": ["src/memory-core", "src/agent-teams", "src/bridge", "src/engines", "better-sqlite3"],
+      "reason": "Keep adapter tests in an explicit owned root that may exercise the Worker Runner public API without weakening production isolation.",
+      "validationSurface": [
+        "packages/arc-worker-runner-adapter/tests/adapter.test.ts",
+        "packages/arc-worker-runner-adapter/tests/integration.test.ts",
+        "packages/arc-worker-runner-adapter/tests/boundary.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-engine",
+      "status": "required",
+      "roots": ["packages/rulespack"],
+      "importRoots": ["packages/rulespack/src"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep the deterministic vendored RulesPack engine independent of MetaBot runtime and downstream daemon implementations.",
+      "validationSurface": [
+        "packages/rulespack/test/compiler.test.ts",
+        "packages/rulespack/test/store-engine.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-metabot-adapter",
+      "status": "required",
+      "roots": ["packages/rulespack-adapter"],
+      "importRoots": ["packages/rulespack-adapter/src"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "thinHooks": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/engines/claude/executor.ts",
+        "src/engines/claude/session-manager.ts",
+        "src/engines/codex/executor.ts",
+        "src/api/http-server.ts",
+        "src/api/bot-registry.ts",
+        "src/api/peer-manager.ts",
+        "src/api/routes/bot-routes.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts",
+        "src/agent-teams/team-supervisor.ts",
+        "src/scheduler/task-scheduler.ts",
+        "packages/worker-runner-mcp/src/runtime.ts",
+        "packages/worker-runner-mcp/src/service.ts",
+        "packages/worker-runner-mcp/src/process-runner.ts",
+        "packages/worker-runner-mcp/src/store.ts",
+        "packages/worker-runner-mcp/src/types.ts"
+      ],
+      "allowedImporters": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts"
+      ],
+      "reason": "Keep MetaBot-specific Codex/source/session/transport bindings in an isolated downstream package with enumerated thin runtime hooks.",
+      "validationSurface": [
+        "packages/rulespack-adapter/tests/runtime.test.ts",
+        "tests/rulespack-codex-integration.test.ts",
+        "tests/rulespack-in-process-smoke.test.ts",
+        "tests/rulespack-operator-routes.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-worker-adapter",
+      "status": "required",
+      "roots": ["packages/worker-runner-mcp/src/rulespack.ts"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep the detached Worker RulesPack binding confined to the Worker package public contracts and the RulesPack adapter.",
+      "validationSurface": ["packages/worker-runner-mcp/tests/service.test.ts", "tests/downstream-boundaries.test.ts"]
+    },
+    {
+      "id": "rulespack-operator-routes",
+      "status": "required",
+      "roots": ["src/extensions/rulespack-routes.ts"],
+      "forbiddenImports": [
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Bind the authenticated HTTP operator surface without coupling it to Bridge, Memory, or detached runner implementations.",
+      "validationSurface": ["tests/rulespack-operator-routes.test.ts", "tests/downstream-boundaries.test.ts"]
+    },
+    {
+      "id": "rulespack-api-principal",
+      "status": "required",
+      "roots": ["src/extensions/rulespack-api-principal.ts"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Keep authenticated API principal derivation independent of API, Bridge, Memory, and daemon internals.",
+      "validationSurface": ["tests/rulespack-operator-routes.test.ts", "tests/downstream-boundaries.test.ts"]
+    },
+    {
+      "id": "rulespack-peer-dispatch",
+      "status": "required",
+      "roots": ["src/extensions/rulespack-peer-dispatch.ts"],
+      "forbiddenImports": [
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep authenticated peer envelope compilation and receipt accounting behind the public peer and registry contracts.",
+      "validationSurface": ["tests/rulespack-operator-routes.test.ts", "tests/downstream-boundaries.test.ts"]
+    },
+    {
       "id": "ci-runtime-prerequisites",
       "status": "required",
-      "roots": [
-        ".github/workflows/ci.yml",
-        "tests/ci-workflow.test.ts"
-      ],
+      "roots": [".github/workflows/ci.yml", "tests/ci-workflow.test.ts"],
       "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
       "validationSurface": [
         "tests/ci-workflow.test.ts",
@@ -220,11 +357,23 @@
     {
       "id": "upstream-runtime-isolation",
       "roots": ["src"],
+      "allowedImporters": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/api/http-server.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts",
+        "src/extensions/rulespack-api-principal.ts",
+        "src/extensions/rulespack-peer-dispatch.ts"
+      ],
       "forbiddenImports": [
         "@xvirobotics/arc-mcp",
         "@xvirobotics/worker-runner-mcp",
         "@xvirobotics/arc-worker-runner-adapter",
-        "@xvirobotics/arc-researchclaw-adapter"
+        "@xvirobotics/arc-researchclaw-adapter",
+        "@metabot/rulespack",
+        "@metabot/rulespack-adapter"
       ]
     }
   ],

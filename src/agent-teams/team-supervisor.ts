@@ -283,6 +283,20 @@ export class AgentTeamSupervisor {
         userId: 'agent-team-supervisor',
         sendCards: false,
         prompt: this.buildPrompt(teamName, agent, messages, tasks, rulesContext),
+        rulesPack: {
+          principal: {
+            kind: 'scoped',
+            source: 'capability',
+            botName: bot.name,
+            chatId,
+            roles: [agent.role ?? 'agent'],
+            agentName: agent.name,
+            taskId: tasks[0] ? String(tasks[0].id) : run.id,
+            userId: 'agent-team-supervisor',
+            dataClasses: ['agent-team'],
+            outputTypes: ['text'],
+          },
+        },
         onUpdate: (state) => {
           if (preparation) this.options.governance!.touchAgent(preparation.instanceId, agent.name);
           const current = this.options.store.getRun(teamName, run.id);

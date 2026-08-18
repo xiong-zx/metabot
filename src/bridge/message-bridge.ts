@@ -57,6 +57,11 @@ import { DeferredActivityDelivery } from './deferred-activity-delivery.js';
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
+import { MetaBotRulesPackRuntime } from '@metabot/rulespack-adapter';
+import type {
+  AuthenticatedExecutionFacts,
+  RulesPackOperator,
+} from '@metabot/rulespack-adapter';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -214,6 +219,8 @@ export interface ApiTaskOptions {
   groupMembers?: string[];
   /** Group ID — used for inter-bot communication chatId pattern. */
   groupId?: string;
+  /** Authenticated child/transport facts supplied only by internal adapters. */
+  rulesPack?: NonNullable<ApiContext['rulesPack']>;
 }
 
 export interface ApiTaskResult {
@@ -339,6 +346,13 @@ export class MessageBridge {
   onActivityEvent?: (event: ActivityEventData) => void;
   private agentTeamStore?: AgentTeamStore;
   private executionEnvProvider?: (input: { botName: string; chatId: string }) => Record<string, string>;
+  private executionPrincipalProvider?: (input: { botName: string; chatId: string }) => {
+    role: string;
+    botName: string;
+    chatId: string;
+    agentName?: string;
+  };
+  private rulesPackRuntime?: MetaBotRulesPackRuntime;
   /**
    * Periodic sweep that evicts stale per-chat between-turn bookkeeping as a
    * safety net behind the event-driven `executor-removed` cleanup. Cleared in
@@ -357,6 +371,16 @@ export class MessageBridge {
     this.engineCache.set(defaultEngineName, { engine: this.engine, executor: this.executor });
     this.sessionManager = new SessionManager(config.claude.defaultWorkingDirectory, logger, config.name);
     this.outputsManager = new OutputsManager(config.claude.outputsBaseDir, logger);
+    if (config.rulesPack) {
+      this.rulesPackRuntime = new MetaBotRulesPackRuntime(config.rulesPack, logger);
+      void this.rulesPackRuntime.initialize().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(
+          { error: message.replace(/(authorization|token|secret|password)\s*[:=]\s*\S+/giu, '$1=[REDACTED]') },
+          'RulesPack initial source refresh failed; turn policy will apply configured failure semantics',
+        );
+      });
+    }
     this.audit = new AuditLogger(logger);
     this.costTracker = new CostTracker();
     this.deferredActivityDelivery = new DeferredActivityDelivery({
@@ -551,6 +575,23 @@ export class MessageBridge {
     provider: (input: { botName: string; chatId: string }) => Record<string, string>,
   ): void {
     this.executionEnvProvider = provider;
+  }
+
+  /** Inject the same authenticated principal derivation used for capabilities. */
+  setExecutionPrincipalProvider(
+    provider: (input: { botName: string; chatId: string }) => {
+      role: string;
+      botName: string;
+      chatId: string;
+      agentName?: string;
+    },
+  ): void {
+    this.executionPrincipalProvider = provider;
+  }
+
+  /** Authenticated operator routes use this surface; undefined means disabled. */
+  getRulesPackOperator(): RulesPackOperator | undefined {
+    return this.rulesPackRuntime;
   }
 
   /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
@@ -1533,6 +1574,7 @@ export class MessageBridge {
     const session = this.sessionManager.getSession(chatId);
     const engineName = session.engine ?? resolveEngineName(this.config);
     this.sessionManager.setSessionId(chatId, sessionId, engineName);
+    this.sessionManager.applyRulesPackDigest(chatId, undefined);
     this.sessionManager.resetUsage(chatId);
     try {
       await this.releaseChatExecutor(chatId, 'resume-command');
@@ -1583,7 +1625,7 @@ export class MessageBridge {
       freshSession?: boolean;
     },
   ): Promise<ExecutionHandle> {
-    const session = this.sessionManager.getSession(chatId);
+    let session = this.sessionManager.getSession(chatId);
     const executionEnv = this.executionEnvProvider?.({ botName: this.config.name, chatId });
     const executionMcp = materializeExecutionMcp({
       executionEnv,
@@ -1594,6 +1636,73 @@ export class MessageBridge {
       chatId,
       logger: this.logger,
     });
+    let preparedRulesPack: Awaited<ReturnType<MetaBotRulesPackRuntime['prepareTurn']>> | undefined;
+    try {
+      if (engineName === 'codex' && this.rulesPackRuntime) {
+        const principal = this.executionPrincipalProvider?.({ botName: this.config.name, chatId });
+        const supplied = opts.apiContext?.rulesPack;
+        const transportPrincipal = supplied?.principal;
+        if (!transportPrincipal || transportPrincipal.kind === 'generic') {
+          this.sessionManager.applyRulesPackDigest(chatId, undefined);
+        } else {
+          if (transportPrincipal.botName !== this.config.name || transportPrincipal.chatId !== chatId) {
+            throw new Error('Verified RulesPack principal does not match the Codex turn');
+          }
+          if (principal && (principal.botName !== transportPrincipal.botName || principal.chatId !== transportPrincipal.chatId)) {
+            throw new Error('Authenticated execution principal does not match the Codex turn');
+          }
+          if (principal?.agentName && transportPrincipal.agentName && principal.agentName !== transportPrincipal.agentName) {
+            throw new Error('Authenticated Agent identity does not match the child turn');
+          }
+          const facts: AuthenticatedExecutionFacts = {
+            botName: transportPrincipal.botName,
+            chatId: transportPrincipal.chatId,
+            roles: [...new Set([...(principal ? [principal.role] : []), ...transportPrincipal.roles])],
+            cwd: opts.cwd,
+            ...(transportPrincipal.userId ? { userId: transportPrincipal.userId } : {}),
+            ...(principal?.agentName || transportPrincipal.agentName
+              ? { agentName: principal?.agentName ?? transportPrincipal.agentName }
+              : {}),
+            ...(transportPrincipal.workerId ? { workerId: transportPrincipal.workerId } : {}),
+            ...(transportPrincipal.taskId ? { taskId: transportPrincipal.taskId } : {}),
+            tools: [
+              ...(opts.allowedTools ?? []),
+              ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
+            ],
+            dataClasses: transportPrincipal.dataClasses ?? [],
+            outputTypes: transportPrincipal.outputTypes ?? ['text'],
+          };
+          preparedRulesPack = await this.rulesPackRuntime.prepareTurn(
+            facts,
+            supplied?.dispatch
+              ? {
+                  envelope: supplied.dispatch.envelope,
+                  transport: { authenticated: true, authenticatedIssuer: supplied.dispatch.authenticatedIssuer },
+                }
+              : undefined,
+          );
+          const activeDigest = preparedRulesPack.mode === 'enforce' && preparedRulesPack.injectionText
+            ? preparedRulesPack.packDigest
+            : undefined;
+          const recycled = this.sessionManager.applyRulesPackDigest(chatId, activeDigest);
+          session = this.sessionManager.getSession(chatId);
+          this.logger.info({
+            mode: preparedRulesPack.mode,
+            digest: preparedRulesPack.packDigest,
+            cache: preparedRulesPack.telemetry.cache,
+            compileLatencyMs: preparedRulesPack.telemetry.compileLatencyMs,
+            selectedRuleCount: preparedRulesPack.telemetry.selectedRuleCount,
+            tokenEstimate: preparedRulesPack.telemetry.tokenCount,
+            characters: preparedRulesPack.telemetry.characterCount,
+            degraded: preparedRulesPack.telemetry.degraded,
+            recycled,
+          }, 'RulesPack prepared for Codex turn');
+        }
+      }
+    } catch (error) {
+      executionMcp?.cleanup();
+      throw error;
+    }
     // Persistent only applies to Claude. Options that need per-turn binding
     // (maxTurns / allowedTools) aren't plumbed through the persistent path yet,
     // so fall back to legacy spawn when they're present — matches the gating
@@ -1652,6 +1761,13 @@ export class MessageBridge {
         allowedTools: opts.allowedTools,
         env: executionEnv,
         mcpEntries: executionMcp?.entries,
+        ...(preparedRulesPack ? {
+          rulesPack: {
+            injectionText: preparedRulesPack.injectionText,
+            markInjected: preparedRulesPack.markInjected,
+            markRejected: preparedRulesPack.markRejected,
+          },
+        } : {}),
       });
       return withMcpCleanup(handle, executionMcp?.cleanup);
     } catch (error) {
@@ -2353,6 +2469,18 @@ export class MessageBridge {
       teamContext: this.agentTeamStore
         ? buildAgentTeamPromptContextForChat(this.agentTeamStore, chatId)
         : undefined,
+      rulesPack: {
+        principal: {
+          kind: 'scoped',
+          source: 'chat',
+          botName: this.config.name,
+          chatId,
+          roles: ['chat'],
+          userId,
+          dataClasses: ['chat'],
+          outputTypes: ['text'],
+        },
+      },
     });
 
     const rateLimiter = new RateLimiter(1500);
@@ -2973,6 +3101,18 @@ export class MessageBridge {
         : undefined,
       groupMembers: options.groupMembers,
       groupId: options.groupId,
+      rulesPack: options.rulesPack ?? {
+        principal: {
+          kind: 'scoped',
+          source: 'capability',
+          botName: this.config.name,
+          chatId,
+          roles: ['internal-api'],
+          userId,
+          dataClasses: ['api'],
+          outputTypes: ['text'],
+        },
+      },
     });
 
     // Forward-declare for the onTeamEvent closure below (only assigned once;
@@ -3452,6 +3592,8 @@ export class MessageBridge {
     this.startingTasks.clear();
     this.messageQueues.clear();
     this.sessionManager.destroy();
+    this.rulesPackRuntime?.close();
+    this.rulesPackRuntime = undefined;
     // Tear down persistent executors (Stage 2). This is the one inherently
     // async step: registry.shutdownAll awaits clean SDK/PTY process exit and
     // flushes per-executor buffers. Return its promise so an awaiting caller

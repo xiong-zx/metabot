@@ -48,11 +48,36 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
       const missing = roots.filter((item) => !existingRoots.includes(item));
       failures.push(`${feature.id}: missing required roots: ${missing.join(', ')}`);
     }
+    const thinHooks = feature.thinHooks;
+    const allowedImporters = feature.allowedImporters;
+    if (thinHooks !== undefined) {
+      if (!Array.isArray(thinHooks) || thinHooks.some((item) => typeof item !== 'string' || item.trim() === '')) {
+        failures.push(`${feature.id}: thinHooks must contain non-empty relative paths`);
+      } else {
+        const missingHooks = thinHooks.filter((item) => !pathEntryExists(resolveInside(root, item)));
+        if (missingHooks.length > 0) failures.push(`${feature.id}: missing thinHooks: ${missingHooks.join(', ')}`);
+        const ownedHooks = thinHooks.filter((item) => roots.some((featureRoot) => containsPath(featureRoot, item)));
+        if (ownedHooks.length > 0)
+          failures.push(`${feature.id}: thinHooks must remain outside owned roots: ${ownedHooks.join(', ')}`);
+      }
+    }
+    if (allowedImporters !== undefined) {
+      if (
+        !Array.isArray(allowedImporters) ||
+        allowedImporters.some((item) => typeof item !== 'string' || item.trim() === '')
+      ) {
+        failures.push(`${feature.id}: allowedImporters must contain non-empty relative paths`);
+      } else {
+        const missingImporters = allowedImporters.filter((item) => !pathEntryExists(resolveInside(root, item)));
+        if (missingImporters.length > 0)
+          failures.push(`${feature.id}: missing allowedImporters: ${missingImporters.join(', ')}`);
+        const undeclared = allowedImporters.filter((item) => !Array.isArray(thinHooks) || !thinHooks.includes(item));
+        if (undeclared.length > 0)
+          failures.push(`${feature.id}: allowedImporters must also be declared thinHooks: ${undeclared.join(', ')}`);
+      }
+    }
     const importRoots = feature.importRoots ?? roots;
-    if (
-      !Array.isArray(importRoots) ||
-      importRoots.some((item) => typeof item !== 'string' || item.trim() === '')
-    ) {
+    if (!Array.isArray(importRoots) || importRoots.some((item) => typeof item !== 'string' || item.trim() === '')) {
       failures.push(`${feature.id}: importRoots must contain non-empty relative paths`);
     } else if (importRoots.some((item) => !roots.some((featureRoot) => containsPath(featureRoot, item)))) {
       failures.push(`${feature.id}: importRoots must stay within declared roots`);
@@ -63,8 +88,8 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
         const missing = importRoots.filter((item) => !existingImportRoots.includes(item));
         failures.push(`${feature.id}: missing required importRoots: ${missing.join(', ')}`);
       }
-      if (existingImportRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
-        scanForbiddenImports(root, feature.id, existingImportRoots, feature.forbiddenImports, failures);
+      if (existingRoots.length > 0 && Array.isArray(feature.forbiddenImports)) {
+        scanForbiddenImports(root, feature.id, existingRoots, feature.forbiddenImports, failures);
       }
     }
     checkedFeatures.push({ id: feature.id, status: feature.status, presentRoots: existingRoots.length });
@@ -93,7 +118,10 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
     if (!Array.isArray(boundary.forbiddenImports) || boundary.forbiddenImports.length === 0) {
       failures.push(`${boundary.id}: reverse boundary must declare forbidden imports`);
     } else if (existingRoots.length > 0) {
-      scanForbiddenImports(root, boundary.id, existingRoots, boundary.forbiddenImports, failures);
+      const allowedImporters = Array.isArray(boundary.allowedImporters)
+        ? boundary.allowedImporters.map((item) => resolveInside(root, item))
+        : [];
+      scanForbiddenImports(root, boundary.id, existingRoots, boundary.forbiddenImports, failures, allowedImporters);
     }
     checkedReverseBoundaries.push({ id: boundary.id, presentRoots: existingRoots.length });
   }
@@ -110,17 +138,17 @@ function assertSourceRootsAreNotSymlinks(root, sourceRoots) {
   }
 }
 
-function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, failures) {
+function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, failures, allowedImporters = []) {
   if (forbiddenImports.some((item) => typeof item !== 'string' || item.trim() === '')) {
     failures.push(`${boundaryId}: forbiddenImports must contain non-empty strings`);
     return;
   }
-  for (const sourceRoot of sourceRoots) {
-    for (const file of walkSourceFiles(resolveInside(root, sourceRoot))) {
-      for (const specifier of collectModuleSpecifiers(file)) {
-        const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
-        if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);
-      }
+  const sourceFiles = new Set(sourceRoots.flatMap((sourceRoot) => walkSourceFiles(resolveInside(root, sourceRoot))));
+  for (const file of [...sourceFiles].sort()) {
+    if (allowedImporters.some((allowed) => file === allowed || file.startsWith(`${allowed}${path.sep}`))) continue;
+    for (const specifier of collectModuleSpecifiers(file)) {
+      const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
+      if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);
     }
   }
 }
@@ -212,7 +240,7 @@ function walkSourceFiles(entry) {
   if (stat.isFile()) return SOURCE_EXTENSIONS.has(path.extname(entry)) ? [entry] : [];
   const files = [];
   for (const name of fs.readdirSync(entry).sort()) {
-    if (name === 'node_modules' || name === 'dist' || name === 'coverage') continue;
+    if (name === 'node_modules' || name === 'dist' || name === 'build' || name === 'coverage') continue;
     const child = path.join(entry, name);
     const childStat = fs.lstatSync(child);
     if (childStat.isSymbolicLink()) throw new Error(`source tree cannot contain a symlink: ${child}`);

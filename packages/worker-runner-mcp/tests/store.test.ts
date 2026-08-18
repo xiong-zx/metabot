@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import { WorkerStore } from '../src/store.js';
 import type { ScopedDispatchWorkerInput } from '../src/types.js';
 import { WorkerRunnerError } from '../src/types.js';
@@ -84,6 +85,22 @@ describe('WorkerStore', () => {
     stores.push(reopened);
     expect(reopened.getAuthorizingCapability('wrk-private-capability')).toBe('signed-worker-capability');
     expect(reopened.require('wrk-private-capability')).not.toHaveProperty('authorizingCapability');
+  });
+
+  it('marks legacy rows without identity evidence unknown instead of defaulting them to ordinary workers', () => {
+    const { store, dir } = makeStore();
+    store.createWorker('legacy-row', input(dir), 2, 100);
+    store.close();
+    const filename = path.join(dir, 'state', 'workers.sqlite');
+    const raw = new Database(filename);
+    raw.prepare('UPDATE worker_jobs SET principal_role = NULL, execution_kind = NULL WHERE id = ?').run('legacy-row');
+    raw.close();
+    const reopened = new WorkerStore(filename);
+    stores.push(reopened);
+    expect(reopened.require('legacy-row')).toMatchObject({
+      principalRole: 'unknown',
+      executionKind: 'unknown',
+    });
   });
 
   it('reuses successful dedupe keys only within TTL and retries terminal failures by policy', () => {
