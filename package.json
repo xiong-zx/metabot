@@ -20,7 +20,7 @@
     "packages/web-ui"
   ],
   "scripts": {
-    "build": "tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
+    "build": "npm run build -w @metabot/rulespack -w @metabot/rulespack-adapter && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
     "build:bridge": "tsc -p tsconfig.bridge.json",
     "build:packages": "npm run build --workspaces --if-present",
     "start": "node dist/index.js",
