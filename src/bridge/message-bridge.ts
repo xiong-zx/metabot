@@ -1641,55 +1641,63 @@ export class MessageBridge {
       if (engineName === 'codex' && this.rulesPackRuntime) {
         const principal = this.executionPrincipalProvider?.({ botName: this.config.name, chatId });
         const supplied = opts.apiContext?.rulesPack;
-        if (principal && (principal.botName !== this.config.name || principal.chatId !== chatId)) {
-          throw new Error('Authenticated execution principal does not match the Codex turn');
+        const transportPrincipal = supplied?.principal;
+        if (!transportPrincipal || transportPrincipal.kind === 'generic') {
+          this.sessionManager.applyRulesPackDigest(chatId, undefined);
+        } else {
+          if (transportPrincipal.botName !== this.config.name || transportPrincipal.chatId !== chatId) {
+            throw new Error('Verified RulesPack principal does not match the Codex turn');
+          }
+          if (principal && (principal.botName !== transportPrincipal.botName || principal.chatId !== transportPrincipal.chatId)) {
+            throw new Error('Authenticated execution principal does not match the Codex turn');
+          }
+          if (principal?.agentName && transportPrincipal.agentName && principal.agentName !== transportPrincipal.agentName) {
+            throw new Error('Authenticated Agent identity does not match the child turn');
+          }
+          const facts: AuthenticatedExecutionFacts = {
+            botName: transportPrincipal.botName,
+            chatId: transportPrincipal.chatId,
+            roles: [...new Set([...(principal ? [principal.role] : []), ...transportPrincipal.roles])],
+            cwd: opts.cwd,
+            ...(transportPrincipal.userId ? { userId: transportPrincipal.userId } : {}),
+            ...(principal?.agentName || transportPrincipal.agentName
+              ? { agentName: principal?.agentName ?? transportPrincipal.agentName }
+              : {}),
+            ...(transportPrincipal.workerId ? { workerId: transportPrincipal.workerId } : {}),
+            ...(transportPrincipal.taskId ? { taskId: transportPrincipal.taskId } : {}),
+            tools: [
+              ...(opts.allowedTools ?? []),
+              ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
+            ],
+            dataClasses: transportPrincipal.dataClasses ?? [],
+            outputTypes: transportPrincipal.outputTypes ?? ['text'],
+          };
+          preparedRulesPack = await this.rulesPackRuntime.prepareTurn(
+            facts,
+            supplied?.dispatch
+              ? {
+                  envelope: supplied.dispatch.envelope,
+                  transport: { authenticated: true, authenticatedIssuer: supplied.dispatch.authenticatedIssuer },
+                }
+              : undefined,
+          );
+          const activeDigest = preparedRulesPack.mode === 'enforce' && preparedRulesPack.injectionText
+            ? preparedRulesPack.packDigest
+            : undefined;
+          const recycled = this.sessionManager.applyRulesPackDigest(chatId, activeDigest);
+          session = this.sessionManager.getSession(chatId);
+          this.logger.info({
+            mode: preparedRulesPack.mode,
+            digest: preparedRulesPack.packDigest,
+            cache: preparedRulesPack.telemetry.cache,
+            compileLatencyMs: preparedRulesPack.telemetry.compileLatencyMs,
+            selectedRuleCount: preparedRulesPack.telemetry.selectedRuleCount,
+            tokenEstimate: preparedRulesPack.telemetry.tokenCount,
+            characters: preparedRulesPack.telemetry.characterCount,
+            degraded: preparedRulesPack.telemetry.degraded,
+            recycled,
+          }, 'RulesPack prepared for Codex turn');
         }
-        if (principal?.agentName && supplied?.agentName && principal.agentName !== supplied.agentName) {
-          throw new Error('Authenticated Agent identity does not match the child turn');
-        }
-        const facts: AuthenticatedExecutionFacts = {
-          botName: this.config.name,
-          chatId,
-          roles: [...new Set([...(principal ? [principal.role] : []), ...(supplied?.roles ?? [])])],
-          cwd: opts.cwd,
-          ...(supplied?.userId ? { userId: supplied.userId } : {}),
-          ...(principal?.agentName || supplied?.agentName
-            ? { agentName: principal?.agentName ?? supplied?.agentName }
-            : {}),
-          ...(supplied?.workerId ? { workerId: supplied.workerId } : {}),
-          ...(supplied?.taskId ? { taskId: supplied.taskId } : {}),
-          tools: [
-            ...(opts.allowedTools ?? []),
-            ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
-          ],
-          dataClasses: supplied?.dataClasses ?? [],
-          outputTypes: supplied?.outputTypes ?? ['text'],
-        };
-        preparedRulesPack = await this.rulesPackRuntime.prepareTurn(
-          facts,
-          supplied?.dispatch
-            ? {
-                envelope: supplied.dispatch.envelope,
-                transport: { authenticated: true, authenticatedIssuer: supplied.dispatch.authenticatedIssuer },
-              }
-            : undefined,
-        );
-        const activeDigest = preparedRulesPack.mode === 'enforce' && preparedRulesPack.injectionText
-          ? preparedRulesPack.packDigest
-          : undefined;
-        const recycled = this.sessionManager.applyRulesPackDigest(chatId, activeDigest);
-        session = this.sessionManager.getSession(chatId);
-        this.logger.info({
-          mode: preparedRulesPack.mode,
-          digest: preparedRulesPack.packDigest,
-          cache: preparedRulesPack.telemetry.cache,
-          compileLatencyMs: preparedRulesPack.telemetry.compileLatencyMs,
-          selectedRuleCount: preparedRulesPack.telemetry.selectedRuleCount,
-          tokenEstimate: preparedRulesPack.telemetry.tokenCount,
-          characters: preparedRulesPack.telemetry.characterCount,
-          degraded: preparedRulesPack.telemetry.degraded,
-          recycled,
-        }, 'RulesPack prepared for Codex turn');
       }
     } catch (error) {
       executionMcp?.cleanup();
@@ -1757,6 +1765,7 @@ export class MessageBridge {
           rulesPack: {
             injectionText: preparedRulesPack.injectionText,
             markInjected: preparedRulesPack.markInjected,
+            markRejected: preparedRulesPack.markRejected,
           },
         } : {}),
       });
@@ -2460,7 +2469,18 @@ export class MessageBridge {
       teamContext: this.agentTeamStore
         ? buildAgentTeamPromptContextForChat(this.agentTeamStore, chatId)
         : undefined,
-      rulesPack: { userId },
+      rulesPack: {
+        principal: {
+          kind: 'scoped',
+          source: 'chat',
+          botName: this.config.name,
+          chatId,
+          roles: ['chat'],
+          userId,
+          dataClasses: ['chat'],
+          outputTypes: ['text'],
+        },
+      },
     });
 
     const rateLimiter = new RateLimiter(1500);
@@ -3081,7 +3101,18 @@ export class MessageBridge {
         : undefined,
       groupMembers: options.groupMembers,
       groupId: options.groupId,
-      rulesPack: { ...(options.rulesPack ?? {}), userId },
+      rulesPack: options.rulesPack ?? {
+        principal: {
+          kind: 'scoped',
+          source: 'capability',
+          botName: this.config.name,
+          chatId,
+          roles: ['internal-api'],
+          userId,
+          dataClasses: ['api'],
+          outputTypes: ['text'],
+        },
+      },
     });
 
     // Forward-declare for the onTeamEvent closure below (only assigned once;

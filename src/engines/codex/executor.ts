@@ -421,6 +421,7 @@ export class CodexExecutor {
       });
       child.once('spawn', () => options.rulesPack?.markInjected());
     } catch (err: any) {
+      options.rulesPack?.markRejected(err);
       finishWithError(err?.message || String(err));
       queue.finish();
     }
@@ -437,6 +438,7 @@ export class CodexExecutor {
         stderr += chunk.toString('utf-8');
       });
       child.on('error', (err) => {
+        options.rulesPack?.markRejected(err);
         finishWithError(err.message);
       });
       child.on('close', (code, signal) => {

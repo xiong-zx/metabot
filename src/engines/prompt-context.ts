@@ -13,13 +13,7 @@ export interface ApiContext {
   groupId?: string;
   /** Authenticated runtime facts for the downstream RulesPack hook; never rendered. */
   rulesPack?: {
-    userId?: string;
-    taskId?: string;
-    agentName?: string;
-    workerId?: string;
-    roles?: string[];
-    dataClasses?: string[];
-    outputTypes?: string[];
+    principal: import('@metabot/rulespack-adapter').RulesPackExecutionPrincipal;
     dispatch?: {
       envelope: import('@metabot/rulespack').RulesPackDispatchEnvelopeV1;
       authenticatedIssuer: string;

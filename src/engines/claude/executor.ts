@@ -273,6 +273,7 @@ export interface ExecutorOptions {
   rulesPack?: {
     injectionText: string;
     markInjected(): void;
+    markRejected(reason: unknown): void;
   };
 }
 

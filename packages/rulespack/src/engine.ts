@@ -104,15 +104,19 @@ export class RulesPackEngine {
     );
     for (const outcome of outcomes) {
       if ('snapshot' in outcome && outcome.snapshot) {
+        const snapshot = {
+          ...outcome.snapshot,
+          source: { ...outcome.snapshot.source, required: outcome.adapter.required },
+        };
         const old = previous.get(outcome.adapter.id);
-        this.store.replaceSourceSnapshot(outcome.snapshot);
-        generations.push(outcome.snapshot.source);
-        rules.push(...outcome.snapshot.rules);
-        if (!old || old.generation !== outcome.snapshot.source.generation) this.invalidateSource(outcome.adapter.id);
+        this.store.replaceSourceSnapshot(snapshot);
+        generations.push(snapshot.source);
+        rules.push(...snapshot.rules);
+        if (!old || old.generation !== snapshot.source.generation) this.invalidateSource(outcome.adapter.id);
         this.store.audit('source-refresh', {
           health: 'fresh',
-          generation: outcome.snapshot.source.generation,
-          ruleCount: outcome.snapshot.rules.length,
+          generation: snapshot.source.generation,
+          ruleCount: snapshot.rules.length,
         }, { sourceId: outcome.adapter.id });
         continue;
       }
@@ -126,7 +130,7 @@ export class RulesPackEngine {
       const withinLkgBound =
         prior &&
         (prior.health === 'fresh' || prior.health === 'stale') &&
-        Date.parse(now) - Date.parse(prior.observedAt) <= this.#lkgTtlMs;
+        Date.parse(now) - Date.parse(prior.freshUntil ?? prior.observedAt) <= this.#lkgTtlMs;
       if (prior && withinLkgBound) {
         usedLastKnownGood = true;
         const stale: SourceGeneration = { ...prior, health: 'stale', error: message };
@@ -142,6 +146,7 @@ export class RulesPackEngine {
           revision: 'unavailable',
           snapshotDigest: digestObject([]),
           observedAt: now,
+          required: outcome.adapter.required,
           health: 'unavailable',
           error: message,
           ruleCount: 0,
@@ -161,11 +166,11 @@ export class RulesPackEngine {
       );
       this.invalidateSource(outcome.adapter.id);
     }
-    return { rules, generations, degradationReasons, usedLastKnownGood };
+    return this.#effectiveSourceState({ rules, generations, degradationReasons, usedLastKnownGood }, now);
   }
 
   currentSourceState(now = new Date().toISOString()): RefreshedSourceState {
-    return this.#storedSourceState(now, true) as RefreshedSourceState;
+    return this.#storedSourceState(now, true, false) as RefreshedSourceState;
   }
 
   compile(options: EngineCompileOptions): EngineCompileResult {
@@ -173,7 +178,10 @@ export class RulesPackEngine {
     const now = options.now ?? new Date().toISOString();
     const mode = options.mode ?? this.mode;
     const budget = options.budget ?? this.#defaultBudget;
-    const sourceState = options.sourceState ?? this.#storedSourceState(now, false);
+    const sourceState = this.#effectiveSourceState(
+      options.sourceState ?? this.#storedSourceState(now, false),
+      now,
+    );
     const fingerprint = subjectFingerprint(options.subject);
     const snapshotDigest = sourceSnapshotDigest({ sourceGenerations: sourceState.generations });
     const cacheKey = digestObject({
@@ -292,6 +300,7 @@ export class RulesPackEngine {
 
   status(): RulesPackStatus {
     const counts = this.store.counts();
+    const sources = this.#storedSourceState(new Date().toISOString(), false, false).generations;
     return {
       mode: this.mode,
       compilerVersion: COMPILER_VERSION,
@@ -299,7 +308,7 @@ export class RulesPackEngine {
       persistentCacheEntries: counts.persistentCacheEntries,
       currentRules: counts.currentRules,
       revokedRules: counts.revokedRules,
-      sources: this.store.listSourceGenerations(),
+      sources,
       ...(this.#lastCompile ? { lastCompile: this.#lastCompile } : {}),
     };
   }
@@ -312,36 +321,64 @@ export class RulesPackEngine {
     }
   }
 
-  #storedSourceState(now: string, includeRules: boolean): Omit<RefreshedSourceState, 'rules'> & {
+  #storedSourceState(now: string, includeRules: boolean, failRequired = true): Omit<RefreshedSourceState, 'rules'> & {
     rules: RefreshedSourceState['rules'] | undefined;
   } {
+    const generations = this.store.listSourceGenerations();
+    return this.#effectiveSourceState({
+      rules: includeRules ? generations.flatMap((source) => this.store.listRules(source.sourceId)) : undefined,
+      generations,
+      degradationReasons: [],
+      usedLastKnownGood: false,
+    }, now, failRequired);
+  }
+
+  #effectiveSourceState<T extends ReturnType<RulesStore['listRules']> | undefined>(
+    state: Omit<RefreshedSourceState, 'rules'> & { rules: T },
+    now: string,
+    failRequired = true,
+  ): Omit<RefreshedSourceState, 'rules'> & { rules: T } {
     const nowMs = Date.parse(now);
-    let usedLastKnownGood = false;
-    const degradationReasons: string[] = [];
-    const generations = this.store.listSourceGenerations().map((source): SourceGeneration => {
-      if (source.health === 'stale') {
-        if (nowMs - Date.parse(source.observedAt) <= this.#lkgTtlMs) {
-          usedLastKnownGood = true;
-          degradationReasons.push(`source ${source.sourceId} unavailable; bounded stored generation used`);
-          return source;
+    if (!Number.isFinite(nowMs)) throw new RulesPackError('VALIDATION_ERROR', 'compile now must be an ISO timestamp');
+    let usedLastKnownGood = state.usedLastKnownGood;
+    const reasons = [...state.degradationReasons];
+    const generations = state.generations.map((source): SourceGeneration => {
+      const freshnessExpired = source.freshUntil !== undefined && Date.parse(source.freshUntil) <= nowMs;
+      const staleSince = source.freshUntil ? Date.parse(source.freshUntil) : Date.parse(source.observedAt);
+      const withinLkg = nowMs - staleSince <= this.#lkgTtlMs;
+      if (source.health === 'fresh' && !freshnessExpired) return source;
+      if ((source.health === 'fresh' && freshnessExpired) || source.health === 'stale') {
+        if (source.required) {
+          if (failRequired) throw new RulesPackError('SOURCE_UNAVAILABLE', `Required source ${source.sourceId} is stale`);
+          const reason = `required source ${source.sourceId} is stale`;
+          if (!reasons.includes(reason)) reasons.push(reason);
+          return { ...source, health: 'unavailable', error: source.error ?? 'freshness deadline expired' };
         }
-        degradationReasons.push(`source ${source.sourceId} unavailable; stored generation exceeded LKG bound`);
+        if (withinLkg) {
+          usedLastKnownGood = true;
+          const reason = `source ${source.sourceId} stale; bounded stored generation used`;
+          if (!reasons.includes(reason)) reasons.push(reason);
+          return { ...source, health: 'stale', error: source.error ?? 'freshness deadline expired' };
+        }
+        const reason = `source ${source.sourceId} unavailable; stored generation exceeded LKG bound`;
+        if (!reasons.includes(reason)) reasons.push(reason);
         return { ...source, health: 'unavailable', error: source.error ?? 'stored generation exceeded LKG bound' };
       }
-      if (source.health !== 'fresh') {
-        degradationReasons.push(`source ${source.sourceId} is ${source.health}${source.error ? `: ${source.error}` : ''}`);
+      if (source.required) {
+        if (failRequired) throw new RulesPackError('SOURCE_UNAVAILABLE', `Required source ${source.sourceId} is ${source.health}`);
+        const reason = `required source ${source.sourceId} is ${source.health}`;
+        if (!reasons.includes(reason)) reasons.push(reason);
+        return source;
       }
+      const reason = `source ${source.sourceId} is ${source.health}${source.error ? `: ${source.error}` : ''}`;
+      if (!reasons.includes(reason)) reasons.push(reason);
       return source;
     });
-    const activeSourceIds = generations
-      .filter((source) => source.health === 'fresh' || source.health === 'stale')
-      .map((source) => source.sourceId);
-    return {
-      rules: includeRules ? activeSourceIds.flatMap((sourceId) => this.store.listRules(sourceId)) : undefined,
-      generations,
-      degradationReasons,
-      usedLastKnownGood,
-    };
+    const active = new Set(
+      generations.filter((source) => source.health === 'fresh' || source.health === 'stale').map((source) => source.sourceId),
+    );
+    const filteredRules = state.rules?.filter((rule) => active.has(rule.source.adapterId)) as T;
+    return { rules: filteredRules, generations, degradationReasons: reasons, usedLastKnownGood };
   }
 
   #telemetry(

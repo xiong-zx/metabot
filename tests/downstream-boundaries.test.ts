@@ -205,6 +205,28 @@ describe('downstream feature boundary gate', () => {
     ]);
   });
 
+  it('mechanically validates feature thinHooks and allowedImporters', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [{
+        id: 'adapter',
+        status: 'required',
+        roots: ['packages/adapter'],
+        thinHooks: ['src/hook.ts', 'src/missing.ts'],
+        allowedImporters: ['src/importer.ts'],
+      }],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/hook.ts'), 'export {};\n');
+    fs.writeFileSync(path.join(root, 'src/importer.ts'), 'export {};\n');
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      'adapter: missing thinHooks: src/missing.ts',
+      'adapter: allowedImporters must also be declared thinHooks: src/importer.ts',
+    ]);
+  });
+
   it('fails closed on path escape or symlinked source roots', () => {
     const escaped = fixture({
       schemaVersion: 1,
@@ -297,11 +319,15 @@ describe('downstream feature boundary gate', () => {
     ) as { features: Array<{ id: string; roots?: string[]; thinHooks?: string[]; validationSurface?: string[] }> };
     const feature = manifest.features.find((candidate) => candidate.id === 'rulespack-codex-adapter');
     expect(feature).toMatchObject({
-      roots: expect.arrayContaining(['packages/rulespack', 'packages/rulespack-adapter']),
+      roots: expect.arrayContaining([
+        'packages/rulespack',
+        'packages/rulespack-adapter',
+        'packages/worker-runner-mcp/src/rulespack.ts',
+      ]),
       thinHooks: expect.arrayContaining([
         'src/bridge/message-bridge.ts',
         'src/engines/codex/executor.ts',
-        'packages/worker-runner-mcp/src/rulespack.ts',
+        'packages/worker-runner-mcp/src/store.ts',
       ]),
       validationSurface: expect.arrayContaining([
         'packages/rulespack-adapter/tests/runtime.test.ts',

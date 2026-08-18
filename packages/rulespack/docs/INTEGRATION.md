@@ -11,8 +11,8 @@ digest logic.
 2. At the unified Codex turn boundary, construct one exact `ExecutionSubject`
    from authenticated runtime facts. Never accept bot/agent/worker/project/chat
    identity from Rule text or an untrusted prompt.
-3. Call `engine.compile` once. Record its telemetry and a `compiled` or
-   `shadowed` receipt.
+3. Call `engine.compile` once. Re-evaluate source freshness before cache lookup,
+   then record telemetry and a `compiled` or `shadowed` receipt.
 4. In `off`, inject nothing. In `shadow`, compare/observe but inject nothing.
    In `enforce`, place only `result.injectionText` in Codex's strongest truthful
    pre-user position. Do not put pack metadata into the model context.
@@ -23,8 +23,9 @@ digest logic.
    construct the child subject and compile the child subset before dispatch.
    The child consumes the supplied pack; it does not search the dispatcher's
    sources.
-7. Store an `injected`, `consumed`, or `rejected` receipt with truthful channel,
-   exact subject fingerprint, digest, issuer/audience, and replay ID.
+7. Store `injected` and received-envelope `consumed` only after exact target
+   input acceptance; store `rejected` on spawn/input/transport failure. Include
+   truthful channel, subject fingerprint, digest, issuer/audience, and replay ID.
 
 ## Dispatch and cross-host delivery
 
@@ -37,7 +38,8 @@ consumption:
 - compare the expected locally constructed target, never a prompt-supplied one;
 - overlay only host-local mandatory policy by compiling a new target-bound
   pack or a documented composite, never by editing the received rendered text;
-- return a consumed-digest receipt.
+- rebind every selected Rule to the full target fingerprint before storage;
+- return a consumed-digest receipt only after target input acceptance.
 
 The envelope fingerprint deliberately excludes authentication bytes so the
 downstream transport can sign or capability-bind it. A remote host receives a

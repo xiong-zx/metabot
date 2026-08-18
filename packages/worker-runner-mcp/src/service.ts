@@ -556,8 +556,16 @@ export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefine
   if (!TRUSTED_PRINCIPAL_ROLES.includes(principal.role)) {
     throw new WorkerRunnerError('Trusted principal role is not recognized', 'FORBIDDEN');
   }
-  const botName = normalizeNonempty(principal.botName, 'principal.botName', TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH);
-  const chatId = normalizeNonempty(principal.chatId, 'principal.chatId', TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH);
+  const botName = normalizeNonempty(
+    principal.botName,
+    'principal.botName',
+    TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+  );
+  const chatId = normalizeNonempty(
+    principal.chatId,
+    'principal.chatId',
+    TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
+  );
   if (chatId.toLowerCase().startsWith('team:')) {
     throw new WorkerRunnerError('Agent Team chats cannot be trusted Worker Runner principals', 'FORBIDDEN');
   }

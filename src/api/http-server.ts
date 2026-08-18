@@ -77,6 +77,7 @@ import {
   TerminalEventRateLimiter,
 } from './routes/worker-events-routes.js';
 import type { RouteContext } from './routes/index.js';
+import { resolveRulesPackApiPrincipal } from '../extensions/rulespack-api-principal.js';
 
 export interface ApiServerOptions {
   port: number;
@@ -292,6 +293,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const ws: { handle?: WebSocketHandle } = {};
   const locallyAuthenticatedRequests = new WeakSet<http.IncomingMessage>();
   const rulesPackTransportIssuers = new WeakMap<http.IncomingMessage, string>();
+  const coreBearerPrincipals = new WeakMap<http.IncomingMessage, { botName?: string }>();
   const capabilityRetirementTimers = new Set<ReturnType<typeof setTimeout>>();
   let closing = false;
 
@@ -336,6 +338,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         localApiSecretAuthenticated: locallyAuthenticatedRequests.has(req),
       }),
     resolveRulesPackTransportIssuer: (req) => rulesPackTransportIssuers.get(req),
+    resolveRulesPackApiPrincipal: (req, target) => resolveRulesPackApiPrincipal({
+      localAdministrator: locallyAuthenticatedRequests.has(req),
+      ...(coreBearerPrincipals.get(req)?.botName ? { coreBearerBotName: coreBearerPrincipals.get(req)!.botName } : {}),
+    }, target),
   };
 
   if (peerManager) {
@@ -409,22 +415,37 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         { messageId: message.id, botName, chatId, fromBot: message.fromBot, fromOwner: message.fromOwner },
         'executing relay inbox talk message',
       );
+      const dispatchEnvelope = rulesPackDispatch as Parameters<typeof resolveRulesPackApiPrincipal>[1]['dispatch'];
+      if (dispatchEnvelope && (dispatchEnvelope.target.bot !== botName || dispatchEnvelope.target.chatId !== chatId)) {
+        logger.warn({ messageId: message.id, botName, chatId }, 'relay RulesPack target does not match authenticated inbox target');
+        return;
+      }
+      const relayPrincipal = dispatchEnvelope
+        ? resolveRulesPackApiPrincipal(
+            { localAdministrator: false, coreBearerBotName: authenticatedRelayIssuer },
+            { botName, chatId, dispatch: dispatchEnvelope },
+          )
+        : {
+            kind: 'scoped' as const,
+            source: 'agent-bus' as const,
+            botName,
+            chatId,
+            roles: ['agent-bus'],
+            userId: authenticatedRelayIssuer,
+            dataClasses: ['agent-bus'],
+            outputTypes: ['text'],
+          };
       await bot.bridge.executeApiTask({
         prompt,
         chatId,
         userId: message.fromBot || message.fromOwner || 'agent-bus',
         sendCards,
-        ...(rulesPackDispatch && authenticatedRelayIssuer ? {
-          rulesPack: {
-            dispatch: {
-              envelope: rulesPackDispatch as import('@metabot/rulespack').RulesPackDispatchEnvelopeV1,
-              authenticatedIssuer: authenticatedRelayIssuer,
-            },
-            roles: ['agent-bus'],
-            dataClasses: ['agent-bus'],
-            outputTypes: ['text'],
-          },
-        } : {}),
+        rulesPack: {
+          principal: relayPrincipal,
+          ...(dispatchEnvelope && authenticatedRelayIssuer
+            ? { dispatch: { envelope: dispatchEnvelope, authenticatedIssuer: authenticatedRelayIssuer } }
+            : {}),
+        },
       });
     });
   }
@@ -635,6 +656,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           rejectUnauthorized();
           return;
         }
+        coreBearerPrincipals.set(req, verified.botName ? { botName: verified.botName } : {});
         if (verified.botName) rulesPackTransportIssuers.set(req, verified.botName);
       }
       // Successful auth — clear any accumulated failed-auth counter so a

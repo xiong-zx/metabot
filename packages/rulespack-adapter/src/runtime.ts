@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, realpathSync, statSync, watch, type FSWatcher } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -47,6 +47,11 @@ const DEFAULT_BUDGET: CompileBudget = { maxTokens: 2_000, maxCharacters: 8_000 }
 const DEFAULT_REFRESH_DEBOUNCE_MS = 250;
 const DEFAULT_MAX_ENVELOPE_TTL_MS = 15 * 60_000;
 const RESERVED_DATABASE_BASENAMES = new Set(['sessions.db', 'agent-teams.db', 'workers.sqlite', 'arc-runs.sqlite']);
+const RULESPACK_TABLES = new Set([
+  'schema_meta', 'rule_versions', 'current_rules', 'revocations', 'source_generations', 'pack_cache',
+  'pack_cache_sources', 'cache_metadata', 'last_known_good', 'audit_events', 'delivery_receipts', 'feedback',
+  'rulespack_adapter_settings', 'rulespack_replay_claims', 'rulespack_replay_claims_v2',
+]);
 
 interface ReplayRow {
   replay_id: string;
@@ -69,6 +74,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   private refreshPromise?: Promise<void>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private intervalTimer?: ReturnType<typeof setInterval>;
+  private freshnessTimer?: ReturnType<typeof setTimeout>;
   private initialized = false;
   private refreshing = false;
   private lastRefreshAt?: string;
@@ -90,7 +96,10 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
       if (!namespace || namespace.toLowerCase() !== this.hostId.toLowerCase()) {
         throw new RulesPackError('PATH_ESCAPE', 'MetaMemory hostRoot must be the namespace of this configured hostId');
       }
+      // Validate locality before opening any database or scheduling background work.
+      new CoreMetaMemoryRuleReader(this.config.metaMemory.coreUrl);
     }
+    assertIndependentRulesPackDatabase(this.dbPath, this.config.protectedDbPaths);
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true });
     const store = new RulesStore(this.dbPath);
     this.engine = new RulesPackEngine({
@@ -122,6 +131,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     this.stateDb.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     if (this.dbPath !== ':memory:') this.stateDb.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
     this.migrateAdapterState();
+    this.restoreOperatorMode();
   }
 
   async initialize(): Promise<void> {
@@ -147,7 +157,8 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     facts: AuthenticatedExecutionFacts,
     incoming?: { envelope: RulesPackDispatchEnvelopeV1; transport: AuthenticatedDispatchContext },
   ): Promise<PreparedRulesPackTurn> {
-    if (this.engine.mode === 'off') {
+    const preparedMode = this.engine.mode;
+    if (preparedMode === 'off') {
       void this.initialize().catch((error) => {
         this.logger.warn({ error: safeError(error) }, 'RulesPack refresh unavailable while mode is off');
       });
@@ -156,9 +167,9 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     }
     const subject = this.buildSubject(facts);
     let receivedEnvelope: RulesPackDispatchEnvelopeV1 | undefined;
-    if (incoming && this.engine.mode !== 'off') {
+    if (incoming && preparedMode !== 'off') {
       try {
-        receivedEnvelope = this.consumeEnvelope(incoming.envelope, subject, incoming.transport);
+        receivedEnvelope = this.acceptEnvelope(incoming.envelope, subject, incoming.transport);
       } catch (error) {
         this.recordRejectedEnvelope(incoming.envelope, subject, error);
         throw error;
@@ -167,43 +178,71 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     // The verified received Rules are now a bounded local temporary source.
     // Compile exactly once, applying local mandatory policy without editing
     // the received rendered bytes.
-    const local = this.engine.compile({ subject, budget: this.budget });
+    let local: EngineCompileResult;
+    try {
+      local = this.engine.compile({ subject, budget: this.budget, mode: preparedMode });
+    } catch (error) {
+      if (receivedEnvelope) this.recordRejectedEnvelope(receivedEnvelope, subject, error);
+      throw error;
+    }
     const injectionText = local.injectionText;
     const effectiveDigest = local.pack.packDigest;
-    this.recordPreparedReceipt(local, subject);
+    this.recordPreparedReceipt(local, subject, preparedMode);
 
-    let injected = false;
+    let accepted = false;
+    let rejected = false;
     return {
-      mode: this.engine.mode,
+      mode: preparedMode,
       subject,
       packDigest: effectiveDigest,
       injectionText,
       telemetry: local.telemetry,
       ...(receivedEnvelope ? { receivedEnvelope } : {}),
       markInjected: () => {
-        if (injected || this.engine.mode !== 'enforce' || injectionText.length === 0) return;
-        injected = true;
-        this.engine.store.recordReceipt(
-          receipt({
+        if (accepted || rejected) return;
+        accepted = true;
+        const transportFields = receivedEnvelope
+          ? { issuer: receivedEnvelope.issuer, audience: receivedEnvelope.audience, replayId: receivedEnvelope.replayId }
+          : {};
+        if (preparedMode === 'enforce' && injectionText.length > 0) {
+          this.engine.store.recordReceipt(receipt({
             packDigest: effectiveDigest,
             subject,
             status: 'injected',
-            ...(receivedEnvelope
-              ? {
-                  issuer: receivedEnvelope.issuer,
-                  audience: receivedEnvelope.audience,
-                  replayId: receivedEnvelope.replayId,
-                }
-              : {}),
+            ...transportFields,
             details: { channelPosition: 'codex-user-prelude', dispatched: receivedEnvelope !== undefined },
-          }),
-        );
+          }));
+        }
+        if (receivedEnvelope) {
+          this.markReplayAccepted(receivedEnvelope.replayId);
+          this.engine.store.recordReceipt(receipt({
+            packDigest: effectiveDigest,
+            subject,
+            status: 'consumed',
+            ...transportFields,
+            details: { envelopeFingerprint: dispatchEnvelopeFingerprint(receivedEnvelope), mode: preparedMode },
+          }));
+        }
+      },
+      markRejected: (reason) => {
+        if (accepted || rejected) return;
+        rejected = true;
+        this.engine.store.recordReceipt(receipt({
+          packDigest: effectiveDigest,
+          subject,
+          status: 'rejected',
+          ...(receivedEnvelope
+            ? { issuer: receivedEnvelope.issuer, audience: receivedEnvelope.audience, replayId: receivedEnvelope.replayId }
+            : {}),
+          details: { reason: safeError(reason), mode: preparedMode, targetAccepted: false },
+        }));
       },
     };
   }
 
   async createDispatchEnvelope(input: {
-    facts: AuthenticatedExecutionFacts;
+    facts?: AuthenticatedExecutionFacts;
+    targetSubject?: ExecutionSubject;
     audience: string;
     required?: boolean;
     parentDispatchId?: string;
@@ -215,8 +254,13 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     targetProjectId?: string;
   }): Promise<RulesPackDispatchEnvelopeV1> {
     await this.initialize();
+    if ((input.facts === undefined) === (input.targetSubject === undefined)) {
+      throw new RulesPackError('VALIDATION_ERROR', 'Dispatch requires exactly one authenticated facts or exact target subject');
+    }
+    const baseSubject = input.targetSubject ? { ...input.targetSubject } : this.buildSubject(input.facts!);
+    subjectFingerprint(baseSubject);
     const subject = {
-      ...this.buildSubject(input.facts),
+      ...baseSubject,
       ...(input.targetHostId ? { hostId: nonempty(input.targetHostId, 'dispatch target hostId') } : {}),
       ...(input.targetProjectId ? { projectId: nonempty(input.targetProjectId, 'dispatch target projectId') } : {}),
     };
@@ -257,6 +301,18 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     return envelope;
   }
 
+  recordDispatchRejected(envelope: RulesPackDispatchEnvelopeV1, reason: unknown): void {
+    this.engine.store.recordReceipt(receipt({
+      packDigest: envelope.packDigest,
+      subject: envelope.target,
+      status: 'rejected',
+      issuer: envelope.issuer,
+      audience: envelope.audience,
+      replayId: envelope.replayId,
+      details: { reason: safeError(reason), phase: 'transport' },
+    }));
+  }
+
   async replaceTemporaryRules(input: {
     sourceId: string;
     revision: string;
@@ -287,6 +343,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         ...rule,
         binding: {
           ...binding,
+          subjectFingerprint: subjectFingerprint(subject),
           chatId: subject.chatId,
           ...(subject.userId ? { userId: subject.userId } : {}),
           ...(subject.taskId ? { taskId: subject.taskId } : {}),
@@ -366,6 +423,12 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     return this.status();
   }
 
+  clearModeOverride(): RulesPackOperatorStatus {
+    this.stateDb.prepare('DELETE FROM rulespack_adapter_settings WHERE key = ?').run('last_operator_mode');
+    this.engine.setMode(normalizeMode(this.config.mode));
+    return this.status();
+  }
+
   async refresh(): Promise<RulesPackOperatorStatus> {
     if (this.refreshPromise) {
       await this.refreshPromise;
@@ -377,6 +440,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         const adapters = this.buildSourceAdapters();
         this.retireRemovedSources(adapters);
         await this.engine.refreshSources(adapters);
+        this.scheduleFreshnessRefresh();
         this.stateDb
           .prepare(
             'INSERT INTO rulespack_adapter_settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
@@ -431,13 +495,14 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   close(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     if (this.intervalTimer) clearInterval(this.intervalTimer);
+    if (this.freshnessTimer) clearTimeout(this.freshnessTimer);
     for (const watcher of this.watchers) watcher.close();
     this.watchers.length = 0;
     this.stateDb.close();
     this.engine.store.close();
   }
 
-  private consumeEnvelope(
+  private acceptEnvelope(
     envelope: RulesPackDispatchEnvelopeV1,
     expectedTarget: ExecutionSubject,
     transport: AuthenticatedDispatchContext,
@@ -455,22 +520,11 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     }
     const verified = validateDispatchEnvelope(envelope, { audience: this.audience, target: expectedTarget });
     this.claimReplay(verified);
-    this.persistDispatchSource(verified);
-    this.engine.store.recordReceipt(
-      receipt({
-        packDigest: verified.packDigest,
-        subject: expectedTarget,
-        status: 'consumed',
-        issuer: verified.issuer,
-        audience: verified.audience,
-        replayId: verified.replayId,
-        details: { envelopeFingerprint: dispatchEnvelopeFingerprint(verified) },
-      }),
-    );
+    this.persistDispatchSource(verified, expectedTarget);
     return verified;
   }
 
-  private persistDispatchSource(envelope: RulesPackDispatchEnvelopeV1): void {
+  private persistDispatchSource(envelope: RulesPackDispatchEnvelopeV1, exactTarget: ExecutionSubject): void {
     const suffix = digestObject(envelope.envelopeId).replace(/^sha256:/u, '').slice(0, 20);
     const sourceId = `dispatch-${suffix}`;
     const idMap = new Map(
@@ -492,6 +546,8 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
           ? { dependencies: rule.dependencies.map((dependency) => idMap.get(dependency) ?? dependency) }
           : {}),
         lifecycle: { ...rule.lifecycle, expiresAt },
+        binding: exactTargetBinding(exactTarget),
+        targets: exactTargetSelectors(exactTarget),
         source: {
           kind: 'temporary',
           adapterId: sourceId,
@@ -520,6 +576,10 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         snapshotDigest,
         observedAt: new Date().toISOString(),
         freshUntil: envelope.expiresAt,
+        // Envelope.required governs this authenticated delivery attempt. The
+        // persisted exact-target temporary source must not globally block
+        // unrelated subjects after its envelope expires.
+        required: false,
         health: 'fresh',
         ruleCount: rules.length,
       },
@@ -532,7 +592,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     try {
       this.stateDb
         .prepare(
-          'INSERT INTO rulespack_replay_claims(replay_id, issuer, audience, pack_digest, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?)',
+          'INSERT INTO rulespack_replay_claims_v2(replay_id, issuer, audience, pack_digest, expires_at, claimed_at, accepted_at) VALUES (?, ?, ?, ?, ?, ?, NULL)',
         )
         .run(
           envelope.replayId,
@@ -542,10 +602,10 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
           envelope.expiresAt,
           new Date().toISOString(),
         );
-      this.stateDb.prepare('DELETE FROM rulespack_replay_claims WHERE expires_at < ?').run(new Date().toISOString());
+      this.stateDb.prepare('DELETE FROM rulespack_replay_claims_v2 WHERE expires_at < ?').run(new Date().toISOString());
     } catch (error) {
       const existing = this.stateDb
-        .prepare('SELECT replay_id FROM rulespack_replay_claims WHERE replay_id = ?')
+        .prepare('SELECT replay_id FROM rulespack_replay_claims_v2 WHERE replay_id = ?')
         .get(envelope.replayId) as ReplayRow | undefined;
       if (existing) {
         this.replayRejections += 1;
@@ -555,15 +615,21 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     }
   }
 
-  private recordPreparedReceipt(result: EngineCompileResult, subject: ExecutionSubject): void {
-    const status = this.engine.mode === 'shadow' ? 'shadowed' : 'compiled';
+  private markReplayAccepted(replayId: string): void {
+    this.stateDb
+      .prepare('UPDATE rulespack_replay_claims_v2 SET accepted_at = ? WHERE replay_id = ? AND accepted_at IS NULL')
+      .run(new Date().toISOString(), replayId);
+  }
+
+  private recordPreparedReceipt(result: EngineCompileResult, subject: ExecutionSubject, mode: RulesMode): void {
+    const status = mode === 'shadow' ? 'shadowed' : 'compiled';
     this.engine.store.recordReceipt(
       receipt({
         packDigest: result.pack.packDigest,
         subject,
         status,
         details: {
-          mode: this.engine.mode,
+          mode,
           cache: result.telemetry.cache,
           selectedRules: result.telemetry.selectedRuleCount,
           tokenEstimate: result.telemetry.tokenCount,
@@ -666,6 +732,29 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     }
   }
 
+  private scheduleFreshnessRefresh(): void {
+    if (this.freshnessTimer) clearTimeout(this.freshnessTimer);
+    const now = Date.now();
+    const maxLead = Math.max(this.config.refreshDebounceMs ?? DEFAULT_REFRESH_DEBOUNCE_MS, 1_000);
+    const refreshTimes = this.engine.store.listSourceGenerations().flatMap((source) => {
+      if (!source.freshUntil) return [];
+      const deadline = Date.parse(source.freshUntil);
+      if (!Number.isFinite(deadline) || deadline <= now) return [];
+      const lifetime = Math.max(1, deadline - Date.parse(source.observedAt));
+      const lead = Math.max(1, Math.min(maxLead, Math.floor(lifetime / 10)));
+      return [deadline - lead];
+    });
+    if (refreshTimes.length === 0) return;
+    const delay = Math.max(0, Math.min(...refreshTimes) - now);
+    this.freshnessTimer = setTimeout(() => {
+      this.freshnessTimer = undefined;
+      void this.refresh().catch((error) => {
+        this.logger.warn({ error: safeError(error) }, 'RulesPack pre-expiry refresh degraded');
+      });
+    }, delay);
+    this.freshnessTimer.unref?.();
+  }
+
   private scheduleRefresh(): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     const delay = this.config.refreshDebounceMs ?? DEFAULT_REFRESH_DEBOUNCE_MS;
@@ -694,7 +783,29 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         consumed_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS rulespack_replay_expiry_idx ON rulespack_replay_claims(expires_at);
+      CREATE TABLE IF NOT EXISTS rulespack_replay_claims_v2 (
+        replay_id TEXT PRIMARY KEY,
+        issuer TEXT NOT NULL,
+        audience TEXT NOT NULL,
+        pack_digest TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        accepted_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS rulespack_replay_v2_expiry_idx ON rulespack_replay_claims_v2(expires_at);
+      INSERT OR IGNORE INTO rulespack_replay_claims_v2(
+        replay_id, issuer, audience, pack_digest, expires_at, claimed_at, accepted_at
+      ) SELECT replay_id, issuer, audience, pack_digest, expires_at, consumed_at, NULL
+        FROM rulespack_replay_claims;
     `);
+  }
+
+  private restoreOperatorMode(): void {
+    const row = this.stateDb
+      .prepare('SELECT value FROM rulespack_adapter_settings WHERE key = ?')
+      .get('last_operator_mode') as { value?: string } | undefined;
+    if (!row?.value) return;
+    this.engine.setMode(normalizeMode(row.value as RulesMode));
   }
 
   private retireRemovedSources(adapters: readonly RuleSourceAdapter[]): void {
@@ -721,6 +832,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
           revision: 'removed',
           snapshotDigest: digestObject([]),
           observedAt: new Date().toISOString(),
+          required: false,
           health: 'fresh',
           ruleCount: 0,
         },
@@ -765,8 +877,7 @@ class ProjectBoundSource implements RuleSourceAdapter {
     return {
       source: {
         ...snapshot.source,
-        snapshotDigest,
-        generation: snapshotDigest,
+        ...(rules.length > 0 ? { snapshotDigest, generation: snapshotDigest } : {}),
         ruleCount: rules.length,
       },
       rules,
@@ -815,6 +926,32 @@ function receipt(input: {
   };
 }
 
+function exactTargetBinding(subject: ExecutionSubject): NonNullable<RuleInputV1['binding']> {
+  return {
+    subjectFingerprint: subjectFingerprint(subject),
+    hostId: subject.hostId,
+    chatId: subject.chatId,
+    ...(subject.userId ? { userId: subject.userId } : {}),
+    ...(subject.projectId ? { projectId: subject.projectId } : {}),
+    ...(subject.taskId ? { taskId: subject.taskId } : {}),
+  };
+}
+
+function exactTargetSelectors(subject: ExecutionSubject): RuleInputV1['targets'] {
+  return {
+    include: {
+      bots: [subject.bot],
+      hosts: [subject.hostId],
+      ...(subject.roles.length ? { roles: [...subject.roles] } : {}),
+      ...(subject.agent ? { agents: [subject.agent] } : {}),
+      ...(subject.worker ? { workers: [subject.worker] } : {}),
+      ...(subject.tools.length ? { tools: [...subject.tools] } : {}),
+      ...(subject.dataClasses.length ? { dataClasses: [...subject.dataClasses] } : {}),
+      ...(subject.outputTypes.length ? { outputTypes: [...subject.outputTypes] } : {}),
+    },
+  };
+}
+
 export function resolveRulesPackDbPath(configured?: string): string {
   const raw =
     configured ??
@@ -827,6 +964,68 @@ export function resolveRulesPackDbPath(configured?: string): string {
     throw new RulesPackError('VALIDATION_ERROR', 'RulesPack must use its own SQLite database path');
   }
   return resolved;
+}
+
+function assertIndependentRulesPackDatabase(dbPath: string, configuredProtected: readonly string[] = []): void {
+  if (dbPath === ':memory:') return;
+  const candidate = canonicalDatabasePath(dbPath);
+  const protectedPaths = defaultProtectedDatabasePaths().concat(configuredProtected.map(expandPath));
+  for (const protectedPath of protectedPaths) {
+    const protectedCanonical = canonicalDatabasePath(protectedPath);
+    if (candidate === protectedCanonical || sameExistingInode(candidate, protectedCanonical)) {
+      throw new RulesPackError('VALIDATION_ERROR', 'RulesPack database aliases a configured live application database');
+    }
+  }
+  const expanded = expandPath(dbPath);
+  if (existsSync(expanded) && lstatSync(expanded).isSymbolicLink()) {
+    throw new RulesPackError('VALIDATION_ERROR', 'RulesPack database must not be a symlink');
+  }
+  if (!existsSync(candidate)) return;
+  const stat = lstatSync(candidate);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new RulesPackError('VALIDATION_ERROR', 'RulesPack database must be a regular non-symlink file');
+  }
+  const db = new DatabaseSync(candidate, { readOnly: true });
+  try {
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
+      .map((row) => row.name)
+      .filter((name) => name !== 'sqlite_sequence');
+    const foreign = tables.filter((name) => !RULESPACK_TABLES.has(name));
+    const coreTables = ['schema_meta', 'rule_versions', 'source_generations', 'pack_cache'];
+    if (foreign.length > 0 || (tables.length > 0 && coreTables.some((name) => !tables.includes(name)))) {
+      throw new RulesPackError('VALIDATION_ERROR', 'RulesPack database contains a foreign application schema', {
+        tables: foreign.slice(0, 20),
+      });
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function canonicalDatabasePath(value: string): string {
+  const expanded = expandPath(value);
+  if (existsSync(expanded)) return realpathSync(expanded);
+  const parent = dirname(expanded);
+  return resolve(existsSync(parent) ? realpathSync(parent) : parent, expanded.slice(parent.length + 1));
+}
+
+function sameExistingInode(left: string, right: string): boolean {
+  if (!existsSync(left) || !existsSync(right)) return false;
+  const leftStat = statSync(left);
+  const rightStat = statSync(right);
+  return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+}
+
+function defaultProtectedDatabasePaths(): string[] {
+  const sessionRoot = process.env.SESSION_STORE_DIR?.trim() || resolve(homedir(), '.metabot');
+  const paths = [resolve(sessionRoot, 'sessions.db'), resolve(sessionRoot, 'agent-teams.db')];
+  const workerRoot = process.env.METABOT_WORKER_DATA_DIR?.trim();
+  if (workerRoot) paths.push(resolve(workerRoot, 'workers.sqlite'));
+  const arcRoot = process.env.METABOT_ARC_DATA_DIR?.trim();
+  if (arcRoot) paths.push(resolve(arcRoot, 'arc-runs.sqlite'));
+  const coreRoot = process.env.METABOT_CORE_DATA_DIR?.trim();
+  if (coreRoot) paths.push(resolve(coreRoot, 'central.db'));
+  return paths;
 }
 
 function expandPath(value: string): string {

@@ -17,7 +17,22 @@ interface StructuredMemoryRules {
 }
 
 export class CoreMetaMemoryRuleReader implements MetaMemoryRuleReader {
-  constructor(private readonly baseUrl = process.env.METABOT_CORE_URL ?? 'http://127.0.0.1:9200') {}
+  private readonly baseUrl: string;
+
+  constructor(baseUrl = process.env.METABOT_CORE_URL ?? 'http://127.0.0.1:9200') {
+    const parsed = new URL(baseUrl);
+    const host = parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase();
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      !(host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/u.test(host))
+    ) {
+      throw new RulesPackError(
+        'PATH_ESCAPE',
+        'RulesPack MetaMemory Core must be host-local/loopback; remote Core identity is not configured',
+      );
+    }
+    this.baseUrl = parsed.toString().replace(/\/+$/u, '');
+  }
 
   async readStructuredRules(
     paths: readonly string[],

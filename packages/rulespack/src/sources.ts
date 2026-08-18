@@ -37,6 +37,7 @@ function sourceGeneration(
   observedAt: string,
   generation?: string,
   freshForMs?: number,
+  required = false,
 ): SourceGeneration {
   const snapshotDigest = digestObject(
     [...rules]
@@ -51,6 +52,7 @@ function sourceGeneration(
     snapshotDigest,
     observedAt,
     ...(freshForMs ? { freshUntil: new Date(Date.parse(observedAt) + freshForMs).toISOString() } : {}),
+    required,
     health: 'fresh',
     ruleCount: rules.length,
   };
@@ -120,6 +122,7 @@ export class StructuredSource implements RuleSourceAdapter {
         context.now,
         this.#options.generation,
         this.#options.freshForMs,
+        this.required,
       ),
       rules,
     };
@@ -187,9 +190,20 @@ export class TrustedFileSource implements RuleSourceAdapter {
       });
     }
     if (this.#options.nativeLoaded) {
+      const content = await readFile(actual);
+      const contentDigest = digestObject({ bytes: content.toString('base64') });
       const rules: readonly RuleV1[] = [];
       return {
-        source: sourceGeneration(this.id, this.kind, `native:${fileStat.mtimeMs}`, rules, context.now),
+        source: sourceGeneration(
+          this.id,
+          this.kind,
+          `native:${contentDigest}`,
+          rules,
+          context.now,
+          contentDigest,
+          undefined,
+          this.required,
+        ),
         rules,
       };
     }
@@ -216,7 +230,16 @@ export class TrustedFileSource implements RuleSourceAdapter {
       }),
     );
     return {
-      source: sourceGeneration(this.id, this.kind, parsed.revision, rules, context.now, parsed.generation),
+      source: sourceGeneration(
+        this.id,
+        this.kind,
+        parsed.revision,
+        rules,
+        context.now,
+        parsed.generation,
+        undefined,
+        this.required,
+      ),
       rules,
     };
   }
@@ -276,6 +299,7 @@ export class MetaMemorySource implements RuleSourceAdapter {
         context.now,
         loaded.generation,
         this.#options.freshForMs,
+        this.required,
       ),
       rules,
     };

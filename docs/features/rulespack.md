@@ -125,35 +125,43 @@ remote-host subject and sends `RulesPackDispatchEnvelopeV1`. The receiver
 requires its already-authenticated transport marker, exact issuer allowlist,
 audience, target fingerprint, bounded lifetime, verified pack digest, and a
 one-time replay ID. The receiver stores the verified pack's selected Rule
-objects as an envelope-expiring, namespaced temporary source, then compiles
-exactly once for the local subject. This lets local mandatory policy overlay
+objects as an envelope-expiring, namespaced temporary source rebound to the
+complete target subject fingerprint, then compiles exactly once for the local
+subject. A different chat/project/agent/worker/task/host never inherits those
+Rules from the shared database; it needs its own authenticated exact envelope.
+This lets local mandatory policy overlay
 through normal engine precedence without editing received rendered text. The
 same database lets later turns and detached Worker/ARC children compile their
 own exact subset without reading dispatcher sources. The resulting local pack
 digest controls session refresh. A rejected target/replay never reaches Codex.
 Core-bearer transports bind the envelope issuer to authenticated `/api/whoami`
 `botName`; local peer-secret transport is administrator-equivalent and binds
-the explicitly forwarded issuer.
+the explicitly forwarded issuer. A generic bearer does not authenticate a
+caller-selected chat/project/role/task/worker and skips RulesPack for that API
+turn. Normal verified peer and Agent Bus forwarding attaches an exact envelope
+automatically.
 
 ## Storage, telemetry, and failure semantics
 
 The default database is
 `${SESSION_STORE_DIR:-~/.metabot}/rulespack/rules-state.sqlite`. It is rejected
-if configured with a known MetaBot session, Agent Team, Worker, or ARC database
-basename. Engine schema v1 owns Rule history/current pointers, revocations,
+if it aliases a known/configured MetaMemory, session, Agent Team, Worker, or ARC
+database by basename, canonical path, symlink/inode, or contains a foreign
+application schema. Engine schema v1 owns Rule history/current pointers, revocations,
 source generations, persistent cache/source index, cache metadata, LKG,
 redacted audit, receipts, and feedback. Adapter tables add only settings and
 replay claims. Worker storage receives additive `principal_role` and
 `execution_kind` columns so restart recovery reconstructs the same child
-subject.
+subject. Legacy rows without identity evidence remain `unknown`/degraded and
+do not default to ordinary Worker targeting.
 
 Compile telemetry records latency, memory/persistent hit or miss, candidate and
 selected/excluded counts, characters/token estimate, digest, generation and
 freshness, degraded/LKG state, and bounded reasons. Adapter status also reports
 target-mismatch and replay rejections. Audits and logs exclude Rule bodies and
 redact secret-shaped fields. Receipts say `compiled`/`shadowed` before spawn,
-`injected` only after Codex spawns with that input, `consumed` only after
-authenticated envelope/replay acceptance, and `rejected` on failure.
+`injected` only after Codex accepts that prepared input, `consumed` only after
+the corresponding target acceptance, and `rejected` on failure.
 
 Optional-source failures use a bounded stored generation and report degraded
 state. Required-source, path escape, unsafe Rule text, mandatory budget,
@@ -161,6 +169,10 @@ dependency, target, expiry, tamper, and replay failures fail closed. General
 compile failures may use engine-verified bounded LKG only when every selected
 Rule remains current, unrevoked, and unexpired. Mode `off` continues with an
 empty injection even when a source refresh is unavailable.
+Every compile/cache decision re-evaluates `freshUntil`; pre-expiry timers
+refresh configured sources, including Meta Memory, outside the turn hot path.
+RulesPack Meta Memory Core URLs are loopback-only without an explicit
+authenticated local-host identity mechanism.
 
 ## Operator surface
 
@@ -168,7 +180,7 @@ All endpoints remain behind the existing MetaBot API authentication gate:
 
 ```text
 GET   /api/bots/:bot/rulespack/status
-PATCH /api/bots/:bot/rulespack/mode               {"mode":"off|shadow|enforce"}
+PATCH /api/bots/:bot/rulespack/mode               {"mode":"off|shadow|enforce|null"}
 POST  /api/bots/:bot/rulespack/refresh
 POST  /api/bots/:bot/rulespack/explain
 GET   /api/bots/:bot/rulespack/cache/status
@@ -197,7 +209,9 @@ record compiler/schema versions, start in `off`, refresh/status, then move to
 
 Rollback is non-destructive:
 
-1. PATCH mode to `off` (or set configuration to off).
+1. PATCH mode to `off` (or set configuration to off). The operator override is
+   durable across restart and takes precedence until PATCH with `mode: null`
+   clears it.
 2. Let active turns finish; sessions with prior Rules bytes recycle only at
    their next boundary.
 3. Keep Rule history, receipts, feedback, and databases in place.

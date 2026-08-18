@@ -57,10 +57,13 @@ export class AgentsStructuredFileSource implements RuleSourceAdapter {
       throw new RulesPackError('VALIDATION_ERROR', 'AGENTS Rules file is not a regular bounded file');
     }
     if (this.options.nativeLoaded) {
+      const text = await readFile(actual, 'utf8');
+      const contentDigest = digestObject({ nativeContent: text });
       return new StructuredSource({
         id: this.id,
         kind: 'ruleset',
-        revision: `native:${file.mtimeMs}`,
+        revision: `native:${contentDigest}`,
+        generation: contentDigest,
         rules: [],
         required: this.required,
       })
@@ -154,10 +157,13 @@ export class ProjectStructuredFileSource implements RuleSourceAdapter {
       throw new RulesPackError('VALIDATION_ERROR', 'Project Rules file is not a regular bounded file');
     }
     if (this.options.nativeLoaded) {
+      const text = await readFile(actual, 'utf8');
+      const contentDigest = digestObject({ nativeContent: text });
       const empty = await new StructuredSource({
         id: this.id,
         kind: 'ruleset',
-        revision: `native:${file.mtimeMs}`,
+        revision: `native:${contentDigest}`,
+        generation: contentDigest,
         rules: [],
         required: this.required,
       }).load(context);

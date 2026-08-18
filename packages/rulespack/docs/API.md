@@ -1,6 +1,6 @@
 # Stable engine API and contract
 
-The v1 schema and `rulespack-compiler/1.0.0` define the adapter boundary.
+The v1 Rule/pack schema and `rulespack-compiler/1.1.0` define the adapter boundary.
 Breaking selection, rendering, digest, or transport semantics require a new
 compiler version. All ordering is explicit and locale-stable; array/set inputs
 are normalized before hashing.

@@ -666,6 +666,7 @@ export class PeerManager {
           engine?: BotInfo['engine'];
           model?: string;
           workingDirectory: string;
+          rulesPackTools?: string[];
           peerUrl?: string;
         }>;
       };
@@ -680,6 +681,9 @@ export class PeerManager {
           engine: b.engine ?? 'codex',
           ...(b.model ? { model: b.model } : {}),
           workingDirectory: b.workingDirectory,
+          ...(Array.isArray(b.rulesPackTools) && b.rulesPackTools.every((tool) => typeof tool === 'string')
+            ? { rulesPackTools: [...new Set(b.rulesPackTools)].sort() }
+            : {}),
           peerUrl: config.url,
           peerName: config.name,
         }));

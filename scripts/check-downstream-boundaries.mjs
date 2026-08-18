@@ -48,6 +48,28 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
       const missing = roots.filter((item) => !existingRoots.includes(item));
       failures.push(`${feature.id}: missing required roots: ${missing.join(', ')}`);
     }
+    const thinHooks = feature.thinHooks;
+    const allowedImporters = feature.allowedImporters;
+    if (thinHooks !== undefined) {
+      if (!Array.isArray(thinHooks) || thinHooks.some((item) => typeof item !== 'string' || item.trim() === '')) {
+        failures.push(`${feature.id}: thinHooks must contain non-empty relative paths`);
+      } else {
+        const missingHooks = thinHooks.filter((item) => !pathEntryExists(resolveInside(root, item)));
+        if (missingHooks.length > 0) failures.push(`${feature.id}: missing thinHooks: ${missingHooks.join(', ')}`);
+        const ownedHooks = thinHooks.filter((item) => roots.some((featureRoot) => containsPath(featureRoot, item)));
+        if (ownedHooks.length > 0) failures.push(`${feature.id}: thinHooks must remain outside owned roots: ${ownedHooks.join(', ')}`);
+      }
+    }
+    if (allowedImporters !== undefined) {
+      if (!Array.isArray(allowedImporters) || allowedImporters.some((item) => typeof item !== 'string' || item.trim() === '')) {
+        failures.push(`${feature.id}: allowedImporters must contain non-empty relative paths`);
+      } else {
+        const missingImporters = allowedImporters.filter((item) => !pathEntryExists(resolveInside(root, item)));
+        if (missingImporters.length > 0) failures.push(`${feature.id}: missing allowedImporters: ${missingImporters.join(', ')}`);
+        const undeclared = allowedImporters.filter((item) => !Array.isArray(thinHooks) || !thinHooks.includes(item));
+        if (undeclared.length > 0) failures.push(`${feature.id}: allowedImporters must also be declared thinHooks: ${undeclared.join(', ')}`);
+      }
+    }
     const importRoots = feature.importRoots ?? roots;
     if (!Array.isArray(importRoots) || importRoots.some((item) => typeof item !== 'string' || item.trim() === '')) {
       failures.push(`${feature.id}: importRoots must contain non-empty relative paths`);

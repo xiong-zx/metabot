@@ -15,8 +15,8 @@ interface WorkerRow {
   id: string;
   bot_name: string;
   chat_id: string;
-  principal_role: WorkerRecord['principalRole'];
-  execution_kind: WorkerRecord['executionKind'];
+  principal_role: WorkerRecord['principalRole'] | null;
+  execution_kind: WorkerRecord['executionKind'] | null;
   authorizing_capability: string | null;
   workdir: string;
   prompt: string;
@@ -118,8 +118,8 @@ export class WorkerStore {
         id TEXT PRIMARY KEY,
         bot_name TEXT NOT NULL,
         chat_id TEXT NOT NULL,
-        principal_role TEXT NOT NULL DEFAULT 'user',
-        execution_kind TEXT NOT NULL DEFAULT 'worker',
+        principal_role TEXT,
+        execution_kind TEXT,
         authorizing_capability TEXT,
         workdir TEXT NOT NULL,
         prompt TEXT NOT NULL,
@@ -176,8 +176,8 @@ export class WorkerStore {
         WHERE status NOT IN ('queued', 'running');
     `);
     this.addColumnIfMissing('worker_jobs', 'authorizing_capability', 'TEXT');
-    this.addColumnIfMissing('worker_jobs', 'principal_role', "TEXT NOT NULL DEFAULT 'user'");
-    this.addColumnIfMissing('worker_jobs', 'execution_kind', "TEXT NOT NULL DEFAULT 'worker'");
+    this.addColumnIfMissing('worker_jobs', 'principal_role', 'TEXT');
+    this.addColumnIfMissing('worker_jobs', 'execution_kind', 'TEXT');
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -235,8 +235,8 @@ export class WorkerStore {
           id,
           botName: input.botName,
           chatId: input.chatId,
-          principalRole: input.principalRole ?? 'user',
-          executionKind: input.executionKind ?? 'worker',
+          principalRole: input.principalRole,
+          executionKind: input.executionKind,
           authorizingCapability: input.authorizingCapability ?? null,
           workdir: input.workdir,
           prompt: input.prompt,
@@ -532,8 +532,8 @@ function fromRow(row: WorkerRow): WorkerRecord {
     id: row.id,
     botName: row.bot_name,
     chatId: row.chat_id,
-    principalRole: row.principal_role,
-    executionKind: row.execution_kind,
+    principalRole: row.principal_role ?? 'unknown',
+    executionKind: row.execution_kind ?? 'unknown',
     workdir: row.workdir,
     prompt: row.prompt,
     engine: row.engine,

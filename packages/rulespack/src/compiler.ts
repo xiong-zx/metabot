@@ -100,12 +100,13 @@ function packDigestPayload(pack: Pick<
     subjectFingerprint: pack.subjectFingerprint,
     sourceSnapshotDigest: pack.sourceSnapshotDigest,
     sourceGenerations: pack.sourceGenerations.map(
-      ({ sourceId, kind, generation, revision, snapshotDigest, health, ruleCount }) => ({
+      ({ sourceId, kind, generation, revision, snapshotDigest, required, health, ruleCount }) => ({
         sourceId,
         kind,
         generation,
         revision,
         snapshotDigest,
+        required,
         health,
         ruleCount,
       }),
@@ -141,7 +142,13 @@ export function sourceSnapshotDigest(request: Pick<CompileRequest, 'sourceGenera
   return digestObject(
     [...request.sourceGenerations]
       .sort((left, right) => left.sourceId.localeCompare(right.sourceId))
-      .map(({ sourceId, generation, snapshotDigest, health }) => ({ sourceId, generation, snapshotDigest, health })),
+      .map(({ sourceId, generation, snapshotDigest, required, health }) => ({
+        sourceId,
+        generation,
+        snapshotDigest,
+        required,
+        health,
+      })),
   );
 }
 

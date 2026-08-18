@@ -126,7 +126,10 @@ export class NodeCliProcessRunner implements ProcessRunner {
       stderr.append(chunk);
       hooks.onActivity();
     });
-    child.stdin.on('error', (error) => stderr.append(Buffer.from(`stdin error: ${error.message}\n`)));
+    child.stdin.on('error', (error) => {
+      stderr.append(Buffer.from(`stdin error: ${error.message}\n`));
+      if (spec.engine === 'codex') spec.rulesPack?.markRejected(error);
+    });
     child.once('close', (exitCode, signal) => {
       finish({
         ...(exitCode !== null ? { exitCode } : {}),
@@ -139,18 +142,22 @@ export class NodeCliProcessRunner implements ProcessRunner {
         spawned = true;
         const pid = child.pid;
         if (!pid) {
+          spec.rulesPack?.markRejected(new Error(`CLI process for ${spec.engine} started without a pid`));
           reject(new Error(`CLI process for ${spec.engine} started without a pid`));
           return;
         }
         this.active.set(pid, { child, completion });
         hooks.onActivity();
-        child.stdin.end(command.stdin, () => {
-          if (spec.engine === 'codex') spec.rulesPack?.markInjected();
+        child.stdin.end(command.stdin, (error?: Error | null) => {
+          if (spec.engine !== 'codex') return;
+          if (error) spec.rulesPack?.markRejected(error);
+          else spec.rulesPack?.markInjected();
         });
         resolve({ pid, completion });
       });
       child.once('error', (error) => {
         if (!spawned) {
+          spec.rulesPack?.markRejected(error);
           settled = true;
           reject(error);
           return;

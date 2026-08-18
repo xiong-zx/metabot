@@ -40,6 +40,8 @@ export interface BotInfo {
   engine: EngineName;
   model?: string;
   workingDirectory: string;
+  /** Authenticated configured tool identities used for exact RulesPack peer subjects. */
+  rulesPackTools?: string[];
   ttsVoice?: string;
   /** Set when the bot comes from a peer instance. */
   peerUrl?: string;
@@ -121,6 +123,12 @@ export class BotRegistry {
       engine: resolveEngineName(b.config),
       ...(defaultModelForEngine(b.config) ? { model: defaultModelForEngine(b.config) } : {}),
       workingDirectory: b.config.claude.defaultWorkingDirectory,
+      ...(resolveEngineName(b.config) === 'codex'
+        ? { rulesPackTools: [
+            ...(b.config.workerTools === true ? ['metabot-worker'] : []),
+            ...(b.config.arcTools === true ? ['metabot-arc'] : []),
+          ] }
+        : {}),
       ...(b.config.ttsVoice ? { ttsVoice: b.config.ttsVoice } : {}),
     }));
   }

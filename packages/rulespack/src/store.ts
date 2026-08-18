@@ -19,7 +19,7 @@ import {
   validateSourceGeneration,
 } from './validate.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 function parseJson<T>(value: unknown, label: string): T {
   try {
@@ -114,6 +114,7 @@ export class RulesStore {
         snapshot_digest TEXT NOT NULL,
         observed_at TEXT NOT NULL,
         fresh_until TEXT,
+        required INTEGER NOT NULL DEFAULT 0,
         health TEXT NOT NULL,
         error TEXT,
         rule_count INTEGER NOT NULL
@@ -182,6 +183,10 @@ export class RulesStore {
       );
       CREATE INDEX IF NOT EXISTS feedback_pack_idx ON feedback(pack_digest, created_at DESC);
     `);
+    const sourceColumns = this.#db.prepare('PRAGMA table_info(source_generations)').all() as Array<{ name: string }>;
+    if (!sourceColumns.some((column) => column.name === 'required')) {
+      this.#db.exec('ALTER TABLE source_generations ADD COLUMN required INTEGER NOT NULL DEFAULT 0');
+    }
     this.#db
       .prepare('INSERT INTO schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
       .run('schema_version', String(SCHEMA_VERSION));
@@ -216,6 +221,7 @@ export class RulesStore {
           revision: rule.source.revision,
           snapshotDigest,
           observedAt: now,
+          required: false,
           health: 'fresh',
           ruleCount: currentRules.length,
         });
@@ -278,11 +284,11 @@ export class RulesStore {
     if (source.error) source = { ...source, error: redactDiagnostic(source.error) };
     this.#db
       .prepare(`INSERT INTO source_generations(
-        source_id, kind, generation, revision, snapshot_digest, observed_at, fresh_until, health, error, rule_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_id, kind, generation, revision, snapshot_digest, observed_at, fresh_until, required, health, error, rule_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind, generation=excluded.generation,
         revision=excluded.revision, snapshot_digest=excluded.snapshot_digest,
-        observed_at=excluded.observed_at, fresh_until=excluded.fresh_until,
+        observed_at=excluded.observed_at, fresh_until=excluded.fresh_until, required=excluded.required,
         health=excluded.health, error=excluded.error, rule_count=excluded.rule_count`)
       .run(
         source.sourceId,
@@ -292,6 +298,7 @@ export class RulesStore {
         source.snapshotDigest,
         source.observedAt,
         source.freshUntil ?? null,
+        source.required ? 1 : 0,
         source.health,
         source.error ?? null,
         source.ruleCount,
@@ -322,6 +329,7 @@ export class RulesStore {
       snapshotDigest: String(row.snapshot_digest),
       observedAt: String(row.observed_at),
       ...(row.fresh_until ? { freshUntil: String(row.fresh_until) } : {}),
+      required: Number(row.required) === 1,
       health: row.health as SourceGeneration['health'],
       ...(row.error ? { error: String(row.error) } : {}),
       ruleCount: Number(row.rule_count),

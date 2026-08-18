@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BotConfigBase } from '../src/config.js';
 import { SessionManager } from '../src/engines/claude/session-manager.js';
 import { CodexExecutor } from '../src/engines/codex/executor.js';
@@ -71,13 +71,14 @@ describe('RulesPack Codex integration hooks', () => {
       executables: { codex: '/bin/codex', claude: '/bin/claude', kimi: '/bin/kimi' },
     });
     const markInjected = () => undefined;
+    const markRejected = () => undefined;
     const codex = runner.buildCommand({
       id: 'worker-1',
       launchId: 'launch-1',
       engine: 'codex',
       workdir: '/tmp',
       prompt: 'child prompt',
-      rulesPack: { injectionText: 'RULESPACK PRELUDE', packDigest: 'digest', markInjected },
+      rulesPack: { injectionText: 'RULESPACK PRELUDE', packDigest: 'digest', markInjected, markRejected },
     });
     expect(codex.stdin).toBe('RULESPACK PRELUDE\n\n---\n\nchild prompt');
     const claude = runner.buildCommand({
@@ -86,8 +87,30 @@ describe('RulesPack Codex integration hooks', () => {
       engine: 'claude',
       workdir: '/tmp',
       prompt: 'child prompt',
-      rulesPack: { injectionText: 'MUST NOT APPLY', packDigest: 'digest', markInjected },
+      rulesPack: { injectionText: 'MUST NOT APPLY', packDigest: 'digest', markInjected, markRejected },
     });
     expect(claude.stdin).toBe('child prompt');
+  });
+
+  it('records prepared input rejection when Codex spawn fails before acceptance', async () => {
+    const broken = config();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-spawn-reject-'));
+    temporary.push(directory);
+    const nonExecutable = path.join(directory, 'codex');
+    fs.writeFileSync(nonExecutable, '#!/bin/sh\nexit 0\n', { mode: 0o600 });
+    broken.codex = { executable: nonExecutable };
+    const markInjected = vi.fn();
+    const markRejected = vi.fn();
+    const handle = new CodexExecutor(broken, logger).startExecution({
+      prompt: 'will not spawn',
+      cwd: '/tmp',
+      abortController: new AbortController(),
+      rulesPack: { injectionText: 'RULE', markInjected, markRejected },
+    });
+    for await (const _message of handle.stream) {
+      // Drain the terminal error so the child error path completes.
+    }
+    expect(markInjected).not.toHaveBeenCalled();
+    expect(markRejected).toHaveBeenCalledOnce();
   });
 });

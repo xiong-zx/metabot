@@ -54,6 +54,7 @@ export function sourceGeneration(generation = 'gen-1') {
     revision: generation,
     snapshotDigest: `snapshot-${generation}`,
     observedAt: NOW,
+    required: false,
     health: 'fresh' as const,
     ruleCount: 1,
   };

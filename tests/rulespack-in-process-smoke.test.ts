@@ -112,11 +112,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
         authenticatedFacts: {
           botName: 'admin',
           chatId: 'chat-smoke',
-          roles: [],
+          roles: ['internal-api'],
           cwd: directory,
           userId: 'api',
           tools: [],
-          dataClasses: [],
+          dataClasses: ['api'],
           outputTypes: ['text'],
         },
       });

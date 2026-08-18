@@ -65,6 +65,8 @@ export interface RulesPackConfig {
   mode?: RulesMode;
   hostId?: string;
   dbPath?: string;
+  /** Live application databases that this independently owned store must never alias. */
+  protectedDbPaths?: readonly string[];
   budget?: Partial<CompileBudget>;
   cacheCapacity?: number;
   cacheTtlMs?: number;
@@ -104,6 +106,26 @@ export interface AuthenticatedDispatchContext {
   authenticatedIssuer: string;
 }
 
+export type RulesPackExecutionPrincipal =
+  | {
+      kind: 'scoped';
+      source: 'chat' | 'local-admin' | 'agent-bus' | 'capability' | 'worker';
+      botName: string;
+      chatId: string;
+      roles: readonly string[];
+      userId?: string;
+      agentName?: string;
+      workerId?: string;
+      taskId?: string;
+      dataClasses?: readonly string[];
+      outputTypes?: readonly string[];
+    }
+  | {
+      kind: 'generic';
+      source: 'core-bearer';
+      botName?: string;
+    };
+
 export interface PreparedRulesPackTurn {
   mode: RulesMode;
   subject: ExecutionSubject;
@@ -111,8 +133,10 @@ export interface PreparedRulesPackTurn {
   injectionText: string;
   telemetry: CompileTelemetry;
   receivedEnvelope?: RulesPackDispatchEnvelopeV1;
-  /** Call only after Codex successfully spawns with the prepared user input. */
+  /** Call only after the exact prepared input is accepted by the target child. */
   markInjected(): void;
+  /** Call when the prepared input is rejected before target acceptance. */
+  markRejected(reason: unknown): void;
 }
 
 export interface RulesPackOperatorStatus extends RulesPackStatus {
@@ -130,6 +154,7 @@ export interface RulesPackOperatorStatus extends RulesPackStatus {
 export interface RulesPackOperator {
   status(): RulesPackOperatorStatus;
   setMode(mode: RulesMode): RulesPackOperatorStatus;
+  clearModeOverride(): RulesPackOperatorStatus;
   refresh(): Promise<RulesPackOperatorStatus>;
   clearCache(): { cleared: number; status: RulesPackOperatorStatus };
   explain(facts: AuthenticatedExecutionFacts): Promise<EngineCompileResult>;
@@ -143,7 +168,9 @@ export interface RulesPackOperator {
     authenticatedFacts: AuthenticatedExecutionFacts;
   }): Promise<RulesPackOperatorStatus>;
   createDispatchEnvelope(input: {
-    facts: AuthenticatedExecutionFacts;
+    facts?: AuthenticatedExecutionFacts;
+    /** Exact target supplied only by an authenticated downstream dispatcher. */
+    targetSubject?: ExecutionSubject;
     audience: string;
     required?: boolean;
     parentDispatchId?: string;
@@ -152,4 +179,5 @@ export interface RulesPackOperator {
     targetHostId?: string;
     targetProjectId?: string;
   }): Promise<RulesPackDispatchEnvelopeV1>;
+  recordDispatchRejected(envelope: RulesPackDispatchEnvelopeV1, reason: unknown): void;
 }

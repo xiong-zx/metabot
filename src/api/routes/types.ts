@@ -24,6 +24,7 @@ import type { AgentTeamExecutionPrincipal } from '../../agent-teams/governance-c
 import type { ExecutionCapabilityService } from '../../services/execution-capabilities.js';
 import type { TerminalEventDispatcher, TerminalEventStore } from '../../services/terminal-event-store.js';
 import type { TerminalEventRateLimiter } from './worker-events-routes.js';
+import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -49,6 +50,10 @@ export interface RouteContext {
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
   resolveRulesPackTransportIssuer?: (req: http.IncomingMessage) => string | undefined;
+  resolveRulesPackApiPrincipal?: (
+    req: http.IncomingMessage,
+    target: Parameters<typeof import('../../extensions/rulespack-api-principal.js').resolveRulesPackApiPrincipal>[1],
+  ) => RulesPackExecutionPrincipal;
   executionCapabilityService?: ExecutionCapabilityService;
   terminalEventStore?: TerminalEventStore;
   terminalEventDispatcher?: TerminalEventDispatcher;

@@ -35,8 +35,12 @@ export async function handleRulesPackRoutes(
   if (method === 'PATCH' && action === 'mode') {
     const body = await parseJsonBody(req);
     const mode = body.mode;
+    if (mode === null) {
+      jsonResponse(res, 200, operator.clearModeOverride());
+      return true;
+    }
     if (mode !== 'off' && mode !== 'shadow' && mode !== 'enforce') {
-      jsonResponse(res, 400, { error: 'mode must be off, shadow, or enforce' });
+      jsonResponse(res, 400, { error: 'mode must be off, shadow, enforce, or null to clear the override' });
       return true;
     }
     jsonResponse(res, 200, operator.setMode(mode));

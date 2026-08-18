@@ -106,8 +106,8 @@ export interface WorkerRecord {
   id: string;
   botName: string;
   chatId: string;
-  principalRole: TrustedPrincipalRole;
-  executionKind: 'worker' | 'arc';
+  principalRole: TrustedPrincipalRole | 'unknown';
+  executionKind: 'worker' | 'arc' | 'unknown';
   workdir: string;
   prompt: string;
   engine: WorkerEngine;
@@ -205,6 +205,7 @@ export interface PreparedWorkerRulesPack {
   injectionText: string;
   packDigest: string;
   markInjected(): void;
+  markRejected(reason: unknown): void;
 }
 
 export interface WorkerRulesPackProvider {

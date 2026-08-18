@@ -14,20 +14,21 @@ export function createWorkerRulesPackProvider(env: NodeJS.ProcessEnv): WorkerRul
   const runtime = new MetaBotRulesPackRuntime(config, stderrLogger);
   return {
     async prepare(worker: WorkerRecord) {
+      const legacyUnknown = worker.principalRole === 'unknown' || worker.executionKind === 'unknown';
       const prepared = await runtime.prepareTurn({
         botName: worker.botName,
         chatId: worker.chatId,
-        roles: [worker.principalRole, worker.executionKind],
+        roles: legacyUnknown ? ['unknown'] : [worker.principalRole, worker.executionKind],
         cwd: worker.workdir,
-        workerId: worker.id,
-        taskId: worker.id,
-        dataClasses: [worker.executionKind === 'arc' ? 'arc' : 'worker'],
+        ...(legacyUnknown ? {} : { workerId: worker.id, taskId: worker.id }),
+        dataClasses: [legacyUnknown ? 'legacy-unknown' : worker.executionKind === 'arc' ? 'arc' : 'worker'],
         outputTypes: [worker.outputContract?.format ?? 'text'],
       });
       return {
         injectionText: prepared.injectionText,
         packDigest: prepared.packDigest,
         markInjected: prepared.markInjected,
+        markRejected: prepared.markRejected,
       };
     },
     close: () => runtime.close(),

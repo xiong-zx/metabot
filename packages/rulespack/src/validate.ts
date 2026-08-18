@@ -220,7 +220,11 @@ export function normalizeRule(input: RuleInputV1): RuleV1 {
 
   if (input.binding) {
     assertObject(input.binding, 'rule.binding');
-    assertOnlyKeys(input.binding, ['userId', 'projectId', 'chatId', 'taskId', 'hostId'], 'rule.binding');
+    assertOnlyKeys(
+      input.binding,
+      ['subjectFingerprint', 'userId', 'projectId', 'chatId', 'taskId', 'hostId'],
+      'rule.binding',
+    );
   }
   const binding = input.binding
     ? Object.fromEntries(
@@ -357,7 +361,7 @@ export function validateSourceGeneration(value: unknown): SourceGeneration {
     value,
     [
       'sourceId', 'kind', 'generation', 'revision', 'snapshotDigest', 'observedAt',
-      'freshUntil', 'health', 'error', 'ruleCount',
+      'freshUntil', 'required', 'health', 'error', 'ruleCount',
     ],
     'source generation',
   );
@@ -370,6 +374,9 @@ export function validateSourceGeneration(value: unknown): SourceGeneration {
   if (!Number.isSafeInteger(value.ruleCount) || Number(value.ruleCount) < 0) {
     fail('source generation ruleCount must be a non-negative integer');
   }
+  if (value.required !== undefined && typeof value.required !== 'boolean') {
+    fail('source generation required must be boolean');
+  }
   return {
     sourceId: requiredString(value.sourceId, 'source.sourceId', ID_PATTERN),
     kind: kind as SourceKind,
@@ -378,6 +385,7 @@ export function validateSourceGeneration(value: unknown): SourceGeneration {
     snapshotDigest: requiredString(value.snapshotDigest, 'source.snapshotDigest'),
     observedAt: optionalIsoDate(value.observedAt, 'source.observedAt') ?? fail('source.observedAt is required'),
     ...(value.freshUntil === undefined ? {} : { freshUntil: optionalIsoDate(value.freshUntil, 'source.freshUntil') as string }),
+    required: value.required === true,
     health,
     ...(value.error === undefined ? {} : { error: requiredString(value.error, 'source.error') }),
     ruleCount: Number(value.ruleCount),

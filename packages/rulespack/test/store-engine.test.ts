@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { RulesPackEngine } from '../src/engine.js';
+import { configSource } from '../src/sources.js';
 import { verifyCompiledPack } from '../src/compiler.js';
+import { RulesPackError } from '../src/errors.js';
 import type { RuleSourceAdapter } from '../src/sources.js';
 import { RulesStore } from '../src/store.js';
 import { makeRule, NOW, sourceGeneration, subject } from './fixtures.js';
@@ -156,4 +158,54 @@ test('default hot-path cache hit does not reload the Rule set', () => {
   engine.compile({ subject, now: NOW });
   assert.equal(store.listCalls, afterMiss);
   store.close();
+});
+
+test('freshness deadlines are evaluated at every compile/cache decision and expired optional Rules are not injected', async () => {
+  const store = new RulesStore(':memory:');
+  const engine = new RulesPackEngine({ store, mode: 'enforce', lastKnownGoodTtlMs: 500 });
+  await engine.refreshSources([configSource({
+    id: 'fresh-config',
+    revision: '1',
+    freshForMs: 1_000,
+    rules: [makeRule({
+      id: 'fresh-only',
+      text: 'Inject only while source is usable.',
+      source: { kind: 'config', adapterId: 'fresh-config', ref: 'test', revision: '1' },
+    })],
+  })], { now: NOW });
+  const fresh = engine.compile({ subject, now: '2026-08-18T06:00:00.500Z' });
+  const cached = engine.compile({ subject, now: '2026-08-18T06:00:00.600Z' });
+  assert.match(fresh.injectionText, /Inject only/u);
+  assert.equal(cached.telemetry.cache, 'hit-memory');
+
+  const expired = engine.compile({ subject, now: '2026-08-18T06:00:02.000Z' });
+  assert.doesNotMatch(expired.injectionText, /Inject only/u);
+  assert.equal(expired.telemetry.cache, 'miss');
+  assert.equal(expired.telemetry.sourceFreshness[0]?.health, 'unavailable');
+  assert.equal(expired.telemetry.degraded, true);
+  assert.equal(engine.currentSourceState('2026-08-18T06:00:02.000Z').generations[0]?.health, 'unavailable');
+  store.close();
+});
+
+test('expired optional source uses only bounded stale generation and expired required source fails closed', async () => {
+  const optionalStore = new RulesStore(':memory:');
+  const optional = new RulesPackEngine({ store: optionalStore, mode: 'enforce', lastKnownGoodTtlMs: 2_000 });
+  await optional.refreshSources([configSource({
+    id: 'optional', revision: '1', freshForMs: 1_000,
+    rules: [makeRule({ id: 'optional-rule', text: 'Bounded stale Rule.', source: { kind: 'config', adapterId: 'optional', ref: 'test', revision: '1' } })],
+  })], { now: NOW });
+  const stale = optional.compile({ subject, now: '2026-08-18T06:00:01.500Z' });
+  assert.match(stale.injectionText, /Bounded stale/u);
+  assert.equal(stale.telemetry.sourceFreshness[0]?.health, 'stale');
+  assert.equal(stale.telemetry.usedLastKnownGood, true);
+  optionalStore.close();
+
+  const requiredStore = new RulesStore(':memory:');
+  const required = new RulesPackEngine({ store: requiredStore, mode: 'enforce' });
+  await required.refreshSources([configSource({ id: 'required', revision: '1', required: true, freshForMs: 1_000, rules: [] })], { now: NOW });
+  assert.throws(
+    () => required.compile({ subject, now: '2026-08-18T06:00:01.001Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'SOURCE_UNAVAILABLE',
+  );
+  requiredStore.close();
 });

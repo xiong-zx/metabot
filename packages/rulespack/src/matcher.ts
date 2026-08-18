@@ -5,6 +5,7 @@ import type {
   RuleV1,
   SelectionDisposition,
 } from './model.js';
+import { digestObject } from './canonical.js';
 
 export interface MatchResult {
   matches: boolean;
@@ -59,12 +60,19 @@ function predicateMatches(predicate: ExactTargets, subject: ExecutionSubject): b
 function bindingMatches(binding: RuleBinding | undefined, subject: ExecutionSubject): boolean {
   if (!binding) return true;
   return (
+    (binding.subjectFingerprint === undefined || binding.subjectFingerprint === subjectFingerprintValue(subject)) &&
     (binding.userId === undefined || binding.userId === subject.userId) &&
     (binding.projectId === undefined || binding.projectId === subject.projectId) &&
     (binding.chatId === undefined || binding.chatId === subject.chatId) &&
     (binding.taskId === undefined || binding.taskId === subject.taskId) &&
     (binding.hostId === undefined || binding.hostId === subject.hostId)
   );
+}
+
+function subjectFingerprintValue(subject: ExecutionSubject): string {
+  // Kept local to avoid a matcher/compiler import cycle; canonical JSON hashing
+  // is the same primitive used by compiler.subjectFingerprint.
+  return digestObject(subject);
 }
 
 export function matchRule(rule: RuleV1, subject: ExecutionSubject): MatchResult {

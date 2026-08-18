@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RulesPackError, type RuleInputV1 } from '@metabot/rulespack';
 import { MetaBotRulesPackRuntime, resolveRulesPackDbPath } from '../src/runtime.js';
 
@@ -168,8 +169,12 @@ describe('MetaBot RulesPack runtime', () => {
     escaped.close();
   });
 
-  it('authenticates target-bound envelopes and rejects audience mismatch and replay', async () => {
+  it('rebinds received Rules to the exact envelope subject with no chat/project/agent/worker/task leakage', async () => {
     const root = temp();
+    const projectA = path.join(root, 'project-a');
+    const projectB = path.join(root, 'project-b');
+    fs.mkdirSync(projectA);
+    fs.mkdirSync(projectB);
     const sender = new MetaBotRulesPackRuntime(
       {
         mode: 'enforce',
@@ -186,33 +191,62 @@ describe('MetaBot RulesPack runtime', () => {
         hostId: 'savio',
         dbPath: path.join(root, 'receiver.sqlite'),
         dispatch: { audience: 'metabot-host:savio', allowedIssuers: ['admin@imac'] },
+        projectBindings: [
+          { projectId: 'project-a', root: projectA },
+          { projectId: 'project-b', root: projectB },
+        ],
       },
       logger,
     );
-    const childFacts = facts(root, { botName: 'pm-savio' });
-    const envelope = await sender.createDispatchEnvelope({
-      facts: { ...childFacts, botName: 'pm-savio' },
-      audience: 'metabot-host:savio',
-      targetHostId: 'savio',
+    const childFacts = facts(projectA, {
+      botName: 'pm-savio',
+      agentName: 'agent-a',
+      workerId: 'worker-a',
+      taskId: 'task-a',
+      roles: ['worker'],
+      dataClasses: ['worker'],
     });
+    const envelope = await sender.createDispatchEnvelope({
+      targetSubject: receiver.buildSubject(childFacts),
+      audience: 'metabot-host:savio',
+    });
+    for (const mismatch of [
+      { chatId: 'chat-b' },
+      { cwd: projectB },
+      { agentName: 'agent-b' },
+      { workerId: 'worker-b' },
+      { taskId: 'task-b' },
+    ]) {
+      const mismatchedEnvelope = await sender.createDispatchEnvelope({
+        targetSubject: receiver.buildSubject(childFacts),
+        audience: 'metabot-host:savio',
+      });
+      await expect(receiver.prepareTurn({ ...childFacts, ...mismatch }, {
+        envelope: mismatchedEnvelope,
+        transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+      })).rejects.toThrow(/target fingerprint/u);
+    }
     const accepted = await receiver.prepareTurn(childFacts, {
       envelope,
       transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
     });
     expect(accepted.injectionText).toContain('Delivered policy.');
+    expect(receiver.receipts().some((item) => item.status === 'consumed')).toBe(false);
+    accepted.markInjected();
+    expect(receiver.receipts().some((item) => item.status === 'consumed')).toBe(true);
     const continued = await receiver.prepareTurn(childFacts);
     expect(continued.packDigest).toBe(accepted.packDigest);
     expect(continued.injectionText).toContain('Delivered policy.');
-
-    const childRuntime = new MetaBotRulesPackRuntime(
-      { mode: 'enforce', hostId: 'savio', dbPath: path.join(root, 'receiver.sqlite') },
-      logger,
-    );
-    const worker = await childRuntime.prepareTurn(facts(root, {
-      botName: 'pm-savio', workerId: 'worker-1', taskId: 'worker-1',
-      roles: ['worker'], dataClasses: ['worker'],
-    }));
-    expect(worker.injectionText).toContain('Delivered policy.');
+    for (const different of [
+      { chatId: 'chat-b' },
+      { cwd: projectB },
+      { agentName: 'agent-b' },
+      { workerId: 'worker-b' },
+      { taskId: 'task-b' },
+    ]) {
+      const isolated = await receiver.prepareTurn({ ...childFacts, ...different });
+      expect(isolated.injectionText).not.toContain('Delivered policy.');
+    }
     await expect(
       receiver.prepareTurn(childFacts, {
         envelope,
@@ -225,9 +259,100 @@ describe('MetaBot RulesPack runtime', () => {
         transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
       }),
     ).rejects.toThrow(/audience/u);
-    childRuntime.close();
     sender.close();
     receiver.close();
+  });
+
+  it('captures prepared mode and records acceptance only after successful target input', async () => {
+    const root = temp();
+    const runtime = new MetaBotRulesPackRuntime({
+      mode: 'enforce',
+      hostId: 'imac',
+      dbPath: path.join(root, 'receipts.sqlite'),
+      configRules: { id: 'config', revision: '1', rules: [rule('receipt', 'Receipt rule.')] },
+    }, logger);
+    const failed = await runtime.prepareTurn(facts(root));
+    failed.markRejected(new Error('spawn rejected'));
+    expect(runtime.receipts().some((item) => item.status === 'injected')).toBe(false);
+    expect(runtime.receipts().some((item) => item.status === 'rejected')).toBe(true);
+
+    const prepared = await runtime.prepareTurn(facts(root));
+    runtime.setMode('off');
+    prepared.markInjected();
+    expect(prepared.mode).toBe('enforce');
+    expect(runtime.receipts().filter((item) => item.status === 'injected')).toHaveLength(1);
+
+    runtime.setMode('shadow');
+    const shadow = await runtime.prepareTurn(facts(root));
+    shadow.markInjected();
+    expect(runtime.receipts().filter((item) => item.status === 'injected')).toHaveLength(1);
+    runtime.setMode('off');
+    const off = await runtime.prepareTurn(facts(root));
+    off.markInjected();
+    expect(runtime.receipts().filter((item) => item.status === 'injected')).toHaveLength(1);
+    runtime.close();
+  });
+
+  it('restores a validated durable operator mode override across restart until cleared', async () => {
+    const root = temp();
+    const dbPath = path.join(root, 'mode.sqlite');
+    let runtime = new MetaBotRulesPackRuntime({ mode: 'enforce', hostId: 'imac', dbPath }, logger);
+    runtime.setMode('off');
+    runtime.close();
+    runtime = new MetaBotRulesPackRuntime({ mode: 'enforce', hostId: 'imac', dbPath }, logger);
+    expect(runtime.status().mode).toBe('off');
+    expect((await runtime.prepareTurn(facts(root))).injectionText).toBe('');
+    expect(runtime.clearModeOverride().mode).toBe('enforce');
+    runtime.close();
+  });
+
+  it('changes digest and misses cache when native-loaded instruction content changes without duplicate injection', async () => {
+    const root = temp();
+    const project = path.join(root, 'project');
+    fs.mkdirSync(project);
+    const agents = path.join(project, 'AGENTS.md');
+    fs.writeFileSync(agents, '# Native instruction one\n');
+    const runtime = new MetaBotRulesPackRuntime({
+      mode: 'enforce',
+      hostId: 'imac',
+      dbPath: path.join(root, 'native.sqlite'),
+      configRules: { id: 'config', revision: '1', rules: [rule('rendered', 'Rendered exactly once.')] },
+      projectBindings: [{
+        projectId: 'project',
+        root: project,
+        nativeFiles: [{ id: 'agents', path: 'AGENTS.md', format: 'agents-json-block', nativeLoaded: true }],
+      }],
+    }, logger);
+    const first = await runtime.prepareTurn(facts(project));
+    expect(first.injectionText).toContain('Rendered exactly once.');
+    expect(first.injectionText).not.toContain('Native instruction one');
+    fs.writeFileSync(agents, '# Native instruction two\n');
+    await runtime.refresh();
+    const changed = await runtime.prepareTurn(facts(project));
+    expect(changed.packDigest).not.toBe(first.packDigest);
+    expect(changed.telemetry.cache).toBe('miss');
+    expect(changed.injectionText).not.toContain('Native instruction two');
+    expect(changed.injectionText.match(/Rendered exactly once\./gu)).toHaveLength(1);
+    runtime.close();
+  });
+
+  it('schedules configured source refresh before its freshness deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-18T06:00:00.000Z'));
+    const root = temp();
+    const runtime = new MetaBotRulesPackRuntime({
+      mode: 'shadow',
+      hostId: 'imac',
+      dbPath: path.join(root, 'freshness.sqlite'),
+      configRules: { id: 'fresh', revision: '1', freshForMs: 10_000, rules: [] },
+    }, logger);
+    await runtime.initialize();
+    const firstObservedAt = runtime.status().sources[0]?.observedAt;
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(runtime.status().sources[0]?.observedAt).not.toBe(firstObservedAt);
+    expect(runtime.status().sources[0]?.health).toBe('fresh');
+    runtime.close();
+    vi.useRealTimers();
   });
 
   it('rejects reserved databases and cross-host MetaMemory namespaces', () => {
@@ -244,5 +369,29 @@ describe('MetaBot RulesPack runtime', () => {
           logger,
         ),
     ).toThrowError(RulesPackError);
+    expect(
+      () => new MetaBotRulesPackRuntime({
+        hostId: 'imac',
+        dbPath: path.join(root, 'remote-memory.sqlite'),
+        metaMemory: { paths: ['/imac/rules/x'], hostRoot: '/imac', coreUrl: 'http://imac.example:9200' },
+      }, logger),
+    ).toThrow(/host-local\/loopback/u);
+  });
+
+  it('rejects canonical/symlink aliases and existing foreign SQLite schemas', () => {
+    const root = temp();
+    const live = path.join(root, 'live.sqlite');
+    const foreign = new DatabaseSync(live);
+    foreign.exec('CREATE TABLE worker_jobs(id TEXT PRIMARY KEY)');
+    foreign.close();
+    expect(() => new MetaBotRulesPackRuntime({ hostId: 'imac', dbPath: live }, logger)).toThrow(/foreign application schema/u);
+
+    const alias = path.join(root, 'rules-alias.sqlite');
+    fs.symlinkSync(live, alias);
+    expect(() => new MetaBotRulesPackRuntime({
+      hostId: 'imac',
+      dbPath: alias,
+      protectedDbPaths: [path.join(root, '.', 'live.sqlite')],
+    }, logger)).toThrow(/aliases a configured live/u);
   });
 });
