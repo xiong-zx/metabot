@@ -284,7 +284,7 @@ export class RulesPackEngine {
           .filter((source) => source.health === 'fresh' || source.health === 'stale')
           .flatMap((source) => this.store.listRules(source.sourceId));
       this.#assertCurrentSourceSafety(currentRules, sourceState.generations);
-      const pack = this.#compiler({
+      const compileRequest = {
         subject: options.subject,
         rules: currentRules,
         sourceGenerations: sourceState.generations,
@@ -292,15 +292,19 @@ export class RulesPackEngine {
         mode,
         now,
         degradationReasons: sourceState.degradationReasons,
-      });
+      };
+      const pack = this.#compiler(compileRequest);
       if (cacheEnabled) {
+        const validUntil = new Date(Date.parse(now) + this.#cacheTtlMs).toISOString();
+        this.store.recordEngineCompile(
+          cacheKey,
+          compileRequest,
+          pack,
+          validUntil,
+          pack.degraded ? undefined : new Date(Date.parse(now) + this.#lkgTtlMs).toISOString(),
+        );
         this.#cache.set(cacheKey, pack);
         this.#indexCacheKey(cacheKey, pack.sourceGenerations);
-        const validUntil = new Date(Date.parse(now) + this.#cacheTtlMs).toISOString();
-        this.store.putCachedPack(cacheKey, pack, validUntil);
-        if (!pack.degraded) {
-          this.store.putLastKnownGood(pack, new Date(Date.parse(now) + this.#lkgTtlMs).toISOString());
-        }
       }
       const telemetry = this.#telemetry(
         pack,
@@ -332,9 +336,10 @@ export class RulesPackEngine {
           .filter((source) => source.health === 'fresh' || source.health === 'stale')
           .flatMap((source) => this.store.listRules(source.sourceId));
       this.#assertCurrentSourceSafety(currentRules, sourceState.generations);
-      this.#assertLkgCurrentLifecycle(currentRules, now);
-      const lkg = this.store.getLastKnownGood(fingerprint, now);
+      this.#assertLkgCurrentLifecycle(currentRules, undefined, now);
+      const lkg = this.store.getLastKnownGood(cacheKey, now);
       if (!lkg || compiledPackIdentityDigest(lkg) !== cacheKey) throw error;
+      this.#assertLkgCurrentLifecycle(currentRules, lkg, now);
       const pack = recomputePackDigest({
         ...lkg,
         compiledAt: now,
@@ -384,15 +389,34 @@ export class RulesPackEngine {
     }
   }
 
-  #assertLkgCurrentLifecycle(rules: ReturnType<RulesStore['listRules']>, now: string): void {
+  #assertLkgCurrentLifecycle(
+    rules: ReturnType<RulesStore['listRules']>,
+    pack: CompiledRulesPack | undefined,
+    now: string,
+  ): void {
     const nowMs = Date.parse(now);
+    const packExpiresMs = pack?.expiresAt === undefined ? undefined : Date.parse(pack.expiresAt);
+    if (packExpiresMs !== undefined && packExpiresMs <= nowMs) {
+      throw new RulesPackError('VALIDATION_ERROR', 'Last-known-good pack reached its lifecycle boundary');
+    }
     for (const rule of rules) {
-      if (
-        rule.lifecycle.status === 'revoked' ||
-        (rule.lifecycle.validFrom !== undefined && Date.parse(rule.lifecycle.validFrom) > nowMs) ||
-        (rule.lifecycle.expiresAt !== undefined && Date.parse(rule.lifecycle.expiresAt) <= nowMs)
-      ) {
+      if (rule.lifecycle.status === 'revoked') {
         throw new RulesPackError('VALIDATION_ERROR', `Rule ${rule.id} lifecycle is not eligible for LKG recovery`);
+      }
+      const validFromMs = rule.lifecycle.validFrom === undefined ? undefined : Date.parse(rule.lifecycle.validFrom);
+      const expiresAtMs = rule.lifecycle.expiresAt === undefined ? undefined : Date.parse(rule.lifecycle.expiresAt);
+      if (expiresAtMs !== undefined && expiresAtMs <= nowMs) {
+        throw new RulesPackError('VALIDATION_ERROR', `Rule ${rule.id} expired before LKG recovery`);
+      }
+      if (!pack) continue;
+      for (const transitionMs of [validFromMs, expiresAtMs]) {
+        if (transitionMs === undefined || transitionMs <= nowMs) continue;
+        if (packExpiresMs === undefined || packExpiresMs > transitionMs) {
+          throw new RulesPackError(
+            'VALIDATION_ERROR',
+            `Last-known-good pack is not bounded by Rule ${rule.id}'s next lifecycle transition`,
+          );
+        }
       }
     }
   }

@@ -155,9 +155,11 @@ The default database is
 `${SESSION_STORE_DIR:-~/.metabot}/rulespack/rules-state.sqlite`. It is rejected
 if it aliases a known/configured MetaMemory, session, Agent Team, Worker, or ARC
 database by basename, canonical path, symlink/inode, or contains a foreign
-application schema. Engine schema v1 owns Rule history/current pointers, revocations,
-source generations, persistent cache/source index, cache metadata, LKG,
-redacted audit, receipts, and feedback. Adapter tables add only settings and
+application schema. Engine schema v3 owns Rule history/current pointers,
+revocations, source generations, persistent cache/source index, authoritative
+compile provenance, cache-key-bound LKG, cache metadata, redacted audit,
+receipts, and feedback. Pre-v3 cache/LKG rows have no authoritative provenance
+and are not recovery candidates. Adapter tables add only settings and
 prepared/accepted/rejected replay leases. Worker storage receives additive `principal_role` and
 `execution_kind` columns so restart recovery reconstructs the same child
 subject. Legacy rows without identity evidence remain `unknown`/degraded and
@@ -177,9 +179,14 @@ dependency, target, expiry, tamper, and replay failures fail closed. Only the
 explicit transient `COMPILE_UNAVAILABLE` failure may use engine-verified
 bounded LKG, and only after the complete current source snapshot passes schema,
 digest, authority, lifecycle, target, text, and store integrity validation and
-its recomputed compiler/mode/budget/subject/source identity exactly matches the
-current compile request. Packs expire before any Rule lifecycle transition,
-including transitions of Rules that were not selected in the old pack.
+its exact compiler/mode/budget/subject/source cache key resolves through a
+persisted engine compile record to digest-verified pack bytes. The store creates
+that record only after checking the complete current Rule input and independently
+re-running the deterministic compiler; raw caller-supplied cache/LKG promotion
+is unavailable. Packs expire at or before every Rule lifecycle transition,
+including transitions of Rules that were not selected in the old pack. A future
+Rule is safe to omit before its `validFrom` only when the pack expires no later
+than that boundary; at the boundary, fresh compile is required.
 Mode `off` resolves before source fail-closed checks and continues with a
 degraded empty pack even when required source state is stale, unavailable, or
 corrupt.

@@ -5,9 +5,15 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { RulesPackEngine } from '../src/engine.js';
-import { compileRules, recomputePackDigest } from '../src/compiler.js';
+import {
+  compileIdentityDigest,
+  compileRules,
+  compiledPackIdentityDigest,
+  recomputePackDigest,
+  sourceSnapshotDigest,
+  verifyCompiledPack,
+} from '../src/compiler.js';
 import { configSource } from '../src/sources.js';
-import { verifyCompiledPack } from '../src/compiler.js';
 import { RulesPackError } from '../src/errors.js';
 import type { RuleSourceAdapter } from '../src/sources.js';
 import { RulesStore } from '../src/store.js';
@@ -46,8 +52,46 @@ test('SQLite persists normalized Rules, generations, audit, receipts, feedback, 
   assert.equal(store.listReceipts(result.pack.packDigest)[0]?.receiptId, 'receipt-1');
   assert.equal(store.listFeedback(result.pack.packDigest)[0]?.feedbackId, 'feedback-1');
   assert.equal(store.counts().persistentCacheEntries, 1);
-  assert.ok(store.getLastKnownGood(result.pack.subjectFingerprint, NOW));
+  const cacheKey = compiledPackIdentityDigest(result.pack);
+  assert.equal(store.getCachedPack(cacheKey, NOW)?.packDigest, result.pack.packDigest);
+  assert.equal(store.getLastKnownGood(cacheKey, NOW)?.packDigest, result.pack.packDigest);
   store.close();
+});
+
+test('cache and LKG fail closed when compile provenance is missing or stored pack bytes are tampered', () => {
+  const missingStore = new RulesStore(':memory:');
+  const missingRule = makeRule({ id: 'missing-provenance', text: 'Require persisted provenance.' });
+  missingStore.replaceSourceSnapshot({
+    source: sourceGeneration('gen-1', [missingRule]),
+    rules: [missingRule],
+  });
+  const missing = new RulesPackEngine({ store: missingStore, mode: 'enforce' });
+  const missingResult = missing.compile({ subject, now: NOW });
+  const missingCacheKey = compiledPackIdentityDigest(missingResult.pack);
+  missingStore.extensionTransaction((database) => {
+    database.prepare('DELETE FROM authoritative_compiles WHERE cache_key = ?').run(missingCacheKey);
+  });
+  assert.equal(missingStore.getCachedPack(missingCacheKey, NOW), undefined);
+  assert.equal(missingStore.getLastKnownGood(missingCacheKey, NOW), undefined);
+  missingStore.close();
+
+  const tamperedStore = new RulesStore(':memory:');
+  const tamperedRule = makeRule({ id: 'tampered-bytes', text: 'Require exact stored bytes.' });
+  tamperedStore.replaceSourceSnapshot({
+    source: sourceGeneration('gen-1', [tamperedRule]),
+    rules: [tamperedRule],
+  });
+  const tamperedResult = new RulesPackEngine({ store: tamperedStore, mode: 'enforce' }).compile({
+    subject,
+    now: NOW,
+  });
+  const tamperedCacheKey = compiledPackIdentityDigest(tamperedResult.pack);
+  tamperedStore.extensionTransaction((database) => {
+    database.prepare("UPDATE pack_cache SET pack_json = pack_json || ' ' WHERE cache_key = ?").run(tamperedCacheKey);
+  });
+  assert.equal(tamperedStore.getLastKnownGood(tamperedCacheKey, NOW), undefined);
+  assert.equal(tamperedStore.getCachedPack(tamperedCacheKey, NOW), undefined);
+  tamperedStore.close();
 });
 
 test('cache hits, source generation invalidation, and revocation-first safety work', () => {
@@ -97,7 +141,7 @@ test('corrupt current Rule state never activates LKG and never resurrects revoca
   );
 
   store.revokeRule('lkg', 'revoked before retry', '2026-08-18T06:00:02.000Z');
-  assert.equal(store.getLastKnownGood(first.pack.subjectFingerprint, '2026-08-18T06:00:03.000Z'), undefined);
+  assert.equal(store.getLastKnownGood(compiledPackIdentityDigest(first.pack), '2026-08-18T06:00:03.000Z'), undefined);
   store.close();
 });
 
@@ -171,7 +215,94 @@ test('LKG rejects a changed generation that adds an applicable mandatory Rule', 
   store.close();
 });
 
-test('cache and LKG expire before an unchanged snapshot makes a mandatory Rule newly applicable', () => {
+test('retagging an old pack cannot forge engine compile provenance or restore invalidated LKG', () => {
+  const store = new RulesStore(':memory:');
+  const baseline = makeRule({ id: 'retag-baseline', text: 'Original selected Rule.' });
+  const generationOne = sourceGeneration('gen-1', [baseline]);
+  store.replaceSourceSnapshot({ source: generationOne, rules: [baseline] });
+  const original = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    cacheTtlMs: 500,
+    lastKnownGoodTtlMs: 60_000,
+  }).compile({ subject, now: NOW });
+  const originalCacheKey = compiledPackIdentityDigest(original.pack);
+  assert.ok(store.getLastKnownGood(originalCacheKey, NOW));
+
+  const mandatory = makeRule({
+    id: 'retag-mandatory',
+    text: 'New mandatory Rule must not be omitted.',
+    mandatory: true,
+    overridable: false,
+    priority: 100,
+  });
+  const generationTwo = sourceGeneration('gen-2', [baseline, mandatory]);
+  store.replaceSourceSnapshot({ source: generationTwo, rules: [baseline, mandatory] });
+  assert.equal(store.getCachedPack(originalCacheKey, '2026-08-18T06:00:00.100Z'), undefined);
+  assert.equal(store.getLastKnownGood(originalCacheKey, '2026-08-18T06:00:00.100Z'), undefined);
+
+  const currentRequest = {
+    subject,
+    rules: [baseline, mandatory],
+    sourceGenerations: [generationTwo],
+    budget: original.pack.budget,
+    mode: 'enforce' as const,
+    now: NOW,
+    degradationReasons: [],
+  };
+  const currentCacheKey = compileIdentityDigest(currentRequest);
+  const retagged = recomputePackDigest({
+    ...original.pack,
+    sourceGenerations: [generationTwo],
+    sourceSnapshotDigest: sourceSnapshotDigest({ sourceGenerations: [generationTwo] }),
+  });
+  assert.equal(compiledPackIdentityDigest(retagged), currentCacheKey);
+  assert.deepEqual(
+    retagged.rules.map((rule) => rule.id),
+    ['retag-baseline'],
+  );
+  assert.throws(
+    () =>
+      store.recordEngineCompile(
+        currentCacheKey,
+        currentRequest,
+        retagged,
+        '2026-08-18T06:00:30.000Z',
+        '2026-08-18T06:01:00.000Z',
+      ),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'STORE_ERROR',
+  );
+  assert.throws(
+    () =>
+      store.recordEngineCompile(
+        currentCacheKey,
+        { ...currentRequest, rules: [baseline] },
+        retagged,
+        '2026-08-18T06:00:30.000Z',
+        '2026-08-18T06:01:00.000Z',
+      ),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'STORE_ERROR',
+  );
+  const legacyStoreApi = store as unknown as Record<string, unknown>;
+  assert.equal(legacyStoreApi.putCachedPack, undefined);
+  assert.equal(legacyStoreApi.putLastKnownGood, undefined);
+  assert.equal(store.getLastKnownGood(currentCacheKey, NOW), undefined);
+
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  assert.throws(
+    () => transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+  );
+  store.close();
+});
+
+test('identical future-lifecycle LKG works before its boundary and fails exactly at the boundary', () => {
   const store = new RulesStore(':memory:');
   const baseline = makeRule({ id: 'timed-baseline', text: 'Baseline before the activation time.' });
   const futureMandatory = makeRule({
@@ -179,7 +310,7 @@ test('cache and LKG expire before an unchanged snapshot makes a mandatory Rule n
     text: 'Mandatory after activation.',
     mandatory: true,
     overridable: false,
-    lifecycle: { status: 'approved', validFrom: '2026-08-18T06:00:00.500Z' },
+    lifecycle: { status: 'approved', validFrom: '2026-08-18T06:00:30.000Z' },
   });
   store.replaceSourceSnapshot({
     source: sourceGeneration('gen-1', [baseline, futureMandatory]),
@@ -188,14 +319,14 @@ test('cache and LKG expire before an unchanged snapshot makes a mandatory Rule n
   const initial = new RulesPackEngine({
     store,
     mode: 'enforce',
-    cacheTtlMs: 60_000,
+    cacheTtlMs: 500,
     lastKnownGoodTtlMs: 60_000,
   }).compile({ subject, now: NOW });
   assert.deepEqual(
     initial.pack.rules.map((rule) => rule.id),
     ['timed-baseline'],
   );
-  assert.equal(initial.pack.expiresAt, '2026-08-18T06:00:00.500Z');
+  assert.equal(initial.pack.expiresAt, '2026-08-18T06:00:30.000Z');
 
   const transient = new RulesPackEngine({
     store,
@@ -205,8 +336,74 @@ test('cache and LKG expire before an unchanged snapshot makes a mandatory Rule n
       throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
     },
   });
+  const beforeBoundary = transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' });
+  assert.equal(beforeBoundary.pack.lastKnownGood, true);
+  assert.deepEqual(
+    beforeBoundary.pack.rules.map((rule) => rule.id),
+    ['timed-baseline'],
+  );
   assert.throws(
-    () => transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' }),
+    () => transient.compile({ subject, now: '2026-08-18T06:00:30.000Z' }),
+    (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
+  );
+  store.close();
+});
+
+test('future conflict and dependency transitions are bounded by LKG expiry', () => {
+  const store = new RulesStore(':memory:');
+  const currentConflict = makeRule({
+    id: 'current-conflict',
+    text: 'Current conflict winner.',
+    conflictKey: 'transition-style',
+    priority: 1,
+  });
+  const futureConflict = makeRule({
+    id: 'future-conflict',
+    text: 'Future conflict winner.',
+    conflictKey: 'transition-style',
+    priority: 100,
+    lifecycle: { status: 'approved', validFrom: '2026-08-18T06:00:30.000Z' },
+  });
+  const futureDependency = makeRule({
+    id: 'future-dependency',
+    text: 'Future dependency.',
+    lifecycle: { status: 'approved', validFrom: '2026-08-18T06:00:30.000Z' },
+  });
+  const dependent = makeRule({
+    id: 'dependent',
+    text: 'Selected only with its future dependency.',
+    dependencies: ['future-dependency'],
+    priority: 50,
+  });
+  const rules = [currentConflict, futureConflict, futureDependency, dependent];
+  store.replaceSourceSnapshot({ source: sourceGeneration('gen-1', rules), rules });
+  const initial = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    cacheTtlMs: 500,
+    lastKnownGoodTtlMs: 60_000,
+  }).compile({ subject, now: NOW });
+  assert.equal(initial.pack.expiresAt, '2026-08-18T06:00:30.000Z');
+  assert.deepEqual(
+    initial.pack.rules.map((rule) => rule.id),
+    ['current-conflict'],
+  );
+
+  const transient = new RulesPackEngine({
+    store,
+    mode: 'enforce',
+    compiler: () => {
+      throw new RulesPackError('COMPILE_UNAVAILABLE', 'temporary compiler outage');
+    },
+  });
+  const beforeBoundary = transient.compile({ subject, now: '2026-08-18T06:00:01.000Z' });
+  assert.equal(beforeBoundary.pack.lastKnownGood, true);
+  assert.deepEqual(
+    beforeBoundary.pack.rules.map((rule) => rule.id),
+    ['current-conflict'],
+  );
+  assert.throws(
+    () => transient.compile({ subject, now: '2026-08-18T06:00:30.000Z' }),
     (error: unknown) => error instanceof RulesPackError && error.code === 'COMPILE_UNAVAILABLE',
   );
   store.close();

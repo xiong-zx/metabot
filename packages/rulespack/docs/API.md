@@ -81,10 +81,16 @@ explicit `--trusted-authority` operator flag for compiler-owned sources.
 `RulesStore` owns one isolated SQLite database. Important methods include:
 
 - `upsertRule`, `replaceSourceSnapshot`, `revokeRule`, `listRules`;
-- `putCachedPack`, `getCachedPack`, `invalidateSourceCache`, `clearCache`;
-- `putLastKnownGood`, `getLastKnownGood`, `isPackSafe`;
+- `getCachedPack`, `getLastKnownGood`, `invalidateSourceCache`, `clearCache`;
+- engine-only `recordEngineCompile`, which independently re-runs the canonical
+  compiler against the complete current store input before atomically issuing
+  cache provenance and, for a nondegraded pack, an LKG link;
 - `recordAudit`, `recordReceipt`, `recordFeedback` and bounded list methods;
 - `counts` and `listSourceGenerations`.
+
+There is no raw pack-cache write or caller-supplied LKG promotion API. Durable
+LKG is a cache-key-bound link to an authoritative compile record and the exact
+stored pack bytes, not a standalone copy whose identity can be retagged.
 
 `RulesPackEngine` composes store and in-process LRU behavior:
 
@@ -93,8 +99,10 @@ explicit `--trusted-authority` operator flag for compiler-owned sources.
 - `setMode`, `invalidateSource`, `clearCache`, and `status` are operator hooks.
 
 The cache key covers compiler version, subject fingerprint, source snapshot and
-generations, compile budget, and mode. A hit is accepted only if every selected
-Rule is still current, digest-identical, unrevoked, and unexpired.
+generations, compile budget, and mode. Cache/LKG reads also require the persisted
+compile-input digest, pack-bytes digest, pack digest, and cache identity to agree.
+A hit is accepted only if every selected Rule is still current,
+digest-identical, unrevoked, and unexpired.
 
 ## Source adapters
 

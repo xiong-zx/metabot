@@ -1,9 +1,10 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { digestObject, eventId, stableStringify } from './canonical.js';
-import { verifyCompiledPack } from './compiler.js';
+import { digestObject, eventId, sha256, stableStringify } from './canonical.js';
+import { compileIdentityDigest, compileRules, compiledPackIdentityDigest, verifyCompiledPack } from './compiler.js';
 import { RulesPackError } from './errors.js';
 import type {
   AuditEvent,
+  CompileRequest,
   CompiledRulesPack,
   DeliveryReceipt,
   RuleV1,
@@ -19,7 +20,7 @@ import {
   validateSourceGeneration,
 } from './validate.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 function parseJson<T>(value: unknown, label: string): T {
   try {
@@ -54,6 +55,25 @@ export interface StoreCounts {
   currentRules: number;
   revokedRules: number;
   persistentCacheEntries: number;
+}
+
+interface AuthoritativePackRow {
+  pack_json: string;
+  pack_digest: string;
+  subject_fingerprint: string;
+  source_snapshot_digest: string;
+  valid_until: string;
+  compile_identity_digest: string;
+  compile_input_digest: string;
+  provenance_pack_digest: string;
+  pack_bytes_digest: string;
+}
+
+interface LastKnownGoodRow extends AuthoritativePackRow {
+  lkg_subject_fingerprint: string;
+  lkg_pack_digest: string;
+  lkg_compile_input_digest: string;
+  lkg_pack_bytes_digest: string;
 }
 
 export class RulesStore {
@@ -137,6 +157,25 @@ export class RulesStore {
         PRIMARY KEY (cache_key, source_id)
       );
       CREATE INDEX IF NOT EXISTS pack_cache_source_idx ON pack_cache_sources(source_id);
+      CREATE TABLE IF NOT EXISTS authoritative_compiles (
+        cache_key TEXT PRIMARY KEY REFERENCES pack_cache(cache_key) ON DELETE CASCADE,
+        compile_identity_digest TEXT NOT NULL,
+        compile_input_digest TEXT NOT NULL,
+        pack_digest TEXT NOT NULL,
+        pack_bytes_digest TEXT NOT NULL,
+        compiled_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS last_known_good_v3 (
+        cache_key TEXT PRIMARY KEY REFERENCES authoritative_compiles(cache_key) ON DELETE CASCADE,
+        subject_fingerprint TEXT NOT NULL,
+        pack_digest TEXT NOT NULL,
+        compile_input_digest TEXT NOT NULL,
+        pack_bytes_digest TEXT NOT NULL,
+        stored_at TEXT NOT NULL,
+        valid_until TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS last_known_good_v3_subject_idx
+        ON last_known_good_v3(subject_fingerprint);
       CREATE TABLE IF NOT EXISTS cache_metadata (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -418,7 +457,68 @@ export class RulesStore {
     return true;
   }
 
-  putCachedPack(cacheKey: string, pack: CompiledRulesPack, validUntil: string): void {
+  /**
+   * Engine persistence boundary. The store independently recompiles the exact
+   * current input before issuing durable cache/LKG provenance. There is no raw
+   * caller-supplied LKG promotion API.
+   */
+  recordEngineCompile(
+    cacheKey: string,
+    request: CompileRequest,
+    pack: CompiledRulesPack,
+    cacheValidUntil: string,
+    lkgValidUntil?: string,
+  ): void {
+    const compiledAt = request.now;
+    if (!compiledAt || compiledAt !== pack.compiledAt) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance timestamp does not match the compiled pack');
+    }
+    const compiledAtMs = Date.parse(compiledAt);
+    const cacheValidUntilMs = Date.parse(cacheValidUntil);
+    const lkgValidUntilMs = lkgValidUntil === undefined ? undefined : Date.parse(lkgValidUntil);
+    if (
+      !Number.isFinite(compiledAtMs) ||
+      !Number.isFinite(cacheValidUntilMs) ||
+      cacheValidUntilMs <= compiledAtMs ||
+      (lkgValidUntilMs !== undefined && (!Number.isFinite(lkgValidUntilMs) || lkgValidUntilMs <= compiledAtMs))
+    ) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance validity bounds are invalid');
+    }
+    if (lkgValidUntil !== undefined && pack.degraded) {
+      throw new RulesPackError('STORE_ERROR', 'A degraded compile cannot be promoted to last-known-good');
+    }
+
+    const rules = request.rules.map(validateRule);
+    const generations = request.sourceGenerations.map(validateSourceGeneration);
+    this.#assertAuthoritativeCompileInput(rules, generations);
+    const expectedCacheKey = compileIdentityDigest(request);
+    if (cacheKey !== expectedCacheKey) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance cache identity is inconsistent');
+    }
+    const expectedPack = compileRules(request);
+    const packJson = stableStringify(pack);
+    if (stableStringify(expectedPack) !== packJson) {
+      throw new RulesPackError('STORE_ERROR', 'Compiled pack does not match the authoritative deterministic compile');
+    }
+    verifyCompiledPack(pack, compiledAt);
+
+    const compileInputDigest = digestObject({
+      cacheKey,
+      compiledAt,
+      subject: request.subject,
+      rules: [...rules].sort(
+        (left, right) =>
+          left.id.localeCompare(right.id) ||
+          left.version.localeCompare(right.version) ||
+          left.digest.localeCompare(right.digest),
+      ),
+      sourceGenerations: [...generations].sort((left, right) => left.sourceId.localeCompare(right.sourceId)),
+      budget: request.budget,
+      mode: request.mode ?? 'enforce',
+      degradationReasons: [...(request.degradationReasons ?? [])],
+    });
+    const packBytesDigest = `sha256:${sha256(packJson)}`;
+
     this.transaction(() => {
       this.#db
         .prepare(
@@ -433,24 +533,70 @@ export class RulesStore {
           pack.packDigest,
           pack.subjectFingerprint,
           pack.sourceSnapshotDigest,
-          stableStringify(pack),
+          packJson,
           pack.compiledAt,
-          validUntil,
+          cacheValidUntil,
         );
       this.#db.prepare('DELETE FROM pack_cache_sources WHERE cache_key = ?').run(cacheKey);
       const insert = this.#db.prepare('INSERT INTO pack_cache_sources(cache_key, source_id) VALUES (?, ?)');
       for (const source of pack.sourceGenerations) insert.run(cacheKey, source.sourceId);
+      this.#db
+        .prepare(
+          `INSERT INTO authoritative_compiles(
+            cache_key, compile_identity_digest, compile_input_digest, pack_digest, pack_bytes_digest, compiled_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(cache_key) DO UPDATE SET
+            compile_identity_digest=excluded.compile_identity_digest,
+            compile_input_digest=excluded.compile_input_digest,
+            pack_digest=excluded.pack_digest,
+            pack_bytes_digest=excluded.pack_bytes_digest,
+            compiled_at=excluded.compiled_at`,
+        )
+        .run(cacheKey, expectedCacheKey, compileInputDigest, pack.packDigest, packBytesDigest, compiledAt);
+      if (lkgValidUntil !== undefined) {
+        this.#db
+          .prepare(
+            `INSERT INTO last_known_good_v3(
+              cache_key, subject_fingerprint, pack_digest, compile_input_digest,
+              pack_bytes_digest, stored_at, valid_until
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+              subject_fingerprint=excluded.subject_fingerprint,
+              pack_digest=excluded.pack_digest,
+              compile_input_digest=excluded.compile_input_digest,
+              pack_bytes_digest=excluded.pack_bytes_digest,
+              stored_at=excluded.stored_at,
+              valid_until=excluded.valid_until`,
+          )
+          .run(
+            cacheKey,
+            pack.subjectFingerprint,
+            pack.packDigest,
+            compileInputDigest,
+            packBytesDigest,
+            compiledAt,
+            lkgValidUntil,
+          );
+      }
     });
   }
 
   getCachedPack(cacheKey: string, now = new Date().toISOString()): CompiledRulesPack | undefined {
-    const row = this.#db.prepare('SELECT pack_json, valid_until FROM pack_cache WHERE cache_key = ?').get(cacheKey) as
-      | { pack_json: string; valid_until: string }
-      | undefined;
+    const row = this.#db
+      .prepare(
+        `SELECT cache.pack_json, cache.pack_digest, cache.subject_fingerprint,
+          cache.source_snapshot_digest, cache.valid_until,
+          provenance.compile_identity_digest, provenance.compile_input_digest,
+          provenance.pack_digest AS provenance_pack_digest,
+          provenance.pack_bytes_digest
+        FROM pack_cache AS cache
+        INNER JOIN authoritative_compiles AS provenance ON provenance.cache_key = cache.cache_key
+        WHERE cache.cache_key = ?`,
+      )
+      .get(cacheKey) as AuthoritativePackRow | undefined;
     if (!row || Date.parse(row.valid_until) <= Date.parse(now)) return undefined;
-    const pack = parseJson<CompiledRulesPack>(row.pack_json, 'pack_cache.pack_json');
     try {
-      verifyCompiledPack(pack, now);
+      const pack = this.#verifyAuthoritativePackRow(cacheKey, row, now);
       return this.isPackSafe(pack, now) ? pack : undefined;
     } catch {
       this.#db.prepare('DELETE FROM pack_cache WHERE cache_key = ?').run(cacheKey);
@@ -458,38 +604,113 @@ export class RulesStore {
     }
   }
 
-  putLastKnownGood(pack: CompiledRulesPack, validUntil: string): void {
-    this.#db
-      .prepare(
-        `INSERT INTO last_known_good(subject_fingerprint, pack_digest, source_snapshot_digest, pack_json, stored_at, valid_until)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(subject_fingerprint) DO UPDATE SET pack_digest=excluded.pack_digest,
-          source_snapshot_digest=excluded.source_snapshot_digest, pack_json=excluded.pack_json,
-          stored_at=excluded.stored_at, valid_until=excluded.valid_until`,
-      )
-      .run(
-        pack.subjectFingerprint,
-        pack.packDigest,
-        pack.sourceSnapshotDigest,
-        stableStringify(pack),
-        pack.compiledAt,
-        validUntil,
-      );
-  }
-
-  getLastKnownGood(subjectFingerprint: string, now = new Date().toISOString()): CompiledRulesPack | undefined {
+  getLastKnownGood(cacheKey: string, now = new Date().toISOString()): CompiledRulesPack | undefined {
     const row = this.#db
-      .prepare('SELECT pack_json, valid_until FROM last_known_good WHERE subject_fingerprint = ?')
-      .get(subjectFingerprint) as { pack_json: string; valid_until: string } | undefined;
+      .prepare(
+        `SELECT cache.pack_json, cache.pack_digest, cache.subject_fingerprint,
+          cache.source_snapshot_digest, lkg.valid_until,
+          provenance.compile_identity_digest, provenance.compile_input_digest,
+          provenance.pack_digest AS provenance_pack_digest,
+          provenance.pack_bytes_digest,
+          lkg.subject_fingerprint AS lkg_subject_fingerprint,
+          lkg.pack_digest AS lkg_pack_digest,
+          lkg.compile_input_digest AS lkg_compile_input_digest,
+          lkg.pack_bytes_digest AS lkg_pack_bytes_digest
+        FROM last_known_good_v3 AS lkg
+        INNER JOIN authoritative_compiles AS provenance ON provenance.cache_key = lkg.cache_key
+        INNER JOIN pack_cache AS cache ON cache.cache_key = provenance.cache_key
+        WHERE lkg.cache_key = ?`,
+      )
+      .get(cacheKey) as LastKnownGoodRow | undefined;
     if (!row || Date.parse(row.valid_until) <= Date.parse(now)) return undefined;
-    const pack = parseJson<CompiledRulesPack>(row.pack_json, 'last_known_good.pack_json');
     try {
-      verifyCompiledPack(pack, now);
+      const pack = this.#verifyAuthoritativePackRow(cacheKey, row, now);
+      if (
+        row.lkg_subject_fingerprint !== pack.subjectFingerprint ||
+        row.lkg_pack_digest !== pack.packDigest ||
+        row.lkg_compile_input_digest !== row.compile_input_digest ||
+        row.lkg_pack_bytes_digest !== row.pack_bytes_digest
+      ) {
+        throw new RulesPackError('STORE_ERROR', 'Last-known-good provenance link is inconsistent');
+      }
       return this.isPackSafe(pack, now) ? pack : undefined;
     } catch {
-      this.#db.prepare('DELETE FROM last_known_good WHERE subject_fingerprint = ?').run(subjectFingerprint);
+      this.#db.prepare('DELETE FROM last_known_good_v3 WHERE cache_key = ?').run(cacheKey);
       return undefined;
     }
+  }
+
+  #assertAuthoritativeCompileInput(rules: readonly RuleV1[], generations: readonly SourceGeneration[]): void {
+    const sourceIds = generations.map((source) => source.sourceId);
+    if (new Set(sourceIds).size !== sourceIds.length) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance contains duplicate source generations');
+    }
+    const storedGenerations = new Map(this.listSourceGenerations().map((source) => [source.sourceId, source]));
+    if (storedGenerations.size !== generations.length) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance does not cover the complete current source state');
+    }
+    const rulesBySource = new Map<string, RuleV1[]>();
+    for (const rule of rules) {
+      const sourceRules = rulesBySource.get(rule.source.adapterId) ?? [];
+      sourceRules.push(rule);
+      rulesBySource.set(rule.source.adapterId, sourceRules);
+    }
+    for (const source of generations) {
+      const stored = storedGenerations.get(source.sourceId);
+      if (
+        !stored ||
+        stored.kind !== source.kind ||
+        stored.generation !== source.generation ||
+        stored.revision !== source.revision ||
+        stored.snapshotDigest !== source.snapshotDigest ||
+        stored.required !== source.required ||
+        stored.ruleCount !== source.ruleCount
+      ) {
+        throw new RulesPackError('STORE_ERROR', `Compile provenance for source ${source.sourceId} is not current`);
+      }
+      const inputRules = [...(rulesBySource.get(source.sourceId) ?? [])].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      );
+      if (source.health === 'fresh' || source.health === 'stale') {
+        const storedRules = [...this.listRules(source.sourceId)].sort((left, right) => left.id.localeCompare(right.id));
+        if (stableStringify(inputRules) !== stableStringify(storedRules)) {
+          throw new RulesPackError(
+            'STORE_ERROR',
+            `Compile provenance Rules for source ${source.sourceId} are not current`,
+          );
+        }
+      } else if (inputRules.length !== 0) {
+        throw new RulesPackError(
+          'STORE_ERROR',
+          `Inactive source ${source.sourceId} supplied Rules to compile provenance`,
+        );
+      }
+    }
+    if ([...rulesBySource.keys()].some((sourceId) => !sourceIds.includes(sourceId))) {
+      throw new RulesPackError('STORE_ERROR', 'Compile provenance contains a Rule from an unknown source');
+    }
+  }
+
+  #verifyAuthoritativePackRow(cacheKey: string, row: AuthoritativePackRow, now: string): CompiledRulesPack {
+    if (
+      row.compile_identity_digest !== cacheKey ||
+      !/^sha256:[a-f0-9]{64}$/u.test(row.compile_input_digest) ||
+      `sha256:${sha256(row.pack_json)}` !== row.pack_bytes_digest
+    ) {
+      throw new RulesPackError('STORE_ERROR', 'Authoritative compile provenance is invalid');
+    }
+    const pack = parseJson<CompiledRulesPack>(row.pack_json, 'pack_cache.pack_json');
+    verifyCompiledPack(pack, now);
+    if (
+      compiledPackIdentityDigest(pack) !== cacheKey ||
+      row.pack_digest !== pack.packDigest ||
+      row.provenance_pack_digest !== pack.packDigest ||
+      row.subject_fingerprint !== pack.subjectFingerprint ||
+      row.source_snapshot_digest !== pack.sourceSnapshotDigest
+    ) {
+      throw new RulesPackError('STORE_ERROR', 'Authoritative compile record does not match its stored pack');
+    }
+    return pack;
   }
 
   invalidateSourceCache(sourceId: string): number {

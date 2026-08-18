@@ -26,19 +26,13 @@ API; Node 22 may print its standard experimental-API warning.
 ## Minimal API
 
 ```ts
-import {
-  RulesPackEngine,
-  RulesStore,
-  configSource,
-} from '@metabot/rulespack';
+import { RulesPackEngine, RulesStore, configSource } from '@metabot/rulespack';
 
 const store = new RulesStore('./rules-state.sqlite');
 const engine = new RulesPackEngine({ store, mode: 'shadow' });
 
 // Source refresh is asynchronous and outside the per-turn hot path.
-const sourceState = await engine.refreshSources([
-  configSource({ id: 'host-policy', revision: '42', rules }),
-]);
+const sourceState = await engine.refreshSources([configSource({ id: 'host-policy', revision: '42', rules })]);
 
 // Per-turn compilation is deterministic local code and cache-backed.
 const result = engine.compile({ subject, sourceState });
@@ -67,8 +61,9 @@ rulespack --db ./rules-state.sqlite feedback-add \
 rulespack --db ./rules-state.sqlite cache-clear
 ```
 
-`cache-clear` removes only recomputable pack-cache/LKG records. It does not
-delete Rule history, source generations, audits, receipts, or feedback.
+`cache-clear` removes only recomputable pack-cache/compile-provenance/LKG
+records. It does not delete Rule history, source generations, audits, receipts,
+or feedback.
 Raw imports cannot self-assert `platform`/`runtime` trust. The explicit
 `--trusted-authority` flag is reserved for an operator importing bytes from a
 compiler-owned source; never use it for project files, chat data, retrieved
