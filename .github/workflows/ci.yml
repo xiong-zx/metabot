@@ -19,6 +19,13 @@ jobs:
           node-version: 22.19.0
           cache: npm
 
+      # node-pty may need a source build when its prebuilt binary is absent.
+      # Reuse setup-node's local headers instead of downloading them from
+      # nodejs.org during npm ci, which makes CI sensitive to a second network
+      # endpoint and has caused intermittent ETIMEDOUT failures.
+      - name: Use setup-node headers for native builds
+        run: echo "npm_config_nodedir=$(node -p 'require(\"node:path\").dirname(require(\"node:path\").dirname(process.execPath))')" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 

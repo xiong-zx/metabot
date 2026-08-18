@@ -7,6 +7,16 @@ const ciWorkflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/
 const restartCli = fs.readFileSync(path.join(repositoryRoot, 'bin/metabot'), 'utf8');
 
 describe('CI runtime prerequisites', () => {
+  it('uses setup-node headers before npm ci builds native dependencies', () => {
+    const headersStep = ciWorkflow.indexOf('Use setup-node headers for native builds');
+    const installStep = ciWorkflow.indexOf('- name: Install dependencies');
+
+    expect(headersStep).toBeGreaterThan(-1);
+    expect(headersStep).toBeLessThan(installStep);
+    expect(ciWorkflow).toContain('npm_config_nodedir=');
+    expect(ciWorkflow).toContain('process.execPath');
+  });
+
   it('builds every compiled package required by the restart preflight before tests', () => {
     const buildStep = ciWorkflow.slice(
       ciWorkflow.indexOf('Build workspace libraries and restart prerequisites'),
