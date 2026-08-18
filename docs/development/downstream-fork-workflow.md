@@ -71,13 +71,14 @@ resolvers. Keep boundary-sensitive imports relative or add a separate lint rule
 when aliases are introduced. `reverseBoundaries` applies the same package check
 from upstream-owned roots back toward downstream packages.
 
-By default, `forbiddenImports` scans every source file under a feature's
-`roots`. A feature may declare narrower `importRoots` when its production code
-must stay isolated but its integration tests need another package's public API.
-Every `importRoots` entry must remain inside one of the declared `roots`, and a
-required feature must contain every declared import root. This is not a general
-exception list: forbidden imports inside the selected production roots still
-fail closed.
+`forbiddenImports` scans every source file recursively under a feature's owned
+`roots`, including tests and nested directories. Declared `importRoots` are
+validated as existing subsets for compatibility and documentation, but never
+narrow this scan. Generated `node_modules`, `dist`, `build`, and `coverage`
+directories are excluded. If integration tests legitimately require a public
+API forbidden to production code, declare production and test directories as
+separate feature roots with explicit policies; do not use an omitted directory
+as an implicit exception.
 
 The repository Actions settings must allow workflows to create pull requests.
 If that permission is disabled, the publish job fails without changing

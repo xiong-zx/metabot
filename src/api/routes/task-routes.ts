@@ -8,6 +8,9 @@ import {
 } from '../../agent-teams/schedule-capability.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import type { RulesPackDispatchEnvelopeV1 } from '@metabot/rulespack';
+import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
+import { forwardAuthenticatedPeerTask } from '../../extensions/rulespack-peer-dispatch.js';
 
 export async function handleTaskRoutes(
   ctx: RouteContext,
@@ -60,7 +63,18 @@ export async function handleTaskRoutes(
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
+    const dispatchEnvelope = body.rulesPackDispatch as RulesPackDispatchEnvelopeV1 | undefined;
+    const dispatchIssuerHeader = singleHeader(req.headers['x-metabot-rulespack-issuer']);
+    const dispatchOrigin = singleHeader(req.headers['x-metabot-origin']);
+    const authenticatedDispatchIssuer = ctx.resolveRulesPackTransportIssuer?.(req);
 
+    if (
+      dispatchEnvelope &&
+      (!dispatchIssuerHeader || dispatchOrigin !== 'peer' || authenticatedDispatchIssuer !== dispatchIssuerHeader)
+    ) {
+      jsonResponse(res, 400, { error: 'RulesPack dispatch requires authenticated peer transport headers' });
+      return true;
+    }
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
       return true;
@@ -76,6 +90,34 @@ export async function handleTaskRoutes(
     } else {
       botName = rawBotName;
     }
+    let rulesPack: NonNullable<import('../../engines/prompt-context.js').ApiContext['rulesPack']>;
+    let rulesPackPrincipal: RulesPackExecutionPrincipal;
+    try {
+      rulesPackPrincipal = ctx.resolveRulesPackApiPrincipal?.(req, {
+        botName,
+        chatId,
+        ...(dispatchEnvelope ? { dispatch: dispatchEnvelope } : {}),
+        declarations: {
+          ...(typeof body.projectId === 'string' ? { projectId: body.projectId } : {}),
+          ...(typeof body.agentName === 'string' ? { agentName: body.agentName } : {}),
+          ...(typeof body.workerId === 'string' ? { workerId: body.workerId } : {}),
+          ...(typeof body.taskId === 'string' ? { taskId: body.taskId } : {}),
+          ...(Array.isArray(body.roles) ? { roles: body.roles as string[] } : {}),
+          ...(Array.isArray(body.tools) ? { tools: body.tools as string[] } : {}),
+          ...(Array.isArray(body.dataClasses) ? { dataClasses: body.dataClasses as string[] } : {}),
+          ...(Array.isArray(body.outputTypes) ? { outputTypes: body.outputTypes as string[] } : {}),
+        },
+      }) ?? { kind: 'generic', source: 'core-bearer' as const };
+      rulesPack = {
+        principal: rulesPackPrincipal,
+        ...(dispatchEnvelope
+          ? { dispatch: { envelope: dispatchEnvelope, authenticatedIssuer: authenticatedDispatchIssuer! } }
+          : {}),
+      };
+    } catch (error) {
+      jsonResponse(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      return true;
+    }
 
     // If targeting a specific peer, skip local lookup
     if (targetPeerName) {
@@ -90,7 +132,14 @@ export async function handleTaskRoutes(
       }
       logger.info({ botName, peerName: targetPeerName, chatId, promptLength: prompt.length }, 'Forwarding talk to peer (qualified)');
       try {
-        const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
+        const result = await forwardAuthenticatedPeerTask({
+          registry,
+          peerManager,
+          peer: peerMatch.peer,
+          peerBot: peerMatch.bot,
+          principal: rulesPackPrincipal,
+          body: { botName, chatId, prompt, sendCards, ...(dispatchEnvelope ? { rulesPackDispatch: dispatchEnvelope } : {}) },
+        });
         const statusCode = (result as any).success === false ? 500 : 200;
         jsonResponse(res, statusCode, result);
       } catch (err: any) {
@@ -129,6 +178,7 @@ export async function handleTaskRoutes(
           try {
             const result = await bot.bridge.executeApiTask({
               prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              ...(rulesPack ? { rulesPack } : {}),
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -196,6 +246,7 @@ export async function handleTaskRoutes(
         chatId,
         userId: 'api',
         sendCards: sendCards ?? true,
+        ...(rulesPack ? { rulesPack } : {}),
         ...(hasWsSubscribers ? {
           onUpdate: (state, bridgeMessageId, final) => {
             const msgType = final ? 'complete' : 'state';
@@ -231,7 +282,14 @@ export async function handleTaskRoutes(
       if (peerMatch) {
         logger.info({ botName, peerName: peerMatch.peer.name, peerUrl: peerMatch.peer.url, chatId, promptLength: prompt.length }, 'Forwarding talk to peer');
         try {
-          const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
+          const result = await forwardAuthenticatedPeerTask({
+            registry,
+            peerManager,
+            peer: peerMatch.peer,
+            peerBot: peerMatch.bot,
+            principal: rulesPackPrincipal,
+            body: { botName, chatId, prompt, sendCards, ...(dispatchEnvelope ? { rulesPackDispatch: dispatchEnvelope } : {}) },
+          });
           const statusCode = (result as any).success === false ? 500 : 200;
           jsonResponse(res, statusCode, result);
         } catch (err: any) {
@@ -432,6 +490,10 @@ export async function handleTaskRoutes(
   }
 
   return false;
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function resolveScheduleAuthorization(

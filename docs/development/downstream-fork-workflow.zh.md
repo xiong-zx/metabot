@@ -62,11 +62,12 @@ upstream 行为。核心 hook 经常冲突，说明 hook 应继续缩小，而�
 如果以后引入别名，应另加 lint 规则。`reverseBoundaries` 使用同样的包检查，
 防止 upstream 自有目录反向依赖 downstream 包。
 
-默认情况下，`forbiddenImports` 会扫描功能 `roots` 下的全部源码。如果一个
-功能的生产代码必须保持隔离，但端到端测试需要调用另一个包的公开 API，可用
-更窄的 `importRoots` 指定依赖扫描目录。每个 `importRoots` 都必须位于某个
-已声明的 `roots` 内；对于 `required` 功能，所有这些目录也必须真实存在。
-这不是通用豁免清单：选中生产目录里的禁止依赖仍会直接让门禁失败。
+`forbiddenImports` 会递归扫描功能自有 `roots` 下的全部源码，包括测试和嵌套
+目录。已声明的 `importRoots` 仍会作为必须存在的子路径接受校验和文档记录，
+但不能缩小扫描范围。扫描会排除生成的 `node_modules`、`dist`、`build` 和
+`coverage` 目录。如果集成测试确实需要调用生产代码禁止使用的公开 API，
+应把生产目录和测试目录声明为具有明确策略的独立功能根，不能把未扫描目录
+当作隐式豁免。
 
 GitHub 仓库的 Actions 设置必须允许工作流创建 PR。如果没有打开该权限，
 发布 job 会失败，但不会修改 `main`。维护者可在一天的保留期内下载已验证

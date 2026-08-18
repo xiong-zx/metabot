@@ -116,7 +116,7 @@ describe('downstream feature boundary gate', () => {
     ]);
   });
 
-  it('can scan a source-only import root while retaining tests under the feature root', () => {
+  it('recursively scans source files anywhere under an owned directory root', () => {
     const root = fixture({
       schemaVersion: 1,
       forbiddenPaths: [],
@@ -131,15 +131,86 @@ describe('downstream feature boundary gate', () => {
       ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'packages/adapter/extra'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export const adapter = true;\n');
+    fs.writeFileSync(path.join(root, 'packages/adapter/extra/worker.ts'), "import '@example/runtime';\n");
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      "adapter: packages/adapter/extra/worker.ts imports forbidden '@example/runtime'",
+    ]);
+  });
+
+  it('recursively scans nested tests under an owned directory root', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter',
+          status: 'required',
+          roots: ['packages/adapter'],
+          importRoots: ['packages/adapter/src'],
+          forbiddenImports: ['@example/runtime'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'packages/adapter/tests/nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export {}\n');
+    fs.writeFileSync(
+      path.join(root, 'packages/adapter/tests/nested/integration.test.ts'),
+      "import '@example/runtime';\n",
+    );
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      "adapter: packages/adapter/tests/nested/integration.test.ts imports forbidden '@example/runtime'",
+    ]);
+  });
+
+  it('supports an explicit separate test-root import policy', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter-production',
+          status: 'required',
+          roots: ['packages/adapter/src'],
+          forbiddenImports: ['@example/runtime'],
+        },
+        {
+          id: 'adapter-tests',
+          status: 'required',
+          roots: ['packages/adapter/tests'],
+          forbiddenImports: ['@example/internal'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter/src'), { recursive: true });
     fs.mkdirSync(path.join(root, 'packages/adapter/tests'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), "export const adapter = true;\n");
+    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), 'export {}\n');
     fs.writeFileSync(path.join(root, 'packages/adapter/tests/integration.test.ts'), "import '@example/runtime';\n");
     expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
+  });
 
-    fs.writeFileSync(path.join(root, 'packages/adapter/src/index.ts'), "import '@example/runtime';\n");
-    expect(checkDownstreamBoundaries(root).failures).toEqual([
-      "adapter: packages/adapter/src/index.ts imports forbidden '@example/runtime'",
-    ]);
+  it('ignores unrelated roots and generated dependency or output directories', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter',
+          status: 'required',
+          roots: ['packages/adapter'],
+          forbiddenImports: ['@example/runtime'],
+        },
+      ],
+    });
+    for (const directory of ['node_modules', 'dist', 'build', 'coverage']) {
+      fs.mkdirSync(path.join(root, 'packages/adapter', directory), { recursive: true });
+      fs.writeFileSync(path.join(root, 'packages/adapter', directory, 'generated.js'), "import '@example/runtime';\n");
+    }
+    fs.mkdirSync(path.join(root, 'packages/unrelated'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'packages/unrelated/index.ts'), "import '@example/runtime';\n");
+    expect(checkDownstreamBoundaries(root)).toMatchObject({ ok: true });
   });
 
   it('rejects import roots outside the declared feature roots', () => {
@@ -157,9 +228,7 @@ describe('downstream feature boundary gate', () => {
       ],
     });
     fs.mkdirSync(path.join(root, 'packages/adapter'), { recursive: true });
-    expect(checkDownstreamBoundaries(root).failures).toContain(
-      'adapter: importRoots must stay within declared roots',
-    );
+    expect(checkDownstreamBoundaries(root).failures).toContain('adapter: importRoots must stay within declared roots');
   });
 
   it('enforces reverse boundaries from upstream roots to downstream packages', () => {
@@ -183,6 +252,52 @@ describe('downstream feature boundary gate', () => {
       failures: ["upstream-isolation: src/index.ts imports forbidden '@example/downstream/runtime'"],
       checkedReverseBoundaries: [{ id: 'upstream-isolation', presentRoots: 1 }],
     });
+  });
+
+  it('allows only enumerated thin-hook importers through a reverse boundary', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [],
+      reverseBoundaries: [
+        {
+          id: 'thin-hooks',
+          roots: ['src'],
+          forbiddenImports: ['@example/downstream'],
+          allowedImporters: ['src/hook.ts'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/hook.ts'), "import '@example/downstream';\n");
+    fs.writeFileSync(path.join(root, 'src/leak.ts'), "import '@example/downstream';\n");
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      "thin-hooks: src/leak.ts imports forbidden '@example/downstream'",
+    ]);
+  });
+
+  it('mechanically validates feature thinHooks and allowedImporters', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'adapter',
+          status: 'required',
+          roots: ['packages/adapter'],
+          thinHooks: ['src/hook.ts', 'src/missing.ts'],
+          allowedImporters: ['src/importer.ts'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/adapter'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/hook.ts'), 'export {};\n');
+    fs.writeFileSync(path.join(root, 'src/importer.ts'), 'export {};\n');
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      'adapter: missing thinHooks: src/missing.ts',
+      'adapter: allowedImporters must also be declared thinHooks: src/importer.ts',
+    ]);
   });
 
   it('fails closed on path escape or symlinked source roots', () => {
@@ -252,12 +367,7 @@ describe('downstream feature boundary gate', () => {
       features: Array<{ id: string; reason?: string; validationSurface?: string[] }>;
     };
 
-    for (const id of [
-      'arc-mcp',
-      'worker-runner-mcp',
-      'arc-worker-runner-adapter',
-      'arc-researchclaw-adapter',
-    ]) {
+    for (const id of ['arc-mcp', 'worker-runner-mcp', 'arc-worker-runner-adapter', 'arc-researchclaw-adapter']) {
       const feature = manifest.features.find((candidate) => candidate.id === id);
       expect(feature).toMatchObject({
         reason: expect.any(String),
@@ -268,5 +378,37 @@ describe('downstream feature boundary gate', () => {
 
   it('passes against the repository manifest', () => {
     expect(checkDownstreamBoundaries(path.resolve(import.meta.dirname, '..'))).toMatchObject({ ok: true });
+  });
+
+  it('declares separately scanned RulesPack engine, adapter, Worker, and extension boundaries', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as { features: Array<{ id: string; roots?: string[]; thinHooks?: string[]; validationSurface?: string[] }> };
+    const adapter = manifest.features.find((candidate) => candidate.id === 'rulespack-metabot-adapter');
+    expect(adapter).toMatchObject({
+      roots: ['packages/rulespack-adapter'],
+      thinHooks: expect.arrayContaining([
+        'src/bridge/message-bridge.ts',
+        'src/engines/codex/executor.ts',
+        'packages/worker-runner-mcp/src/store.ts',
+      ]),
+      validationSurface: expect.arrayContaining([
+        'packages/rulespack-adapter/tests/runtime.test.ts',
+        'tests/rulespack-codex-integration.test.ts',
+      ]),
+    });
+    for (const [id, root] of [
+      ['rulespack-engine', 'packages/rulespack'],
+      ['rulespack-worker-adapter', 'packages/worker-runner-mcp/src/rulespack.ts'],
+      ['rulespack-operator-routes', 'src/extensions/rulespack-routes.ts'],
+      ['rulespack-api-principal', 'src/extensions/rulespack-api-principal.ts'],
+      ['rulespack-peer-dispatch', 'src/extensions/rulespack-peer-dispatch.ts'],
+    ]) {
+      expect(manifest.features.find((candidate) => candidate.id === id)).toMatchObject({
+        roots: expect.arrayContaining([root]),
+        forbiddenImports: expect.any(Array),
+      });
+    }
   });
 });

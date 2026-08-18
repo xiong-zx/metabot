@@ -8,6 +8,7 @@ import { NullSender } from '../../web/null-sender.js';
 import { MessageBridge } from '../../bridge/message-bridge.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import { handleRulesPackRoutes } from '../../extensions/rulespack-routes.js';
 
 export async function handleBotRoutes(
   ctx: RouteContext,
@@ -17,6 +18,8 @@ export async function handleBotRoutes(
   url: string,
 ): Promise<boolean> {
   const { registry, logger, botsConfigPath, peerManager, ws } = ctx;
+
+  if (await handleRulesPackRoutes(ctx, req, res, method, url)) return true;
 
   // GET /api/bots/:name/profile — detailed bot profile with stats
   if (method === 'GET' && /^\/api\/bots\/[^/]+\/profile$/.test(url)) {

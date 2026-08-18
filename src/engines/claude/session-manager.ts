@@ -23,6 +23,8 @@ export interface UserSession {
   modelEngine?: EngineName;
   /** Per-session Codex reasoning effort override. */
   reasoningEffort?: CodexReasoningEffort;
+  /** RulesPack digest injected into the current Codex session. */
+  rulesPackDigest?: string;
   /** Per-session engine override. Falls back to bot default when undefined. */
   engine?: EngineName;
   /**
@@ -50,6 +52,7 @@ interface PersistedSession {
   model?: string;
   modelEngine?: EngineName;
   reasoningEffort?: CodexReasoningEffort;
+  rulesPackDigest?: string;
   engine?: EngineName;
   activeGoal?: string;
   goalSetAt?: number;
@@ -161,6 +164,26 @@ export class SessionManager {
   }
 
   /**
+   * Apply the effective RulesPack digest only at a turn boundary. A changed
+   * digest (including enforce -> off rollback) recycles the Codex session but
+   * preserves cwd/model/goal preferences. Returns true when recycling occurred.
+   */
+  applyRulesPackDigest(chatId: string, digest: string | undefined): boolean {
+    const session = this.getSession(chatId);
+    if (session.rulesPackDigest === digest) return false;
+    const recycled = !!session.sessionId;
+    session.sessionId = undefined;
+    session.sessionIdEngine = undefined;
+    session.rulesPackDigest = digest;
+    this.logger.info(
+      { chatId, recycled, hasRulesPack: digest !== undefined },
+      'RulesPack digest changed at turn boundary',
+    );
+    this.saveToDisk();
+    return recycled;
+  }
+
+  /**
    * Set per-session engine override. Pass undefined to clear and fall back
    * to the bot's configured engine. Switching engines also clears the prior
    * `sessionId` (engines track conversation state in different stores) and
@@ -175,6 +198,7 @@ export class SessionManager {
     session.model = undefined;
     session.modelEngine = undefined;
     session.reasoningEffort = undefined;
+    session.rulesPackDigest = undefined;
     this.logger.info({ chatId, engine }, 'Session engine override updated (session reset)');
     this.saveToDisk();
   }
@@ -249,6 +273,7 @@ export class SessionManager {
       session.goalSetAt = undefined;
       session.goalIterations = undefined;
       session.goalMaxIterations = undefined;
+      session.rulesPackDigest = undefined;
       // Keep working directory
       this.logger.info({ chatId }, 'Session reset');
       this.saveToDisk();
@@ -275,7 +300,7 @@ export class SessionManager {
       const data: Record<string, PersistedSession> = {};
       for (const [chatId, session] of this.sessions) {
         // Persist sessions that have a sessionId, model, engine override, effort override, or active goal
-        if (session.sessionId || session.model || session.engine || session.reasoningEffort || session.activeGoal) {
+        if (session.sessionId || session.model || session.engine || session.reasoningEffort || session.activeGoal || session.rulesPackDigest) {
           data[chatId] = {
             sessionId: session.sessionId || '',
             sessionIdEngine: session.sessionIdEngine,
@@ -287,6 +312,7 @@ export class SessionManager {
             model: session.model,
             modelEngine: session.modelEngine,
             reasoningEffort: session.reasoningEffort,
+            rulesPackDigest: session.rulesPackDigest,
             engine: session.engine,
             activeGoal: session.activeGoal,
             goalSetAt: session.goalSetAt,
@@ -322,6 +348,7 @@ export class SessionManager {
           model: persisted.model,
           modelEngine: persisted.modelEngine,
           reasoningEffort: persisted.reasoningEffort,
+          rulesPackDigest: persisted.rulesPackDigest,
           engine: persisted.engine,
           activeGoal: persisted.activeGoal,
           goalSetAt: persisted.goalSetAt,

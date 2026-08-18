@@ -9,6 +9,8 @@
     "packages/arc-mcp",
     "packages/arc-researchclaw-adapter",
     "packages/arc-worker-runner-adapter",
+    "packages/rulespack",
+    "packages/rulespack-adapter",
     "packages/cli",
     "packages/cli-core",
     "packages/metamemory",
@@ -18,7 +20,7 @@
     "packages/web-ui"
   ],
   "scripts": {
-    "build": "tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
+    "build": "npm run build -w @metabot/rulespack -w @metabot/rulespack-adapter && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
     "build:bridge": "tsc -p tsconfig.bridge.json",
     "build:packages": "npm run build --workspaces --if-present",
     "start": "node dist/index.js",
@@ -36,6 +38,8 @@
     "update-cli": "cp bin/metabot ~/.local/bin/metabot && chmod +x ~/.local/bin/metabot && echo \"Updated: metabot\" && rm -f ~/.local/bin/mb ~/.local/bin/mm ~/.local/bin/mh"
   },
   "dependencies": {
+    "@metabot/rulespack": "*",
+    "@metabot/rulespack-adapter": "*",
     "@anthropic-ai/claude-agent-sdk": "^0.3.154",
     "@anthropic-ai/sdk": "^0.100.0",
     "@larksuiteoapi/node-sdk": "^1.64.0",
