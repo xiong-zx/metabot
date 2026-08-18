@@ -86,6 +86,17 @@
       ]
     },
     {
+      "id": "codex-stdin-prompt-transport-upstream-gap",
+      "status": "required",
+      "roots": ["src/engines/codex/executor.ts"],
+      "reason": "Track the generic Codex stdin prompt transport as a removable upstreamable patch until upstream accepts it; full prompts must not remain in argv or depend on option-like leading bytes.",
+      "validationSurface": [
+        "tests/codex-build-args.test.ts",
+        "tests/codex-executor-stdin.test.ts",
+        "tests/codex-executor-terminal-result.test.ts"
+      ]
+    },
+    {
       "id": "terminal-callback-inbox",
       "status": "required",
       "roots": [

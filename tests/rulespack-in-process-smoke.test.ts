@@ -53,7 +53,9 @@ describe('RulesPack in-process MetaBot smoke', () => {
       executable,
       `#!/usr/bin/env node
 import fs from 'node:fs';
-fs.writeFileSync(process.env.RULESPACK_SMOKE_CAPTURE, JSON.stringify(process.argv.slice(2)));
+let prompt = '';
+for await (const chunk of process.stdin) prompt += chunk.toString('utf8');
+fs.writeFileSync(process.env.RULESPACK_SMOKE_CAPTURE, JSON.stringify({args: process.argv.slice(2), prompt}));
 console.log(JSON.stringify({type:'thread.started',thread_id:'thread-rulespack'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'msg-1',type:'agent_message',text:'done'}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_tokens:2}}));
@@ -88,15 +90,19 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
     try {
       const run = () => bridge.executeApiTask({ prompt: 'Do the smoke task.', chatId: 'chat-smoke', sendCards: false });
       expect((await run()).success).toBe(true);
-      let args = JSON.parse(readFileSync(capture, 'utf8')) as string[];
-      expect(args).not.toContain('resume');
-      expect(args.at(-1)?.indexOf('Apply the smoke policy.')).toBeLessThan(
-        args.at(-1)?.indexOf('Do the smoke task.') ?? 0,
+      let invocation = JSON.parse(readFileSync(capture, 'utf8')) as { args: string[]; prompt: string };
+      expect(invocation.args).not.toContain('resume');
+      expect(invocation.args.at(-1)).toBe('-');
+      expect(invocation.args).not.toContain(invocation.prompt);
+      expect(invocation.prompt.indexOf('Apply the smoke policy.')).toBeLessThan(
+        invocation.prompt.indexOf('Do the smoke task.'),
       );
 
       expect((await run()).success).toBe(true);
-      args = JSON.parse(readFileSync(capture, 'utf8')) as string[];
-      expect(args).toContain('resume');
+      invocation = JSON.parse(readFileSync(capture, 'utf8')) as { args: string[]; prompt: string };
+      expect(invocation.args).toContain('resume');
+      expect(invocation.args.at(-1)).toBe('-');
+      expect(invocation.args).not.toContain(invocation.prompt);
 
       await bridge.getRulesPackOperator()!.replaceTemporaryRules({
         sourceId: 'temporary-smoke',
@@ -121,15 +127,17 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
         },
       });
       expect((await run()).success).toBe(true);
-      args = JSON.parse(readFileSync(capture, 'utf8')) as string[];
-      expect(args).not.toContain('resume');
-      expect(args.at(-1)).toContain('Apply the changed temporary policy.');
+      invocation = JSON.parse(readFileSync(capture, 'utf8')) as { args: string[]; prompt: string };
+      expect(invocation.args).not.toContain('resume');
+      expect(invocation.args.at(-1)).toBe('-');
+      expect(invocation.prompt).toContain('Apply the changed temporary policy.');
 
       bridge.getRulesPackOperator()!.setMode('off');
       expect((await run()).success).toBe(true);
-      args = JSON.parse(readFileSync(capture, 'utf8')) as string[];
-      expect(args).not.toContain('resume');
-      expect(args.at(-1)).not.toContain('RULESPACK DATA');
+      invocation = JSON.parse(readFileSync(capture, 'utf8')) as { args: string[]; prompt: string };
+      expect(invocation.args).not.toContain('resume');
+      expect(invocation.args.at(-1)).toBe('-');
+      expect(invocation.prompt).not.toContain('RULESPACK DATA');
     } finally {
       await bridge.destroyAsync();
     }
