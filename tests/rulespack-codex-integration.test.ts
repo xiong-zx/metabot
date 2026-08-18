@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RENDER_BEGIN, RENDER_END } from '@metabot/rulespack';
 import type { BotConfigBase } from '../src/config.js';
 import { SessionManager } from '../src/engines/claude/session-manager.js';
 import { CodexExecutor } from '../src/engines/codex/executor.js';
@@ -9,6 +10,7 @@ import { NodeCliProcessRunner } from '../packages/worker-runner-mcp/src/process-
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 const temporary: string[] = [];
+const actualInjection = `${RENDER_BEGIN}\nApproved rule\n${RENDER_END}`;
 
 afterEach(() => {
   delete process.env.SESSION_STORE_DIR;
@@ -34,15 +36,14 @@ function config(): BotConfigBase {
 
 describe('RulesPack Codex integration hooks', () => {
   it('places only RulesPack rendered bytes before the user body and existing context', () => {
-    const injection = '<<< BEGIN RULESPACK DATA v1 >>>\nApproved rule\n<<< END RULESPACK DATA v1 >>>';
     const prompt = (new CodexExecutor(config(), logger) as any).buildPromptWithContext(
       'actual user prompt',
       undefined,
       { botName: 'admin', chatId: 'chat-a', engine: 'codex' },
-      injection,
+      actualInjection,
     ) as string;
-    expect(prompt.indexOf(injection)).toBe(0);
-    expect(prompt.indexOf('actual user prompt')).toBeGreaterThan(prompt.indexOf(injection));
+    expect(prompt.indexOf(actualInjection)).toBe(0);
+    expect(prompt.indexOf('actual user prompt')).toBeGreaterThan(prompt.indexOf(actualInjection));
     expect(prompt.indexOf('## Current MetaBot Context')).toBeGreaterThan(prompt.indexOf('actual user prompt'));
     expect(prompt).not.toContain('packDigest');
     expect(prompt).not.toContain('subjectFingerprint');
@@ -90,6 +91,124 @@ describe('RulesPack Codex integration hooks', () => {
       rulesPack: { injectionText: 'MUST NOT APPLY', packDigest: 'digest', markInjected, markRejected },
     });
     expect(claude.stdin).toBe('child prompt');
+  });
+
+  it.each([
+    { name: 'fresh', sessionId: undefined },
+    { name: 'resume', sessionId: 'session-existing' },
+  ])('writes the real delimiter through stdin and records accepted $name transport', async ({ sessionId }) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-stdin-accept-'));
+    temporary.push(directory);
+    const executable = path.join(directory, 'codex');
+    const argvFile = path.join(directory, 'argv');
+    const stdinFile = path.join(directory, 'stdin');
+    fs.writeFileSync(
+      executable,
+      `#!/bin/sh
+: > "$CAPTURE_ARGV"
+for arg in "$@"; do printf '%s\\n' "$arg" >> "$CAPTURE_ARGV"; done
+cat > "$CAPTURE_STDIN"
+printf '%s\\n' '{"type":"thread.started","thread_id":"thread-rulespack"}'
+printf '%s\\n' '{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"done"}}'
+printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+`,
+      { mode: 0o755 },
+    );
+    const cfg = config();
+    cfg.codex = {
+      executable,
+      env: { CAPTURE_ARGV: argvFile, CAPTURE_STDIN: stdinFile },
+    };
+    const markInjected = vi.fn();
+    const markRejected = vi.fn();
+    const handle = new CodexExecutor(cfg, logger).startExecution({
+      prompt: 'actual user prompt',
+      cwd: directory,
+      sessionId,
+      abortController: new AbortController(),
+      rulesPack: { injectionText: actualInjection, markInjected, markRejected },
+    });
+    for await (const _message of handle.stream) {
+      // Drain through the terminal result.
+    }
+
+    const expectedPrompt = `${actualInjection}\n\n---\n\nactual user prompt`;
+    expect(fs.readFileSync(stdinFile, 'utf8')).toBe(expectedPrompt);
+    const argv = fs.readFileSync(argvFile, 'utf8').trimEnd().split('\n');
+    expect(argv).not.toContain(expectedPrompt);
+    expect(argv.slice(argv.indexOf('exec'))).toEqual(sessionId
+      ? ['exec', 'resume', '--json', '--skip-git-repo-check', sessionId, '-']
+      : ['exec', '--json', '--color', 'never', '--skip-git-repo-check', '-']);
+    expect(markInjected).toHaveBeenCalledOnce();
+    expect(markRejected).not.toHaveBeenCalled();
+  });
+
+  it('records rejection instead of injection when Codex closes stdin early', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-stdin-reject-'));
+    temporary.push(directory);
+    const executable = path.join(directory, 'codex');
+    fs.writeFileSync(executable, '#!/bin/sh\nexec 0<&-\nsleep 0.1\nexit 7\n', { mode: 0o755 });
+    const cfg = config();
+    cfg.codex = { executable };
+    const markInjected = vi.fn();
+    const markRejected = vi.fn();
+    const handle = new CodexExecutor(cfg, logger).startExecution({
+      prompt: 'x'.repeat(2 * 1024 * 1024),
+      cwd: directory,
+      abortController: new AbortController(),
+      rulesPack: { injectionText: actualInjection, markInjected, markRejected },
+    });
+    for await (const _message of handle.stream) {
+      // Drain the stdin failure result.
+    }
+    expect(markInjected).not.toHaveBeenCalled();
+    expect(markRejected).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an accepted receipt when Codex fails after reading the complete prompt', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-post-input-failure-'));
+    temporary.push(directory);
+    const executable = path.join(directory, 'codex');
+    fs.writeFileSync(executable, '#!/bin/sh\ncat >/dev/null\nexit 7\n', { mode: 0o755 });
+    const cfg = config();
+    cfg.codex = { executable };
+    const markInjected = vi.fn();
+    const markRejected = vi.fn();
+    const handle = new CodexExecutor(cfg, logger).startExecution({
+      prompt: 'accepted before execution failure',
+      cwd: directory,
+      abortController: new AbortController(),
+      rulesPack: { injectionText: actualInjection, markInjected, markRejected },
+    });
+    for await (const _message of handle.stream) {
+      // Drain the non-zero terminal result.
+    }
+    expect(markInjected).toHaveBeenCalledOnce();
+    expect(markRejected).not.toHaveBeenCalled();
+  });
+
+  it('records rejection when cancellation happens before prompt delivery', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-stdin-cancel-'));
+    temporary.push(directory);
+    const executable = path.join(directory, 'codex');
+    fs.writeFileSync(executable, '#!/bin/sh\nsleep 5\n', { mode: 0o755 });
+    const cfg = config();
+    cfg.codex = { executable };
+    const markInjected = vi.fn();
+    const markRejected = vi.fn();
+    const abortController = new AbortController();
+    abortController.abort();
+    const handle = new CodexExecutor(cfg, logger).startExecution({
+      prompt: 'cancelled before delivery',
+      cwd: directory,
+      abortController,
+      rulesPack: { injectionText: actualInjection, markInjected, markRejected },
+    });
+    for await (const _message of handle.stream) {
+      // Drain the cancelled terminal result.
+    }
+    expect(markInjected).not.toHaveBeenCalled();
+    expect(markRejected).toHaveBeenCalledOnce();
   });
 
   it('records prepared input rejection when Codex spawn fails before acceptance', async () => {

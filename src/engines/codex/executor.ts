@@ -259,7 +259,9 @@ export function buildCodexEnv(
 }
 
 /**
- * Build the argv array for `codex exec`. Exported for unit testing.
+ * Build the argv array for `codex exec`. The complete prompt is transported
+ * through stdin; argv contains only Codex options and the documented `-`
+ * stdin marker. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
  * `extraArgs` / `profile` / `model` cannot introduce shell-injection even
  * if they contain metacharacters — but they will still be visible to the
@@ -268,7 +270,6 @@ export function buildCodexEnv(
 export function buildCodexArgs(
   codexConfig: CodexBotConfig,
   cwd: string,
-  prompt: string,
   sessionId: string | undefined,
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
@@ -304,9 +305,9 @@ export function buildCodexArgs(
 
   args.push('exec');
   if (sessionId) {
-    args.push('resume', '--json', '--skip-git-repo-check', sessionId, prompt);
+    args.push('resume', '--json', '--skip-git-repo-check', sessionId, '-');
   } else {
-    args.push('--json', '--color', 'never', '--skip-git-repo-check', prompt);
+    args.push('--json', '--color', 'never', '--skip-git-repo-check', '-');
   }
   return args;
 }
@@ -331,7 +332,6 @@ export class CodexExecutor {
     const args = buildCodexArgs(
       codexConfig,
       cwd,
-      fullPrompt,
       sessionId,
       model,
       options.reasoningEffort,
@@ -345,9 +345,24 @@ export class CodexExecutor {
     let stdoutBuffer = '';
     let terminalResultDelivered = false;
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    let promptTransportState: 'pending' | 'written' | 'rejected' = 'pending';
 
     const executable = resolveCodexPath(codexConfig.executable);
     this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
+
+    const acceptPromptTransport = (): void => {
+      if (promptTransportState !== 'pending') return;
+      promptTransportState = 'written';
+      options.rulesPack?.markInjected();
+    };
+
+    const rejectPromptTransport = (error: unknown): boolean => {
+      if (promptTransportState !== 'pending') return false;
+      promptTransportState = 'rejected';
+      options.rulesPack?.markRejected(error);
+      this.logger.warn({ err: error }, 'Codex prompt stdin transport failed');
+      return true;
+    };
 
     const finishWithError = (message: string): void => {
       if (terminalResultDelivered) return;
@@ -417,31 +432,64 @@ export class CodexExecutor {
       child = spawn(executable, args, {
         cwd,
         env: buildCodexEnv(codexConfig, { ...process.env, ...(options.env ?? {}) }),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
-      child.once('spawn', () => options.rulesPack?.markInjected());
     } catch (err: any) {
-      options.rulesPack?.markRejected(err);
+      rejectPromptTransport(err);
       finishWithError(err?.message || String(err));
       queue.finish();
     }
 
     if (child) {
-      if (abortController.signal.aborted) {
+      const promptInput = child.stdin;
+      if (!promptInput) {
+        const error = new Error('Codex stdin pipe is unavailable');
+        rejectPromptTransport(error);
+        finishWithError(error.message);
         child.kill('SIGTERM');
       } else {
-        abortController.signal.addEventListener('abort', () => child?.kill('SIGTERM'), { once: true });
+        promptInput.once('error', (error) => {
+          if (!rejectPromptTransport(error)) return;
+          finishWithError(`Failed to write Codex prompt to stdin: ${error.message}`);
+          if (child && !child.killed) child.kill('SIGTERM');
+        });
+        child.once('spawn', () => {
+          if (abortController.signal.aborted) {
+            rejectPromptTransport(new Error('Codex execution was cancelled before prompt delivery completed'));
+            promptInput.destroy();
+            if (child && !child.killed) child.kill('SIGTERM');
+            return;
+          }
+          promptInput.end(fullPrompt, (error?: Error | null) => {
+            if (error) {
+              if (!rejectPromptTransport(error)) return;
+              finishWithError(`Failed to write Codex prompt to stdin: ${error.message}`);
+              if (child && !child.killed) child.kill('SIGTERM');
+              return;
+            }
+            acceptPromptTransport();
+          });
+        });
       }
+
+      const abortExecution = () => {
+        rejectPromptTransport(new Error('Codex execution was cancelled before prompt delivery completed'));
+        child?.stdin?.destroy();
+        child?.kill('SIGTERM');
+      };
+      if (abortController.signal.aborted) abortExecution();
+      else abortController.signal.addEventListener('abort', abortExecution, { once: true });
 
       child.stdout?.on('data', processStdout);
       child.stderr?.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8');
       });
       child.on('error', (err) => {
-        options.rulesPack?.markRejected(err);
+        rejectPromptTransport(err);
         finishWithError(err.message);
       });
       child.on('close', (code, signal) => {
+        rejectPromptTransport(new Error('Codex exited before prompt delivery completed'));
         if (exitTimer) clearTimeout(exitTimer);
         if (stdoutBuffer.trim()) {
           try {
@@ -473,6 +521,8 @@ export class CodexExecutor {
       },
       finish: () => {
         if (exitTimer) clearTimeout(exitTimer);
+        rejectPromptTransport(new Error('Codex execution finished before prompt delivery completed'));
+        child?.stdin?.destroy();
         if (child && !child.killed) child.kill('SIGTERM');
         queue.finish();
       },
