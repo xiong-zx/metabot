@@ -1557,6 +1557,25 @@ step "Phase 8: Starting MetaBot"
 
 cd "$METABOT_HOME"
 
+# The Bridge imports the RulesPack adapter through its compiled workspace
+# entrypoint. Release archives contain source rather than dist, so build the
+# engine first and the adapter second before compiling Bridge.
+info "Building deterministic RulesPack engine..."
+if npm run build -w @metabot/rulespack; then
+  success "RulesPack engine build complete"
+else
+  error "RulesPack engine build failed. MetaBot was not started."
+  exit 1
+fi
+
+info "Building Codex RulesPack adapter..."
+if npm run build -w @metabot/rulespack-adapter; then
+  success "RulesPack adapter build complete"
+else
+  error "RulesPack adapter build failed. MetaBot was not started."
+  exit 1
+fi
+
 info "Building bridge TypeScript..."
 if npm run build:bridge; then
   success "Bridge build complete"

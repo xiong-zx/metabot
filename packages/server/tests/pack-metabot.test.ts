@@ -81,6 +81,8 @@ describe('pack-metabot.sh', () => {
 
   it('packaged install builds the bridge runtime, delegated CLI, and independent MCP packages', () => {
     const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
+    expect(installSh).toContain('npm run build -w @metabot/rulespack');
+    expect(installSh).toContain('npm run build -w @metabot/rulespack-adapter');
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
@@ -117,6 +119,8 @@ describe('pack-metabot.sh', () => {
     expect(uninstallSh).toContain('pm2_app_owned_by_runtime metabot-core');
     expect(uninstallSh).toContain('Leaving metabot-core untouched');
     expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
+    expect(metabot).toContain('npm run build -w @metabot/rulespack');
+    expect(metabot).toContain('npm run build -w @metabot/rulespack-adapter');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
@@ -136,6 +140,8 @@ describe('pack-metabot.sh', () => {
       'packages/cli-core',
       'packages/metamemory',
       'packages/skill-hub',
+      'packages/rulespack',
+      'packages/rulespack-adapter',
       'packages/arc-mcp',
       'packages/arc-researchclaw-adapter',
       'packages/arc-worker-runner-adapter',

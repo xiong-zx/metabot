@@ -223,7 +223,9 @@ cmd_update() {
   info "Installing dependencies..."
   npm install --production=false
 
-  info "Building bridge, metabot CLI, and execution daemons..."
+  info "Building RulesPack, bridge, metabot CLI, and execution daemons..."
+  npm run build -w @metabot/rulespack
+  npm run build -w @metabot/rulespack-adapter
   npm run build:bridge
   npm run build -w @xvirobotics/cli
   npm run build -w @xvirobotics/worker-runner-mcp
@@ -686,6 +688,8 @@ _ensure_runtime_artifacts() {
     src/index.ts \
     src/runtime/restart-state-cli.ts \
     scripts/pm2-protected-runtime-switch.cjs \
+    packages/rulespack/dist/index.js \
+    packages/rulespack-adapter/dist/index.js \
     packages/worker-runner-mcp/dist/daemon-cli.js \
     packages/arc-mcp/dist/daemon-cli.js \
     packages/arc-researchclaw-adapter/dist/factory.js \
