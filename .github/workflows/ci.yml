@@ -25,6 +25,8 @@ jobs:
       - name: Type check
         run: |
           npx tsc --noEmit
+          npm run typecheck -w @metabot/rulespack
+          npm run typecheck -w @metabot/rulespack-adapter
           npm run typecheck -w @xvirobotics/arc-mcp
           npm run typecheck -w @xvirobotics/worker-runner-mcp
 
@@ -35,13 +37,16 @@ jobs:
       # runtime packages here too so their independently shipped binaries and
       # restart preflight are covered.
       # The controlled-restart CLI tests run the production runtime-artifact
-      # preflight, which requires both compiled ARC adapters.
+      # preflight, which requires both compiled ARC adapters. RulesPack's
+      # adapter also imports the engine's compiled public entry during tests.
       - name: Build workspace libraries and restart prerequisites
         run: >-
           npm run build
           -w @xvirobotics/cli-core
           -w @xvirobotics/metamemory
           -w @xvirobotics/skill-hub
+          -w @metabot/rulespack
+          -w @metabot/rulespack-adapter
           -w @xvirobotics/arc-mcp
           -w @xvirobotics/worker-runner-mcp
           -w @xvirobotics/arc-researchclaw-adapter

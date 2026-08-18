@@ -14,8 +14,11 @@ describe('CI runtime prerequisites', () => {
     );
 
     expect(restartCli).toContain('packages/arc-researchclaw-adapter/dist/factory.js');
+    expect(buildStep).toContain('-w @metabot/rulespack');
+    expect(buildStep).toContain('-w @metabot/rulespack-adapter');
     expect(buildStep).toContain('-w @xvirobotics/arc-mcp');
     expect(buildStep).toContain('-w @xvirobotics/worker-runner-mcp');
     expect(buildStep).toContain('-w @xvirobotics/arc-researchclaw-adapter');
+    expect(buildStep).toContain('-w @xvirobotics/arc-worker-runner-adapter');
   });
 });
