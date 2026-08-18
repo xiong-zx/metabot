@@ -838,6 +838,8 @@ export class PeerManager {
       'Content-Type': 'application/json',
       'X-MetaBot-Origin': 'peer',
     };
+    const dispatch = (body as { rulesPackDispatch?: { issuer?: string } }).rulesPackDispatch;
+    if (dispatch?.issuer) headers['X-MetaBot-RulesPack-Issuer'] = dispatch.issuer;
     const auth = this.resolveOutboundAuth(peer);
     if (auth) {
       headers['Authorization'] = `Bearer ${auth}`;
@@ -886,6 +888,7 @@ export class PeerManager {
           chatId,
           prompt,
           sendCards: body?.sendCards,
+          ...(body?.rulesPackDispatch ? { rulesPackDispatch: body.rulesPackDispatch } : {}),
         }),
       }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

@@ -481,6 +481,12 @@ export class TaskScheduler {
         chatId: task.chatId,
         userId: 'scheduler',
         sendCards: task.sendCards,
+        rulesPack: {
+          taskId: task.id,
+          roles: ['scheduler'],
+          dataClasses: ['schedule'],
+          outputTypes: ['text'],
+        },
         onUpdate: (state: CardState, _bridgeMessageId: string, final: boolean) => {
           // Stream updates to any WebSocket client subscribed to this chatId
           if (this.wsHandle) {

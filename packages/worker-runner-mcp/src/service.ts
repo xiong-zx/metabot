@@ -14,6 +14,7 @@ import type {
   TrustedPrincipal,
   WorkerRecord,
   WorkerServiceConfig,
+  WorkerRulesPackProvider,
 } from './types.js';
 import {
   TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
@@ -68,6 +69,7 @@ export class WorkerService {
       makeId?: () => string;
       makeLaunchId?: () => string;
       dynamicPrincipals?: boolean;
+      rulesPackProvider?: WorkerRulesPackProvider;
     } = {},
   ) {
     this.dynamicPrincipals = options.dynamicPrincipals === true;
@@ -81,7 +83,10 @@ export class WorkerService {
     this.now = options.now ?? Date.now;
     this.makeId = options.makeId ?? (() => `wrk-${randomUUID()}`);
     this.makeLaunchId = options.makeLaunchId ?? (() => `launch-${randomUUID()}`);
+    this.rulesPackProvider = options.rulesPackProvider;
   }
+
+  private readonly rulesPackProvider?: WorkerRulesPackProvider;
 
   getTrustedPrincipal(): TrustedPrincipal {
     if (!this.principal) {
@@ -213,11 +218,13 @@ export class WorkerService {
     for (const id of [...this.active.keys()]) this.clearActive(id);
     for (const timer of this.notificationTimers.values()) clearTimeout(timer);
     this.notificationTimers.clear();
+    this.rulesPackProvider?.close?.();
   }
 
   private async launchWorker(worker: WorkerRecord, recovered: boolean): Promise<void> {
     const launchId = this.makeLaunchId();
     try {
+      const rulesPack = worker.engine === 'codex' ? await this.rulesPackProvider?.prepare(worker) : undefined;
       const running = await this.runner.launch(
         {
           id: worker.id,
@@ -227,6 +234,7 @@ export class WorkerService {
           workdir: worker.workdir,
           prompt: worker.prompt,
           outputContract: worker.outputContract,
+          ...(rulesPack ? { rulesPack } : {}),
         },
         { onActivity: () => this.recordActivity(worker.id, launchId) },
       );
@@ -523,6 +531,8 @@ export class WorkerService {
     return {
       botName: principal.botName,
       chatId: principal.chatId,
+      principalRole: principal.role,
+      executionKind: isArcServicePrincipal(principal) ? 'arc' : 'worker',
       ...(authorizingCapability !== undefined
         ? { authorizingCapability: normalizeNonempty(authorizingCapability, 'authorizingCapability', 4_096) }
         : {}),
@@ -546,16 +556,8 @@ export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefine
   if (!TRUSTED_PRINCIPAL_ROLES.includes(principal.role)) {
     throw new WorkerRunnerError('Trusted principal role is not recognized', 'FORBIDDEN');
   }
-  const botName = normalizeNonempty(
-    principal.botName,
-    'principal.botName',
-    TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
-  );
-  const chatId = normalizeNonempty(
-    principal.chatId,
-    'principal.chatId',
-    TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH,
-  );
+  const botName = normalizeNonempty(principal.botName, 'principal.botName', TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH);
+  const chatId = normalizeNonempty(principal.chatId, 'principal.chatId', TRUSTED_PRINCIPAL_CHAT_ID_MAX_LENGTH);
   if (chatId.toLowerCase().startsWith('team:')) {
     throw new WorkerRunnerError('Agent Team chats cannot be trusted Worker Runner principals', 'FORBIDDEN');
   }

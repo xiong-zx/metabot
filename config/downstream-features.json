@@ -50,12 +50,7 @@
         "src/agent-teams/governance-capability.ts",
         "src/agent-teams/schedule-capability.ts"
       ],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/arc-mcp",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/arc-mcp", "@xvirobotics/worker-runner-mcp"],
       "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
       "validationSurface": [
         "tests/agent-team-governance-capability.test.ts",
@@ -69,11 +64,7 @@
       "id": "agent-team-compact-card-upstream-gap",
       "status": "required",
       "roots": ["src/feishu/team-panel.ts"],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
       "reason": "Track the generic compact Agent Team card renderer as a removable upstreamable patch until upstream accepts it.",
       "validationSurface": [
         "tests/card-builder.test.ts",
@@ -84,15 +75,8 @@
     {
       "id": "agent-team-busy-chat-reliability-upstream-gap",
       "status": "required",
-      "roots": [
-        "src/scheduler/busy-retry-policy.ts",
-        "src/bridge/deferred-activity-delivery.ts"
-      ],
-      "forbiddenImports": [
-        "src/memory-core",
-        "src/workers",
-        "@xvirobotics/worker-runner-mcp"
-      ],
+      "roots": ["src/scheduler/busy-retry-policy.ts", "src/bridge/deferred-activity-delivery.ts"],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
       "reason": "Track generic bounded busy-chat retry, burst coalescing, and reusable activity-card delivery as removable upstreamable patches until upstream accepts them.",
       "validationSurface": [
         "tests/busy-retry-policy.test.ts",
@@ -202,12 +186,53 @@
       ]
     },
     {
+      "id": "rulespack-codex-adapter",
+      "status": "required",
+      "roots": ["packages/rulespack", "packages/rulespack-adapter", "src/extensions/rulespack-routes.ts"],
+      "importRoots": ["packages/rulespack/src", "packages/rulespack-adapter/src"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "thinHooks": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/engines/claude/executor.ts",
+        "src/engines/claude/session-manager.ts",
+        "src/engines/codex/executor.ts",
+        "src/api/http-server.ts",
+        "src/api/peer-manager.ts",
+        "src/api/routes/bot-routes.ts",
+        "src/api/routes/task-routes.ts",
+        "src/agent-teams/team-supervisor.ts",
+        "src/scheduler/task-scheduler.ts",
+        "packages/worker-runner-mcp/src/rulespack.ts",
+        "packages/worker-runner-mcp/src/runtime.ts",
+        "packages/worker-runner-mcp/src/service.ts",
+        "packages/worker-runner-mcp/src/process-runner.ts"
+      ],
+      "reason": "Vendor the deterministic FIX-009 engine and keep MetaBot-specific Codex/source/session/transport bindings in an isolated downstream package with enumerated thin runtime hooks.",
+      "validationSurface": [
+        "packages/rulespack/test/compiler.test.ts",
+        "packages/rulespack/test/store-engine.test.ts",
+        "packages/rulespack-adapter/tests/runtime.test.ts",
+        "tests/rulespack-codex-integration.test.ts",
+        "tests/rulespack-in-process-smoke.test.ts",
+        "tests/rulespack-operator-routes.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
       "id": "ci-runtime-prerequisites",
       "status": "required",
-      "roots": [
-        ".github/workflows/ci.yml",
-        "tests/ci-workflow.test.ts"
-      ],
+      "roots": [".github/workflows/ci.yml", "tests/ci-workflow.test.ts"],
       "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
       "validationSurface": [
         "tests/ci-workflow.test.ts",
@@ -220,11 +245,20 @@
     {
       "id": "upstream-runtime-isolation",
       "roots": ["src"],
+      "allowedImporters": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/api/http-server.ts",
+        "src/api/routes/task-routes.ts"
+      ],
       "forbiddenImports": [
         "@xvirobotics/arc-mcp",
         "@xvirobotics/worker-runner-mcp",
         "@xvirobotics/arc-worker-runner-adapter",
-        "@xvirobotics/arc-researchclaw-adapter"
+        "@xvirobotics/arc-researchclaw-adapter",
+        "@metabot/rulespack",
+        "@metabot/rulespack-adapter"
       ]
     }
   ],

@@ -8,6 +8,7 @@ import { NodeCliProcessRunner } from './process-runner.js';
 import { WorkerService, normalizeTrustedPrincipal } from './service.js';
 import { WorkerStore } from './store.js';
 import type { TrustedPrincipal } from './types.js';
+import { createWorkerRulesPackProvider } from './rulespack.js';
 
 export interface WorkerRunnerServiceRuntime {
   principal?: TrustedPrincipal;
@@ -81,7 +82,7 @@ export function createWorkerRunnerServiceRuntime(
         notificationRetryInitialMs: integerEnv(env, 'METABOT_WORKER_NOTIFY_RETRY_INITIAL_MS', 1_000),
         notificationRetryMaxMs: integerEnv(env, 'METABOT_WORKER_NOTIFY_RETRY_MAX_MS', 60_000),
       },
-      { dynamicPrincipals },
+      { dynamicPrincipals, rulesPackProvider: createWorkerRulesPackProvider(env) },
     );
     return { ...(principal ? { principal } : {}), store, service };
   } catch (error) {

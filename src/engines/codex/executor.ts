@@ -322,7 +322,7 @@ export class CodexExecutor {
     const codexConfig = this.config.codex ?? {};
     const model = options.model ?? codexConfig.model;
     const modelMetadata = resolveCodexModelMetadata(codexConfig, model);
-    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
+    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext, options.rulesPack?.injectionText);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
@@ -419,6 +419,7 @@ export class CodexExecutor {
         env: buildCodexEnv(codexConfig, { ...process.env, ...(options.env ?? {}) }),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      child.once('spawn', () => options.rulesPack?.markInjected());
     } catch (err: any) {
       finishWithError(err?.message || String(err));
       queue.finish();
@@ -491,6 +492,7 @@ export class CodexExecutor {
     prompt: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
+    rulesPackInjection?: string,
   ): string {
     const sections: string[] = [];
 
@@ -515,7 +517,10 @@ export class CodexExecutor {
       }
     }
 
-    if (sections.length === 0) return prompt;
-    return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    const userBody = sections.length === 0 ? prompt : `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    if (!rulesPackInjection) return userBody;
+    // Codex CLI exposes one user-channel turn. Put approved RulesPack bytes in
+    // the strongest truthful pre-user position and keep metadata out of context.
+    return `${rulesPackInjection}\n\n---\n\n${userBody}`;
   }
 }

@@ -49,10 +49,7 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
       failures.push(`${feature.id}: missing required roots: ${missing.join(', ')}`);
     }
     const importRoots = feature.importRoots ?? roots;
-    if (
-      !Array.isArray(importRoots) ||
-      importRoots.some((item) => typeof item !== 'string' || item.trim() === '')
-    ) {
+    if (!Array.isArray(importRoots) || importRoots.some((item) => typeof item !== 'string' || item.trim() === '')) {
       failures.push(`${feature.id}: importRoots must contain non-empty relative paths`);
     } else if (importRoots.some((item) => !roots.some((featureRoot) => containsPath(featureRoot, item)))) {
       failures.push(`${feature.id}: importRoots must stay within declared roots`);
@@ -93,7 +90,10 @@ export function checkDownstreamBoundaries(repoRoot, manifestPath = 'config/downs
     if (!Array.isArray(boundary.forbiddenImports) || boundary.forbiddenImports.length === 0) {
       failures.push(`${boundary.id}: reverse boundary must declare forbidden imports`);
     } else if (existingRoots.length > 0) {
-      scanForbiddenImports(root, boundary.id, existingRoots, boundary.forbiddenImports, failures);
+      const allowedImporters = Array.isArray(boundary.allowedImporters)
+        ? boundary.allowedImporters.map((item) => resolveInside(root, item))
+        : [];
+      scanForbiddenImports(root, boundary.id, existingRoots, boundary.forbiddenImports, failures, allowedImporters);
     }
     checkedReverseBoundaries.push({ id: boundary.id, presentRoots: existingRoots.length });
   }
@@ -110,13 +110,14 @@ function assertSourceRootsAreNotSymlinks(root, sourceRoots) {
   }
 }
 
-function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, failures) {
+function scanForbiddenImports(root, boundaryId, sourceRoots, forbiddenImports, failures, allowedImporters = []) {
   if (forbiddenImports.some((item) => typeof item !== 'string' || item.trim() === '')) {
     failures.push(`${boundaryId}: forbiddenImports must contain non-empty strings`);
     return;
   }
   for (const sourceRoot of sourceRoots) {
     for (const file of walkSourceFiles(resolveInside(root, sourceRoot))) {
+      if (allowedImporters.some((allowed) => file === allowed || file.startsWith(`${allowed}${path.sep}`))) continue;
       for (const specifier of collectModuleSpecifiers(file)) {
         const forbidden = forbiddenImports.find((item) => matchesForbiddenImport(root, file, specifier, item));
         if (forbidden) failures.push(`${boundaryId}: ${relative(root, file)} imports forbidden '${specifier}'`);

@@ -5,6 +5,8 @@
     { "path": "./packages/arc-mcp" },
     { "path": "./packages/arc-researchclaw-adapter" },
     { "path": "./packages/arc-worker-runner-adapter" },
+    { "path": "./packages/rulespack" },
+    { "path": "./packages/rulespack-adapter" },
     { "path": "./packages/cli-core" },
     { "path": "./packages/metamemory" },
     { "path": "./packages/skill-hub" },

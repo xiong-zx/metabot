@@ -144,7 +144,9 @@ export class NodeCliProcessRunner implements ProcessRunner {
         }
         this.active.set(pid, { child, completion });
         hooks.onActivity();
-        child.stdin.end(command.stdin);
+        child.stdin.end(command.stdin, () => {
+          if (spec.engine === 'codex') spec.rulesPack?.markInjected();
+        });
         resolve({ pid, completion });
       });
       child.once('error', (error) => {
@@ -167,7 +169,11 @@ export class NodeCliProcessRunner implements ProcessRunner {
   }
 
   buildCommand(spec: ProcessLaunchSpec): CommandSpec {
-    const prompt = renderWorkerPrompt(spec.prompt, spec.outputContract);
+    const workerPrompt = renderWorkerPrompt(spec.prompt, spec.outputContract);
+    const prompt =
+      spec.engine === 'codex' && spec.rulesPack?.injectionText
+        ? `${spec.rulesPack.injectionText}\n\n---\n\n${workerPrompt}`
+        : workerPrompt;
     switch (spec.engine) {
       case 'codex':
         return {

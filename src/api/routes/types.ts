@@ -48,6 +48,7 @@ export interface RouteContext {
   agentTeamSupervisor?: AgentTeamSupervisor;
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
+  resolveRulesPackTransportIssuer?: (req: http.IncomingMessage) => string | undefined;
   executionCapabilityService?: ExecutionCapabilityService;
   terminalEventStore?: TerminalEventStore;
   terminalEventDispatcher?: TerminalEventDispatcher;

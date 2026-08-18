@@ -8,5 +8,6 @@ export * from './local-auth.js';
 export * from './service.js';
 export * from './mcp-server.js';
 export * from './runtime.js';
+export * from './rulespack.js';
 export * from './daemon.js';
 export * from './proxy.js';

@@ -185,21 +185,29 @@ function metabotCoreBaseUrl(): string | undefined {
  * Verify a Bearer header against metabot-core `GET /api/whoami`. Returns true
  * only on HTTP 200. Fails closed on any error (network, non-200, timeout).
  */
-async function verifyBearerViaMetabotCore(authHeader: string, logger: Logger): Promise<boolean> {
+async function verifyBearerViaMetabotCore(
+  authHeader: string,
+  logger: Logger,
+): Promise<{ verified: boolean; botName?: string }> {
   const base = metabotCoreBaseUrl();
   if (!base) {
     logger.warn('cross-bridge talk attempted but METABOT_CORE_AGENT_BUS_URL/METABOT_CORE_URL is unset — cannot verify');
-    return false;
+    return { verified: false };
   }
   try {
     const resp = await fetch(`${base}/api/whoami`, {
       headers: { Authorization: authHeader },
       signal: AbortSignal.timeout(WHOAMI_VERIFY_TIMEOUT_MS),
     });
-    return resp.ok;
+    if (!resp.ok) return { verified: false };
+    const body = await resp.json().catch(() => ({})) as { botName?: unknown };
+    return {
+      verified: true,
+      ...(typeof body.botName === 'string' && body.botName.trim() ? { botName: body.botName.trim() } : {}),
+    };
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'whoami verification failed');
-    return false;
+    return { verified: false };
   }
 }
 
@@ -283,6 +291,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   const ws: { handle?: WebSocketHandle } = {};
   const locallyAuthenticatedRequests = new WeakSet<http.IncomingMessage>();
+  const rulesPackTransportIssuers = new WeakMap<http.IncomingMessage, string>();
   const capabilityRetirementTimers = new Set<ReturnType<typeof setTimeout>>();
   let closing = false;
 
@@ -326,6 +335,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         chatId: headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]),
         localApiSecretAuthenticated: locallyAuthenticatedRequests.has(req),
       }),
+    resolveRulesPackTransportIssuer: (req) => rulesPackTransportIssuers.get(req),
   };
 
   if (peerManager) {
@@ -385,6 +395,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           ? parsedContent.chatId
           : message.chatId || `agent-inbox-${botName}`;
       const sendCards = typeof parsedContent?.sendCards === 'boolean' ? parsedContent.sendCards : true;
+      const rulesPackDispatch = parsedContent?.rulesPackDispatch;
+      const authenticatedRelayIssuer = message.fromBot || message.fromOwner;
       const bot = registry.get(botName);
       if (!bot) {
         logger.warn(
@@ -402,12 +414,26 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         chatId,
         userId: message.fromBot || message.fromOwner || 'agent-bus',
         sendCards,
+        ...(rulesPackDispatch && authenticatedRelayIssuer ? {
+          rulesPack: {
+            dispatch: {
+              envelope: rulesPackDispatch as import('@metabot/rulespack').RulesPackDispatchEnvelopeV1,
+              authenticatedIssuer: authenticatedRelayIssuer,
+            },
+            roles: ['agent-bus'],
+            dataClasses: ['agent-bus'],
+            outputTypes: ['text'],
+          },
+        } : {}),
       });
     });
   }
 
   for (const bot of registry.listRegistered()) {
     bot.bridge.setAgentTeamStore(agentTeamStore);
+    const executionPrincipalFor = ({ botName, chatId }: { botName: string; chatId: string }) =>
+      deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
+    bot.bridge.setExecutionPrincipalProvider?.(executionPrincipalFor);
     const capabilityCache = new Map<
       string,
       { env: Record<string, string>; refreshAt: number; timer: ReturnType<typeof setTimeout> }
@@ -420,7 +446,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         clearTimeout(cached.timer);
         capabilityRetirementTimers.delete(cached.timer);
       }
-      const principal = deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
+      const principal = executionPrincipalFor({ botName, chatId });
       const env = {
         [AGENT_TEAM_CAPABILITY_ENV]: agentTeamCapabilityService.issue({
           ...principal,
@@ -549,7 +575,11 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const auth = req.headers.authorization;
       // Timing-safe comparison so the secret can't be recovered byte-by-byte.
       const localOk = isLocalSecretAuthorized(secret, auth);
-      if (localOk) locallyAuthenticatedRequests.add(req);
+      if (localOk) {
+        locallyAuthenticatedRequests.add(req);
+        const claimedIssuer = headerValue(req.headers['x-metabot-rulespack-issuer']);
+        if (claimedIssuer) rulesPackTransportIssuers.set(req, claimedIssuer);
+      }
       const capability = headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]);
       const capabilityBotName = headerValue(req.headers[AGENT_TEAM_BOT_HEADER]);
       const capabilityChatId = headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]);
@@ -601,10 +631,11 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           return;
         }
         const verified = await verifyBearerViaMetabotCore(auth!, logger);
-        if (!verified) {
+        if (!verified.verified) {
           rejectUnauthorized();
           return;
         }
+        if (verified.botName) rulesPackTransportIssuers.set(req, verified.botName);
       }
       // Successful auth — clear any accumulated failed-auth counter so a
       // legitimate client is never throttled by the backoff guard.

@@ -93,6 +93,8 @@ export interface DispatchWorkerInput {
 export interface ScopedDispatchWorkerInput extends DispatchWorkerInput {
   botName: string;
   chatId: string;
+  principalRole: TrustedPrincipalRole;
+  executionKind: 'worker' | 'arc';
   authorizingCapability?: string;
   dedupePolicy: DedupePolicy;
   timeoutMs: number;
@@ -104,6 +106,8 @@ export interface WorkerRecord {
   id: string;
   botName: string;
   chatId: string;
+  principalRole: TrustedPrincipalRole;
+  executionKind: 'worker' | 'arc';
   workdir: string;
   prompt: string;
   engine: WorkerEngine;
@@ -194,6 +198,18 @@ export interface ProcessLaunchSpec {
   workdir: string;
   prompt: string;
   outputContract?: GenericOutputContract;
+  rulesPack?: PreparedWorkerRulesPack;
+}
+
+export interface PreparedWorkerRulesPack {
+  injectionText: string;
+  packDigest: string;
+  markInjected(): void;
+}
+
+export interface WorkerRulesPackProvider {
+  prepare(worker: WorkerRecord): Promise<PreparedWorkerRulesPack>;
+  close?(): void;
 }
 
 export interface ProcessLaunchHooks {

@@ -8,6 +8,7 @@ import {
 } from '../../agent-teams/schedule-capability.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import type { RulesPackDispatchEnvelopeV1 } from '@metabot/rulespack';
 
 export async function handleTaskRoutes(
   ctx: RouteContext,
@@ -60,6 +61,26 @@ export async function handleTaskRoutes(
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
+    const dispatchEnvelope = body.rulesPackDispatch as RulesPackDispatchEnvelopeV1 | undefined;
+    const dispatchIssuerHeader = singleHeader(req.headers['x-metabot-rulespack-issuer']);
+    const dispatchOrigin = singleHeader(req.headers['x-metabot-origin']);
+    const authenticatedDispatchIssuer = ctx.resolveRulesPackTransportIssuer?.(req);
+
+    if (
+      dispatchEnvelope &&
+      (!dispatchIssuerHeader || dispatchOrigin !== 'peer' || authenticatedDispatchIssuer !== dispatchIssuerHeader)
+    ) {
+      jsonResponse(res, 400, { error: 'RulesPack dispatch requires authenticated peer transport headers' });
+      return true;
+    }
+    const rulesPack = dispatchEnvelope
+      ? {
+          dispatch: { envelope: dispatchEnvelope, authenticatedIssuer: authenticatedDispatchIssuer! },
+          roles: ['peer'],
+          dataClasses: ['agent-bus'],
+          outputTypes: ['text'],
+        }
+      : undefined;
 
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
@@ -90,7 +111,10 @@ export async function handleTaskRoutes(
       }
       logger.info({ botName, peerName: targetPeerName, chatId, promptLength: prompt.length }, 'Forwarding talk to peer (qualified)');
       try {
-        const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
+        const result = await peerManager.forwardTask(peerMatch.peer, {
+          botName, chatId, prompt, sendCards,
+          ...(dispatchEnvelope ? { rulesPackDispatch: dispatchEnvelope } : {}),
+        });
         const statusCode = (result as any).success === false ? 500 : 200;
         jsonResponse(res, statusCode, result);
       } catch (err: any) {
@@ -129,6 +153,7 @@ export async function handleTaskRoutes(
           try {
             const result = await bot.bridge.executeApiTask({
               prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              ...(rulesPack ? { rulesPack } : {}),
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -196,6 +221,7 @@ export async function handleTaskRoutes(
         chatId,
         userId: 'api',
         sendCards: sendCards ?? true,
+        ...(rulesPack ? { rulesPack } : {}),
         ...(hasWsSubscribers ? {
           onUpdate: (state, bridgeMessageId, final) => {
             const msgType = final ? 'complete' : 'state';
@@ -231,7 +257,10 @@ export async function handleTaskRoutes(
       if (peerMatch) {
         logger.info({ botName, peerName: peerMatch.peer.name, peerUrl: peerMatch.peer.url, chatId, promptLength: prompt.length }, 'Forwarding talk to peer');
         try {
-          const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
+          const result = await peerManager.forwardTask(peerMatch.peer, {
+            botName, chatId, prompt, sendCards,
+            ...(dispatchEnvelope ? { rulesPackDispatch: dispatchEnvelope } : {}),
+          });
           const statusCode = (result as any).success === false ? 500 : 200;
           jsonResponse(res, statusCode, result);
         } catch (err: any) {
@@ -432,6 +461,10 @@ export async function handleTaskRoutes(
   }
 
   return false;
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function resolveScheduleAuthorization(

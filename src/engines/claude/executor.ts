@@ -269,6 +269,11 @@ export interface ExecutorOptions {
   env?: Record<string, string>;
   /** Additive per-session MCP servers materialized by the bridge. */
   mcpEntries?: McpEntry[];
+  /** Prepared only by MessageBridge's authenticated Codex turn boundary. */
+  rulesPack?: {
+    injectionText: string;
+    markInjected(): void;
+  };
 }
 
 export type SDKMessage = {

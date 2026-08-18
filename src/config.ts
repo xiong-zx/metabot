@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import type { RulesPackConfig } from '@metabot/rulespack-adapter';
 import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
 
 export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
@@ -138,6 +139,8 @@ export interface BotConfigBase {
   };
   /** Codex-specific overrides. Populated only when engine === 'codex'. */
   codex?: CodexBotConfig;
+  /** Downstream Codex-only deterministic RulesPack integration. Default mode is off. */
+  rulesPack?: RulesPackConfig;
   /**
    * Stage 4 — opt-in to the persistent Claude process pool. When enabled,
    * each chatId is backed by a long-lived Claude Code process (managed by
@@ -324,6 +327,7 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
+  rulesPack?: RulesPackConfig;
   /** Security-relevant opt-ins; omitted/false means no capability is minted. */
   workerTools?: boolean;
   arcTools?: boolean;
@@ -574,10 +578,11 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
   };
 }
 
-function executionToolOptIns(entry: EngineJsonFields): Pick<BotConfigBase, 'workerTools' | 'arcTools'> {
+function executionToolOptIns(entry: EngineJsonFields): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack'> {
   return {
     ...(entry.workerTools !== undefined ? { workerTools: entry.workerTools } : {}),
     ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
+    ...(entry.rulesPack !== undefined ? { rulesPack: entry.rulesPack } : {}),
   };
 }
 

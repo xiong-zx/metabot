@@ -185,6 +185,26 @@ describe('downstream feature boundary gate', () => {
     });
   });
 
+  it('allows only enumerated thin-hook importers through a reverse boundary', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [],
+      reverseBoundaries: [{
+        id: 'thin-hooks',
+        roots: ['src'],
+        forbiddenImports: ['@example/downstream'],
+        allowedImporters: ['src/hook.ts'],
+      }],
+    });
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/hook.ts'), "import '@example/downstream';\n");
+    fs.writeFileSync(path.join(root, 'src/leak.ts'), "import '@example/downstream';\n");
+    expect(checkDownstreamBoundaries(root).failures).toEqual([
+      "thin-hooks: src/leak.ts imports forbidden '@example/downstream'",
+    ]);
+  });
+
   it('fails closed on path escape or symlinked source roots', () => {
     const escaped = fixture({
       schemaVersion: 1,
@@ -268,5 +288,25 @@ describe('downstream feature boundary gate', () => {
 
   it('passes against the repository manifest', () => {
     expect(checkDownstreamBoundaries(path.resolve(import.meta.dirname, '..'))).toMatchObject({ ok: true });
+  });
+
+  it('declares RulesPack as an isolated downstream feature with explicit thin hooks', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as { features: Array<{ id: string; roots?: string[]; thinHooks?: string[]; validationSurface?: string[] }> };
+    const feature = manifest.features.find((candidate) => candidate.id === 'rulespack-codex-adapter');
+    expect(feature).toMatchObject({
+      roots: expect.arrayContaining(['packages/rulespack', 'packages/rulespack-adapter']),
+      thinHooks: expect.arrayContaining([
+        'src/bridge/message-bridge.ts',
+        'src/engines/codex/executor.ts',
+        'packages/worker-runner-mcp/src/rulespack.ts',
+      ]),
+      validationSurface: expect.arrayContaining([
+        'packages/rulespack-adapter/tests/runtime.test.ts',
+        'tests/rulespack-codex-integration.test.ts',
+      ]),
+    });
   });
 });

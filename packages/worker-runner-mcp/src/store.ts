@@ -15,6 +15,8 @@ interface WorkerRow {
   id: string;
   bot_name: string;
   chat_id: string;
+  principal_role: WorkerRecord['principalRole'];
+  execution_kind: WorkerRecord['executionKind'];
   authorizing_capability: string | null;
   workdir: string;
   prompt: string;
@@ -116,6 +118,8 @@ export class WorkerStore {
         id TEXT PRIMARY KEY,
         bot_name TEXT NOT NULL,
         chat_id TEXT NOT NULL,
+        principal_role TEXT NOT NULL DEFAULT 'user',
+        execution_kind TEXT NOT NULL DEFAULT 'worker',
         authorizing_capability TEXT,
         workdir TEXT NOT NULL,
         prompt TEXT NOT NULL,
@@ -172,6 +176,8 @@ export class WorkerStore {
         WHERE status NOT IN ('queued', 'running');
     `);
     this.addColumnIfMissing('worker_jobs', 'authorizing_capability', 'TEXT');
+    this.addColumnIfMissing('worker_jobs', 'principal_role', "TEXT NOT NULL DEFAULT 'user'");
+    this.addColumnIfMissing('worker_jobs', 'execution_kind', "TEXT NOT NULL DEFAULT 'worker'");
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -214,12 +220,12 @@ export class WorkerStore {
       this.db
         .prepare(
           `INSERT INTO worker_jobs (
-             id, bot_name, chat_id, authorizing_capability, workdir, prompt, engine, model, label,
+             id, bot_name, chat_id, principal_role, execution_kind, authorizing_capability, workdir, prompt, engine, model, label,
              dedupe_key, dedupe_ttl_ms, retry_terminal, timeout_ms, idle_timeout_ms,
              restart_policy, restart_idempotent, output_contract_json, status,
              created_at
            ) VALUES (
-             @id, @botName, @chatId, @authorizingCapability, @workdir, @prompt, @engine, @model, @label,
+             @id, @botName, @chatId, @principalRole, @executionKind, @authorizingCapability, @workdir, @prompt, @engine, @model, @label,
              @dedupeKey, @dedupeTtlMs, @retryTerminal, @timeoutMs, @idleTimeoutMs,
              @restartPolicy, @restartIdempotent, @outputContractJson, 'queued',
              @createdAt
@@ -229,6 +235,8 @@ export class WorkerStore {
           id,
           botName: input.botName,
           chatId: input.chatId,
+          principalRole: input.principalRole ?? 'user',
+          executionKind: input.executionKind ?? 'worker',
           authorizingCapability: input.authorizingCapability ?? null,
           workdir: input.workdir,
           prompt: input.prompt,
@@ -263,9 +271,9 @@ export class WorkerStore {
 
   /** Private callback authorization state; deliberately omitted from WorkerRecord. */
   getAuthorizingCapability(id: string): string | undefined {
-    const row = this.db
-      .prepare('SELECT authorizing_capability FROM worker_jobs WHERE id = ?')
-      .get(id) as { authorizing_capability: string | null } | undefined;
+    const row = this.db.prepare('SELECT authorizing_capability FROM worker_jobs WHERE id = ?').get(id) as
+      | { authorizing_capability: string | null }
+      | undefined;
     return row?.authorizing_capability ?? undefined;
   }
 
@@ -524,6 +532,8 @@ function fromRow(row: WorkerRow): WorkerRecord {
     id: row.id,
     botName: row.bot_name,
     chatId: row.chat_id,
+    principalRole: row.principal_role,
+    executionKind: row.execution_kind,
     workdir: row.workdir,
     prompt: row.prompt,
     engine: row.engine,
