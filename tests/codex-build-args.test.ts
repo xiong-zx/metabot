@@ -7,21 +7,20 @@ import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/confi
 
 describe('buildCodexArgs', () => {
   const cwd = '/work/proj';
-  const prompt = 'run pwd';
 
   it('defaults approval policy to "never" and sandbox to "workspace-write"', () => {
-    const args = buildCodexArgs({}, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs({}, cwd, undefined, undefined);
     expect(args).toEqual([
       '-a', 'never',
       '--sandbox', 'workspace-write',
       '-C', cwd,
-      'exec', '--json', '--color', 'never', '--skip-git-repo-check', prompt,
+      'exec', '--json', '--color', 'never', '--skip-git-repo-check', '-',
     ]);
   });
 
   it('honors explicit approvalPolicy and sandbox', () => {
     const cfg: CodexBotConfig = { approvalPolicy: 'on-failure', sandbox: 'read-only' };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs(cfg, cwd, undefined, undefined);
     expect(args.slice(0, 4)).toEqual(['-a', 'on-failure', '--sandbox', 'read-only']);
   });
 
@@ -31,7 +30,7 @@ describe('buildCodexArgs', () => {
       approvalPolicy: 'on-failure',
       sandbox: 'read-only',
     };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs(cfg, cwd, undefined, undefined);
     expect(args[0]).toBe('--dangerously-bypass-approvals-and-sandbox');
     expect(args).not.toContain('-a');
     expect(args).not.toContain('--sandbox');
@@ -39,7 +38,7 @@ describe('buildCodexArgs', () => {
 
   it('passes model and profile when provided', () => {
     const cfg: CodexBotConfig = { profile: 'staging' };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, 'gpt-5.5');
+    const args = buildCodexArgs(cfg, cwd, undefined, 'gpt-5.5');
     expect(args).toContain('-m');
     expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.5');
     expect(args).toContain('-p');
@@ -48,21 +47,21 @@ describe('buildCodexArgs', () => {
 
   it('passes Codex OpenAI-compatible base URL as a config override', () => {
     const cfg: CodexBotConfig = { baseUrl: 'https://gateway.example.com/openai/v1' };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, 'gpt-5.5');
+    const args = buildCodexArgs(cfg, cwd, undefined, 'gpt-5.5');
     expect(args).toContain('-c');
     expect(args[args.indexOf('-c') + 1]).toBe('openai_base_url="https://gateway.example.com/openai/v1"');
     expect(args.indexOf('-c')).toBeLessThan(args.indexOf('exec'));
   });
 
   it('passes Codex reasoning effort as a config override', () => {
-    const args = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5', 'high');
+    const args = buildCodexArgs({}, cwd, undefined, 'gpt-5.5', 'high');
     expect(args).toContain('-c');
     expect(args).toContain('model_reasoning_effort="high"');
     expect(args.indexOf('model_reasoning_effort="high"')).toBeLessThan(args.indexOf('exec'));
   });
 
   it('uses codex.reasoningEffort when no per-turn effort is provided', () => {
-    const args = buildCodexArgs({ reasoningEffort: 'xhigh' }, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs({ reasoningEffort: 'xhigh' }, cwd, undefined, undefined);
     expect(args).toContain('model_reasoning_effort="xhigh"');
   });
 
@@ -70,36 +69,34 @@ describe('buildCodexArgs', () => {
     expect(normalizeCodexReasoningEffort('ultracode')).toBeUndefined();
     expect(normalizeCodexReasoningEffort('max')).toBe('max');
     expect(normalizeCodexReasoningEffort('ultra')).toBe('ultra');
-    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'max')).toContain('model_reasoning_effort="max"');
-    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'ultra')).toContain('model_reasoning_effort="ultra"');
+    expect(buildCodexArgs({}, cwd, undefined, undefined, 'max')).toContain('model_reasoning_effort="max"');
+    expect(buildCodexArgs({}, cwd, undefined, undefined, 'ultra')).toContain('model_reasoning_effort="ultra"');
   });
 
   it('appends extraArgs verbatim between global flags and the exec subcommand', () => {
     const cfg: CodexBotConfig = { extraArgs: ['--foo', 'bar baz', '--qux'] };
-    const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs(cfg, cwd, undefined, undefined);
     const execIdx = args.indexOf('exec');
     expect(args.slice(execIdx - 3, execIdx)).toEqual(['--foo', 'bar baz', '--qux']);
   });
 
   it('uses `exec resume <sessionId>` when a session id is provided', () => {
-    const args = buildCodexArgs({}, cwd, prompt, 'sess-abc', undefined);
+    const args = buildCodexArgs({}, cwd, 'sess-abc', undefined);
     const tail = args.slice(args.indexOf('exec'));
-    expect(tail).toEqual(['exec', 'resume', '--json', '--skip-git-repo-check', 'sess-abc', prompt]);
+    expect(tail).toEqual(['exec', 'resume', '--json', '--skip-git-repo-check', 'sess-abc', '-']);
     // resume path does NOT pass --color never (Codex resume subcommand differs)
     expect(tail).not.toContain('--color');
   });
 
   it('passes `--color never` for fresh executions (no session id)', () => {
-    const args = buildCodexArgs({}, cwd, prompt, undefined, undefined);
+    const args = buildCodexArgs({}, cwd, undefined, undefined);
     const tail = args.slice(args.indexOf('exec'));
-    expect(tail).toEqual(['exec', '--json', '--color', 'never', '--skip-git-repo-check', prompt]);
+    expect(tail).toEqual(['exec', '--json', '--color', 'never', '--skip-git-repo-check', '-']);
   });
 
-  it('keeps prompt as a single argv entry even with whitespace / metacharacters', () => {
-    // spawn() receives argv as an array, so shell metacharacters are safe.
-    const evil = 'ignore; rm -rf /\n`whoami`';
-    const args = buildCodexArgs({}, cwd, evil, undefined, undefined);
-    expect(args[args.length - 1]).toBe(evil);
+  it('never carries prompt bytes in argv', () => {
+    const args = buildCodexArgs({}, cwd, undefined, undefined);
+    expect(args.at(-1)).toBe('-');
   });
 
   it('infers Codex display model and context from CODEX_HOME files', () => {
