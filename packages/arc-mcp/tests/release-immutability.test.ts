@@ -191,6 +191,20 @@ describe('symlinks and unsafe nodes', () => {
     expect(() => sealReleaseTrees(paths)).toThrow(/only a virtualenv interpreter link may be a symlink/i);
   });
 
+  it('accepts the exact root-level lib64 link created by Linux virtualenvs', () => {
+    buildRelease();
+    symlinkSync('lib', path.join(paths.venv, 'lib64'));
+    const record = sealReleaseTrees(paths);
+    expect(record.trees.venv.interpreter_links).toBe((SYSTEM_PYTHON ? 2 : 0) + 1);
+    expect(() => assertReleaseTreesSealed(paths, record)).not.toThrow();
+  });
+
+  it('refuses a root-level lib64 link that does not point exactly to lib', () => {
+    buildRelease();
+    symlinkSync('bin', path.join(paths.venv, 'lib64'));
+    expect(() => sealReleaseTrees(paths)).toThrow(/lib64 link must point exactly to lib/i);
+  });
+
   it('refuses a bin symlink that is not an interpreter name', () => {
     buildRelease();
     symlinkSync(path.join(paths.venv, 'bin', 'researchclaw'), path.join(paths.venv, 'bin', 'rc'));

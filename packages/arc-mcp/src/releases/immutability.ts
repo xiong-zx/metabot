@@ -38,7 +38,7 @@ export const SEALED_TREE_NAMES: readonly SealedTreeName[] = ['source', 'venv'];
 export interface SealedTreeRecord {
   files: number;
   directories: number;
-  /** Interpreter links; see {@link assertAllowedInterpreterLink}. */
+  /** Allowed virtualenv structural links. Field name retained for manifest compatibility. */
   interpreter_links: number;
 }
 
@@ -57,11 +57,11 @@ export interface SealedTreePaths {
 /**
  * Where a symlink is tolerated, and nowhere else.
  *
- * `interpreterDir` is a virtualenv's `bin`, the one place a symlink is
- * structural rather than incidental: `python`, `python3` and `python3.11` are
- * how a virtualenv reaches its base interpreter, and a virtualenv without them
- * is not a virtualenv. A source tree passes no interpreter directory at all,
- * so every symlink in it is refused.
+ * `interpreterDir` is a virtualenv's `bin`, where `python`, `python3` and
+ * `python3.11` structurally reach the base interpreter. CPython on Linux may
+ * also create the exact root-level `lib64 -> lib` compatibility link. A source
+ * tree receives none of these virtualenv paths, so every symlink in it is
+ * refused.
  */
 interface LinkPolicy {
   releaseDir: string;
@@ -69,6 +69,10 @@ interface LinkPolicy {
   interpreterDir?: string;
   /** Canonical, so it can be compared against a resolved symlink target. */
   interpreterRealDir?: string;
+  /** Lexical virtualenv root, for the exact root-level lib64 compatibility link. */
+  venvDir?: string;
+  /** Canonical virtualenv lib directory that lib64 must resolve to. */
+  venvLibRealDir?: string;
 }
 
 const VENV_INTERPRETER_NAME = /^python(\d+(\.\d+)?)?$/;
@@ -95,10 +99,10 @@ export function sealReleaseTrees(paths: SealedTreePaths): ReleaseImmutabilityRec
 /**
  * Fail-closed immutability check.
  *
- * Refuses a writable file, a writable directory, a symlink that is not a
- * virtualenv interpreter link, any node that is neither a regular file nor a
- * directory, and — when the sealed record is supplied — a census that no
- * longer matches the one the manifest recorded.
+ * Refuses a writable file, a writable directory, a symlink that is not an
+ * allowed virtualenv structural link, any node that is neither a regular file
+ * nor a directory, and — when the sealed record is supplied — a census that
+ * no longer matches the one the manifest recorded.
  */
 export function assertReleaseTreesSealed(
   paths: SealedTreePaths,
@@ -173,7 +177,7 @@ function sealTree(root: string, label: string, policy: LinkPolicy): SealedTreeRe
       const candidate = path.join(directory, entry);
       const info = lstatSync(candidate);
       if (info.isSymbolicLink()) {
-        assertAllowedInterpreterLink(candidate, label, policy);
+        assertAllowedVirtualenvLink(candidate, label, policy);
         record.interpreter_links += 1;
         continue;
       }
@@ -209,7 +213,7 @@ function assertTreeSealed(root: string, label: string, policy: LinkPolicy): Seal
       const candidate = path.join(directory, entry);
       const info = lstatSync(candidate);
       if (info.isSymbolicLink()) {
-        assertAllowedInterpreterLink(candidate, label, policy);
+        assertAllowedVirtualenvLink(candidate, label, policy);
         record.interpreter_links += 1;
         continue;
       }
@@ -251,15 +255,28 @@ function assertNotWritable(node: string, mode: number, label: string): void {
  * link cannot be used to reach the source tree or a release directory under a
  * name that looks like an interpreter.
  */
-function assertAllowedInterpreterLink(link: string, label: string, policy: LinkPolicy): void {
+function assertAllowedVirtualenvLink(link: string, label: string, policy: LinkPolicy): void {
   const refuse = (reason: string): never => {
     throw new Error(`Official release ${label} tree contains an unsafe symlink (${reason}): ${link}`);
   };
+  const target = readlinkSync(link);
+  if (policy.venvDir && path.dirname(link) === policy.venvDir && path.basename(link) === 'lib64') {
+    if (target !== 'lib') refuse('the virtualenv lib64 link must point exactly to lib');
+    let resolved: string;
+    try {
+      resolved = realpathSync.native(link);
+    } catch {
+      return refuse('the virtualenv lib64 target does not resolve');
+    }
+    if (!policy.venvLibRealDir || resolved !== policy.venvLibRealDir || !statSync(resolved).isDirectory()) {
+      refuse('the virtualenv lib64 target is not its own lib directory');
+    }
+    return;
+  }
   if (!policy.interpreterDir || path.dirname(link) !== policy.interpreterDir) {
     refuse('only a virtualenv interpreter link may be a symlink');
   }
   if (!VENV_INTERPRETER_NAME.test(path.basename(link))) refuse('not an interpreter name');
-  const target = readlinkSync(link);
   if (target.split('/').includes('..')) refuse('the target traverses upwards');
   let resolved: string;
   try {
@@ -279,6 +296,8 @@ function linkPolicy(paths: SealedTreePaths): Required<LinkPolicy> {
     releaseDir: realpathIfPossible(paths.release),
     interpreterDir,
     interpreterRealDir: realpathIfPossible(interpreterDir),
+    venvDir: paths.venv,
+    venvLibRealDir: realpathIfPossible(path.join(paths.venv, 'lib')),
   };
 }
 
