@@ -97,7 +97,6 @@ describe('buildCodexArgs', () => {
     const args = buildCodexArgs(
       { extraArgs: ['--operator-override'] },
       cwd,
-      prompt,
       undefined,
       undefined,
       undefined,
@@ -117,8 +116,8 @@ describe('buildCodexArgs', () => {
   });
 
   it('keeps argv byte-identical when no MCP entries are materialized', () => {
-    const existing = buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high');
-    expect(buildCodexArgs({}, cwd, prompt, undefined, undefined, 'high', [])).toEqual(existing);
+    const existing = buildCodexArgs({}, cwd, undefined, undefined, 'high');
+    expect(buildCodexArgs({}, cwd, undefined, undefined, 'high', [])).toEqual(existing);
   });
 
   it('uses `exec resume <sessionId>` when a session id is provided', () => {
