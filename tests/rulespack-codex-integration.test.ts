@@ -191,7 +191,7 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_token
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rulespack-stdin-cancel-'));
     temporary.push(directory);
     const executable = path.join(directory, 'codex');
-    fs.writeFileSync(executable, '#!/bin/sh\nsleep 5\n', { mode: 0o755 });
+    fs.writeFileSync(executable, '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
     const cfg = config();
     cfg.codex = { executable };
     const markInjected = vi.fn();
