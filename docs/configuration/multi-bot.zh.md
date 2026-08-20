@@ -75,6 +75,30 @@
 | 微信      | 可选 `wechatBotToken`；省略时扫码登录                                          |
 | Slack     | `slackBotToken`、`slackSigningSecret`，可选 `slackBotUserId`、`groupNoMention` |
 
+## Codex RulesPack 共享默认值
+
+在 `bots.json` 根级配置 `rulesPackDefaults` 后，所有渠道中当前及未来新增的
+Codex Bot 都会继承它。`dbPath` 必须同时包含 `{surface}` 和 `{bot}`，以隔离
+Bridge、Worker 及各 Bot 的状态。`required` 默认值不允许 Bot 退出或替换必需
+source；`optional` 默认值允许设置 `"rulesPack": false`，但必须同时提供
+`rulesPackOptOutReason`。Claude 和 Kimi 引擎仍可使用，但 RulesPack 状态会明确
+显示为 `unsupported`，因为规则注入仅支持 Codex。详见
+[Codex RulesPack](../features/rulespack.md)。
+
+如果一个 project 对应多个 chat，请用 `projectChatBindings` 列出精确的
+`(bot, chatId)`。凡是声明为该 project scope 的 Rule，都会自动适用于这些
+chat。用于 peer 和 Agent Bus 路由时，目标 Bridge 只发布这些精确 tuple 的
+SHA-256 key 及 project ID，不会在发现结果中暴露原始 chat ID；接收端仍会用
+本地配置重新验证 project。Rule target 中，同一个列表里的值是“任意一个即可”（例如 bot 是 `pm`
+或 `pm-savio`）；不同字段则必须“同时满足”（例如 bot 命中上述列表，并且
+认证角色包含 `pm`）。
+
+同一 Bridge 的全部 Bot 共用一个 Core credential，因此也必须共用同一个
+`dispatch.issuer`。请使用 Bridge 实际使用的 token 运行 `metabot agents whoami`，
+把返回的 `botName` 原样填入 `dispatch.issuer`；不要在 `issuer` 或
+`allowedIssuers` 中使用 `{bot}` / `{surface}`。旧版模板化身份配置会在启动时
+给出明确迁移错误，不会静默弱化传输身份绑定。
+
 ## Codex 配置
 
 ```json
@@ -156,6 +180,8 @@ MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久
   使用单次调用配置，Claude 使用追加式会话配置，都不会覆盖用户共享的
   MCP 设置。Kimi 目前没有隔离的单会话 MCP 配置入口，因此即使开关已启用
   也不会获得这两个工具。
+- 所有渠道的 Bot 名称在 Unicode 规范化及忽略大小写后必须全局唯一；这也
+  能避免大小写不敏感文件系统上的每 Bot 状态路径碰撞。
 
 设置 `BOTS_CONFIG` 后，单 Bot 的渠道环境变量会被忽略。
 

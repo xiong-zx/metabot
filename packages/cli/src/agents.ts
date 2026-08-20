@@ -97,6 +97,11 @@ interface AgentRow {
   visible: boolean;
   visibleToOwners?: string[];
   lastSeenAt: string;
+  rulesPackStatus?: {
+    state: 'inherited' | 'overridden' | 'opted-out' | 'unconfigured' | 'unsupported';
+    required: boolean;
+    mode?: 'off' | 'shadow' | 'enforce';
+  };
 }
 
 interface ListResponse {
@@ -285,6 +290,19 @@ async function cmdTalk(args: string[]): Promise<void> {
     );
   }
   if (!peer.url) throw new Error(`metabot agents talk: peer '${peerName}' has no url in registry`);
+
+  const targetAgent = (list.agents || []).find((agent) => agent.botName === botName);
+  const rulesPack = targetAgent?.rulesPackStatus;
+  if (
+    rulesPack &&
+    (rulesPack.state === 'inherited' || rulesPack.state === 'overridden') &&
+    (rulesPack.required || rulesPack.mode === 'shadow' || rulesPack.mode === 'enforce')
+  ) {
+    throw new Error(
+      `metabot agents talk: target '${botName}' requires a sender-compiled RulesPack envelope; ` +
+        `use \`metabot talk ${target} ${chatId} "<message>"\` through a resident Bridge`,
+    );
+  }
 
   if (chatIdSource === 'project') {
     process.stderr.write(`→ using project-derived chatId: ${chatId}\n`);

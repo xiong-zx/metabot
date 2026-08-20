@@ -96,6 +96,9 @@ export interface ScopedDispatchWorkerInput extends DispatchWorkerInput {
   principalRole: TrustedPrincipalRole;
   executionKind: 'worker' | 'arc';
   authorizingCapability?: string;
+  /** Private signed carrier; omitted from WorkerRecord and all public output. */
+  rulesPackChildGrantJson?: string;
+  rulesPackChildGrantDigest?: string;
   dedupePolicy: DedupePolicy;
   timeoutMs: number;
   idleTimeoutMs: number;
@@ -208,8 +211,33 @@ export interface PreparedWorkerRulesPack {
   markRejected(reason: unknown): void;
 }
 
+export type WorkerRulesPackMode = 'off' | 'shadow' | 'enforce';
+
+export interface WorkerRulesPackControlStatus {
+  botName: string;
+  state: 'configured' | 'unconfigured' | 'opted-out' | 'unsupported' | 'standalone-shared';
+  botScoped: boolean;
+  mode: WorkerRulesPackMode;
+  configuredMode?: WorkerRulesPackMode;
+  operatorModeOverride?: {
+    mode: WorkerRulesPackMode;
+    updatedAt: string;
+  };
+  operatorModeVersion: number;
+  operatorModeOperationId?: string;
+  appliesTo: 'subsequent-codex-policy-preparations';
+  inFlight: 'unchanged';
+}
+
 export interface WorkerRulesPackProvider {
-  prepare(worker: WorkerRecord): Promise<PreparedWorkerRulesPack>;
+  prepare(worker: WorkerRecord, childGrant?: import('@metabot/rulespack').RulesPackChildGrantV1): Promise<PreparedWorkerRulesPack | undefined>;
+  controlStatus?(botName: string): WorkerRulesPackControlStatus;
+  setControlMode?(
+    botName: string,
+    mode: WorkerRulesPackMode | null,
+    expectedVersion: number,
+    operationId: string,
+  ): WorkerRulesPackControlStatus;
   close?(): void;
 }
 

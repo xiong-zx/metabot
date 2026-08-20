@@ -78,6 +78,10 @@ import {
 } from './routes/worker-events-routes.js';
 import type { RouteContext } from './routes/index.js';
 import { resolveRulesPackApiPrincipal } from '../extensions/rulespack-api-principal.js';
+import {
+  LocalRulesPackWorkerCoordinator,
+  type RulesPackWorkerCoordinator,
+} from '../extensions/rulespack-worker-coordinator.js';
 
 export interface ApiServerOptions {
   port: number;
@@ -96,6 +100,7 @@ export interface ApiServerOptions {
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   agentTeamCapabilityService?: AgentTeamExecutionCapabilityService;
   executionCapabilityService?: ExecutionCapabilityService;
+  rulesPackWorkerCoordinator?: RulesPackWorkerCoordinator;
   terminalEventStore?: TerminalEventStore;
   terminalEventRateLimiter?: TerminalEventRateLimiter;
   agentTeams?: AgentTeamConfig[];
@@ -231,6 +236,12 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const ownsAgentTeamGovernance = !options.agentTeamGovernance;
   const agentTeamCapabilityService = options.agentTeamCapabilityService ?? new AgentTeamExecutionCapabilityService();
   const executionCapabilityService = options.executionCapabilityService ?? new ExecutionCapabilityService();
+  const rulesPackWorkerCoordinator = options.rulesPackWorkerCoordinator ?? new LocalRulesPackWorkerCoordinator({
+    capabilityService: executionCapabilityService,
+    endpoint: process.env.METABOT_WORKER_DAEMON_URL?.trim()
+      || process.env.METABOT_WORKER_LISTEN?.trim()
+      || 'http://127.0.0.1:9311/mcp',
+  });
   const terminalEventStore = options.terminalEventStore ?? new TerminalEventStore(logger);
   const ownsTerminalEventStore = !options.terminalEventStore;
   const terminalEventRateLimiter = options.terminalEventRateLimiter ?? new TerminalEventRateLimiter();
@@ -327,6 +338,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     agentTeamSupervisor,
     agentTeamGovernance,
     executionCapabilityService,
+    rulesPackWorkerCoordinator,
     terminalEventStore,
     terminalEventDispatcher,
     terminalEventRateLimiter,
@@ -455,6 +467,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     const executionPrincipalFor = ({ botName, chatId }: { botName: string; chatId: string }) =>
       deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
     bot.bridge.setExecutionPrincipalProvider?.(executionPrincipalFor);
+    bot.bridge.setRulesPackChildGrantProvider?.((capability, parent) =>
+      executionCapabilityService.issueRulesPackChildGrant(capability, parent));
     const capabilityCache = new Map<
       string,
       { env: Record<string, string>; refreshAt: number; timer: ReturnType<typeof setTimeout> }

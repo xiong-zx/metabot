@@ -404,6 +404,7 @@ describe('downstream feature boundary gate', () => {
       ['rulespack-operator-routes', 'src/extensions/rulespack-routes.ts'],
       ['rulespack-api-principal', 'src/extensions/rulespack-api-principal.ts'],
       ['rulespack-peer-dispatch', 'src/extensions/rulespack-peer-dispatch.ts'],
+      ['rulespack-detached-dispatch-grant', 'packages/worker-runner-mcp/src/rulespack.ts'],
     ]) {
       expect(manifest.features.find((candidate) => candidate.id === id)).toMatchObject({
         roots: expect.arrayContaining([root]),

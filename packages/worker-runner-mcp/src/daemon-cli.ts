@@ -32,10 +32,15 @@ if (env.METABOT_WORKER_CALLBACK_URL) {
     'Worker callback signing',
   ]);
 }
-const runtime = createWorkerRunnerServiceRuntime({ env, dynamicPrincipals: true });
+const capabilityVerifier = new LocalCapabilityVerifier(capabilityPublicKeys, 'worker');
+const runtime = createWorkerRunnerServiceRuntime({
+  env,
+  dynamicPrincipals: true,
+  rulesPackGrantVerifier: (grant, capability) => capabilityVerifier.verifyRulesPackChildGrant(grant, capability),
+});
 const daemon = new WorkerRunnerDaemon(runtime.service, {
   endpoint: requiredAnyEnv(env, ['METABOT_WORKER_LISTEN', 'METABOT_WORKER_DAEMON_URL']),
-  capabilityVerifier: new LocalCapabilityVerifier(capabilityPublicKeys, 'worker'),
+  capabilityVerifier,
   maxRequestBytes: integerEnv(env, 'METABOT_WORKER_MAX_REQUEST_BYTES', 1_048_576),
   maxStatusOutputChars: integerEnv(env, 'METABOT_WORKER_STATUS_OUTPUT_CHARS', 16_384),
 });

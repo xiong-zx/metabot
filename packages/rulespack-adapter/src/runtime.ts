@@ -27,6 +27,7 @@ import {
   type RuleSourceAdapter,
   type RulesFeedback,
   type RulesMode,
+  type RulesPackChildGrantV1,
   type RulesPackDispatchEnvelopeV1,
   type SourceSnapshot,
 } from '@metabot/rulespack';
@@ -40,6 +41,7 @@ import type {
   RulesPackLogger,
   RulesPackOperator,
   RulesPackOperatorStatus,
+  RulesPackProjectChatBindingConfig,
   RulesPackProjectBindingConfig,
   RulesPackStructuredSourceConfig,
 } from './types.js';
@@ -52,6 +54,7 @@ const RESERVED_DATABASE_BASENAMES = new Set(['sessions.db', 'agent-teams.db', 'w
 const RULESPACK_TABLES = new Set([
   ...RULESPACK_STORE_TABLES,
   'rulespack_adapter_settings',
+  'rulespack_adapter_mode_audit',
   'rulespack_replay_claims',
   'rulespack_replay_claims_v2',
   'rulespack_replay_claims_v3',
@@ -71,6 +74,12 @@ interface ProvisionalDispatch {
   claimToken: string;
 }
 
+interface OperatorModeState {
+  version: number;
+  operationId?: string;
+  override?: { mode: RulesMode; updatedAt: string };
+}
+
 export class MetaBotRulesPackRuntime implements RulesPackOperator {
   readonly hostId: string;
   readonly dbPath: string;
@@ -81,6 +90,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   private readonly logger: RulesPackLogger;
   private readonly stateDb: DatabaseSync;
   private readonly projectBindings: Array<RulesPackProjectBindingConfig & { canonicalRoot: string }>;
+  private readonly projectChatBindings: ReadonlyMap<string, string>;
   private readonly temporaryAdapters = new Map<string, RuleSourceAdapter>();
   private readonly watchers: FSWatcher[] = [];
   private readonly budget: CompileBudget;
@@ -100,7 +110,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     this.config = config ?? {};
     this.logger = logger;
     this.hostId = nonempty(this.config.hostId ?? process.env.RULESPACK_HOST_ID ?? hostname(), 'RulesPack hostId');
-    this.dbPath = resolveRulesPackDbPath(this.config.dbPath);
+    this.dbPath = validateRulesPackDatabasePath(this.config.dbPath, this.config.protectedDbPaths);
     this.audience = nonempty(
       this.config.dispatch?.audience ?? `metabot-host:${this.hostId}`,
       'RulesPack dispatch audience',
@@ -113,7 +123,6 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
       // Validate locality before opening any database or scheduling background work.
       new CoreMetaMemoryRuleReader(this.config.metaMemory.coreUrl);
     }
-    assertIndependentRulesPackDatabase(this.dbPath, this.config.protectedDbPaths);
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true });
     this.stateDb = new DatabaseSync(this.dbPath);
     this.stateDb.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
@@ -144,6 +153,10 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         canonicalRoot: realpathSync(expandPath(binding.root)),
       }))
       .sort((left, right) => right.canonicalRoot.length - left.canonicalRoot.length);
+    this.projectChatBindings = buildProjectChatBindings(
+      this.config.projectChatBindings,
+      new Set(this.projectBindings.map((binding) => binding.projectId)),
+    );
     this.migrateAdapterState();
     this.restoreOperatorMode();
   }
@@ -180,8 +193,13 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
       await this.initialize();
     }
     const subject = this.buildSubject(facts);
+    if (incoming && preparedMode === 'off') {
+      const error = new RulesPackError('TARGET_MISMATCH', 'RulesPack dispatch rejected while target mode is off');
+      this.recordRejectedEnvelope(incoming.envelope, subject, error);
+      throw error;
+    }
     let provisional: ProvisionalDispatch | undefined;
-    if (incoming && preparedMode !== 'off') {
+    if (incoming) {
       try {
         provisional = this.prepareEnvelope(incoming.envelope, subject, incoming.transport);
       } catch (error) {
@@ -259,9 +277,13 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
             receipt({
               packDigest: effectiveDigest,
               subject,
-              status: 'consumed',
+              status: preparedMode === 'shadow' ? 'shadowed' : 'consumed',
               ...transportFields,
-              details: { envelopeFingerprint: dispatchEnvelopeFingerprint(receivedEnvelope), mode: preparedMode },
+              details: {
+                envelopeFingerprint: dispatchEnvelopeFingerprint(receivedEnvelope),
+                mode: preparedMode,
+                targetAccepted: true,
+              },
             }),
           );
         }
@@ -287,6 +309,68 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         );
       },
     };
+  }
+
+  /**
+   * Rebind one authenticated parent dispatch to the exact, server-assigned
+   * detached Worker subject. The worker-surface database owns replay and final
+   * source persistence; the Bridge database is never opened here.
+   */
+  async prepareDelegatedTurn(
+    facts: AuthenticatedExecutionFacts,
+    grant: RulesPackChildGrantV1,
+  ): Promise<PreparedRulesPackTurn> {
+    const subject = this.buildSubject(facts);
+    if (
+      subject.hostId !== grant.constraints.hostId ||
+      subject.bot !== grant.constraints.bot ||
+      subject.chatId !== grant.constraints.chatId ||
+      subject.projectId !== grant.constraints.projectId ||
+      !subject.worker || !subject.taskId
+    ) {
+      throw new RulesPackError('TARGET_MISMATCH', 'RulesPack child grant does not match the exact Worker subject');
+    }
+    const suffix = digestObject({ grantId: grant.grantId, subjectFingerprint: subjectFingerprint(subject) })
+      .replace(/^sha256:/u, '')
+      .slice(0, 24);
+    const envelopeId = `child-${suffix}`;
+    const sourceSuffix = digestObject(envelopeId).replace(/^sha256:/u, '').slice(0, 20);
+    if (this.engine.store.listSourceGenerations().some((source) => source.sourceId === `dispatch-${sourceSuffix}`)) {
+      return this.prepareTurn(facts);
+    }
+    const seedEnvelope: RulesPackDispatchEnvelopeV1 = {
+      ...grant.parent,
+      envelopeId,
+      replayId: `child-replay-${suffix}`,
+      audience: this.audience,
+      issuedAt: grant.issuedAt,
+      expiresAt: grant.expiresAt,
+      target: subject,
+      subjectFingerprint: subjectFingerprint(subject),
+      parentDispatchId: grant.parent.envelopeId,
+    };
+    const snapshot = this.buildDispatchSource(seedEnvelope, subject);
+    const delegated = this.engine.compile({
+      subject,
+      budget: this.budget,
+      mode: this.engine.mode,
+      provisional: true,
+      sourceState: {
+        rules: snapshot.rules,
+        generations: [snapshot.source],
+        degradationReasons: [],
+        usedLastKnownGood: false,
+      },
+    });
+    const envelope: RulesPackDispatchEnvelopeV1 = {
+      ...seedEnvelope,
+      packDigest: delegated.pack.packDigest,
+      pack: delegated.pack,
+    };
+    return this.prepareTurn(facts, {
+      envelope,
+      transport: { authenticated: true, authenticatedIssuer: envelope.issuer },
+    });
   }
 
   async createDispatchEnvelope(input: {
@@ -432,17 +516,32 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   buildSubject(facts: AuthenticatedExecutionFacts): ExecutionSubject {
     if (!facts || typeof facts !== 'object')
       throw new RulesPackError('VALIDATION_ERROR', 'Authenticated facts required');
-    const cwd = realpathSync(facts.cwd);
-    const project = this.projectBindings.find((binding) => containedBy(binding.canonicalRoot, cwd));
+    const botName = nonempty(facts.botName, 'authenticated botName');
+    const chatId = nonempty(facts.chatId, 'authenticated chatId');
+    const cwdProjectId = this.projectIdForCwd(facts.cwd);
+    const chatProjectId = this.projectIdForChat(botName, chatId);
+    if (cwdProjectId && chatProjectId && cwdProjectId !== chatProjectId) {
+      throw new RulesPackError(
+        'TARGET_MISMATCH',
+        'Authenticated chat project does not match the configured cwd binding',
+      );
+    }
+    const projectId = chatProjectId ?? cwdProjectId;
+    if (facts.projectId && projectId !== facts.projectId) {
+      throw new RulesPackError(
+        'TARGET_MISMATCH',
+        'Authenticated project identity does not match the configured cwd binding',
+      );
+    }
     return {
       hostId: this.hostId,
-      bot: nonempty(facts.botName, 'authenticated botName'),
+      bot: botName,
       roles: exactValues(facts.roles),
       ...(facts.agentName ? { agent: nonempty(facts.agentName, 'authenticated agentName') } : {}),
       ...(facts.workerId ? { worker: nonempty(facts.workerId, 'authenticated workerId') } : {}),
       ...(facts.userId ? { userId: nonempty(facts.userId, 'authenticated userId') } : {}),
-      ...(project ? { projectId: project.projectId } : {}),
-      chatId: nonempty(facts.chatId, 'authenticated chatId'),
+      ...(projectId ? { projectId } : {}),
+      chatId,
       ...(facts.taskId ? { taskId: nonempty(facts.taskId, 'authenticated taskId') } : {}),
       tools: exactValues(facts.tools ?? []),
       dataClasses: exactValues(facts.dataClasses ?? []),
@@ -452,12 +551,30 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     };
   }
 
+  projectIdForCwd(cwd: string): string | undefined {
+    const canonicalCwd = realpathSync(cwd);
+    return this.projectBindings.find((binding) => containedBy(binding.canonicalRoot, canonicalCwd))?.projectId;
+  }
+
+  projectIdForChat(botName: string, chatId: string): string | undefined {
+    return this.projectChatBindings.get(projectChatKey(
+      nonempty(botName, 'authenticated botName'),
+      nonempty(chatId, 'authenticated chatId'),
+    ));
+  }
+
   status(): RulesPackOperatorStatus {
+    const operatorMode = this.readOperatorModeState();
+    const durableMode = operatorMode.override?.mode ?? normalizeMode(this.config.mode);
+    if (this.engine.mode !== durableMode) this.engine.setMode(durableMode);
     return {
       ...this.engine.status(),
       dbPath: this.dbPath,
       hostId: this.hostId,
       audience: this.audience,
+      ...(operatorMode.override ? { operatorModeOverride: operatorMode.override } : {}),
+      operatorModeVersion: operatorMode.version,
+      ...(operatorMode.operationId ? { operatorModeOperationId: operatorMode.operationId } : {}),
       initialized: this.initialized,
       refreshing: this.refreshing,
       ...(this.lastRefreshAt ? { lastRefreshAt: this.lastRefreshAt } : {}),
@@ -468,19 +585,26 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   }
 
   setMode(mode: RulesMode): RulesPackOperatorStatus {
-    this.engine.setMode(normalizeMode(mode));
-    this.stateDb
-      .prepare(
-        'INSERT INTO rulespack_adapter_settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
-      )
-      .run('last_operator_mode', mode, new Date().toISOString());
-    return this.status();
+    const normalized = normalizeMode(mode);
+    return this.applyOperatorModeChange('set', normalized, undefined, randomUUID());
   }
 
   clearModeOverride(): RulesPackOperatorStatus {
-    this.stateDb.prepare('DELETE FROM rulespack_adapter_settings WHERE key = ?').run('last_operator_mode');
-    this.engine.setMode(normalizeMode(this.config.mode));
-    return this.status();
+    return this.applyOperatorModeChange('clear', normalizeMode(this.config.mode), undefined, randomUUID());
+  }
+
+  compareAndSetMode(
+    mode: RulesMode | null,
+    expectedVersion: number,
+    operationId: string,
+  ): RulesPackOperatorStatus {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      throw new RulesPackError('VALIDATION_ERROR', 'RulesPack operator mode expectedVersion is invalid');
+    }
+    const normalizedOperationId = nonempty(operationId, 'RulesPack operator mode operationId');
+    return mode === null
+      ? this.applyOperatorModeChange('clear', normalizeMode(this.config.mode), expectedVersion, normalizedOperationId)
+      : this.applyOperatorModeChange('set', normalizeMode(mode), expectedVersion, normalizedOperationId);
   }
 
   async refresh(): Promise<RulesPackOperatorStatus> {
@@ -904,6 +1028,17 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      INSERT OR IGNORE INTO rulespack_adapter_settings(key, value, updated_at)
+        VALUES ('operator_mode_version', '0', '1970-01-01T00:00:00.000Z');
+      CREATE TABLE IF NOT EXISTS rulespack_adapter_mode_audit (
+        event_id TEXT PRIMARY KEY,
+        action TEXT NOT NULL CHECK (action IN ('set', 'clear')),
+        previous_mode TEXT NOT NULL CHECK (previous_mode IN ('off', 'shadow', 'enforce')),
+        effective_mode TEXT NOT NULL CHECK (effective_mode IN ('off', 'shadow', 'enforce')),
+        occurred_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS rulespack_adapter_mode_audit_occurred_idx
+        ON rulespack_adapter_mode_audit(occurred_at DESC);
       CREATE TABLE IF NOT EXISTS rulespack_replay_claims (
         replay_id TEXT PRIMARY KEY,
         issuer TEXT NOT NULL,
@@ -952,11 +1087,86 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   }
 
   private restoreOperatorMode(): void {
-    const row = this.stateDb
-      .prepare('SELECT value FROM rulespack_adapter_settings WHERE key = ?')
-      .get('last_operator_mode') as { value?: string } | undefined;
-    if (!row?.value) return;
-    this.engine.setMode(normalizeMode(row.value as RulesMode));
+    const state = this.readOperatorModeState();
+    if (!state.override) return;
+    this.engine.setMode(state.override.mode);
+  }
+
+  private readOperatorModeState(): OperatorModeState {
+    const rows = this.stateDb
+      .prepare(
+        "SELECT key, value, updated_at FROM rulespack_adapter_settings WHERE key IN ('last_operator_mode', 'operator_mode_version', 'operator_mode_operation_id')",
+      )
+      .all() as Array<{ key: string; value: string; updated_at: string }>;
+    const settings = new Map(rows.map((row) => [row.key, row]));
+    const overrideRow = settings.get('last_operator_mode');
+    const versionRow = settings.get('operator_mode_version');
+    const operationRow = settings.get('operator_mode_operation_id');
+    const version = Number(versionRow?.value ?? '0');
+    if (!Number.isSafeInteger(version) || version < 0) {
+      throw new RulesPackError('VALIDATION_ERROR', 'RulesPack operator mode version is corrupt');
+    }
+    return {
+      version,
+      ...(operationRow?.value ? { operationId: operationRow.value } : {}),
+      ...(overrideRow?.value && overrideRow.updated_at
+        ? { override: { mode: normalizeMode(overrideRow.value as RulesMode), updatedAt: overrideRow.updated_at } }
+        : {}),
+    };
+  }
+
+  private applyOperatorModeChange(
+    action: 'set' | 'clear',
+    effectiveMode: RulesMode,
+    expectedVersion: number | undefined,
+    operationId: string,
+  ): RulesPackOperatorStatus {
+    const occurredAt = new Date().toISOString();
+    this.stateDb.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.readOperatorModeState();
+      const previousMode = current.override?.mode ?? normalizeMode(this.config.mode);
+      if (expectedVersion !== undefined && current.version !== expectedVersion) {
+        throw new RulesPackError(
+          'TARGET_MISMATCH',
+          `RulesPack operator mode version mismatch: expected ${expectedVersion}, current ${current.version}`,
+        );
+      }
+      if (action === 'clear') {
+        this.stateDb.prepare('DELETE FROM rulespack_adapter_settings WHERE key = ?').run('last_operator_mode');
+      } else {
+        this.stateDb
+          .prepare(
+            'INSERT INTO rulespack_adapter_settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+          )
+          .run('last_operator_mode', effectiveMode, occurredAt);
+      }
+      const nextVersion = current.version + 1;
+      if (!Number.isSafeInteger(nextVersion)) {
+        throw new RulesPackError('VALIDATION_ERROR', 'RulesPack operator mode version is exhausted');
+      }
+      this.stateDb
+        .prepare(
+          'INSERT INTO rulespack_adapter_settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+        )
+        .run('operator_mode_version', String(nextVersion), occurredAt);
+      this.stateDb
+        .prepare(
+          'INSERT INTO rulespack_adapter_settings(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+        )
+        .run('operator_mode_operation_id', operationId, occurredAt);
+      this.stateDb
+        .prepare(
+          'INSERT INTO rulespack_adapter_mode_audit(event_id, action, previous_mode, effective_mode, occurred_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(operationId, action, previousMode, effectiveMode, occurredAt);
+      this.stateDb.exec('COMMIT');
+    } catch (error) {
+      this.stateDb.exec('ROLLBACK');
+      throw error;
+    }
+    this.engine.setMode(effectiveMode);
+    return this.status();
   }
 
   private retireRemovedSources(adapters: readonly RuleSourceAdapter[]): void {
@@ -1117,6 +1327,16 @@ export function resolveRulesPackDbPath(configured?: string): string {
   return resolved;
 }
 
+/** Read-only validation for config preflight; it never creates or migrates the target database. */
+export function validateRulesPackDatabasePath(
+  configured?: string,
+  protectedDbPaths: readonly string[] = [],
+): string {
+  const dbPath = resolveRulesPackDbPath(configured);
+  assertIndependentRulesPackDatabase(dbPath, protectedDbPaths);
+  return dbPath;
+}
+
 function assertIndependentRulesPackDatabase(dbPath: string, configuredProtected: readonly string[] = []): void {
   if (dbPath === ':memory:') return;
   const candidate = canonicalDatabasePath(dbPath);
@@ -1188,6 +1408,61 @@ function expandPath(value: string): string {
 function containedBy(root: string, child: string): boolean {
   const rel = relative(root, child);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function buildProjectChatBindings(
+  configured: readonly RulesPackProjectChatBindingConfig[] | undefined,
+  configuredProjects: ReadonlySet<string>,
+): ReadonlyMap<string, string> {
+  if (configured !== undefined && !Array.isArray(configured)) {
+    throw new RulesPackError('VALIDATION_ERROR', 'RulesPack projectChatBindings must be an array');
+  }
+  const bindings = new Map<string, string>();
+  const declaredProjects = new Set<string>();
+  for (const project of configured ?? []) {
+    if (!project || typeof project !== 'object' || Array.isArray(project)) {
+      throw new RulesPackError('VALIDATION_ERROR', 'RulesPack projectChatBindings entry is invalid');
+    }
+    const projectId = configIdentity(project.projectId, 'RulesPack chat projectId');
+    if (!configuredProjects.has(projectId)) {
+      throw new RulesPackError(
+        'VALIDATION_ERROR',
+        `RulesPack chat project ${projectId} has no configured project root`,
+      );
+    }
+    if (declaredProjects.has(projectId)) {
+      throw new RulesPackError('VALIDATION_ERROR', `RulesPack chat project ${projectId} is declared more than once`);
+    }
+    declaredProjects.add(projectId);
+    if (!Array.isArray(project.chats) || project.chats.length === 0) {
+      throw new RulesPackError('VALIDATION_ERROR', `RulesPack chat project ${projectId} requires at least one chat`);
+    }
+    for (const chat of project.chats) {
+      if (!chat || typeof chat !== 'object' || Array.isArray(chat)) {
+        throw new RulesPackError('VALIDATION_ERROR', `RulesPack chat project ${projectId} contains an invalid chat`);
+      }
+      const bot = configIdentity(chat.bot, 'RulesPack project chat bot');
+      const chatId = configIdentity(chat.chatId, 'RulesPack project chatId');
+      const key = projectChatKey(bot, chatId);
+      if (bindings.has(key)) {
+        throw new RulesPackError(
+          'VALIDATION_ERROR',
+          `RulesPack project chat ${bot}/${chatId} is declared more than once`,
+        );
+      }
+      bindings.set(key, projectId);
+    }
+  }
+  return bindings;
+}
+
+function projectChatKey(bot: string, chatId: string): string {
+  return JSON.stringify([bot, chatId]);
+}
+
+function configIdentity(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new RulesPackError('VALIDATION_ERROR', `${label} is invalid`);
+  return nonempty(value, label);
 }
 
 function exactValues(values: readonly string[]): string[] {

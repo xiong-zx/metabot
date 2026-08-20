@@ -14,6 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { MetaBotRulesPackRuntime } from '@metabot/rulespack-adapter';
+import { LocalCapabilityVerifier, readPublicKeyFile } from '../packages/worker-runner-mcp/src/local-auth.js';
 import {
   ExecutionCapabilityError,
   ExecutionCapabilityService,
@@ -49,6 +51,59 @@ function signCapabilityClaims(dir: string, claims: ExecutionCapabilityClaims): s
 }
 
 describe('execution capability Ed25519 keys', () => {
+  it('signs a capability-bound, expiring Worker child grant and rejects tamper or cross-capability use', async () => {
+    const dir = keyDir();
+    const service = new ExecutionCapabilityService(dir);
+    const now = 1_000_000;
+    const token = service.issue({
+      purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1', ttlMs: 10_000,
+    }, now);
+    const runtime = new MetaBotRulesPackRuntime({
+      mode: 'enforce',
+      hostId: 'sender',
+      dbPath: join(dir, 'grant-sender.sqlite'),
+      dispatch: { issuer: 'remote-bridge' },
+      configRules: {
+        id: 'grant', revision: '1', rules: [{
+          schemaVersion: 1, id: 'grant-rule', version: '1', text: 'Grant policy.', scope: 'global',
+          targets: {}, authority: 'user-approved', priority: 1, overridable: false,
+          lifecycle: { status: 'approved' },
+          source: { kind: 'config', adapterId: 'grant', ref: 'grant', revision: '1' },
+        }],
+      },
+    }, { debug() {}, info() {}, warn() {}, error() {} });
+    try {
+      const parent = await runtime.createDispatchEnvelope({
+        targetSubject: {
+          hostId: 'imac', bot: 'pm-codex', roles: ['pm'], chatId: 'chat-1',
+          projectId: 'metabot', tools: ['metabot-worker'], dataClasses: ['agent-bus'],
+          outputTypes: ['text'], engine: 'codex',
+        },
+        audience: 'metabot-host:imac', now: new Date(now).toISOString(), ttlMs: 5_000,
+      });
+      const grant = service.issueRulesPackChildGrant(token, parent, now);
+      const verifier = new LocalCapabilityVerifier([
+        readPublicKeyFile(join(dir, 'worker-capability.pub'), 'worker capability'),
+      ], 'worker', () => now + 1);
+      expect(verifier.verifyRulesPackChildGrant(grant, token)).toMatchObject({
+        purpose: 'worker', depth: 1, constraints: { bot: 'pm-codex', chatId: 'chat-1', projectId: 'metabot' },
+      });
+      expect(() => verifier.verifyRulesPackChildGrant({
+        ...grant, constraints: { ...grant.constraints, projectId: 'other' },
+      }, token)).toThrow(/signature/u);
+      const otherToken = service.issue({
+        purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1', ttlMs: 9_000,
+      }, now);
+      expect(() => verifier.verifyRulesPackChildGrant(grant, otherToken)).toThrow(/capability binding/u);
+      const expired = new LocalCapabilityVerifier([
+        readPublicKeyFile(join(dir, 'worker-capability.pub'), 'worker capability'),
+      ], 'worker', () => now + 5_000);
+      expect(() => expired.verifyRulesPackChildGrant(grant, token)).toThrow(/expired/u);
+    } finally {
+      runtime.close();
+    }
+  });
+
   it('provisions TOFU keypairs out of runtime without overwriting and diagnoses ownership/modes/pairs', () => {
     const dir = keyDir();
     const before = readFileSync(join(dir, 'worker-capability.key'), 'utf8');

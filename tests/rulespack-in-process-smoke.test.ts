@@ -74,7 +74,14 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
         hostId: 'imac',
         dbPath: join(directory, 'rules-state.sqlite'),
         configRules: { id: 'smoke-config', revision: '1', rules: [rule('base', 'Apply the smoke policy.')] },
+        projectBindings: [{ projectId: 'smoke-project', root: directory }],
+        dispatch: {
+          issuer: 'metabot-host:imac',
+          audience: 'metabot-host:imac',
+          allowedIssuers: ['metabot-host:imac'],
+        },
       },
+      rulesPackPolicy: { state: 'inherited', required: true },
       claude: {
         defaultWorkingDirectory: directory,
         maxTurns: undefined,
@@ -88,6 +95,66 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
     };
     const bridge = new MessageBridge(config, logger, new NullSender());
     try {
+      await expect(bridge.executeApiTask({
+        prompt: 'Must not run without an exact principal.',
+        chatId: 'generic-bearer',
+        sendCards: false,
+        rulesPack: { principal: { kind: 'generic', source: 'core-bearer' } },
+      })).rejects.toThrow('missing or unscoped transport principal');
+      await expect(bridge.executeApiTask({
+        prompt: 'Must not switch away from the required policy engine.',
+        chatId: 'unsupported-engine',
+        sendCards: false,
+        engine: 'kimi',
+      })).rejects.toThrow('supports Codex only');
+      const dispatchFacts = {
+        botName: 'admin',
+        chatId: 'dispatch-smoke',
+        roles: ['peer'],
+        cwd: directory,
+        userId: 'peer-user',
+        agentName: 'agent-a',
+        workerId: 'worker-a',
+        projectId: 'smoke-project',
+        taskId: 'task-a',
+        tools: [],
+        dataClasses: ['agent-bus', 'worker'],
+        outputTypes: ['json'],
+      };
+      const envelope = await bridge.getRulesPackOperator()!.createDispatchEnvelope({
+        facts: dispatchFacts,
+        audience: 'metabot-host:imac',
+      });
+      const dispatched = await bridge.executeApiTask({
+        prompt: 'Consume the authenticated dispatch.',
+        chatId: 'dispatch-smoke',
+        sendCards: false,
+        rulesPack: {
+          principal: {
+            kind: 'scoped',
+            source: 'agent-bus',
+            botName: 'admin',
+            chatId: 'dispatch-smoke',
+            roles: ['peer'],
+            userId: 'peer-user',
+            agentName: 'agent-a',
+            workerId: 'worker-a',
+            projectId: 'smoke-project',
+            taskId: 'task-a',
+            tools: [],
+            dataClasses: ['agent-bus', 'worker'],
+            outputTypes: ['json'],
+          },
+          dispatch: { envelope, authenticatedIssuer: 'metabot-host:imac' },
+        },
+      });
+      expect(dispatched.rulesPackDelivery).toEqual({
+        status: 'consumed',
+        envelopeId: envelope.envelopeId,
+        replayId: envelope.replayId,
+        packDigest: envelope.packDigest,
+        effectivePackDigest: expect.stringMatching(/^sha256:/u),
+      });
       const run = () => bridge.executeApiTask({ prompt: 'Do the smoke task.', chatId: 'chat-smoke', sendCards: false });
       expect((await run()).success).toBe(true);
       let invocation = JSON.parse(readFileSync(capture, 'utf8')) as { args: string[]; prompt: string };

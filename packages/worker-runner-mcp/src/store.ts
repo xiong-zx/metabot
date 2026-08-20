@@ -18,6 +18,8 @@ interface WorkerRow {
   principal_role: WorkerRecord['principalRole'] | null;
   execution_kind: WorkerRecord['executionKind'] | null;
   authorizing_capability: string | null;
+  rulespack_child_grant_json: string | null;
+  rulespack_child_grant_digest: string | null;
   workdir: string;
   prompt: string;
   engine: WorkerRecord['engine'];
@@ -121,6 +123,8 @@ export class WorkerStore {
         principal_role TEXT,
         execution_kind TEXT,
         authorizing_capability TEXT,
+        rulespack_child_grant_json TEXT,
+        rulespack_child_grant_digest TEXT,
         workdir TEXT NOT NULL,
         prompt TEXT NOT NULL,
         engine TEXT NOT NULL CHECK (engine IN ('codex', 'claude', 'kimi')),
@@ -178,6 +182,8 @@ export class WorkerStore {
     this.addColumnIfMissing('worker_jobs', 'authorizing_capability', 'TEXT');
     this.addColumnIfMissing('worker_jobs', 'principal_role', 'TEXT');
     this.addColumnIfMissing('worker_jobs', 'execution_kind', 'TEXT');
+    this.addColumnIfMissing('worker_jobs', 'rulespack_child_grant_json', 'TEXT');
+    this.addColumnIfMissing('worker_jobs', 'rulespack_child_grant_digest', 'TEXT');
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -196,8 +202,14 @@ export class WorkerStore {
     const transaction = this.db.transaction((): DispatchWorkerResult => {
       let retriedTerminal = false;
       if (input.dedupeKey) {
-        const existing = this.findLatestByDedupe(input.botName, input.chatId, input.dedupeKey);
-        if (existing) {
+        const existingRow = this.findLatestByDedupeRow(
+          input.botName,
+          input.chatId,
+          input.dedupeKey,
+          input.rulesPackChildGrantDigest ?? null,
+        );
+        if (existingRow) {
+          const existing = fromRow(existingRow);
           const reuse = shouldReuseDedupe(existing, input, createdAt);
           if (reuse) return { worker: existing, deduplicated: true, retriedTerminal: false };
           retriedTerminal = isTerminal(existing.status);
@@ -220,12 +232,14 @@ export class WorkerStore {
       this.db
         .prepare(
           `INSERT INTO worker_jobs (
-             id, bot_name, chat_id, principal_role, execution_kind, authorizing_capability, workdir, prompt, engine, model, label,
+             id, bot_name, chat_id, principal_role, execution_kind, authorizing_capability,
+             rulespack_child_grant_json, rulespack_child_grant_digest, workdir, prompt, engine, model, label,
              dedupe_key, dedupe_ttl_ms, retry_terminal, timeout_ms, idle_timeout_ms,
              restart_policy, restart_idempotent, output_contract_json, status,
              created_at
            ) VALUES (
-             @id, @botName, @chatId, @principalRole, @executionKind, @authorizingCapability, @workdir, @prompt, @engine, @model, @label,
+             @id, @botName, @chatId, @principalRole, @executionKind, @authorizingCapability,
+             @rulesPackChildGrantJson, @rulesPackChildGrantDigest, @workdir, @prompt, @engine, @model, @label,
              @dedupeKey, @dedupeTtlMs, @retryTerminal, @timeoutMs, @idleTimeoutMs,
              @restartPolicy, @restartIdempotent, @outputContractJson, 'queued',
              @createdAt
@@ -238,6 +252,8 @@ export class WorkerStore {
           principalRole: input.principalRole,
           executionKind: input.executionKind,
           authorizingCapability: input.authorizingCapability ?? null,
+          rulesPackChildGrantJson: input.rulesPackChildGrantJson ?? null,
+          rulesPackChildGrantDigest: input.rulesPackChildGrantDigest ?? null,
           workdir: input.workdir,
           prompt: input.prompt,
           engine: input.engine,
@@ -277,15 +293,40 @@ export class WorkerStore {
     return row?.authorizing_capability ?? undefined;
   }
 
-  findLatestByDedupe(botName: string, chatId: string, dedupeKey: string): WorkerRecord | undefined {
-    const row = this.db
+  /** Private RulesPack carrier; deliberately omitted from WorkerRecord/status/callbacks. */
+  getRulesPackChildGrant(id: string): { json: string; digest: string } | undefined {
+    const row = this.db.prepare(
+      'SELECT rulespack_child_grant_json, rulespack_child_grant_digest FROM worker_jobs WHERE id = ?',
+    ).get(id) as { rulespack_child_grant_json: string | null; rulespack_child_grant_digest: string | null } | undefined;
+    return row?.rulespack_child_grant_json && row.rulespack_child_grant_digest
+      ? { json: row.rulespack_child_grant_json, digest: row.rulespack_child_grant_digest }
+      : undefined;
+  }
+
+  findLatestByDedupe(
+    botName: string,
+    chatId: string,
+    dedupeKey: string,
+    rulesPackChildGrantDigest?: string,
+  ): WorkerRecord | undefined {
+    const row = this.findLatestByDedupeRow(botName, chatId, dedupeKey, rulesPackChildGrantDigest ?? null);
+    return row ? fromRow(row) : undefined;
+  }
+
+  private findLatestByDedupeRow(
+    botName: string,
+    chatId: string,
+    dedupeKey: string,
+    rulesPackChildGrantDigest: string | null,
+  ): WorkerRow | undefined {
+    return this.db
       .prepare(
         `SELECT * FROM worker_jobs
          WHERE bot_name = ? AND chat_id = ? AND dedupe_key = ?
+           AND rulespack_child_grant_digest IS ?
          ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       )
-      .get(botName, chatId, dedupeKey) as WorkerRow | undefined;
-    return row ? fromRow(row) : undefined;
+      .get(botName, chatId, dedupeKey, rulesPackChildGrantDigest) as WorkerRow | undefined;
   }
 
   listScope(botName: string, chatId: string, limit: number): WorkerRecord[] {

@@ -3,7 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
-import type { RulesPackConfig } from '@metabot/rulespack-adapter';
+import {
+  resolveRulesPackBotConfig,
+  type RulesPackBotOverride,
+  type RulesPackBotPolicy,
+  type RulesPackConfig,
+  type RulesPackDefaultsConfig,
+} from '@metabot/rulespack-adapter';
 import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
 
 export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
@@ -141,6 +147,8 @@ export interface BotConfigBase {
   codex?: CodexBotConfig;
   /** Downstream Codex-only deterministic RulesPack integration. Default mode is off. */
   rulesPack?: RulesPackConfig;
+  /** Non-secret provenance for inherited, overridden, opted-out, or unsupported RulesPack state. */
+  rulesPackPolicy?: RulesPackBotPolicy;
   /**
    * Stage 4 — opt-in to the persistent Claude process pool. When enabled,
    * each chatId is backed by a long-lived Claude Code process (managed by
@@ -327,7 +335,9 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
-  rulesPack?: RulesPackConfig;
+  /** Per-bot override. False is an audited opt-out and requires rulesPackOptOutReason. */
+  rulesPack?: RulesPackBotOverride;
+  rulesPackOptOutReason?: string;
   /** Security-relevant opt-ins; omitted/false means no capability is minted. */
   workerTools?: boolean;
   arcTools?: boolean;
@@ -363,7 +373,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   groupNoMention?: boolean;
 }
 
-function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
+function feishuBotFromJson(entry: FeishuBotJsonEntry, defaults?: RulesPackDefaultsConfig): BotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -376,7 +386,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
-    ...executionToolOptIns(entry),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -415,7 +425,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
+function telegramBotFromJson(entry: TelegramBotJsonEntry, defaults?: RulesPackDefaultsConfig): TelegramBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -428,7 +438,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
-    ...executionToolOptIns(entry),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -462,7 +472,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
+export function webBotFromJson(entry: WebBotJsonEntry, defaults?: RulesPackDefaultsConfig): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -475,7 +485,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
-    ...executionToolOptIns(entry),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -503,14 +513,14 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
+function wechatBotFromJson(entry: WechatBotJsonEntry, defaults?: RulesPackDefaultsConfig): WechatBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
-    ...executionToolOptIns(entry),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -551,7 +561,7 @@ export interface SlackBotJsonEntry extends EngineJsonFields {
   groupNoMention?: boolean;
 }
 
-function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
+function slackBotFromJson(entry: SlackBotJsonEntry, defaults?: RulesPackDefaultsConfig): SlackBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -564,7 +574,7 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
-    ...executionToolOptIns(entry),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -578,11 +588,26 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
   };
 }
 
-function executionToolOptIns(entry: EngineJsonFields): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack'> {
+function executionToolOptIns(
+  entry: EngineJsonFields,
+  defaults?: RulesPackDefaultsConfig,
+): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack' | 'rulesPackPolicy'> {
+  const envEngine = process.env.METABOT_ENGINE;
+  const engine = entry.engine ?? (envEngine === 'claude' || envEngine === 'kimi' || envEngine === 'codex'
+    ? envEngine
+    : 'codex');
+  const resolved = resolveRulesPackBotConfig({
+    botName: (entry as EngineJsonFields & { name?: string }).name ?? 'default',
+    engine,
+    defaults,
+    ...(entry.rulesPack !== undefined ? { override: entry.rulesPack } : {}),
+    ...(entry.rulesPackOptOutReason !== undefined ? { optOutReason: entry.rulesPackOptOutReason } : {}),
+  });
   return {
     ...(entry.workerTools !== undefined ? { workerTools: entry.workerTools } : {}),
     ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
-    ...(entry.rulesPack !== undefined ? { rulesPack: entry.rulesPack } : {}),
+    ...(resolved.rulesPack ? { rulesPack: resolved.rulesPack } : {}),
+    rulesPackPolicy: resolved.policy,
   };
 }
 
@@ -760,6 +785,8 @@ export interface PeerJsonEntry {
 }
 
 export interface BotsJsonNewFormat {
+  /** Shared Codex-only RulesPack defaults for current and future bot entries. */
+  rulesPackDefaults?: RulesPackDefaultsConfig;
   feishuBots?: FeishuBotJsonEntry[];
   telegramBots?: TelegramBotJsonEntry[];
   webBots?: WebBotJsonEntry[];
@@ -791,24 +818,25 @@ export function loadAppConfig(): AppConfig {
       if (parsed.length === 0) {
         throw new Error(`BOTS_CONFIG file must contain a non-empty array or object: ${resolved}`);
       }
-      feishuBots = (parsed as FeishuBotJsonEntry[]).map(feishuBotFromJson);
+      feishuBots = (parsed as FeishuBotJsonEntry[]).map((entry) => feishuBotFromJson(entry));
     } else if (parsed && typeof parsed === 'object') {
       // New format: { feishuBots: [...], telegramBots: [...], webBots: [...] }
       const cfg = parsed as BotsJsonNewFormat;
+      const rulesPackDefaults = cfg.rulesPackDefaults;
       if (cfg.feishuBots) {
-        feishuBots = cfg.feishuBots.map(feishuBotFromJson);
+        feishuBots = cfg.feishuBots.map((entry) => feishuBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.telegramBots) {
-        telegramBots = cfg.telegramBots.map(telegramBotFromJson);
+        telegramBots = cfg.telegramBots.map((entry) => telegramBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.webBots) {
-        webBots = cfg.webBots.map(webBotFromJson);
+        webBots = cfg.webBots.map((entry) => webBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.wechatBots) {
-        wechatBots = cfg.wechatBots.map(wechatBotFromJson);
+        wechatBots = cfg.wechatBots.map((entry) => wechatBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.slackBots) {
-        slackBots = cfg.slackBots.map(slackBotFromJson);
+        slackBots = cfg.slackBots.map((entry) => slackBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.agentTeams) {
         agentTeams = cfg.agentTeams.map(normalizeAgentTeamConfig);
@@ -845,6 +873,14 @@ export function loadAppConfig(): AppConfig {
       );
     }
   }
+
+  assertUniqueBotNames([
+    ...feishuBots,
+    ...telegramBots,
+    ...webBots,
+    ...wechatBots,
+    ...slackBots,
+  ]);
 
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
   const apiSecret = process.env.API_SECRET || undefined;
@@ -913,6 +949,18 @@ export function loadAppConfig(): AppConfig {
     peers,
     agentTeams,
   };
+}
+
+function assertUniqueBotNames(bots: readonly Pick<BotConfigBase, 'name'>[]): void {
+  const names = new Map<string, string>();
+  for (const bot of bots) {
+    const canonical = bot.name.normalize('NFKC').toLowerCase();
+    const existing = names.get(canonical);
+    if (existing !== undefined) {
+      throw new Error(`Bot names must be globally unique ignoring case: "${existing}" and "${bot.name}"`);
+    }
+    names.set(canonical, bot.name);
+  }
 }
 
 function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {

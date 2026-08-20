@@ -268,6 +268,124 @@ describe('PeerManager', () => {
     );
   });
 
+  it('binds Agent Bus RulesPack issuers to the cached Core whoami identity', async () => {
+    process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+    process.env.METABOT_CORE_TOKEN = 'core-bearer';
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === 'https://metabot.example.com/core/api/whoami') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: () => Promise.resolve({ botName: 'bridge-credential' }),
+        });
+      }
+      if (url === 'https://metabot.example.com/core/api/inbox/remote-bot') {
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          statusText: 'Created',
+          json: () => Promise.resolve({ message: { id: 'message-1' } }),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found', json: () => Promise.resolve({}) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    manager = new PeerManager([], [], createLogger());
+
+    const body = {
+      botName: 'remote-bot',
+      chatId: 'chat1',
+      prompt: 'hello',
+      rulesPackDispatch: { issuer: 'bridge-credential' },
+    };
+    await expect(manager.forwardTask({ name: 'remote-bot', url: 'inbox:' }, body)).resolves.toMatchObject({
+      accepted: true,
+      relay: 'inbox',
+    });
+    await expect(manager.forwardTask({ name: 'remote-bot', url: 'inbox:' }, body)).resolves.toMatchObject({
+      accepted: true,
+      relay: 'inbox',
+    });
+
+    const whoamiCalls = fetchMock.mock.calls.filter(([url]) => url === 'https://metabot.example.com/core/api/whoami');
+    expect(whoamiCalls).toHaveLength(1);
+    expect(whoamiCalls[0]?.[1]).toMatchObject({
+      headers: { Authorization: 'Bearer core-bearer' },
+    });
+  });
+
+  it('fails closed and logs when an envelope issuer differs from Core whoami', async () => {
+    process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+    process.env.METABOT_CORE_TOKEN = 'core-bearer';
+    const logger = createLogger();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({ botName: 'bridge-credential' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    manager = new PeerManager([], [], logger);
+
+    await expect(
+      manager.forwardTask(
+        { name: 'remote-bot', url: 'inbox:' },
+        {
+          botName: 'remote-bot',
+          chatId: 'chat1',
+          prompt: 'hello',
+          rulesPackDispatch: { issuer: 'secretary' },
+        },
+      ),
+    ).rejects.toThrow(
+      'RulesPack dispatch issuer "secretary" does not match authenticated Agent Bus identity "bridge-credential"',
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      'https://metabot.example.com/core/api/inbox/remote-bot',
+      expect.anything(),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ issuer: 'secretary', authenticatedIssuer: 'bridge-credential' }),
+      'RulesPack dispatch issuer does not match authenticated Agent Bus transport identity',
+    );
+  });
+
+  it('treats an explicit peer secret as local-administrator-equivalent issuer authorization', async () => {
+    const logger = createLogger();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: () => Promise.resolve({ success: true }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const peer = { name: 'trusted-local-admin', url: 'http://trusted:9100', secret: 'peer-secret' };
+    manager = new PeerManager([peer], [], logger);
+
+    await expect(
+      manager.forwardTask(peer, {
+        botName: 'remote-bot',
+        chatId: 'chat1',
+        prompt: 'hello',
+        rulesPackDispatch: { issuer: 'operator-a' },
+      }),
+    ).resolves.toEqual({ success: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://trusted:9100/api/talk',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer peer-secret',
+          'X-MetaBot-RulesPack-Issuer': 'operator-a',
+        }),
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ issuer: 'operator-a', authMode: 'local-administrator-secret' }),
+      'RulesPack issuer authorized by explicit peer secret (local administrator equivalent)',
+    );
+  });
+
   it('turns direct peer non-2xx into failure only for envelope-bearing delivery', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
@@ -275,17 +393,21 @@ describe('PeerManager', () => {
       json: () => Promise.resolve({ error: 'unavailable' }),
     });
     vi.stubGlobal('fetch', fetchMock);
-    manager = new PeerManager([{ name: 'alice', url: 'http://localhost:9200' }], [], createLogger());
+    manager = new PeerManager(
+      [{ name: 'alice', url: 'http://localhost:9200', secret: 'peer-secret' }],
+      [],
+      createLogger(),
+    );
 
     await expect(
       manager.forwardTask(
-        { name: 'alice', url: 'http://localhost:9200' },
+        { name: 'alice', url: 'http://localhost:9200', secret: 'peer-secret' },
         { botName: 'bot-a', chatId: 'chat1', prompt: 'hello', rulesPackDispatch: { issuer: 'admin' } },
       ),
     ).rejects.toThrow(/HTTP 503/u);
     await expect(
       manager.forwardTask(
-        { name: 'alice', url: 'http://localhost:9200' },
+        { name: 'alice', url: 'http://localhost:9200', secret: 'peer-secret' },
         { botName: 'bot-a', chatId: 'chat1', prompt: 'legacy' },
       ),
     ).resolves.toEqual({ error: 'unavailable' });
@@ -350,6 +472,42 @@ describe('PeerManager', () => {
     expect(bots[0].peerUrl).toBe('http://localhost:9200');
   });
 
+  it('preserves authenticated direct-peer default project metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(url.endsWith('/api/bots') ? {
+        bots: [{
+          name: 'project-bot',
+          platform: 'web',
+          workingDirectory: '/srv/project-a',
+          engine: 'codex',
+          rulesPackStatus: {
+            state: 'inherited', required: true, mode: 'enforce', defaultProjectId: 'project-a',
+            projectChatAttestations: [{
+              subjectKey: `sha256:${'a'.repeat(64)}`,
+              projectId: 'project-chat',
+            }],
+          },
+          rulesPackIdentity: { hostId: 'direct-host', audience: 'metabot-host:direct-host' },
+        }],
+      } : { skills: [] }),
+    })));
+    manager = new PeerManager(
+      [{ name: 'direct', url: 'http://direct:9100', secret: 'peer-secret' }],
+      [],
+      createLogger(),
+    );
+    await manager.refreshAll();
+    expect(manager.getPeerBots()[0].rulesPackStatus?.defaultProjectId).toBe('project-a');
+    expect(manager.getPeerBots()[0].rulesPackStatus?.projectChatAttestations).toEqual([{
+      subjectKey: `sha256:${'a'.repeat(64)}`,
+      projectId: 'project-chat',
+    }]);
+    expect(manager.getPeerBots()[0].rulesPackIdentity).toEqual({
+      hostId: 'direct-host', audience: 'metabot-host:direct-host',
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Registry mode (METABOT_CORE_AGENT_BUS_URL set) — discovery via central
   // /api/agents endpoint + visibility-is-the-permission (no talkSecret).
@@ -367,8 +525,14 @@ describe('PeerManager', () => {
           Promise.resolve({
             registered: 2,
             results: [
-              { botName: 'visible-bot', status: 201 },
-              { botName: 'hidden-bot', status: 201 },
+              {
+                botName: 'visible-bot', status: 201,
+                rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+              },
+              {
+                botName: 'hidden-bot', status: 201,
+                rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+              },
             ],
           }),
       });
@@ -377,7 +541,13 @@ describe('PeerManager', () => {
       manager = new PeerManager(
         [],
         [
-          { name: 'visible-bot' }, // visible undefined → defaults true
+          {
+            name: 'visible-bot',
+            rulesPackStatus: {
+              state: 'inherited', required: true, mode: 'shadow', defaultProjectId: 'project-a',
+            },
+            rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+          }, // visible undefined → defaults true
           { name: 'hidden-bot', visible: false },
         ],
         createLogger(),
@@ -398,13 +568,93 @@ describe('PeerManager', () => {
       });
       const body = JSON.parse((bulkInit as RequestInit).body as string);
       expect(body).toEqual({
+        rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
         bots: [
-          { botName: 'visible-bot', url: 'http://self.example:9100', visible: true },
+          {
+            botName: 'visible-bot',
+            url: 'http://self.example:9100',
+            visible: true,
+            rulesPackStatus: {
+              state: 'inherited', required: true, mode: 'shadow', defaultProjectId: 'project-a',
+            },
+          },
           { botName: 'hidden-bot', url: 'http://self.example:9100', visible: false },
         ],
       });
+      await manager.updateLocalRulesPackStatus('visible-bot', {
+        state: 'inherited', required: true, mode: 'enforce',
+        operatorModeVersion: 1, operatorModeOperationId: 'operation-1',
+      });
+      const updatedBulkCalls = fetchMock.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      const updatedBody = JSON.parse((updatedBulkCalls.at(-1)?.[1] as RequestInit).body as string);
+      expect(updatedBody.bots).toEqual([{
+        botName: 'visible-bot', url: 'http://self.example:9100', visible: true,
+        rulesPackStatus: {
+          state: 'inherited', required: true, mode: 'enforce', defaultProjectId: 'project-a',
+          operatorModeVersion: 1, operatorModeOperationId: 'operation-1',
+        },
+      }]);
       // No legacy talkSecret field anywhere in the wire payload.
       expect((bulkInit as RequestInit).body as string).not.toMatch(/talkSecret/);
+    });
+
+    it('rejects a successful Core response that omits the proposed identity attestation', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'active-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      manager = new PeerManager([], [{
+        name: 'active-bot',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'enforce' },
+        rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+      }], createLogger());
+      (manager as any).agentBusUrl = undefined;
+
+      await new Promise((resolve) => setImmediate(resolve));
+      (manager as any).agentBusUrl = 'https://metabot.example.com/core';
+      await expect((manager as any).postBulkRegister()).rejects.toThrow(
+        'Core did not attest the configured RulesPack identity',
+      );
+    });
+
+    it('awaits live RulesPack publication and restores its local snapshot on rejection', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
+      let calls = 0;
+      const fetchMock = vi.fn().mockImplementation(async () => {
+        calls += 1;
+        return {
+          ok: true,
+          json: async () => calls === 1
+            ? { registered: 1, results: [{
+                botName: 'visible-bot', status: 201,
+                rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+              }] }
+            : { registered: 0, results: [{ botName: 'visible-bot', status: 409, error: 'rulespack_status_stale' }] },
+        };
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      manager = new PeerManager([], [{
+        name: 'visible-bot',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'shadow', operatorModeVersion: 1,
+          operatorModeOperationId: 'operation-1' },
+        rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+      }], createLogger());
+      await new Promise((resolve) => setImmediate(resolve));
+      await expect(manager.updateLocalRulesPackStatus('visible-bot', {
+        state: 'inherited', required: true, mode: 'enforce', operatorModeVersion: 2,
+        operatorModeOperationId: 'operation-2',
+      })).rejects.toThrow('rulespack_status_stale');
+      expect((manager as any).localBots[0].rulesPackStatus).toMatchObject({
+        mode: 'shadow', operatorModeVersion: 1, operatorModeOperationId: 'operation-1',
+      });
     });
 
     it('emits batch POST /api/agents/heartbeat with registered bot names', async () => {
@@ -454,6 +704,7 @@ describe('PeerManager', () => {
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
       process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
 
+      let aliceMode: 'shadow' | 'off' = 'shadow';
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url === 'https://metabot.example.com/core/api/agents') {
           return Promise.resolve({
@@ -462,7 +713,16 @@ describe('PeerManager', () => {
               Promise.resolve({
                 agents: [
                   { botName: 'self-bot', url: 'http://self.example:9100', visible: true, lastSeenAt: 'now' },
-                  { botName: 'alice', url: 'http://alice:9100', visible: true, lastSeenAt: 'now' },
+                  {
+                    botName: 'alice',
+                    url: 'http://alice:9100',
+                    visible: true,
+                    lastSeenAt: 'now',
+                    rulesPackStatus: {
+                      state: 'inherited', required: true, mode: aliceMode, defaultProjectId: 'project-a',
+                    },
+                    rulesPackIdentity: { hostId: 'savio', audience: 'metabot-host:savio' },
+                  },
                 ],
               }),
           });
@@ -487,6 +747,15 @@ describe('PeerManager', () => {
       expect(bots).toHaveLength(1);
       expect(bots[0].name).toBe('alice');
       expect(bots[0].peerName).toBe('alice');
+      expect(bots[0].rulesPackIdentity).toEqual({ hostId: 'savio', audience: 'metabot-host:savio' });
+      expect(bots[0].rulesPackStatus).toEqual({
+        state: 'inherited', required: true, mode: 'shadow', defaultProjectId: 'project-a',
+      });
+      aliceMode = 'off';
+      await (manager as any).runPollTick();
+      expect(manager.getPeerBots()[0].rulesPackStatus).toEqual({
+        state: 'inherited', required: true, mode: 'off', defaultProjectId: 'project-a',
+      });
       expect(fetchMock).not.toHaveBeenCalledWith('http://alice:9100/api/bots', expect.anything());
       expect(peers.some((p) => p.name === 'self-bot')).toBe(false);
     });

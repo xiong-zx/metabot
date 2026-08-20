@@ -321,6 +321,14 @@ export type SDKMessage = {
 
 export interface ExecutionHandle {
   stream: AsyncGenerator<SDKMessage>;
+  /** Present only for an authenticated received RulesPack envelope. */
+  rulesPackDelivery?: () => {
+    status: 'consumed';
+    envelopeId: string;
+    replayId: string;
+    packDigest: string;
+    effectivePackDigest: string;
+  } | undefined;
   sendAnswer(toolUseId: string, sessionId: string, answerText: string): void;
   /**
    * Resolve a pending AskUserQuestion PreToolUse hook with the user's answers.

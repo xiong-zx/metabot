@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Use Node.js 22.19.0
         uses: actions/setup-node@v5
@@ -28,6 +30,30 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Enforce downstream boundaries
+        run: npm run check:downstream-boundaries
+
+      - name: Enforce feature history and added-secret gates
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          npm run check:feature-history -- --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_BRANCH"
+          npm run check:added-secrets -- --base "$BASE_SHA" --head "$HEAD_SHA"
+
+      - name: Scan pushed additions for secrets
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # A force-with-lease can make github.event.before unreachable from
+          # every current ref. Fetch the exact event object or fail closed.
+          git fetch --no-tags origin "$BASE_SHA"
+          npm run check:added-secrets -- --base "$BASE_SHA" --head "$HEAD_SHA"
 
       # Root TypeScript and adapter sources resolve workspace packages through
       # their published dist entrypoints. Build the engine first, then the

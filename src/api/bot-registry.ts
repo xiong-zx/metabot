@@ -3,6 +3,10 @@ import type { BotConfigBase } from '../config.js';
 import { resolveEngineName, type EngineName } from '../engines/index.js';
 import type { MessageBridge } from '../bridge/message-bridge.js';
 import type { IMessageSender } from '../bridge/message-sender.interface.js';
+import {
+  buildRulesPackProjectChatAttestations,
+  type RulesPackProjectChatAttestation,
+} from '../extensions/rulespack-peer-project.js';
 
 export interface RegisteredBot {
   name: string;
@@ -42,6 +46,24 @@ export interface BotInfo {
   workingDirectory: string;
   /** Authenticated configured tool identities used for exact RulesPack peer subjects. */
   rulesPackTools?: string[];
+  /** Non-secret Codex-only RulesPack adoption/opt-out state. */
+  rulesPackStatus?: {
+    state: 'inherited' | 'overridden' | 'opted-out' | 'unconfigured' | 'unsupported';
+    required: boolean;
+    mode?: 'off' | 'shadow' | 'enforce';
+    operatorModeVersion?: number;
+    operatorModeOperationId?: string;
+    /** Explicit trusted default-cwd binding; null attests that the cwd is unbound. */
+    defaultProjectId?: string | null;
+    /** Hashed exact (bot, chatId) bindings authenticated by peer/Core transport. */
+    projectChatAttestations?: RulesPackProjectChatAttestation[];
+    optOutReason?: string;
+  };
+  /** Live non-secret host identity used for authenticated RulesPack dispatch. */
+  rulesPackIdentity?: {
+    hostId: string;
+    audience: string;
+  };
   ttsVoice?: string;
   /** Set when the bot comes from a peer instance. */
   peerUrl?: string;
@@ -114,24 +136,79 @@ export class BotRegistry {
   }
 
   list(): BotInfo[] {
-    return Array.from(this.bots.values()).map((b) => ({
-      name: b.name,
-      ...(b.config.description ? { description: b.config.description } : {}),
-      ...(b.config.specialties?.length ? { specialties: b.config.specialties } : {}),
-      ...(b.config.icon ? { icon: b.config.icon } : {}),
-      platform: b.platform,
-      engine: resolveEngineName(b.config),
-      ...(defaultModelForEngine(b.config) ? { model: defaultModelForEngine(b.config) } : {}),
-      workingDirectory: b.config.claude.defaultWorkingDirectory,
-      ...(resolveEngineName(b.config) === 'codex'
-        ? { rulesPackTools: [
-            ...(b.config.workerTools === true ? ['metabot-worker'] : []),
-            ...(b.config.arcTools === true ? ['metabot-arc'] : []),
-          ] }
-        : {}),
-      ...(b.config.ttsVoice ? { ttsVoice: b.config.ttsVoice } : {}),
-    }));
+    return Array.from(this.bots.values()).map((b) => {
+      const rulesPackIdentity = rulesPackIdentityForBot(b);
+      return {
+        name: b.name,
+        ...(b.config.description ? { description: b.config.description } : {}),
+        ...(b.config.specialties?.length ? { specialties: b.config.specialties } : {}),
+        ...(b.config.icon ? { icon: b.config.icon } : {}),
+        platform: b.platform,
+        engine: resolveEngineName(b.config),
+        ...(defaultModelForEngine(b.config) ? { model: defaultModelForEngine(b.config) } : {}),
+        workingDirectory: b.config.claude.defaultWorkingDirectory,
+        ...(resolveEngineName(b.config) === 'codex'
+          ? { rulesPackTools: [
+              ...(b.config.workerTools === true ? ['metabot-worker'] : []),
+            ] }
+          : {}),
+        rulesPackStatus: rulesPackStatusForBot(b),
+        ...(rulesPackIdentity ? { rulesPackIdentity } : {}),
+        ...(b.config.ttsVoice ? { ttsVoice: b.config.ttsVoice } : {}),
+      };
+    });
   }
+}
+
+function rulesPackIdentityForBot(bot: RegisteredBot): BotInfo['rulesPackIdentity'] {
+  if (resolveEngineName(bot.config) !== 'codex') return undefined;
+  try {
+    const status = bot.bridge.getRulesPackOperator?.()?.status();
+    return status && typeof status.hostId === 'string' && status.hostId &&
+      typeof status.audience === 'string' && status.audience
+      ? { hostId: status.hostId, audience: status.audience }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rulesPackStatusForBot(bot: RegisteredBot): NonNullable<BotInfo['rulesPackStatus']> {
+  const engine = resolveEngineName(bot.config);
+  const policy = bot.config.rulesPackPolicy ?? {
+    state: engine === 'codex'
+      ? (bot.config.rulesPack ? 'overridden' as const : 'unconfigured' as const)
+      : 'unsupported' as const,
+    required: false,
+  };
+  let mode = bot.config.rulesPack?.mode;
+  let operatorModeVersion: number | undefined;
+  let operatorModeOperationId: string | undefined;
+  let defaultProjectId: string | null | undefined;
+  const projectChatAttestations = engine === 'codex' &&
+    (policy.state === 'inherited' || policy.state === 'overridden')
+    ? buildRulesPackProjectChatAttestations(bot.config.rulesPack?.projectChatBindings, bot.name)
+    : undefined;
+  try {
+    const operator = bot.bridge.getRulesPackOperator?.();
+    const status = operator?.status();
+    mode = status?.mode ?? mode;
+    operatorModeVersion = status?.operatorModeVersion;
+    operatorModeOperationId = status?.operatorModeOperationId;
+    if (operator && (policy.state === 'inherited' || policy.state === 'overridden')) {
+      defaultProjectId = operator.projectIdForCwd(bot.config.claude.defaultWorkingDirectory) ?? null;
+    }
+  } catch {
+    // Keep config-derived status when live diagnostics are temporarily unavailable.
+  }
+  return {
+    ...policy,
+    ...(mode ? { mode } : {}),
+    ...(operatorModeVersion !== undefined ? { operatorModeVersion } : {}),
+    ...(operatorModeOperationId ? { operatorModeOperationId } : {}),
+    ...(defaultProjectId !== undefined ? { defaultProjectId } : {}),
+    ...(projectChatAttestations ? { projectChatAttestations } : {}),
+  };
 }
 
 function defaultModelForEngine(config: BotConfigBase): string | undefined {

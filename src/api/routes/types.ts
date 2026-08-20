@@ -25,6 +25,7 @@ import type { ExecutionCapabilityService } from '../../services/execution-capabi
 import type { TerminalEventDispatcher, TerminalEventStore } from '../../services/terminal-event-store.js';
 import type { TerminalEventRateLimiter } from './worker-events-routes.js';
 import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
+import type { RulesPackWorkerCoordinator } from '../../extensions/rulespack-worker-coordinator.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -55,6 +56,7 @@ export interface RouteContext {
     target: Parameters<typeof import('../../extensions/rulespack-api-principal.js').resolveRulesPackApiPrincipal>[1],
   ) => RulesPackExecutionPrincipal;
   executionCapabilityService?: ExecutionCapabilityService;
+  rulesPackWorkerCoordinator?: RulesPackWorkerCoordinator;
   terminalEventStore?: TerminalEventStore;
   terminalEventDispatcher?: TerminalEventDispatcher;
   terminalEventRateLimiter?: TerminalEventRateLimiter;

@@ -1,4 +1,39 @@
 {
+  "rulesPackDefaults": {
+    "policy": "required",
+    "config": {
+      "mode": "shadow",
+      "hostId": "local",
+      "dbPath": "/home/user/.metabot/rulespack/{surface}-{bot}.sqlite",
+      "metaMemory": {
+        "id": "local-codex-policy",
+        "hostRoot": "/local",
+        "paths": ["/local/rules/codex/metabot-development"],
+        "required": true,
+        "freshForMs": 300000
+      },
+      "projectBindings": [
+        { "projectId": "metabot", "root": "/home/user/metabot" },
+        { "projectId": "metabot", "root": "/home/user/metabot-worktrees" },
+        { "projectId": "project-alpha", "root": "/home/user/project-alpha" }
+      ],
+      "projectChatBindings": [
+        {
+          "projectId": "project-alpha",
+          "chats": [
+            { "bot": "project-alpha", "chatId": "oc_project_alpha_primary" },
+            { "bot": "tg-project", "chatId": "tg_project_alpha_updates" }
+          ]
+        }
+      ],
+      "dispatch": {
+        "issuer": "metabot-core-admin",
+        "audience": "metabot-host:local",
+        "allowedIssuers": ["metabot-core-admin"],
+        "maxEnvelopeTtlMs": 900000
+      }
+    }
+  },
   "feishuBots": [
     {
       "name": "project-alpha",

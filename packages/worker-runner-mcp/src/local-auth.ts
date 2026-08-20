@@ -1,4 +1,5 @@
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   sign as cryptoSign,
@@ -6,6 +7,12 @@ import {
   type KeyObject,
 } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
+import {
+  dispatchEnvelopeFingerprint,
+  rulesPackChildGrantFingerprint,
+  validateDispatchEnvelope,
+  type RulesPackChildGrantV1,
+} from '@metabot/rulespack';
 import type { TrustedPrincipal, TrustedPrincipalRole } from './types.js';
 import { normalizeTrustedPrincipal } from './service.js';
 import { WorkerRunnerError } from './types.js';
@@ -77,6 +84,57 @@ export class LocalCapabilityVerifier {
     }
     return { claims, principal };
   }
+
+  verifyRulesPackChildGrant(
+    grant: RulesPackChildGrantV1,
+    capability: string,
+  ): RulesPackChildGrantV1 {
+    const authenticated = this.verify(capability);
+    const now = this.now();
+    if (!grant || typeof grant !== 'object' || Array.isArray(grant)) throw forbidden('RulesPack child grant is invalid');
+    const { signature, ...unsigned } = grant;
+    if (
+      grant.schemaVersion !== 1 || grant.purpose !== 'worker' || grant.depth !== 1 ||
+      typeof grant.grantId !== 'string' || !grant.grantId ||
+      signature?.scheme !== 'ed25519' || typeof signature.value !== 'string'
+    ) throw forbidden('RulesPack child grant contract is invalid');
+    const signatureBytes = Buffer.from(signature.value, 'base64url');
+    if (
+      signatureBytes.length !== 64 || signatureBytes.toString('base64url') !== signature.value ||
+      !this.publicKeys.some((key) => cryptoVerify(
+        null,
+        Buffer.from(rulesPackChildGrantFingerprint(unsigned)),
+        key,
+        signatureBytes,
+      ))
+    ) throw forbidden('RulesPack child grant signature is invalid');
+    if (grant.capabilityDigest !== capabilityDigest(capability)) {
+      throw forbidden('RulesPack child grant capability binding is invalid');
+    }
+    const issuedAt = Date.parse(grant.issuedAt);
+    const expiresAt = Date.parse(grant.expiresAt);
+    if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || issuedAt > now || expiresAt <= now) {
+      throw forbidden('RulesPack child grant is expired or not yet valid');
+    }
+    if (expiresAt > authenticated.claims.exp || expiresAt > Date.parse(grant.parent.expiresAt)) {
+      throw forbidden('RulesPack child grant exceeds its parent or capability lifetime');
+    }
+    validateDispatchEnvelope(grant.parent, {
+      audience: grant.parent.audience,
+      target: grant.parent.target,
+      now: new Date(now).toISOString(),
+    });
+    if (grant.parentEnvelopeFingerprint !== dispatchEnvelopeFingerprint(grant.parent)) {
+      throw forbidden('RulesPack child grant parent fingerprint is invalid');
+    }
+    const parent = grant.parent.target;
+    if (
+      grant.constraints.hostId !== parent.hostId || grant.constraints.bot !== parent.bot ||
+      grant.constraints.chatId !== parent.chatId || grant.constraints.projectId !== parent.projectId ||
+      parent.bot !== authenticated.principal.botName || parent.chatId !== authenticated.principal.chatId
+    ) throw forbidden('RulesPack child grant scope is invalid');
+    return grant;
+  }
 }
 
 /** Test/Bridge-contract helper. Daemon production code never receives this private key. */
@@ -110,6 +168,25 @@ export function readCapabilityTokenFile(filePath: string, label: string): string
     throw new Error(`${label} does not contain a bounded capability token`);
   }
   return token;
+}
+
+export function readRulesPackChildGrantFile(filePath: string): RulesPackChildGrantV1 {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('RulesPack child grant must be a regular non-symlink file');
+  if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+    throw new Error('RulesPack child grant permissions must not grant group or other access');
+  }
+  const raw = readFileSync(filePath, 'utf8');
+  if (Buffer.byteLength(raw, 'utf8') > 1_048_576 || raw.includes('\0')) throw new Error('RulesPack child grant is too large');
+  try {
+    return JSON.parse(raw) as RulesPackChildGrantV1;
+  } catch {
+    throw new Error('RulesPack child grant is not valid JSON');
+  }
+}
+
+function capabilityDigest(capability: string): string {
+  return `sha256:${createHash('sha256').update(capability).digest('hex')}`;
 }
 
 export function assertDistinctKeys(

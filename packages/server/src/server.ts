@@ -911,7 +911,7 @@ export function startServer(options: ServerOptions): ServerHandle {
       }
       if (pathname === '/api/agents/bulk' && method === 'POST') {
         const body = await parseJsonBody(req);
-        return jsonResult(res, agentRoutes.registerAgentsBulk(agentStore, body, cred));
+        return jsonResult(res, agentRoutes.registerAgentsBulk(agentStore, credentialsStore, body, cred));
       }
       if (pathname === '/api/agents/heartbeat' && method === 'POST') {
         const body = await parseJsonBody(req);

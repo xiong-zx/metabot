@@ -1,6 +1,6 @@
 import type * as http from 'node:http';
 import type { Credential } from '../auth/credentials.js';
-import type { AgentStore } from './agent-store.js';
+import type { AgentRecord, AgentStore } from './agent-store.js';
 import type { InboxStore, InboxMessage } from './inbox-store.js';
 
 export interface RouteResult {
@@ -41,6 +41,52 @@ function publicShape(msg: InboxMessage) {
   };
 }
 
+function requiresRulesPackDispatch(agent: AgentRecord): boolean {
+  const rulesPack = agent.rulesPackStatus;
+  return !!rulesPack &&
+    (rulesPack.state === 'inherited' || rulesPack.state === 'overridden') &&
+    (rulesPack.required || rulesPack.mode === 'shadow' || rulesPack.mode === 'enforce');
+}
+
+function validateRulesPackRelay(
+  content: string,
+  botName: string,
+  chatId: string,
+  cred: Credential,
+): RouteResult | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    return err(409, 'rulespack_dispatch_required_use_bridge_talk');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return err(409, 'rulespack_dispatch_required_use_bridge_talk');
+  }
+  const dispatch = (parsed as Record<string, unknown>).rulesPackDispatch;
+  if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
+    return err(409, 'rulespack_dispatch_required_use_bridge_talk');
+  }
+  const envelope = dispatch as Record<string, unknown>;
+  const target = envelope.target;
+  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+    return err(400, 'rulespack_dispatch_target_invalid');
+  }
+  const exactTarget = target as Record<string, unknown>;
+  if (exactTarget.bot !== botName || exactTarget.chatId !== chatId) {
+    return err(400, 'rulespack_dispatch_target_mismatch');
+  }
+  if (!cred.botName || envelope.issuer !== cred.botName) {
+    return err(403, 'rulespack_dispatch_issuer_mismatch');
+  }
+  for (const field of ['envelopeId', 'replayId', 'packDigest'] as const) {
+    if (typeof envelope[field] !== 'string' || !(envelope[field] as string).trim()) {
+      return err(400, 'rulespack_dispatch_invalid');
+    }
+  }
+  return undefined;
+}
+
 /**
  * POST /api/inbox/:botName — enqueue a message addressed to `botName`.
  *
@@ -71,6 +117,10 @@ export function enqueueInbox(
   const content = typeof body.content === 'string' ? body.content : '';
   if (!content) return err(400, 'content_required');
   const chatId = typeof body.chatId === 'string' ? body.chatId : '';
+  if (requiresRulesPackDispatch(known)) {
+    const invalidRelay = validateRulesPackRelay(content, botName, chatId, cred);
+    if (invalidRelay) return invalidRelay;
+  }
   // Cred.botName is empty for the bootstrap admin (no bot). Surface that as
   // `fromBot=null` rather than empty-string so the consumer can render
   // "system" cleanly.

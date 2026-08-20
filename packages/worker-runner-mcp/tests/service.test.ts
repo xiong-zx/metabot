@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { RulesPackChildGrantV1 } from '@metabot/rulespack';
 import {
   HttpCompletionNotifier,
   verifyTerminalCallback,
@@ -183,6 +184,186 @@ describe('WorkerService pinned authority and lifecycle', () => {
     expect(kit.runner.launches).toHaveLength(0);
   });
 
+  it.each(['claude', 'kimi'] as const)('rejects a hidden RulesPack grant for a %s worker before persistence', async (engine) => {
+    const { store, dir } = makeStore();
+    const runner = new FakeProcessRunner();
+    const grant = { schemaVersion: 1, purpose: 'worker' } as RulesPackChildGrantV1;
+    const service = new WorkerService(store, runner, new RecordingNotifier(), PM_PRINCIPAL, testConfig(), {
+      rulesPackGrantVerifier: (value) => value,
+    });
+    services.push(service);
+    await expect(service.dispatch(input(dir, { engine }), undefined, 'capability', grant)).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(store.listScope(PM_PRINCIPAL.botName, PM_PRINCIPAL.chatId, 10)).toEqual([]);
+    expect(runner.launches).toEqual([]);
+  });
+
+  it('dispatches a protected worker instead of deduplicating to a running plain worker', async () => {
+    const kit = makeGrantKit();
+    const first = await kit.service.dispatch(input(kit.dir, { dedupeKey: 'plain-to-protected' }));
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+
+    const second = await kit.service.dispatch(
+      input(kit.dir, { dedupeKey: 'plain-to-protected' }),
+      undefined,
+      'capability-a',
+      childGrant('grant-a'),
+    );
+
+    expect(second).toMatchObject({ deduplicated: false, worker: { id: 'wrk-2' } });
+    expect(second.worker.id).not.toBe(first.worker.id);
+    expect(second.worker).not.toHaveProperty('rulesPackChildGrantDigest');
+    await vi.waitFor(() => expect(kit.runner.launches).toHaveLength(2));
+    expect(kit.store.getRulesPackChildGrant(second.worker.id)).toBeDefined();
+
+    const third = await kit.service.dispatch(input(kit.dir, { dedupeKey: 'plain-to-protected' }));
+    expect(third).toMatchObject({
+      deduplicated: true,
+      retriedTerminal: false,
+      worker: { id: first.worker.id, status: 'running' },
+    });
+    expect(kit.runner.launches).toHaveLength(2);
+  });
+
+  it('dispatches a plain worker instead of deduplicating to a completed protected worker', async () => {
+    const kit = makeGrantKit();
+    const dedupePolicy = { completedTtlMs: 1_000, retryTerminal: false };
+    const first = await kit.service.dispatch(
+      input(kit.dir, { dedupeKey: 'protected-to-plain', dedupePolicy }),
+      undefined,
+      'capability-a',
+      childGrant('grant-a'),
+    );
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+    kit.runner.complete(4_000, SUCCESS_RESULT);
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('completed'));
+
+    const second = await kit.service.dispatch(input(kit.dir, { dedupeKey: 'protected-to-plain', dedupePolicy }));
+
+    expect(second).toMatchObject({ deduplicated: false, retriedTerminal: false, worker: { id: 'wrk-2' } });
+    expect(kit.store.getRulesPackChildGrant(second.worker.id)).toBeUndefined();
+    await vi.waitFor(() => expect(kit.runner.launches).toHaveLength(2));
+  });
+
+  it('dispatches a new worker when the verified RulesPack grant digest changes', async () => {
+    const kit = makeGrantKit();
+    const grantA = childGrant('grant-a');
+    const first = await kit.service.dispatch(
+      input(kit.dir, { dedupeKey: 'grant-change' }),
+      undefined,
+      'capability-a',
+      grantA,
+    );
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+
+    const second = await kit.service.dispatch(
+      input(kit.dir, { dedupeKey: 'grant-change' }),
+      undefined,
+      'capability-b',
+      childGrant('grant-b'),
+    );
+
+    expect(second).toMatchObject({ deduplicated: false, worker: { id: 'wrk-2' } });
+    expect(second.worker.id).not.toBe(first.worker.id);
+    await vi.waitFor(() => expect(kit.runner.launches).toHaveLength(2));
+    expect(kit.store.getRulesPackChildGrant(second.worker.id)?.digest).not.toBe(
+      kit.store.getRulesPackChildGrant(first.worker.id)?.digest,
+    );
+
+    const third = await kit.service.dispatch(
+      input(kit.dir, { dedupeKey: 'grant-change' }),
+      undefined,
+      'capability-a',
+      grantA,
+    );
+    expect(third).toMatchObject({
+      deduplicated: true,
+      retriedTerminal: false,
+      worker: { id: first.worker.id, status: 'running' },
+    });
+    expect(kit.runner.launches).toHaveLength(2);
+  });
+
+  it('reuses a completed plain worker after dispatching a newer granted worker with the same key', async () => {
+    const kit = makeGrantKit();
+    const dispatchInput = input(kit.dir, {
+      dedupeKey: 'plain-grant-plain-completed',
+      dedupePolicy: { completedTtlMs: 1, retryTerminal: false },
+    });
+    const first = await kit.service.dispatch(dispatchInput);
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+    kit.runner.complete(4_000, SUCCESS_RESULT);
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('completed'));
+
+    const second = await kit.service.dispatch(dispatchInput, undefined, 'capability-a', childGrant('grant-a'));
+    await vi.waitFor(() => expect(kit.store.require(second.worker.id).status).toBe('running'));
+    const third = await kit.service.dispatch(dispatchInput);
+
+    expect(third).toMatchObject({
+      deduplicated: true,
+      retriedTerminal: false,
+      worker: { id: first.worker.id, status: 'completed' },
+    });
+    expect(kit.runner.launches).toHaveLength(2);
+    expect(kit.store.listScope(PM_PRINCIPAL.botName, PM_PRINCIPAL.chatId, 10)).toHaveLength(2);
+  });
+
+  it('reuses completed grant A after dispatching a newer grant B worker with the same key', async () => {
+    const kit = makeGrantKit();
+    const dispatchInput = input(kit.dir, {
+      dedupeKey: 'grant-a-b-a-completed',
+      dedupePolicy: { completedTtlMs: 1, retryTerminal: false },
+    });
+    const grantA = childGrant('grant-a');
+    const first = await kit.service.dispatch(dispatchInput, undefined, 'capability-a', grantA);
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+    kit.runner.complete(4_000, SUCCESS_RESULT);
+    await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('completed'));
+
+    const second = await kit.service.dispatch(dispatchInput, undefined, 'capability-b', childGrant('grant-b'));
+    await vi.waitFor(() => expect(kit.store.require(second.worker.id).status).toBe('running'));
+    const third = await kit.service.dispatch(dispatchInput, undefined, 'capability-a', grantA);
+
+    expect(third).toMatchObject({
+      deduplicated: true,
+      retriedTerminal: false,
+      worker: { id: first.worker.id, status: 'completed' },
+    });
+    expect(kit.runner.launches).toHaveLength(2);
+    expect(kit.store.listScope(PM_PRINCIPAL.botName, PM_PRINCIPAL.chatId, 10)).toHaveLength(2);
+  });
+
+  it.each(['running', 'completed'] as const)(
+    'deduplicates to a %s protected worker when the verified RulesPack grant digest matches',
+    async (status) => {
+      const kit = makeGrantKit();
+      const grant = childGrant('grant-a');
+      const dispatchInput = input(kit.dir, {
+        dedupeKey: `same-grant-${status}`,
+        dedupePolicy: { completedTtlMs: 1_000, retryTerminal: false },
+      });
+      const first = await kit.service.dispatch(dispatchInput, undefined, 'capability-a', grant);
+      await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('running'));
+      if (status === 'completed') {
+        kit.runner.complete(4_000, SUCCESS_RESULT);
+        await vi.waitFor(() => expect(kit.store.require(first.worker.id).status).toBe('completed'));
+      }
+
+      const second = await kit.service.dispatch(dispatchInput, undefined, 'capability-a', grant);
+
+      expect(second).toMatchObject({
+        deduplicated: true,
+        retriedTerminal: false,
+        worker: { id: first.worker.id, status },
+      });
+      expect(second.worker).not.toHaveProperty('rulesPackChildGrantJson');
+      expect(second.worker).not.toHaveProperty('rulesPackChildGrantDigest');
+      expect(kit.runner.launches).toHaveLength(1);
+      expect(kit.store.listScope(PM_PRINCIPAL.botName, PM_PRINCIPAL.chatId, 10)).toHaveLength(1);
+    },
+  );
+
   it('aborts an owned live launch and ignores its late successful completion', async () => {
     const kit = makeKit();
     const dispatched = await kit.service.dispatch(input(kit.dir));
@@ -221,6 +402,68 @@ describe('WorkerService pinned authority and lifecycle', () => {
 });
 
 describe('WorkerService restart recovery', () => {
+  it('re-verifies and reuses the private RulesPack grant for an idempotent relaunch', async () => {
+    const { store, dir } = makeStore();
+    const grant = {
+      schemaVersion: 1,
+      purpose: 'worker',
+      grantId: 'persisted-grant',
+      capabilityDigest: 'sha256:capability',
+      issuedAt: '2026-08-19T00:00:00.000Z',
+      expiresAt: '2026-08-19T01:00:00.000Z',
+      depth: 1,
+      parentEnvelopeFingerprint: 'sha256:parent',
+      parent: { envelopeId: 'parent-envelope' },
+      constraints: { hostId: 'imac', bot: 'bot-a', chatId: 'chat-a' },
+      signature: { scheme: 'ed25519', value: 'verified-signature' },
+    } as unknown as RulesPackChildGrantV1;
+    const prepared = () => ({
+      injectionText: 'received policy',
+      packDigest: 'sha256:pack',
+      markInjected() {},
+      markRejected() {},
+    });
+    const firstRunner = new FakeProcessRunner();
+    const firstPrepare = vi.fn(async () => prepared());
+    const verify = vi.fn((value: RulesPackChildGrantV1) => value);
+    const first = new WorkerService(store, firstRunner, new RecordingNotifier(), PM_PRINCIPAL, testConfig(), {
+      makeId: () => 'wrk-granted-relaunch',
+      makeLaunchId: () => 'launch-first',
+      rulesPackProvider: { prepare: firstPrepare },
+      rulesPackGrantVerifier: verify,
+    });
+    services.push(first);
+    const dispatched = await first.dispatch(input(dir, {
+      recoveryPolicy: { restart: 'relaunch', idempotent: true },
+    }), undefined, 'persisted-capability', grant);
+    await vi.waitFor(() => expect(store.require(dispatched.worker.id).status).toBe('running'));
+    expect(firstPrepare).toHaveBeenCalledWith(expect.objectContaining({ id: dispatched.worker.id }), grant);
+    first.dispose();
+
+    const recoveredRunner = new FakeProcessRunner();
+    const recoveredPrepare = vi.fn(async () => prepared());
+    const recovered = new WorkerService(
+      store,
+      recoveredRunner,
+      new RecordingNotifier(),
+      PM_PRINCIPAL,
+      testConfig(),
+      {
+        makeLaunchId: () => 'launch-recovered',
+        rulesPackProvider: { prepare: recoveredPrepare },
+        rulesPackGrantVerifier: verify,
+      },
+    );
+    services.push(recovered);
+    await recovered.start();
+    await vi.waitFor(() => expect(store.require(dispatched.worker.id)).toMatchObject({
+      status: 'running', launchId: 'launch-recovered', recoveryCount: 1,
+    }));
+    expect(recoveredPrepare).toHaveBeenCalledWith(expect.objectContaining({ id: dispatched.worker.id }), grant);
+    expect(store.require(dispatched.worker.id)).not.toHaveProperty('rulesPackChildGrantJson');
+    expect(verify).toHaveBeenCalledTimes(3);
+  });
+
   it('marks an ambiguous persisted running launch recovery_required and never signals its numeric PID', async () => {
     const kit = makeKit();
     seedRunning(kit.store, kit.dir, 'wrk-old', 8_001, { restart: 'manual', idempotent: false });
@@ -424,6 +667,21 @@ function makeKit(config: Partial<Parameters<typeof testConfig>[0]> = {}) {
   return { dir, store, runner, notifier, service };
 }
 
+function makeGrantKit() {
+  const { store, dir } = makeStore();
+  const runner = new FakeProcessRunner();
+  const notifier = new RecordingNotifier();
+  let id = 0;
+  let launchId = 0;
+  const service = new WorkerService(store, runner, notifier, PM_PRINCIPAL, testConfig(), {
+    makeId: () => `wrk-${++id}`,
+    makeLaunchId: () => `launch-${++launchId}`,
+    rulesPackGrantVerifier: (value) => value,
+  });
+  services.push(service);
+  return { dir, store, runner, notifier, service };
+}
+
 function makeStore(): { store: WorkerStore; dir: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'worker-service-'));
   dirs.push(dir);
@@ -450,6 +708,22 @@ function testConfig(patch: Record<string, number> = {}) {
 
 function input(dir: string, patch: Partial<DispatchWorkerInput> = {}): DispatchWorkerInput {
   return { workdir: dir, prompt: 'implement the task', engine: 'codex', ...patch };
+}
+
+function childGrant(grantId: string): RulesPackChildGrantV1 {
+  return {
+    schemaVersion: 1,
+    purpose: 'worker',
+    grantId,
+    capabilityDigest: `sha256:${grantId}`,
+    issuedAt: '2026-08-19T00:00:00.000Z',
+    expiresAt: '2026-08-19T01:00:00.000Z',
+    depth: 1,
+    parentEnvelopeFingerprint: 'sha256:parent',
+    parent: { envelopeId: 'parent-envelope' },
+    constraints: { hostId: 'imac', bot: 'bot-a', chatId: 'chat-a' },
+    signature: { scheme: 'ed25519', value: 'verified-signature' },
+  } as unknown as RulesPackChildGrantV1;
 }
 
 function scopedInput(dir: string, patch: Partial<ScopedDispatchWorkerInput> = {}): ScopedDispatchWorkerInput {

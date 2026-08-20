@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RulesPackError, type RuleInputV1 } from '@metabot/rulespack';
 import { MetaBotRulesPackRuntime, resolveRulesPackDbPath } from '../src/runtime.js';
+import { preflightRulesPackConfig } from '../src/preflight.js';
 
 const temporary: string[] = [];
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -52,6 +53,17 @@ function facts(root: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe('MetaBot RulesPack runtime', () => {
+  it('preflight validates the actual configured database path without creating it', async () => {
+    const root = temp();
+    const reserved = path.join(root, 'sessions.db');
+    await expect(preflightRulesPackConfig({ dbPath: reserved }, logger)).rejects.toThrow('own SQLite database path');
+    expect(fs.existsSync(reserved)).toBe(false);
+    const protectedPath = path.join(root, 'policy.sqlite');
+    await expect(preflightRulesPackConfig({
+      dbPath: protectedPath, protectedDbPaths: [protectedPath],
+    }, logger)).rejects.toThrow('aliases a configured live application database');
+    expect(fs.existsSync(protectedPath)).toBe(false);
+  });
   it('defaults off and keeps off/shadow/enforce injection semantics truthful', async () => {
     const root = temp();
     const dbPath = path.join(root, 'rules-state.sqlite');
@@ -83,6 +95,49 @@ describe('MetaBot RulesPack runtime', () => {
     runtime.close();
   });
 
+  it('acknowledges an accepted shadow envelope as shadowed and never consumed', async () => {
+    const root = temp();
+    const sender = new MetaBotRulesPackRuntime(
+      {
+        mode: 'enforce',
+        hostId: 'imac',
+        dbPath: path.join(root, 'shadow-sender.sqlite'),
+        dispatch: { issuer: 'admin@imac' },
+        configRules: { id: 'sender', revision: '1', rules: [rule('sent-shadow', 'Observe this policy.')] },
+      },
+      logger,
+    );
+    const receiver = new MetaBotRulesPackRuntime(
+      {
+        mode: 'shadow',
+        hostId: 'savio',
+        dbPath: path.join(root, 'shadow-receiver.sqlite'),
+        dispatch: { audience: 'metabot-host:savio', allowedIssuers: ['admin@imac'] },
+      },
+      logger,
+    );
+    const childFacts = facts(root, { botName: 'pm-savio', roles: ['peer', 'pm'] });
+    const envelope = await sender.createDispatchEnvelope({
+      targetSubject: receiver.buildSubject(childFacts),
+      audience: 'metabot-host:savio',
+    });
+    const prepared = await receiver.prepareTurn(childFacts, {
+      envelope,
+      transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+    });
+    expect(prepared.injectionText).toBe('');
+    expect(receiver.receipts().some((item) => item.replayId === envelope.replayId && item.status === 'consumed')).toBe(false);
+    prepared.markInjected();
+    expect(receiver.receipts().some((item) => item.replayId === envelope.replayId && item.status === 'shadowed')).toBe(true);
+    expect(receiver.receipts().some((item) => item.replayId === envelope.replayId && item.status === 'consumed')).toBe(false);
+    await expect(receiver.prepareTurn(childFacts, {
+      envelope,
+      transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+    })).rejects.toThrow(/replay/u);
+    sender.close();
+    receiver.close();
+  });
+
   it('binds project-native rules to configured roots with no cross-project leakage', async () => {
     const root = temp();
     const projectA = path.join(root, 'a');
@@ -112,9 +167,75 @@ describe('MetaBot RulesPack runtime', () => {
       },
       logger,
     );
+    expect(runtime.projectIdForCwd(projectA)).toBe('project-a');
+    expect(runtime.projectIdForCwd(projectB)).toBeUndefined();
     expect((await runtime.prepareTurn(facts(projectA))).injectionText).toContain('project A');
     expect((await runtime.prepareTurn(facts(projectB))).injectionText).not.toContain('project A');
     runtime.close();
+  });
+
+  it('binds multiple exact bot/chat identities to one project and rejects cwd conflicts', async () => {
+    const root = temp();
+    const projectA = path.join(root, 'project-a');
+    const projectB = path.join(root, 'project-b');
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(projectA);
+    fs.mkdirSync(projectB);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(
+      path.join(projectA, 'rules.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        revision: '1',
+        rules: [rule('project-chat-rule', 'Apply to every chat in project A.', { scope: 'project' })],
+      }),
+    );
+    const runtime = new MetaBotRulesPackRuntime(
+      {
+        mode: 'enforce',
+        hostId: 'imac',
+        dbPath: path.join(root, 'project-chat.sqlite'),
+        projectBindings: [
+          {
+            projectId: 'project-a',
+            root: projectA,
+            nativeFiles: [{ id: 'project-a-file', path: 'rules.json' }],
+          },
+          { projectId: 'project-b', root: projectB },
+        ],
+        projectChatBindings: [
+          {
+            projectId: 'project-a',
+            chats: [
+              { bot: 'admin', chatId: 'chat-a' },
+              { bot: 'pm-savio', chatId: 'chat-b' },
+            ],
+          },
+        ],
+      },
+      logger,
+    );
+    expect(runtime.projectIdForChat('admin', 'chat-a')).toBe('project-a');
+    expect(runtime.projectIdForChat('pm-savio', 'chat-b')).toBe('project-a');
+    expect(runtime.projectIdForChat('admin', 'chat-b')).toBeUndefined();
+    expect((await runtime.prepareTurn(facts(outside))).injectionText).toContain('every chat in project A');
+    expect((await runtime.prepareTurn(facts(outside, {
+      botName: 'pm-savio', chatId: 'chat-b',
+    }))).injectionText).toContain('every chat in project A');
+    expect((await runtime.prepareTurn(facts(outside, {
+      botName: 'admin', chatId: 'chat-b',
+    }))).injectionText).not.toContain('every chat in project A');
+    await expect(runtime.prepareTurn(facts(projectB))).rejects.toThrow(
+      'Authenticated chat project does not match the configured cwd binding',
+    );
+    runtime.close();
+
+    expect(() => new MetaBotRulesPackRuntime({
+      hostId: 'imac',
+      dbPath: ':memory:',
+      projectBindings: [{ projectId: 'project-a', root: projectA }],
+      projectChatBindings: [{ projectId: 'missing', chats: [{ bot: 'admin', chatId: 'chat-a' }] }],
+    }, logger)).toThrow('RulesPack chat project missing has no configured project root');
   });
 
   it('reuses unchanged digest, invalidates changed generations, and rejects unsafe path escape', async () => {
@@ -265,6 +386,18 @@ describe('MetaBot RulesPack runtime', () => {
         transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
       }),
     ).rejects.toThrow(/audience/u);
+    const expiredEnvelope = await sender.createDispatchEnvelope({
+      targetSubject: receiver.buildSubject(childFacts),
+      audience: 'metabot-host:savio',
+      now: new Date(Date.now() - 120_000).toISOString(),
+      ttlMs: 1_000,
+    });
+    await expect(
+      receiver.prepareTurn(childFacts, {
+        envelope: expiredEnvelope,
+        transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+      }),
+    ).rejects.toThrow(/expired/u);
     sender.close();
     receiver.close();
   });
@@ -443,17 +576,57 @@ describe('MetaBot RulesPack runtime', () => {
     runtime.close();
   });
 
+  it('rejects an authenticated dispatch instead of executing it while target mode is off', async () => {
+    const root = temp();
+    const sender = new MetaBotRulesPackRuntime({
+      mode: 'enforce', hostId: 'imac', dbPath: path.join(root, 'off-sender.sqlite'),
+      dispatch: { issuer: 'admin@imac' },
+      configRules: { id: 'sender', revision: '1', rules: [rule('sent', 'Sent policy.')] },
+    }, logger);
+    const receiver = new MetaBotRulesPackRuntime({
+      mode: 'off', hostId: 'savio', dbPath: path.join(root, 'off-receiver.sqlite'),
+      dispatch: { audience: 'metabot-host:savio', allowedIssuers: ['admin@imac'] },
+    }, logger);
+    const childFacts = facts(root, { botName: 'pm', chatId: 'dispatch-off' });
+    const envelope = await sender.createDispatchEnvelope({
+      targetSubject: receiver.buildSubject(childFacts), audience: 'metabot-host:savio',
+    });
+    await expect(receiver.prepareTurn(childFacts, {
+      envelope, transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+    })).rejects.toThrow('mode is off');
+    expect(receiver.receipts().some((receipt) => receipt.status === 'rejected')).toBe(true);
+    sender.close();
+    receiver.close();
+  });
+
   it('restores a validated durable operator mode override across restart until cleared', async () => {
     const root = temp();
     const dbPath = path.join(root, 'mode.sqlite');
     let runtime = new MetaBotRulesPackRuntime({ mode: 'enforce', hostId: 'imac', dbPath }, logger);
-    runtime.setMode('off');
+    const off = runtime.setMode('off');
+    expect(off.operatorModeOverride).toMatchObject({ mode: 'off', updatedAt: expect.any(String) });
+    expect(off).toMatchObject({ operatorModeVersion: 1, operatorModeOperationId: expect.any(String) });
     runtime.close();
     runtime = new MetaBotRulesPackRuntime({ mode: 'enforce', hostId: 'imac', dbPath }, logger);
     expect(runtime.status().mode).toBe('off');
+    expect(runtime.status().operatorModeOverride).toMatchObject({ mode: 'off', updatedAt: expect.any(String) });
+    expect(runtime.status()).toMatchObject({ operatorModeVersion: 1 });
+    expect(() => runtime.compareAndSetMode(null, 0, 'stale-clear')).toThrow('version mismatch');
+    expect(runtime.status()).toMatchObject({ mode: 'off', operatorModeVersion: 1 });
     expect((await runtime.prepareTurn(facts(root))).injectionText).toBe('');
-    expect(runtime.clearModeOverride().mode).toBe('enforce');
+    const cleared = runtime.compareAndSetMode(null, 1, 'confirmed-clear');
+    expect(cleared.mode).toBe('enforce');
+    expect(cleared.operatorModeOverride).toBeUndefined();
+    expect(cleared).toMatchObject({ operatorModeVersion: 2, operatorModeOperationId: 'confirmed-clear' });
     runtime.close();
+    const auditDb = new DatabaseSync(dbPath, { readOnly: true });
+    expect(auditDb.prepare(
+      'SELECT action, previous_mode, effective_mode FROM rulespack_adapter_mode_audit ORDER BY occurred_at',
+    ).all()).toEqual([
+      { action: 'set', previous_mode: 'enforce', effective_mode: 'off' },
+      { action: 'clear', previous_mode: 'off', effective_mode: 'enforce' },
+    ]);
+    auditDb.close();
   });
 
   it('configured and persisted off modes continue with degraded empty packs for corrupt or stale required state', async () => {

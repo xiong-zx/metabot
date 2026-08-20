@@ -1,6 +1,8 @@
 import {
+  createHash,
   createPublicKey,
   generateKeyPairSync,
+  randomUUID,
   sign as cryptoSign,
   verify as cryptoVerify,
 } from 'node:crypto';
@@ -18,6 +20,13 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  dispatchEnvelopeFingerprint,
+  rulesPackChildGrantFingerprint,
+  validateDispatchEnvelope,
+  type RulesPackChildGrantV1,
+  type RulesPackDispatchEnvelopeV1,
+} from '@metabot/rulespack';
 import { capabilityServers, loopbackProxyServers } from './mcp-registry.js';
 
 export type ExecutionCapabilityPurpose = string;
@@ -303,6 +312,57 @@ export class ExecutionCapabilityService {
     });
   }
 
+  /** Sign a non-secret, capability-bound grant for the Worker proxy only. */
+  issueRulesPackChildGrant(
+    capability: string,
+    parent: RulesPackDispatchEnvelopeV1,
+    now = Date.now(),
+  ): RulesPackChildGrantV1 {
+    validateDispatchEnvelope(parent, {
+      audience: parent.audience,
+      target: parent.target,
+      now: new Date(now).toISOString(),
+    });
+    const claims = this.verify(capability, {
+      purpose: 'worker',
+      botName: parent.target.bot,
+      chatId: parent.target.chatId,
+      now,
+    });
+    const parentExpiry = Date.parse(parent.expiresAt);
+    if (!Number.isFinite(parentExpiry) || parentExpiry <= now) {
+      throw new ExecutionCapabilityError('RulesPack parent dispatch has expired', 'CAPABILITY_EXPIRED');
+    }
+    const unsigned: Omit<RulesPackChildGrantV1, 'signature'> = {
+      schemaVersion: 1,
+      purpose: 'worker',
+      grantId: `rulespack-child-${randomUUID()}`,
+      capabilityDigest: executionCapabilityDigest(capability),
+      issuedAt: new Date(now).toISOString(),
+      expiresAt: new Date(Math.min(parentExpiry, claims.exp)).toISOString(),
+      depth: 1,
+      parentEnvelopeFingerprint: dispatchEnvelopeFingerprint(parent),
+      parent,
+      constraints: {
+        hostId: parent.target.hostId,
+        bot: parent.target.bot,
+        chatId: parent.target.chatId,
+        ...(parent.target.projectId ? { projectId: parent.target.projectId } : {}),
+      },
+    };
+    return {
+      ...unsigned,
+      signature: {
+        scheme: 'ed25519',
+        value: cryptoSign(
+          null,
+          Buffer.from(rulesPackChildGrantFingerprint(unsigned)),
+          this.loadPrivateKey(capabilityPrefix('worker')),
+        ).toString('base64url'),
+      },
+    };
+  }
+
   private signCapability(claims: ExecutionCapabilityClaims | LocalLifecycleCapabilityClaims): string {
     const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
     const privateKey = this.loadPrivateKey(capabilityPrefix(claims.purpose));
@@ -423,6 +483,10 @@ export class ExecutionCapabilityService {
         : []),
     ];
   }
+}
+
+export function executionCapabilityDigest(capability: string): string {
+  return `sha256:${createHash('sha256').update(capability).digest('hex')}`;
 }
 
 function capabilityPrefix(purpose: ExecutionCapabilityPurpose): KeyPrefix {

@@ -387,13 +387,24 @@ async function main() {
   // on the first poll tick. The local bot list is the full set of bots
   // configured in bots.json; visibility (per bot) is passed through to the
   // bulk-register call so `visible:false` rows are hidden in the registry.
-  const localBotsForRegistry = [
-    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.slackBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+  const configuredBots = [
+    ...appConfig.feishuBots,
+    ...appConfig.telegramBots,
+    ...appConfig.webBots,
+    ...appConfig.wechatBots,
+    ...appConfig.slackBots,
   ];
+  const configuredByName = new Map(configuredBots.map((bot) => [bot.name, bot]));
+  const localBotsForRegistry = registry.list().map((bot) => {
+    const configured = configuredByName.get(bot.name);
+    return {
+      name: bot.name,
+      visible: configured?.visible,
+      memoryPublic: configured?.memoryPublic,
+      rulesPackStatus: bot.rulesPackStatus,
+      rulesPackIdentity: bot.rulesPackIdentity,
+    };
+  });
   let peerManager: PeerManager | undefined;
   if (
     appConfig.peers.length > 0 ||

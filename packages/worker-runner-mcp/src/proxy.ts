@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 export interface LocalMcpProxyOptions {
   endpoint: URL | string;
   capability: string;
+  rulesPackGrantFile?: string;
 }
 
 /** Transparent JSON-RPC relay: the proxy adds authority only as an HTTP header. */
@@ -14,7 +15,12 @@ export async function runLocalMcpStdioProxy(options: LocalMcpProxyOptions): Prom
   }
   if (!options.capability.trim()) throw new Error('Proxy capability is required');
   const remote = new StreamableHTTPClientTransport(endpoint, {
-    requestInit: { headers: { authorization: `Bearer ${options.capability.trim()}` } },
+    requestInit: { headers: {
+      authorization: `Bearer ${options.capability.trim()}`,
+      ...(options.rulesPackGrantFile
+        ? { 'x-metabot-rulespack-grant-file': options.rulesPackGrantFile }
+        : {}),
+    } },
   });
   const stdio = new StdioServerTransport();
   stdio.onmessage = (message) => void remote.send(message).catch((error) => stdio.onerror?.(error as Error));

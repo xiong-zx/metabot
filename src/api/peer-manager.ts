@@ -42,6 +42,9 @@ export interface LocalBotEntry {
    * existing column value on update.
    */
   memoryPublic?: boolean;
+  rulesPackStatus?: BotInfo['rulesPackStatus'];
+  /** Live operator host/audience proposed for credential-bound Core TOFU. */
+  rulesPackIdentity?: BotInfo['rulesPackIdentity'];
 }
 
 export interface RelayInboxMessage {
@@ -241,11 +244,14 @@ export class PeerManager {
   // Registry mode (on when METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL is set).
   private agentBusUrl?: string;
   private agentBusToken?: string;
+  /** Cached identity for the Bridge-wide Core credential used by every bot. */
+  private agentBusIdentityPromise?: Promise<string>;
   private selfUrl?: string;
   /** Local bots from bots.json — every entry is bulk-registered at boot. */
   private localBots: LocalBotEntry[] = [];
   /** Names that successfully landed in the registry (heartbeat targets). */
   private registeredBotNames: Set<string> = new Set();
+  private registrationTail: Promise<void> = Promise.resolve();
   private relayHandler?: RelayInboxHandler;
   private relayPollers: Map<string, AbortController> = new Map();
   private agentBusFailureCount = 0;
@@ -403,7 +409,7 @@ export class PeerManager {
     while (true) {
       attempt++;
       try {
-        const result = await this.postBulkRegister();
+        const result = await this.queueBulkRegister();
         this.logger.info(
           {
             agentBusUrl: this.agentBusUrl,
@@ -432,14 +438,27 @@ export class PeerManager {
    * restart. Per-entry name-squat errors are logged but don't fail the batch
    * (server returns them in `results[i].status === 403`).
    */
-  private async postBulkRegister(): Promise<{ registered: number }> {
+  private queueBulkRegister(targetBotName?: string): Promise<{ registered: number }> {
+    const run = this.registrationTail
+      .catch(() => undefined)
+      .then(() => this.postBulkRegister(targetBotName));
+    this.registrationTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async postBulkRegister(targetBotName?: string): Promise<{ registered: number }> {
     if (!this.agentBusUrl || this.localBots.length === 0) {
       return { registered: 0 };
     }
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.agentBusToken) headers['Authorization'] = `Bearer ${this.agentBusToken}`;
+    const rulesPackIdentity = this.localRulesPackIdentity();
+    const selectedBots = targetBotName
+      ? this.localBots.filter((bot) => bot.name === targetBotName)
+      : this.localBots;
     const payload = {
-      bots: this.localBots.map((b) => ({
+      ...(rulesPackIdentity ? { rulesPackIdentity } : {}),
+      bots: selectedBots.map((b) => ({
         botName: b.name,
         url: this.selfUrl || 'inbox:',
         visible: b.visible !== false,
@@ -447,6 +466,7 @@ export class PeerManager {
         // so a CLI-time `metabot memory visibility` toggle isn't clobbered by
         // every restart. Server-side, undefined → keep existing column value.
         ...(b.memoryPublic !== undefined ? { memoryPublic: b.memoryPublic } : {}),
+        ...(b.rulesPackStatus ? { rulesPackStatus: b.rulesPackStatus } : {}),
       })),
     };
     const resp = await proxyFetch(`${this.agentBusUrl}/api/agents/bulk`, {
@@ -460,18 +480,64 @@ export class PeerManager {
     }
     const data = (await resp.json()) as {
       registered: number;
-      results: Array<{ botName: string; status: number; error?: string }>;
+      results: Array<{
+        botName: string;
+        status: number;
+        error?: string;
+        rulesPackIdentity?: BotInfo['rulesPackIdentity'];
+      }>;
     };
-    this.registeredBotNames = new Set(
-      (data.results || []).filter((r) => r.status === 201 || r.status === 200).map((r) => r.botName),
-    );
+    const accepted = (data.results || []).filter((r) => r.status === 201 || r.status === 200);
+    if (targetBotName) {
+      const target = (data.results || []).find((result) => result.botName === targetBotName);
+      if (!target || target.status < 200 || target.status >= 300) {
+        throw new Error(`RulesPack status publication failed for ${targetBotName}: ${target?.error ?? 'missing result'}`);
+      }
+      this.registeredBotNames.add(targetBotName);
+    } else {
+      this.registeredBotNames = new Set(accepted.map((r) => r.botName));
+    }
     this.syncRelayPollers();
     for (const r of data.results || []) {
       if (r.status >= 400) {
         this.logger.warn({ botName: r.botName, status: r.status, error: r.error }, 'bulk-register entry rejected');
       }
     }
+    if (rulesPackIdentity) {
+      for (const local of selectedBots.filter((bot) => bot.rulesPackIdentity)) {
+        const result = (data.results || []).find((entry) => entry.botName === local.name);
+        if (
+          !result ||
+          (result.status !== 200 && result.status !== 201) ||
+          result.rulesPackIdentity?.hostId !== rulesPackIdentity.hostId ||
+          result.rulesPackIdentity?.audience !== rulesPackIdentity.audience
+        ) {
+          throw new Error(`Core did not attest the configured RulesPack identity for bot ${local.name}`);
+        }
+      }
+    }
     return { registered: data.registered ?? this.registeredBotNames.size };
+  }
+
+  private localRulesPackIdentity(): NonNullable<BotInfo['rulesPackIdentity']> | undefined {
+    let resolved: NonNullable<BotInfo['rulesPackIdentity']> | undefined;
+    for (const bot of this.localBots) {
+      const active =
+        (bot.rulesPackStatus?.state === 'inherited' || bot.rulesPackStatus?.state === 'overridden') &&
+        (bot.rulesPackStatus.mode === 'shadow' || bot.rulesPackStatus.mode === 'enforce');
+      if (active && !bot.rulesPackIdentity) {
+        throw new Error(`Active RulesPack bot ${bot.name} has no live host/audience identity`);
+      }
+      if (!bot.rulesPackIdentity) continue;
+      if (
+        resolved &&
+        (resolved.hostId !== bot.rulesPackIdentity.hostId || resolved.audience !== bot.rulesPackIdentity.audience)
+      ) {
+        throw new Error('One Bridge credential cannot register multiple RulesPack host/audience identities');
+      }
+      resolved = bot.rulesPackIdentity;
+    }
+    return resolved;
   }
 
   private async sendHeartbeat(): Promise<void> {
@@ -502,7 +568,14 @@ export class PeerManager {
       throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
     }
     const data = (await resp.json()) as {
-      agents: Array<{ botName: string; url: string; visible?: boolean; lastSeenAt?: string }>;
+      agents: Array<{
+        botName: string;
+        url: string;
+        visible?: boolean;
+        lastSeenAt?: string;
+        rulesPackStatus?: BotInfo['rulesPackStatus'];
+        rulesPackIdentity?: BotInfo['rulesPackIdentity'];
+      }>;
     };
 
     const next = new Map<string, PeerState>();
@@ -526,6 +599,7 @@ export class PeerManager {
           : unchanged
             ? {
                 ...prev,
+                bots: [agentBusBot(entry, normalizedUrl, prev.bots[0])],
                 relay: true,
                 healthy: true,
                 lastChecked: Date.now(),
@@ -537,18 +611,7 @@ export class PeerManager {
                 healthy: !sameHost,
                 lastChecked: sameHost ? 0 : Date.now(),
                 lastHealthy: sameHost ? 0 : Date.now(),
-                bots: sameHost
-                  ? []
-                  : [
-                      {
-                        name: entry.botName,
-                        platform: 'agent-bus',
-                        engine: 'codex',
-                        workingDirectory: '',
-                        peerUrl: normalizedUrl,
-                        peerName: entry.botName,
-                      },
-                    ],
+                bots: sameHost ? [] : [agentBusBot(entry, normalizedUrl)],
                 skills: [],
                 relay: !sameHost,
               },
@@ -607,9 +670,100 @@ export class PeerManager {
     return peer.secret || this.agentBusToken;
   }
 
+  /**
+   * Bind an envelope issuer to the credential that will authenticate this
+   * exact outbound hop. A static peer secret is the remote Bridge's local API
+   * administrator secret, so possession explicitly authorizes the configured
+   * issuer. Agent Bus traffic instead uses one Bridge-wide Core credential;
+   * its server-derived `/api/whoami` botName must match exactly.
+   */
+  private async assertRulesPackTransportIssuer(peer: PeerConfig, body: object): Promise<void> {
+    const dispatch = (body as { rulesPackDispatch?: { issuer?: unknown } }).rulesPackDispatch;
+    if (!dispatch) return;
+    const issuer = typeof dispatch.issuer === 'string' ? dispatch.issuer.trim() : '';
+    if (!issuer) {
+      this.logger.warn({ peerName: peer.name }, 'RulesPack dispatch has no issuer to bind to outbound transport');
+      throw new Error('RulesPack dispatch issuer is required for authenticated transport');
+    }
+    if (peer.secret) {
+      this.logger.info(
+        { peerName: peer.name, issuer, authMode: 'local-administrator-secret' },
+        'RulesPack issuer authorized by explicit peer secret (local administrator equivalent)',
+      );
+      return;
+    }
+    let authenticatedIssuer: string;
+    try {
+      authenticatedIssuer = await this.resolveAgentBusIdentity();
+    } catch (error) {
+      this.logger.warn(
+        { peerName: peer.name, issuer, error: error instanceof Error ? error.message : String(error) },
+        'RulesPack dispatch blocked because Agent Bus transport identity could not be verified',
+      );
+      throw error;
+    }
+    if (issuer !== authenticatedIssuer) {
+      this.logger.warn(
+        { peerName: peer.name, issuer, authenticatedIssuer, authMode: 'core-bearer' },
+        'RulesPack dispatch issuer does not match authenticated Agent Bus transport identity',
+      );
+      throw new Error(
+        `RulesPack dispatch issuer "${issuer}" does not match authenticated Agent Bus identity "${authenticatedIssuer}"`,
+      );
+    }
+  }
+
+  private async resolveAgentBusIdentity(): Promise<string> {
+    if (!this.agentBusUrl || !this.agentBusToken) {
+      throw new Error('RulesPack Agent Bus dispatch requires a configured Core URL and credential');
+    }
+    if (!this.agentBusIdentityPromise) {
+      this.agentBusIdentityPromise = this.fetchAgentBusIdentity().catch((error) => {
+        this.agentBusIdentityPromise = undefined;
+        throw error;
+      });
+    }
+    return this.agentBusIdentityPromise;
+  }
+
+  private async fetchAgentBusIdentity(): Promise<string> {
+    const resp = await proxyFetch(`${this.agentBusUrl}/api/whoami`, {
+      headers: { Authorization: `Bearer ${this.agentBusToken}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      throw new Error(`Core whoami failed with HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    const body = (await resp.json().catch(() => ({}))) as { botName?: unknown };
+    const botName = typeof body.botName === 'string' ? body.botName.trim() : '';
+    if (!botName) throw new Error('Core whoami did not return a botName transport identity');
+    return botName;
+  }
+
   async refreshAll(): Promise<void> {
     const tasks = Array.from(this.peers.values()).map((state) => this.refreshPeer(state));
     await Promise.allSettled(tasks);
+  }
+
+  /** Publish a live, non-secret RulesPack mode/adoption change to the central Agent Bus. */
+  async updateLocalRulesPackStatus(
+    name: string,
+    rulesPackStatus: NonNullable<BotInfo['rulesPackStatus']>,
+  ): Promise<void> {
+    const local = this.localBots.find((bot) => bot.name === name);
+    if (!local) return;
+    const previous = local.rulesPackStatus;
+    const next = { ...previous, ...rulesPackStatus };
+    local.rulesPackStatus = next;
+    if (!this.agentBusUrl) return;
+    try {
+      await this.queueBulkRegister(name);
+    } catch (error) {
+      if (local.rulesPackStatus === next) local.rulesPackStatus = previous;
+      this.logger.warn({ botName: name, error: error instanceof Error ? error.message : String(error) },
+        'failed to publish live RulesPack status to agent bus');
+      throw error;
+    }
   }
 
   private async refreshPeer(state: PeerState): Promise<void> {
@@ -667,6 +821,8 @@ export class PeerManager {
           model?: string;
           workingDirectory: string;
           rulesPackTools?: string[];
+          rulesPackStatus?: BotInfo['rulesPackStatus'];
+          rulesPackIdentity?: BotInfo['rulesPackIdentity'];
           peerUrl?: string;
         }>;
       };
@@ -684,6 +840,8 @@ export class PeerManager {
           ...(Array.isArray(b.rulesPackTools) && b.rulesPackTools.every((tool) => typeof tool === 'string')
             ? { rulesPackTools: [...new Set(b.rulesPackTools)].sort() }
             : {}),
+          ...(b.rulesPackStatus ? { rulesPackStatus: b.rulesPackStatus } : {}),
+          ...(b.rulesPackIdentity ? { rulesPackIdentity: b.rulesPackIdentity } : {}),
           peerUrl: config.url,
           peerName: config.name,
         }));
@@ -818,6 +976,7 @@ export class PeerManager {
 
   /** Forward a task request to a peer. Adds X-MetaBot-Origin header to prevent loops. */
   async forwardTask(peer: PeerConfig, body: object): Promise<object> {
+    await this.assertRulesPackTransportIssuer(peer, body);
     if (peer.url === 'inbox:' || this.isRelayPeer(peer)) {
       return this.enqueueRelayTask(peer, body);
     }
@@ -1031,4 +1190,31 @@ export class PeerManager {
     }
     this.relayPollers.clear();
   }
+}
+
+function agentBusBot(
+  entry: {
+    botName: string;
+    rulesPackStatus?: BotInfo['rulesPackStatus'];
+    rulesPackIdentity?: BotInfo['rulesPackIdentity'];
+  },
+  normalizedUrl: string,
+  previous?: PeerBotInfo,
+): PeerBotInfo {
+  const {
+    rulesPackStatus: _staleStatus,
+    rulesPackIdentity: _staleIdentity,
+    ...stable
+  } = previous ?? {} as PeerBotInfo;
+  return {
+    ...stable,
+    name: entry.botName,
+    platform: 'agent-bus',
+    engine: 'codex',
+    workingDirectory: '',
+    ...(entry.rulesPackStatus ? { rulesPackStatus: entry.rulesPackStatus } : {}),
+    ...(entry.rulesPackIdentity ? { rulesPackIdentity: entry.rulesPackIdentity } : {}),
+    peerUrl: normalizedUrl,
+    peerName: entry.botName,
+  };
 }

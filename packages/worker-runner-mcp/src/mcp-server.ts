@@ -1,6 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { DispatchWorkerInput, GenericOutputContract, TrustedPrincipal, WorkerRecord } from './types.js';
+import type { RulesPackChildGrantV1 } from '@metabot/rulespack';
 import { WorkerRunnerError } from './types.js';
 import type { WorkerService } from './service.js';
 
@@ -100,6 +101,8 @@ export const WORKER_RUNNER_TOOLS: Tool[] = [
 
 export interface WorkerRunnerMcpOptions {
   authorizingCapability?: string;
+  /** Verified daemon-session context; never accepted from tool arguments. */
+  rulesPackChildGrant?: RulesPackChildGrantV1;
   maxStatusOutputChars?: number;
 }
 
@@ -182,7 +185,7 @@ export function createWorkerRunnerMcpServer(
                   },
                 }
               : {}),
-          }, authenticatedPrincipal, options.authorizingCapability);
+          }, authenticatedPrincipal, options.authorizingCapability, options.rulesPackChildGrant);
           return toolResult({
             deduplicated: result.deduplicated,
             retriedTerminal: result.retriedTerminal,

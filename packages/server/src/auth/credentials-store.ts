@@ -5,6 +5,7 @@ import type { Logger } from 'pino';
 import {
   Credential,
   CredentialPublic,
+  CredentialRulesPackIdentity,
   IssueInput,
   IssueResult,
   Role,
@@ -14,6 +15,13 @@ import {
 } from './credentials.js';
 
 const CACHE_TTL_MS = 60_000;
+
+export class CredentialRulesPackIdentityMismatchError extends Error {
+  constructor() {
+    super('credential RulesPack identity is already bound to a different host or audience');
+    this.name = 'CredentialRulesPackIdentityMismatchError';
+  }
+}
 
 interface CacheEntry {
   cred: Credential | null;
@@ -55,6 +63,13 @@ export class CredentialsStore {
       CREATE INDEX IF NOT EXISTS credentials_bot_name_idx
         ON credentials(bot_name);
     `);
+    const cols = this.db.prepare(`PRAGMA table_info(credentials)`).all() as Array<{ name: string }>;
+    if (!cols.some((column) => column.name === 'rulespack_host_id')) {
+      this.db.exec(`ALTER TABLE credentials ADD COLUMN rulespack_host_id TEXT`);
+    }
+    if (!cols.some((column) => column.name === 'rulespack_audience')) {
+      this.db.exec(`ALTER TABLE credentials ADD COLUMN rulespack_audience TEXT`);
+    }
   }
 
   /** Issue a new credential. Returns the public record + one-time token. */
@@ -101,6 +116,44 @@ export class CredentialsStore {
     const cred = this.findByTokenHash(tokenHash);
     this.cache.set(tokenHash, { cred, expiresAt: now + CACHE_TTL_MS });
     return cred;
+  }
+
+  /**
+   * Bind a non-secret RulesPack host/audience pair using authenticated TOFU.
+   * The first caller for this credential wins atomically; every later caller
+   * must repeat the exact pair. Tokens are neither replaced nor reissued.
+   */
+  bindRulesPackIdentity(
+    credentialId: string,
+    proposed: CredentialRulesPackIdentity,
+  ): Credential {
+    const bind = this.db.transaction(() => {
+      const current = this.findById(credentialId);
+      if (!current) throw new Error('credential_not_found');
+      if (!current.rulesPackIdentity) {
+        this.db.prepare(`
+          UPDATE credentials
+             SET rulespack_host_id = ?, rulespack_audience = ?
+           WHERE id = ? AND rulespack_host_id IS NULL AND rulespack_audience IS NULL
+        `).run(proposed.hostId, proposed.audience, credentialId);
+      }
+      const bound = this.findById(credentialId);
+      if (
+        !bound?.rulesPackIdentity ||
+        bound.rulesPackIdentity.hostId !== proposed.hostId ||
+        bound.rulesPackIdentity.audience !== proposed.audience
+      ) {
+        throw new CredentialRulesPackIdentityMismatchError();
+      }
+      return bound;
+    });
+    const bound = bind();
+    this.invalidateCacheById(credentialId);
+    this.logger.info(
+      { credentialId, hostId: bound.rulesPackIdentity?.hostId, audience: bound.rulesPackIdentity?.audience },
+      'credential RulesPack identity bound',
+    );
+    return bound;
   }
 
   /** Mark a credential as revoked. Returns revokedAt ms, or null if missing. */
@@ -231,6 +284,8 @@ interface RawCredRow {
   revoked_at: number | null;
   last_used_at: number | null;
   notes: string;
+  rulespack_host_id: string | null;
+  rulespack_audience: string | null;
 }
 
 function rowToCredential(row: RawCredRow): Credential {
@@ -247,6 +302,9 @@ function rowToCredential(row: RawCredRow): Credential {
     revokedAt: row.revoked_at,
     lastUsedAt: row.last_used_at,
     notes: row.notes,
+    ...(row.rulespack_host_id && row.rulespack_audience
+      ? { rulesPackIdentity: { hostId: row.rulespack_host_id, audience: row.rulespack_audience } }
+      : {}),
   };
 }
 

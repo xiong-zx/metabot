@@ -51,13 +51,12 @@ export function resolveRulesPackApiPrincipal(
       ...(envelopeTarget.userId ? { userId: envelopeTarget.userId } : {}),
       ...(envelopeTarget.agent ? { agentName: envelopeTarget.agent } : {}),
       ...(envelopeTarget.worker ? { workerId: envelopeTarget.worker } : {}),
+      ...(envelopeTarget.projectId ? { projectId: envelopeTarget.projectId } : {}),
       ...(envelopeTarget.taskId ? { taskId: envelopeTarget.taskId } : {}),
+      tools: envelopeTarget.tools,
       dataClasses: envelopeTarget.dataClasses,
       outputTypes: envelopeTarget.outputTypes,
     };
-  }
-  if (declarations && Object.values(declarations).some((value) => value !== undefined)) {
-    throw new Error('RulesPack API identity declarations require an authenticated exact dispatch');
   }
   if (auth.localAdministrator) {
     return {
@@ -65,11 +64,19 @@ export function resolveRulesPackApiPrincipal(
       source: 'local-admin',
       botName: target.botName,
       chatId: target.chatId,
-      roles: ['api-admin'],
+      roles: exactValues(['api-admin', ...(declarations?.roles ?? [])]),
       userId: 'api-local-admin',
-      dataClasses: ['api'],
-      outputTypes: ['text'],
+      ...(declarations?.agentName ? { agentName: declarations.agentName } : {}),
+      ...(declarations?.workerId ? { workerId: declarations.workerId } : {}),
+      ...(declarations?.projectId ? { projectId: declarations.projectId } : {}),
+      ...(declarations?.taskId ? { taskId: declarations.taskId } : {}),
+      ...(declarations?.tools ? { tools: exactValues(declarations.tools) } : {}),
+      dataClasses: exactValues(['api', ...(declarations?.dataClasses ?? [])]),
+      outputTypes: exactValues(declarations?.outputTypes ?? ['text']),
     };
+  }
+  if (declarations && Object.values(declarations).some((value) => value !== undefined)) {
+    throw new Error('RulesPack API identity declarations require an authenticated exact dispatch');
   }
   return {
     kind: 'generic',
@@ -82,4 +89,11 @@ function sameDeclaration(declared: readonly string[] | undefined, authenticated:
   if (declared === undefined) return true;
   if (!declared.every((value) => typeof value === 'string')) return false;
   return [...new Set(declared)].sort().join('\0') === [...new Set(authenticated)].sort().join('\0');
+}
+
+function exactValues(values: readonly string[]): string[] {
+  if (!values.every((value) => typeof value === 'string' && value.trim().length > 0)) {
+    throw new Error('RulesPack API identity declarations must contain non-empty strings');
+  }
+  return [...new Set(values.map((value) => value.trim()))].sort();
 }

@@ -36,6 +36,8 @@ export interface MaterializeExecutionMcpInput {
   logger: McpMaterializeLogger;
   /** Defaults to the full registry; overridden by fixtures. */
   servers?: readonly AnyMcpServerDescriptor[];
+  /** Product ids unavailable for this exact turn. */
+  excludedServerIds?: readonly string[];
   /** Injectable only so tests can force a filename collision. */
   nonce?: () => string;
 }
@@ -43,6 +45,7 @@ export interface MaterializeExecutionMcpInput {
 export interface MaterializedExecutionMcp {
   entries: McpEntry[];
   claudeMcpConfigPath?: string;
+  attachRulesPackChildGrant(grant: string): void;
   cleanup(): void;
 }
 
@@ -64,7 +67,8 @@ export function materializeExecutionMcp(
   input: MaterializeExecutionMcpInput,
 ): MaterializedExecutionMcp | undefined {
   const executionEnv = input.executionEnv;
-  const servers = input.servers ?? EXECUTION_MCP_SERVERS;
+  const excluded = new Set(input.excludedServerIds ?? []);
+  const servers = (input.servers ?? EXECUTION_MCP_SERVERS).filter((server) => !excluded.has(server.id));
   const authorized = servers.filter((server) => hasValue(executionEnv?.[server.capabilityEnvVar]));
   if (authorized.length === 0) return undefined;
 
@@ -183,6 +187,24 @@ function materializeAuthorizedExecutionMcp(
     return {
       entries,
       ...(claudeMcpConfigPath ? { claudeMcpConfigPath } : {}),
+      attachRulesPackChildGrant: (grant: string) => {
+        if (cleaned) throw new Error('Execution MCP material is already cleaned');
+        const server = servers.find((candidate) => candidate.id === 'worker');
+        const entry = entries.find((candidate) => candidate.name === server?.serverName);
+        if (!server?.rulesPackGrantFileEnvVar || !entry) {
+          throw new Error('Worker MCP entry is unavailable for a RulesPack child grant');
+        }
+        if (typeof grant !== 'string' || !grant || Buffer.byteLength(grant, 'utf8') > 1_048_576) {
+          throw new Error('RulesPack child grant is empty or too large');
+        }
+        if (entry.env[server.rulesPackGrantFileEnvVar]) {
+          throw new Error('RulesPack child grant is already attached');
+        }
+        const grantPath = path.join(scratchDir, `${scopeName}-worker-rulespack-grant.json`);
+        leasePrivateFile(grantPath, `${grant}\n`);
+        leasedPaths.push(grantPath);
+        entry.env[server.rulesPackGrantFileEnvVar] = grantPath;
+      },
       cleanup: () => {
         if (cleaned) return;
         cleaned = true;

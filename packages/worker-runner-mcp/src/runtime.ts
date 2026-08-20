@@ -9,6 +9,7 @@ import { WorkerService, normalizeTrustedPrincipal } from './service.js';
 import { WorkerStore } from './store.js';
 import type { TrustedPrincipal } from './types.js';
 import { createWorkerRulesPackProvider } from './rulespack.js';
+import type { RulesPackChildGrantV1 } from '@metabot/rulespack';
 
 export interface WorkerRunnerServiceRuntime {
   principal?: TrustedPrincipal;
@@ -28,6 +29,7 @@ export interface CreateWorkerRunnerRuntimeOptions {
 
 export interface CreateWorkerRunnerServiceRuntimeOptions extends CreateWorkerRunnerRuntimeOptions {
   dynamicPrincipals?: boolean;
+  rulesPackGrantVerifier?: (grant: RulesPackChildGrantV1, capability: string) => RulesPackChildGrantV1;
 }
 
 export function createWorkerRunnerServiceRuntime(
@@ -82,7 +84,11 @@ export function createWorkerRunnerServiceRuntime(
         notificationRetryInitialMs: integerEnv(env, 'METABOT_WORKER_NOTIFY_RETRY_INITIAL_MS', 1_000),
         notificationRetryMaxMs: integerEnv(env, 'METABOT_WORKER_NOTIFY_RETRY_MAX_MS', 60_000),
       },
-      { dynamicPrincipals, rulesPackProvider: createWorkerRulesPackProvider(env) },
+      {
+        dynamicPrincipals,
+        rulesPackProvider: createWorkerRulesPackProvider(env),
+        rulesPackGrantVerifier: options.rulesPackGrantVerifier,
+      },
     );
     return { ...(principal ? { principal } : {}), store, service };
   } catch (error) {

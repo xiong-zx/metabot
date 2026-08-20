@@ -88,6 +88,21 @@ describe('materializeExecutionMcp', () => {
     expect(tokenPaths.every((file) => !existsSync(file))).toBe(true);
   });
 
+  it('leases a hidden 0600 Worker grant companion and can omit native ARC for a dispatched turn', () => {
+    const root = runtimeRoot();
+    const materialized = materializeExecutionMcp(input(root, { excludedServerIds: ['arc'] }))!;
+    expect(materialized.entries.map((entry) => entry.name)).toEqual(['metabot-worker']);
+    materialized.attachRulesPackChildGrant('{"schemaVersion":1,"grantId":"grant-sentinel"}');
+    const entry = materialized.entries[0];
+    const grantPath = entry.env.METABOT_WORKER_PROXY_RULESPACK_GRANT_FILE;
+    expect(grantPath).toMatch(/worker-rulespack-grant\.json$/u);
+    expect(lstatSync(grantPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(grantPath, 'utf8')).toContain('grant-sentinel');
+    expect(entry.env).not.toHaveProperty('METABOT_ARC_PROXY_CAPABILITY_FILE');
+    materialized.cleanup();
+    expect(existsSync(grantPath)).toBe(false);
+  });
+
   it('gives concurrent turns in one chat separate capability files that clean up independently', () => {
     const root = runtimeRoot();
     const turn = (capability: string) =>

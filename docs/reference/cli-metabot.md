@@ -165,6 +165,9 @@ metabot talk alice/bot <chatId> <prompt>  # talk to a specific peer's bot
 The bot name supports [qualified names](../features/peers.md#qualified-names)
 (`peerName/botName`) for cross-instance routing. This is the bridge-local talk
 path; `metabot agents talk` is the separate central-registry P2P variant.
+The CLI-only variant has no sender RulesPack runtime and refuses protected
+targets. Use the Bridge-local `metabot talk` form when the target advertises a
+required, shadow, or enforce RulesPack state.
 
 ### Peers
 

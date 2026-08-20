@@ -97,6 +97,34 @@ local HTTP Authorization header, and forwards JSON-RPC unchanged. It never
 adds identity fields to tool calls. The standalone stdio executable keeps the
 existing environment-pinned identity mode.
 
+For a Bridge turn that accepted an exact remote RulesPack dispatch, the proxy
+may also receive `METABOT_WORKER_PROXY_RULESPACK_GRANT_FILE`. It validates the
+private regular-file shape and forwards only its confined path as authenticated
+session metadata. The daemon verifies the Ed25519 signature, capability digest,
+purpose, parent fingerprint, scope, and expiry. The grant is never a tool
+argument and is never returned by list/status or copied into the Worker child
+environment; only the resulting rendered Rules are prepended to Codex stdin.
+Native ARC MCP is not a substitute for this boundary. ARC descendants are
+covered only when dispatched through Worker Runner.
+
+The daemon also owns a non-MCP, loopback-only RulesPack operator below its MCP
+path: `GET .../rulespack/bots/:bot/status` and
+`PATCH .../rulespack/bots/:bot/mode`. It accepts only the exact fixed lifecycle
+admin capability. The endpoint delegates to the daemon's current RulesPack
+provider, writes the independent worker-surface RulesPack database (never
+`workers.sqlite`), and returns a durable override timestamp. It affects the
+next Codex policy preparation; already-started preparations and launched
+processes remain unchanged.
+Bot-scoped mutation is available only with `BOTS_CONFIG`; the process-wide
+legacy `METABOT_RULESPACK_CONFIG` reports `standalone-shared` and rejects it.
+This endpoint is for the authenticated Bridge coordinator, not an engine tool.
+PATCH requires exactly `mode`, `expectedVersion`, and `operationId`. The
+provider commits the mode setting, monotonic version, operation ID, and audit
+event atomically; stale versions fail with conflict. Worker startup also rejects
+any Codex bot whose worker database aliases any bot's Bridge or Worker database
+by canonical path or device/inode. Configured Claude/Kimi bots
+report `unsupported` and cannot be mutated.
+
 ## MCP tools
 
 The server advertises exactly four tools:

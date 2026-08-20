@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -14,6 +14,7 @@ import {
   LOCAL_LIFECYCLE_ADMIN_PRINCIPAL,
   type ScopedDispatchWorkerInput,
   type TrustedPrincipal,
+  type WorkerRulesPackProvider,
 } from '../src/types.js';
 import { FakeProcessRunner, RecordingNotifier } from './helpers.js';
 
@@ -25,6 +26,26 @@ afterEach(async () => {
 });
 
 describe('Worker Runner daemon authentication', () => {
+  it('rejects a RulesPack grant path outside its confined private root before session creation', async () => {
+    const kit = await makeDaemon();
+    const outside = path.join(kit.dir, 'outside-grant.json');
+    writeFileSync(outside, '{}', { mode: 0o600 });
+    chmodSync(outside, 0o600);
+    const response = await fetch(kit.daemon.url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${kit.issue(PM)}`,
+        'content-type': 'application/json',
+        'x-metabot-rulespack-grant-file': outside,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      }),
+    });
+    expect(response.status).toBe(401);
+  });
+
   it('fails closed without a capability and rejects a token for another purpose', async () => {
     const kit = await makeDaemon();
     const initialize = {
@@ -212,23 +233,93 @@ describe('Worker Runner daemon authentication', () => {
     const status = await connected.client.callTool({ name: 'worker_status', arguments: { id: worker.id } });
     expect(JSON.stringify(status.structuredContent)).not.toContain(capability);
   });
+
+  it('restricts bot-scoped RulesPack control to lifecycle admin and delegates to the current provider', async () => {
+    const controlStatus = vi.fn((botName: string) => ({
+      botName,
+      state: 'configured' as const,
+      botScoped: true,
+      mode: 'enforce' as const,
+      configuredMode: 'enforce' as const,
+      operatorModeVersion: 0,
+      appliesTo: 'subsequent-codex-policy-preparations' as const,
+      inFlight: 'unchanged' as const,
+    }));
+    const setControlMode = vi.fn((
+      botName: string,
+      mode: 'off' | 'shadow' | 'enforce' | null,
+      expectedVersion: number,
+      operationId: string,
+    ) => ({
+      botName,
+      state: 'configured' as const,
+      botScoped: true,
+      mode: mode ?? 'enforce',
+      configuredMode: 'enforce' as const,
+      operatorModeVersion: expectedVersion + 1,
+      operatorModeOperationId: operationId,
+      ...(mode === null ? {} : { operatorModeOverride: { mode, updatedAt: '2026-08-19T00:00:00.000Z' } }),
+      appliesTo: 'subsequent-codex-policy-preparations' as const,
+      inFlight: 'unchanged' as const,
+    }));
+    const provider: WorkerRulesPackProvider = {
+      prepare: async () => undefined,
+      controlStatus,
+      setControlMode,
+    };
+    const kit = await makeDaemon(undefined, provider);
+    const statusUrl = rulesPackUrl(kit.daemon.url, 'admin', 'status');
+    const modeUrl = rulesPackUrl(kit.daemon.url, 'admin', 'mode');
+
+    expect((await fetch(statusUrl)).status).toBe(401);
+    expect((await fetch(modeUrl, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${kit.issue(PM)}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'off', expectedVersion: 0, operationId: 'forbidden' }),
+    })).status).toBe(403);
+
+    const lifecycle = kit.issue(LOCAL_LIFECYCLE_ADMIN_PRINCIPAL);
+    const status = await fetch(statusUrl, { headers: { authorization: `Bearer ${lifecycle}` } });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      botName: 'admin', mode: 'enforce', appliesTo: 'subsequent-codex-policy-preparations', inFlight: 'unchanged',
+    });
+    const changed = await fetch(modeUrl, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${lifecycle}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'off', expectedVersion: 0, operationId: 'mode-off-1' }),
+    });
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toMatchObject({
+      botName: 'admin', mode: 'off', operatorModeOverride: { mode: 'off' },
+    });
+    expect(controlStatus).toHaveBeenCalledWith('admin');
+    expect(setControlMode).toHaveBeenCalledWith('admin', 'off', 0, 'mode-off-1');
+  });
 });
 
 const PM: TrustedPrincipal = { role: 'pm', botName: 'bot-a', chatId: 'chat-a' };
 const OTHER_PM: TrustedPrincipal = { role: 'pm', botName: 'bot-b', chatId: 'chat-b' };
 
-async function makeDaemon(seed?: (store: WorkerStore, dir: string) => void) {
+async function makeDaemon(
+  seed?: (store: WorkerStore, dir: string) => void,
+  rulesPackProvider?: WorkerRulesPackProvider,
+) {
   const dir = mkdtempSync(path.join(tmpdir(), 'worker-daemon-'));
+  const rulesPackGrantRoot = path.join(dir, 'private-grants');
+  mkdirSync(rulesPackGrantRoot, { mode: 0o700 });
   const store = new WorkerStore(path.join(dir, 'state', 'workers.sqlite'));
   seed?.(store, dir);
   const runner = new FakeProcessRunner();
   const service = new WorkerService(store, runner, new RecordingNotifier(), undefined, testConfig(), {
     dynamicPrincipals: true,
+    ...(rulesPackProvider ? { rulesPackProvider } : {}),
   });
   const verifier = new LocalCapabilityVerifier([CAPABILITY_KEYS.publicKey], 'worker');
   const daemon = new WorkerRunnerDaemon(service, {
     endpoint: 'http://127.0.0.1:0/mcp',
     capabilityVerifier: verifier,
+    rulesPackGrantRoot,
   });
   await daemon.start();
   cleanups.push(async () => {
@@ -238,6 +329,12 @@ async function makeDaemon(seed?: (store: WorkerStore, dir: string) => void) {
     rmSync(dir, { recursive: true, force: true });
   });
   return { dir, store, runner, service, issue: (principal: TrustedPrincipal) => issue(principal), daemon };
+}
+
+function rulesPackUrl(urlValue: URL, botName: string, action: 'status' | 'mode'): URL {
+  const url = new URL(urlValue);
+  url.pathname = `${url.pathname.replace(/\/+$/u, '')}/rulespack/bots/${encodeURIComponent(botName)}/${action}`;
+  return url;
 }
 
 function issue(principal: TrustedPrincipal, purpose: LocalCapabilityPurpose = 'worker'): string {

@@ -27,6 +27,17 @@ describe('CI runtime prerequisites', () => {
     expect(ciWorkflow).toContain('process.execPath');
   });
 
+  it('fetches the exact pre-push object before scanning rewritten history', () => {
+    const pushScan = ciWorkflow.slice(
+      ciWorkflow.indexOf('- name: Scan pushed additions for secrets'),
+      ciWorkflow.indexOf('- name: Build RulesPack entrypoints'),
+    );
+
+    expect(pushScan).toContain('git fetch --no-tags origin "$BASE_SHA"');
+    expect(pushScan).not.toContain('--depth=1');
+    expect(pushScan.indexOf('git fetch')).toBeLessThan(pushScan.indexOf('npm run check:added-secrets'));
+  });
+
   it('builds every compiled package required by the restart preflight before tests', () => {
     const rulesPackBuildStep = ciWorkflow.slice(
       ciWorkflow.indexOf('Build RulesPack entrypoints'),

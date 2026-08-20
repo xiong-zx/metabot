@@ -136,7 +136,9 @@ metabot talk alice/bot <chatId> <prompt>  # 指定 peer 的 Bot 对话
 
 Bot 名称支持[限定名](../features/peers.md#qualified-names)（`peerName/botName`）实现跨实例
 路由。这是 bridge 本地的对话路径；`metabot agents talk` 是基于中心注册表的 P2P
-变体。
+变体。CLI-only 变体没有发送端 RulesPack runtime，因此会拒绝 required、shadow 或
+enforce 的受保护目标；这类目标必须使用 Bridge 本地的 `metabot talk`，由 Bridge
+先编译并绑定精确 envelope。
 
 ### Peers
 

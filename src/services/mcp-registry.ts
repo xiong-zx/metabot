@@ -59,6 +59,8 @@ export interface McpServerDescriptor {
   /** Execution environment token and entry-facing private file variables. */
   readonly capabilityEnvVar: string;
   readonly capabilityFileEnvVar: string;
+  /** Optional private, signed RulesPack descendant grant for this session. */
+  readonly rulesPackGrantFileEnvVar?: string;
 }
 
 export interface LoopbackProxyDescriptor extends McpServerDescriptor {
@@ -99,6 +101,7 @@ const WORKER_RUNNER: LoopbackProxyDescriptor = {
   optIn: 'workerTools',
   capabilityEnvVar: 'METABOT_WORKER_CAPABILITY',
   capabilityFileEnvVar: 'METABOT_WORKER_PROXY_CAPABILITY_FILE',
+  rulesPackGrantFileEnvVar: 'METABOT_WORKER_PROXY_RULESPACK_GRANT_FILE',
   endpointEnvVar: 'METABOT_WORKER_DAEMON_URL',
   proxyScript: ['packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js'],
   proxyUrlEnvVar: 'METABOT_WORKER_PROXY_URL',
@@ -143,6 +146,9 @@ export function assertDistinctMcpServers(servers: readonly AnyMcpServerDescripto
   for (const server of servers) {
     claim('id', server.id, server.id);
     claim('server name', server.serverName, server.id);
+    if (server.rulesPackGrantFileEnvVar) {
+      claim('RulesPack grant variable', server.rulesPackGrantFileEnvVar, server.id);
+    }
     if (!isLoopbackProxy(server)) {
       claim('executable', server.binary, server.id);
       claim('capability variable', server.capabilityEnvVar, server.id);

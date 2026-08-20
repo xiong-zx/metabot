@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import {
+  rulesPackChildGrantFingerprint,
+  type RulesPackChildGrantV1,
+} from '@metabot/rulespack';
 import { KIMI_PROMPT_MAX_BYTES, renderedPromptBytes } from './prompt.js';
 import type {
   CompletionNotifier,
@@ -15,6 +19,8 @@ import type {
   WorkerRecord,
   WorkerServiceConfig,
   WorkerRulesPackProvider,
+  WorkerRulesPackControlStatus,
+  WorkerRulesPackMode,
 } from './types.js';
 import {
   TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
@@ -70,6 +76,7 @@ export class WorkerService {
       makeLaunchId?: () => string;
       dynamicPrincipals?: boolean;
       rulesPackProvider?: WorkerRulesPackProvider;
+      rulesPackGrantVerifier?: (grant: RulesPackChildGrantV1, capability: string) => RulesPackChildGrantV1;
     } = {},
   ) {
     this.dynamicPrincipals = options.dynamicPrincipals === true;
@@ -84,9 +91,14 @@ export class WorkerService {
     this.makeId = options.makeId ?? (() => `wrk-${randomUUID()}`);
     this.makeLaunchId = options.makeLaunchId ?? (() => `launch-${randomUUID()}`);
     this.rulesPackProvider = options.rulesPackProvider;
+    this.rulesPackGrantVerifier = options.rulesPackGrantVerifier;
   }
 
   private readonly rulesPackProvider?: WorkerRulesPackProvider;
+  private readonly rulesPackGrantVerifier?: (
+    grant: RulesPackChildGrantV1,
+    capability: string,
+  ) => RulesPackChildGrantV1;
 
   getTrustedPrincipal(): TrustedPrincipal {
     if (!this.principal) {
@@ -149,10 +161,11 @@ export class WorkerService {
     rawInput: DispatchWorkerInput,
     principal?: TrustedPrincipal,
     authorizingCapability?: string,
+    rulesPackChildGrant?: RulesPackChildGrantV1,
   ): Promise<DispatchWorkerResult> {
     const actor = this.resolvePrincipal(principal);
     this.authorizeMutation(actor, 'dispatch');
-    const input = this.normalizeDispatch(rawInput, actor, authorizingCapability);
+    const input = this.normalizeDispatch(rawInput, actor, authorizingCapability, rulesPackChildGrant);
     const created = this.store.createWorker(this.makeId(), input, this.config.maxConcurrentPerScope, this.now());
     if (!created.deduplicated) void this.launchWorker(created.worker, false);
     return created;
@@ -214,6 +227,50 @@ export class WorkerService {
     return terminal ?? this.store.require(id);
   }
 
+  rulesPackStatus(botNameValue: string, principal?: TrustedPrincipal): WorkerRulesPackControlStatus {
+    this.authorizeRulesPackControl(this.resolvePrincipal(principal));
+    const botName = normalizeNonempty(
+      botNameValue,
+      'botName',
+      TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+    );
+    return this.rulesPackProvider?.controlStatus?.(botName) ?? {
+      botName,
+      state: 'unconfigured',
+      botScoped: false,
+      mode: 'off',
+      operatorModeVersion: 0,
+      appliesTo: 'subsequent-codex-policy-preparations',
+      inFlight: 'unchanged',
+    };
+  }
+
+  setRulesPackMode(
+    botNameValue: string,
+    mode: WorkerRulesPackMode | null,
+    expectedVersion: number,
+    operationId: string,
+    principal?: TrustedPrincipal,
+  ): WorkerRulesPackControlStatus {
+    this.authorizeRulesPackControl(this.resolvePrincipal(principal));
+    const botName = normalizeNonempty(
+      botNameValue,
+      'botName',
+      TRUSTED_PRINCIPAL_BOT_NAME_MAX_LENGTH,
+    );
+    if (mode !== null && !['off', 'shadow', 'enforce'].includes(mode)) {
+      throw new WorkerRunnerError('Worker RulesPack mode is invalid', 'INVALID_INPUT');
+    }
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      throw new WorkerRunnerError('Worker RulesPack expectedVersion is invalid', 'INVALID_INPUT');
+    }
+    const normalizedOperationId = normalizeNonempty(operationId, 'operationId', 500);
+    if (!this.rulesPackProvider?.setControlMode) {
+      throw new WorkerRunnerError(`Worker RulesPack is not configured for bot: ${botName}`, 'CONFLICT');
+    }
+    return this.rulesPackProvider.setControlMode(botName, mode, expectedVersion, normalizedOperationId);
+  }
+
   dispose(): void {
     for (const id of [...this.active.keys()]) this.clearActive(id);
     for (const timer of this.notificationTimers.values()) clearTimeout(timer);
@@ -224,7 +281,10 @@ export class WorkerService {
   private async launchWorker(worker: WorkerRecord, recovered: boolean): Promise<void> {
     const launchId = this.makeLaunchId();
     try {
-      const rulesPack = worker.engine === 'codex' ? await this.rulesPackProvider?.prepare(worker) : undefined;
+      const childGrant = this.loadRulesPackChildGrant(worker);
+      const rulesPack = worker.engine === 'codex'
+        ? await this.rulesPackProvider?.prepare(worker, childGrant)
+        : undefined;
       const running = await this.runner.launch(
         {
           id: worker.id,
@@ -459,6 +519,12 @@ export class WorkerService {
     }
   }
 
+  private authorizeRulesPackControl(principal: TrustedPrincipal): void {
+    if (!isLocalLifecycleAdmin(principal)) {
+      throw new WorkerRunnerError('Only the fixed local lifecycle admin may control Worker RulesPack', 'FORBIDDEN');
+    }
+  }
+
   private requirePrincipal(): TrustedPrincipal {
     if (!this.principal) {
       throw new WorkerRunnerError('An authenticated connection principal is required', 'FORBIDDEN');
@@ -476,10 +542,20 @@ export class WorkerService {
     input: DispatchWorkerInput,
     principal: TrustedPrincipal,
     authorizingCapability?: string,
+    rulesPackChildGrant?: RulesPackChildGrantV1,
   ): ScopedDispatchWorkerInput {
     if (!WORKER_ENGINES.includes(input.engine)) {
       throw new WorkerRunnerError(`Unsupported worker engine: ${String(input.engine)}`, 'INVALID_INPUT');
     }
+    if (rulesPackChildGrant && input.engine !== 'codex') {
+      throw new WorkerRunnerError('RulesPack child grants support Codex workers only', 'INVALID_INPUT');
+    }
+    if (rulesPackChildGrant && (!authorizingCapability || !this.rulesPackGrantVerifier)) {
+      throw new WorkerRunnerError('RulesPack child grant verification is unavailable', 'FORBIDDEN');
+    }
+    const verifiedGrant = rulesPackChildGrant
+      ? this.rulesPackGrantVerifier!(rulesPackChildGrant, authorizingCapability!)
+      : undefined;
     const prompt = normalizeNonempty(input.prompt, 'prompt', 500_000);
     const outputContract =
       input.outputContract !== undefined ? normalizeOutputContract(input.outputContract) : undefined;
@@ -536,6 +612,12 @@ export class WorkerService {
       ...(authorizingCapability !== undefined
         ? { authorizingCapability: normalizeNonempty(authorizingCapability, 'authorizingCapability', 4_096) }
         : {}),
+      ...(verifiedGrant
+        ? {
+            rulesPackChildGrantJson: JSON.stringify(verifiedGrant),
+            rulesPackChildGrantDigest: rulesPackChildGrantFingerprint(stripGrantSignature(verifiedGrant)),
+          }
+        : {}),
       workdir,
       prompt,
       engine: input.engine,
@@ -549,6 +631,31 @@ export class WorkerService {
       ...(outputContract ? { outputContract } : {}),
     };
   }
+
+  private loadRulesPackChildGrant(worker: WorkerRecord): RulesPackChildGrantV1 | undefined {
+    const stored = this.store.getRulesPackChildGrant(worker.id);
+    if (!stored) return undefined;
+    const capability = this.store.getAuthorizingCapability(worker.id);
+    if (!capability || !this.rulesPackGrantVerifier) {
+      throw new WorkerRunnerError('Stored RulesPack child grant cannot be re-authenticated', 'FORBIDDEN');
+    }
+    let grant: RulesPackChildGrantV1;
+    try {
+      grant = JSON.parse(stored.json) as RulesPackChildGrantV1;
+    } catch {
+      throw new WorkerRunnerError('Stored RulesPack child grant is invalid JSON', 'CONFLICT');
+    }
+    const verified = this.rulesPackGrantVerifier(grant, capability);
+    if (rulesPackChildGrantFingerprint(stripGrantSignature(verified)) !== stored.digest) {
+      throw new WorkerRunnerError('Stored RulesPack child grant digest mismatch', 'CONFLICT');
+    }
+    return verified;
+  }
+}
+
+function stripGrantSignature(grant: RulesPackChildGrantV1): Omit<RulesPackChildGrantV1, 'signature'> {
+  const { signature: _signature, ...unsigned } = grant;
+  return unsigned;
 }
 
 export function normalizeTrustedPrincipal(principal: TrustedPrincipal | undefined): TrustedPrincipal {

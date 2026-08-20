@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import path from 'node:path';
+import type { RulesPackChildGrantV1 } from '@metabot/rulespack';
 import type { Server as McpProtocolServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { TrustedPrincipal } from './types.js';
-import { WorkerRunnerError } from './types.js';
-import { LocalCapabilityVerifier } from './local-auth.js';
+import type { TrustedPrincipal, WorkerRulesPackMode } from './types.js';
+import { WorkerRunnerError, isLocalLifecycleAdmin } from './types.js';
+import { LocalCapabilityVerifier, readRulesPackChildGrantFile } from './local-auth.js';
 import { createWorkerRunnerMcpServer } from './mcp-server.js';
 import type { WorkerService } from './service.js';
 
@@ -15,6 +18,7 @@ interface Session {
   server: McpProtocolServer;
   principal: TrustedPrincipal;
   authorizingCapability: string;
+  rulesPackChildGrant?: RulesPackChildGrantV1;
 }
 
 export interface WorkerRunnerDaemonOptions {
@@ -22,6 +26,7 @@ export interface WorkerRunnerDaemonOptions {
   capabilityVerifier: LocalCapabilityVerifier;
   maxRequestBytes?: number;
   maxStatusOutputChars?: number;
+  rulesPackGrantRoot?: string;
 }
 
 /**
@@ -94,6 +99,11 @@ export class WorkerRunnerDaemon {
         return;
       }
       const requestUrl = new URL(request.url ?? '/', 'http://localhost');
+      const rulesPackRoute = parseRulesPackOperatorRoute(this.endpointConfig.pathname, requestUrl.pathname);
+      if (rulesPackRoute) {
+        await this.handleRulesPackOperator(request, response, rulesPackRoute);
+        return;
+      }
       if (requestUrl.pathname !== this.endpointConfig.pathname) {
         sendJson(response, 404, rpcError('Not found'));
         return;
@@ -109,6 +119,10 @@ export class WorkerRunnerDaemon {
         }
         if (!samePrincipal(session.principal, principal)) {
           sendJson(response, 403, rpcError('Capability principal does not match the MCP session'));
+          return;
+        }
+        if (session.rulesPackChildGrant?.grantId !== authenticated.rulesPackChildGrant?.grantId) {
+          sendJson(response, 403, rpcError('RulesPack child grant does not match the MCP session'));
           return;
         }
         const body = request.method === 'POST' ? await readJsonBody(request, this.maxRequestBytes) : undefined;
@@ -127,6 +141,7 @@ export class WorkerRunnerDaemon {
 
       const server = createWorkerRunnerMcpServer(this.service, principal, {
         authorizingCapability: authenticated.capability,
+        ...(authenticated.rulesPackChildGrant ? { rulesPackChildGrant: authenticated.rulesPackChildGrant } : {}),
         maxStatusOutputChars: this.options.maxStatusOutputChars,
       });
       const transport = new StreamableHTTPServerTransport({
@@ -137,6 +152,7 @@ export class WorkerRunnerDaemon {
             server,
             principal,
             authorizingCapability: authenticated.capability,
+            ...(authenticated.rulesPackChildGrant ? { rulesPackChildGrant: authenticated.rulesPackChildGrant } : {}),
           });
         },
       });
@@ -148,16 +164,84 @@ export class WorkerRunnerDaemon {
       await transport.handleRequest(request, response, body);
     } catch (error) {
       if (response.headersSent) return;
-      const status = error instanceof WorkerRunnerError && error.code === 'FORBIDDEN' ? 401 : 400;
+      const status = error instanceof WorkerRunnerError
+        ? error.code === 'FORBIDDEN'
+          ? 401
+          : error.code === 'CONFLICT'
+            ? 409
+            : error.code === 'NOT_FOUND'
+              ? 404
+              : 400
+        : 400;
       sendJson(response, status, rpcError(error instanceof Error ? error.message : String(error)));
     }
   }
 
-  private authenticate(request: IncomingMessage): { capability: string; principal: TrustedPrincipal } {
+  private async handleRulesPackOperator(
+    request: IncomingMessage,
+    response: ServerResponse,
+    route: { botName: string; action: 'status' | 'mode' },
+  ): Promise<void> {
+    const principal = this.authenticate(request).principal;
+    if (!isLocalLifecycleAdmin(principal)) {
+      sendJson(response, 403, rpcError('Only the fixed local lifecycle admin may control Worker RulesPack'));
+      return;
+    }
+    if (request.method === 'GET' && route.action === 'status') {
+      sendJson(response, 200, this.service.rulesPackStatus(route.botName, principal));
+      return;
+    }
+    if (request.method === 'PATCH' && route.action === 'mode') {
+      const body = requireRecord(await readJsonBody(request, this.maxRequestBytes));
+      if (Object.keys(body).sort().join(',') !== 'expectedVersion,mode,operationId') {
+        throw new WorkerRunnerError(
+          'Worker RulesPack mode request must contain exactly expectedVersion, mode, and operationId',
+          'INVALID_INPUT',
+        );
+      }
+      const mode = body.mode;
+      if (mode !== null && mode !== 'off' && mode !== 'shadow' && mode !== 'enforce') {
+        throw new WorkerRunnerError('Worker RulesPack mode must be off, shadow, enforce, or null', 'INVALID_INPUT');
+      }
+      sendJson(response, 200, this.service.setRulesPackMode(
+        route.botName,
+        mode as WorkerRulesPackMode | null,
+        body.expectedVersion as number,
+        body.operationId as string,
+        principal,
+      ));
+      return;
+    }
+    sendJson(response, 405, rpcError('Unsupported Worker RulesPack operator action'));
+  }
+
+  private authenticate(request: IncomingMessage): {
+    capability: string;
+    principal: TrustedPrincipal;
+    rulesPackChildGrant?: RulesPackChildGrantV1;
+  } {
     const authorization = singleHeader(request, 'authorization');
     if (!authorization?.startsWith('Bearer ')) throw new WorkerRunnerError('Bearer capability required', 'FORBIDDEN');
     const capability = authorization.slice('Bearer '.length);
-    return { capability, principal: this.options.capabilityVerifier.verify(capability).principal };
+    const principal = this.options.capabilityVerifier.verify(capability).principal;
+    const grantFile = singleHeader(request, 'x-metabot-rulespack-grant-file');
+    if (!grantFile) return { capability, principal };
+    const grant = readRulesPackChildGrantFile(grantFile);
+    const root = realpathSync.native(this.options.rulesPackGrantRoot ?? path.join(
+      process.env.METABOT_HOME ?? process.cwd(),
+      'data',
+      'mcp-capabilities',
+    ));
+    const candidate = realpathSync.native(grantFile);
+    const relative = path.relative(root, candidate);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new WorkerRunnerError('RulesPack child grant file escapes its private root', 'FORBIDDEN');
+    }
+    const rulesPackChildGrant = this.options.capabilityVerifier.verifyRulesPackChildGrant(
+      grant,
+      capability,
+    );
+    return { capability, principal, rulesPackChildGrant };
   }
 }
 
@@ -178,6 +262,26 @@ function isLoopbackPeer(address: string | undefined): boolean {
 
 function samePrincipal(a: TrustedPrincipal, b: TrustedPrincipal): boolean {
   return a.role === b.role && a.botName === b.botName && a.chatId === b.chatId;
+}
+
+function parseRulesPackOperatorRoute(
+  endpointPathname: string,
+  requestPathname: string,
+): { botName: string; action: 'status' | 'mode' } | undefined {
+  const base = endpointPathname.replace(/\/+$/u, '');
+  const match = new RegExp(`^${escapeRegex(base)}/rulespack/bots/([^/]+)/(status|mode)$`, 'u').exec(requestPathname);
+  if (!match) return undefined;
+  let botName: string;
+  try {
+    botName = decodeURIComponent(match[1]);
+  } catch {
+    throw new WorkerRunnerError('Worker RulesPack bot name is not valid URL encoding', 'INVALID_INPUT');
+  }
+  return { botName, action: match[2] as 'status' | 'mode' };
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 function singleHeader(request: IncomingMessage, name: string): string | undefined {
@@ -204,11 +308,18 @@ async function readJsonBody(request: IncomingMessage, maxBytes: number): Promise
   }
 }
 
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new WorkerRunnerError('Worker RulesPack request body must be an object', 'INVALID_INPUT');
+  }
+  return value as Record<string, unknown>;
+}
+
 function rpcError(message: string): Record<string, unknown> {
   return { jsonrpc: '2.0', error: { code: -32000, message }, id: null };
 }
 
-function sendJson(response: ServerResponse, status: number, body: Record<string, unknown>): void {
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json' });
   response.end(JSON.stringify(body));
 }

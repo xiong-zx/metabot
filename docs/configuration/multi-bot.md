@@ -76,6 +76,32 @@ Channel-specific credentials:
 | WeChat      | optional `wechatBotToken`; omit it for QR login                                             |
 | Slack       | `slackBotToken`, `slackSigningSecret`, optional `slackBotUserId`, optional `groupNoMention` |
 
+## Shared Codex RulesPack Defaults
+
+`rulesPackDefaults` at the root of `bots.json` applies to every current and
+future Codex bot on every channel. Use a `dbPath` containing both `{surface}`
+and `{bot}` so Bridge and Worker state remain isolated. Required defaults
+reject per-bot opt-out or replacement of required sources. Optional defaults
+allow `"rulesPack": false` only with `rulesPackOptOutReason`. Claude and Kimi
+remain supported engines, but their RulesPack state is explicitly
+`unsupported` because RulesPack injection is Codex-only. See
+[RulesPack for Codex](../features/rulespack.md).
+
+Use `projectChatBindings` when several exact `(bot, chatId)` identities belong
+to one project. Every project-scoped Rule then applies to all of those chats.
+For peer and Agent Bus routing, the target Bridge publishes SHA-256 keys for
+these exact tuples with their project IDs; raw chat IDs are not exposed through
+discovery, and the receiving Bridge re-verifies the project locally.
+For Rule targets, values in one list are alternatives (`pm` **or**
+`pm-savio`), while separate dimensions must all match (the selected bot
+**and** role `pm`).
+
+`dispatch.issuer` is shared by every bot in the Bridge because Agent Bus calls
+share one Core credential. Set it to the exact `botName` reported by
+`metabot agents whoami`; do not use `{bot}` or `{surface}` in `issuer` or
+`allowedIssuers`. Legacy templated identity config is rejected at startup with
+a migration error so transport binding cannot silently weaken.
+
 ## Codex Options
 
 ```json
@@ -161,6 +187,9 @@ personal-edition bots default to Codex when `engine` is omitted.
   Claude uses additive session config, so shared user MCP settings are not
   overwritten. Kimi has no isolated per-session MCP surface and therefore
   receives neither tool even when a flag is enabled.
+- Bot names must be globally unique across every channel, ignoring Unicode
+  normalization and case. This keeps per-bot state paths collision-free on
+  case-insensitive filesystems.
 
 When `BOTS_CONFIG` is set, single-bot channel environment variables are ignored.
 

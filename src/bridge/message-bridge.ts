@@ -58,6 +58,7 @@ import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
 import { MetaBotRulesPackRuntime } from '@metabot/rulespack-adapter';
+import type { RulesPackChildGrantV1, RulesPackDispatchEnvelopeV1 } from '@metabot/rulespack';
 import type {
   AuthenticatedExecutionFacts,
   RulesPackOperator,
@@ -232,6 +233,14 @@ export interface ApiTaskResult {
   costUsd?: number;
   durationMs?: number;
   error?: string;
+  /** Exact receipt-bound acknowledgement for authenticated peer delivery. */
+  rulesPackDelivery?: {
+    status: 'shadowed' | 'consumed';
+    envelopeId: string;
+    replayId: string;
+    packDigest: string;
+    effectivePackDigest: string;
+  };
 }
 
 export interface ActivityEventData {
@@ -346,6 +355,10 @@ export class MessageBridge {
   onActivityEvent?: (event: ActivityEventData) => void;
   private agentTeamStore?: AgentTeamStore;
   private executionEnvProvider?: (input: { botName: string; chatId: string }) => Record<string, string>;
+  private rulesPackChildGrantProvider?: (
+    capability: string,
+    parent: RulesPackDispatchEnvelopeV1,
+  ) => RulesPackChildGrantV1;
   private executionPrincipalProvider?: (input: { botName: string; chatId: string }) => {
     role: string;
     botName: string;
@@ -575,6 +588,12 @@ export class MessageBridge {
     provider: (input: { botName: string; chatId: string }) => Record<string, string>,
   ): void {
     this.executionEnvProvider = provider;
+  }
+
+  setRulesPackChildGrantProvider(
+    provider: (capability: string, parent: RulesPackDispatchEnvelopeV1) => RulesPackChildGrantV1,
+  ): void {
+    this.rulesPackChildGrantProvider = provider;
   }
 
   /** Inject the same authenticated principal derivation used for capabilities. */
@@ -1626,6 +1645,7 @@ export class MessageBridge {
     },
   ): Promise<ExecutionHandle> {
     let session = this.sessionManager.getSession(chatId);
+    const suppliedRulesPack = opts.apiContext?.rulesPack;
     const executionEnv = this.executionEnvProvider?.({ botName: this.config.name, chatId });
     const executionMcp = materializeExecutionMcp({
       executionEnv,
@@ -1635,14 +1655,27 @@ export class MessageBridge {
       botName: this.config.name,
       chatId,
       logger: this.logger,
+      ...(suppliedRulesPack?.dispatch ? { excludedServerIds: ['arc'] } : {}),
     });
     let preparedRulesPack: Awaited<ReturnType<MetaBotRulesPackRuntime['prepareTurn']>> | undefined;
     try {
+      if (this.config.rulesPackPolicy?.required && engineName !== 'codex') {
+        throw new Error(`Required RulesPack supports Codex only; ${engineName} execution was rejected`);
+      }
+      if (suppliedRulesPack?.dispatch && engineName !== 'codex') {
+        throw new Error(`RulesPack dispatch is unsupported for ${engineName}; Codex is required`);
+      }
+      if (suppliedRulesPack?.dispatch && engineName === 'codex' && !this.rulesPackRuntime) {
+        throw new Error('RulesPack dispatch rejected because the target Codex bot is not configured');
+      }
       if (engineName === 'codex' && this.rulesPackRuntime) {
         const principal = this.executionPrincipalProvider?.({ botName: this.config.name, chatId });
-        const supplied = opts.apiContext?.rulesPack;
+        const supplied = suppliedRulesPack;
         const transportPrincipal = supplied?.principal;
         if (!transportPrincipal || transportPrincipal.kind === 'generic') {
+          if (this.config.rulesPackPolicy?.required) {
+            throw new Error('Required RulesPack rejected a missing or unscoped transport principal');
+          }
           this.sessionManager.applyRulesPackDigest(chatId, undefined);
         } else {
           if (transportPrincipal.botName !== this.config.name || transportPrincipal.chatId !== chatId) {
@@ -1654,6 +1687,13 @@ export class MessageBridge {
           if (principal?.agentName && transportPrincipal.agentName && principal.agentName !== transportPrincipal.agentName) {
             throw new Error('Authenticated Agent identity does not match the child turn');
           }
+          const materializedTools = [
+            ...(opts.allowedTools ?? []),
+            ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
+          ];
+          if (transportPrincipal.tools && !sameExactValues(materializedTools, transportPrincipal.tools)) {
+            throw new Error('Verified RulesPack principal tools do not match the Codex turn');
+          }
           const facts: AuthenticatedExecutionFacts = {
             botName: transportPrincipal.botName,
             chatId: transportPrincipal.chatId,
@@ -1664,11 +1704,9 @@ export class MessageBridge {
               ? { agentName: principal?.agentName ?? transportPrincipal.agentName }
               : {}),
             ...(transportPrincipal.workerId ? { workerId: transportPrincipal.workerId } : {}),
+            ...(transportPrincipal.projectId ? { projectId: transportPrincipal.projectId } : {}),
             ...(transportPrincipal.taskId ? { taskId: transportPrincipal.taskId } : {}),
-            tools: [
-              ...(opts.allowedTools ?? []),
-              ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
-            ],
+            tools: materializedTools,
             dataClasses: transportPrincipal.dataClasses ?? [],
             outputTypes: transportPrincipal.outputTypes ?? ['text'],
           };
@@ -1681,6 +1719,17 @@ export class MessageBridge {
                 }
               : undefined,
           );
+          if (
+            preparedRulesPack.receivedEnvelope &&
+            executionMcp?.entries.some((entry) => entry.name === 'metabot-worker')
+          ) {
+            const workerCapability = executionEnv?.METABOT_WORKER_CAPABILITY;
+            if (!workerCapability || !this.rulesPackChildGrantProvider) {
+              throw new Error('RulesPack Worker child grant signer is unavailable');
+            }
+            const grant = this.rulesPackChildGrantProvider(workerCapability, preparedRulesPack.receivedEnvelope);
+            executionMcp.attachRulesPackChildGrant(JSON.stringify(grant));
+          }
           const activeDigest = preparedRulesPack.mode === 'enforce' && preparedRulesPack.injectionText
             ? preparedRulesPack.packDigest
             : undefined;
@@ -1769,7 +1818,29 @@ export class MessageBridge {
           },
         } : {}),
       });
-      return withMcpCleanup(handle, executionMcp?.cleanup);
+      const result = withMcpCleanup(handle, executionMcp?.cleanup);
+      if (preparedRulesPack?.receivedEnvelope) {
+        const envelope = preparedRulesPack.receivedEnvelope;
+        const deliveryHandle = result as unknown as {
+          rulesPackDelivery?: () => ApiTaskResult['rulesPackDelivery'];
+        };
+        deliveryHandle.rulesPackDelivery = () => {
+          const status = preparedRulesPack.mode === 'shadow' ? 'shadowed' : 'consumed';
+          const acknowledged = this.rulesPackRuntime?.receipts(preparedRulesPack.packDigest, 1_000).some((receipt) =>
+            receipt.status === status &&
+            receipt.replayId === envelope.replayId &&
+            receipt.packDigest === preparedRulesPack.packDigest,
+          );
+          return acknowledged ? {
+            status,
+            envelopeId: envelope.envelopeId,
+            replayId: envelope.replayId,
+            packDigest: envelope.packDigest,
+            effectivePackDigest: preparedRulesPack.packDigest,
+          } : undefined;
+        };
+      }
+      return result;
     } catch (error) {
       executionMcp?.cleanup();
       throw error;
@@ -3377,6 +3448,9 @@ export class MessageBridge {
         costUsd: lastState.costUsd,
         durationMs,
         error: lastState.errorMessage,
+        ...(executionHandle.rulesPackDelivery?.()
+          ? { rulesPackDelivery: executionHandle.rulesPackDelivery() }
+          : {}),
       };
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'API task execution error');
@@ -3436,6 +3510,9 @@ export class MessageBridge {
             costUsd: lastState.costUsd,
             durationMs: Date.now() - startTime,
             error: lastState.errorMessage,
+            ...(retryHandle.rulesPackDelivery?.()
+              ? { rulesPackDelivery: retryHandle.rulesPackDelivery() }
+              : {}),
           };
         } catch (retryErr: any) {
           this.logger.error({ err: retryErr, chatId }, 'API task retry after stale session also failed');
@@ -3628,6 +3705,11 @@ export class MessageBridge {
 
 function hasTeamState(teamState: TeamState | undefined): boolean {
   return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
+}
+
+function sameExactValues(left: readonly string[], right: readonly string[]): boolean {
+  const normalize = (values: readonly string[]) => [...new Set(values)].sort().join('\0');
+  return normalize(left) === normalize(right);
 }
 
 function withMcpCleanup(handle: ExecutionHandle, cleanup: (() => void) | undefined): ExecutionHandle {

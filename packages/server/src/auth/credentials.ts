@@ -2,6 +2,16 @@ import * as crypto from 'node:crypto';
 
 export type Role = 'admin' | 'member';
 
+/**
+ * Non-secret RulesPack target identity bound to one authenticated Core
+ * credential. The first authenticated Bridge bulk registration may establish
+ * it; later requests may only repeat the exact pair.
+ */
+export interface CredentialRulesPackIdentity {
+  hostId: string;
+  audience: string;
+}
+
 export interface Credential {
   id: string;
   tokenHash: string;
@@ -15,6 +25,7 @@ export interface Credential {
   revokedAt: number | null;
   lastUsedAt: number | null;
   notes: string;
+  rulesPackIdentity?: CredentialRulesPackIdentity;
   /**
    * True for in-memory synthetic credentials minted from a browser SSO
    * identity (oauth2-proxy → X-Forwarded-Email). Never persisted, no token.
@@ -40,6 +51,7 @@ export interface CredentialPublic {
   revokedAt: number | null;
   lastUsedAt: number | null;
   notes: string;
+  rulesPackIdentity?: CredentialRulesPackIdentity;
 }
 
 export interface IssueInput {

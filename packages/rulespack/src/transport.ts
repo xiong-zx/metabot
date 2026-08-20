@@ -24,6 +24,35 @@ export interface RulesPackDispatchEnvelopeV1 {
   };
 }
 
+/** Signed local-only authority for one level of detached Worker descendants. */
+export interface RulesPackChildGrantV1 {
+  schemaVersion: 1;
+  purpose: 'worker';
+  grantId: string;
+  capabilityDigest: string;
+  issuedAt: string;
+  expiresAt: string;
+  depth: 1;
+  parentEnvelopeFingerprint: string;
+  parent: RulesPackDispatchEnvelopeV1;
+  constraints: {
+    hostId: string;
+    bot: string;
+    chatId: string;
+    projectId?: string;
+  };
+  signature: {
+    scheme: 'ed25519';
+    value: string;
+  };
+}
+
+export function rulesPackChildGrantFingerprint(
+  grant: Omit<RulesPackChildGrantV1, 'signature'>,
+): string {
+  return digestObject(grant);
+}
+
 /** Structural verification only. The downstream adapter owns authenticated capability/signature verification. */
 export function validateDispatchEnvelope(
   envelope: RulesPackDispatchEnvelopeV1,
