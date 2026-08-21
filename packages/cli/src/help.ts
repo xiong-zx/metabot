@@ -17,6 +17,8 @@ Subcommands:
                         e.g. metabot teams dispatch demo worker "review PR" | metabot teams next demo worker
   t5t <cmd> [args]      daily team status portal (board / projects / entries)
                         e.g. metabot t5t board | metabot t5t push <slug> <date> "<item>"
+  artifacts <cmd>       strict Savio deliverables mirror (status / sync)
+                        e.g. metabot artifacts status --config <file>
   help                  this message (also --help, -h, or bare invocation)
 
 Each subcommand has its own help; pass --help through to see it:
@@ -26,6 +28,7 @@ Each subcommand has its own help; pass --help through to see it:
   metabot inbox --help
   metabot teams --help
   metabot t5t --help
+  metabot artifacts --help
 
 Env:
   METABOT_CORE_URL              default http://localhost:9200

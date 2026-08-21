@@ -59,6 +59,7 @@ import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
 import { MetaBotRulesPackRuntime } from '@metabot/rulespack-adapter';
 import type { RulesPackChildGrantV1, RulesPackDispatchEnvelopeV1 } from '@metabot/rulespack';
+import { ArtifactDeliveryPublisher } from '../extensions/artifact-delivery.js';
 import type {
   AuthenticatedExecutionFacts,
   RulesPackOperator,
@@ -415,7 +416,12 @@ export class MessageBridge {
       (chatId, sessionId) => this.applyResume(chatId, sessionId),
     );
 
-    this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
+    this.outputHandler = new OutputHandler(
+      logger,
+      sender,
+      this.outputsManager,
+      config.artifactDelivery ? new ArtifactDeliveryPublisher(config.artifactDelivery, logger) : undefined,
+    );
     this.codexCommands = new CodexCommandController({
       config,
       logger,

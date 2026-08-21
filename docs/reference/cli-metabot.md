@@ -278,6 +278,21 @@ TTS flags:
 | `--provider NAME` | TTS provider: `doubao`, `openai`, or `elevenlabs`                     |
 | `--voice ID`      | Voice/speaker ID (provider-specific)                                  |
 
+### Strict artifact mirrors
+
+```bash
+metabot artifacts status --config /absolute/path/artifact-mirror.json
+metabot artifacts sync --config /absolute/path/artifact-mirror.json --apply
+metabot artifacts publish --config /absolute/path/artifact-mirror.json \
+  --project project-alpha --file /absolute/path/annotations/marked.pdf \
+  --name project-alpha_review-tech_topic-annotations_lang-en_20260821_v01.pdf --apply
+```
+
+`status` is read-only. `sync --apply` strictly restores the configured local
+deliverables payload from its authority after preserving rollback bytes and
+local edits. `publish` is the explicit annotations-to-authority path and never
+overwrites different bytes.
+
 ## 3. metabot-core delegation
 
 Any subcommand not listed above is forwarded to the metabot-core feature CLI

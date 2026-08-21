@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "sshHost": "research-host",
+  "backupRoot": "/home/user/.metabot/artifact-mirror/backups",
+  "stateRoot": "/home/user/.metabot/artifact-mirror/state",
+  "catalogTool": "/home/user/workspaces/tools/artifact-catalog/artifact-catalog",
+  "projects": [
+    {
+      "projectId": "project-alpha",
+      "sourceRoot": "/srv/workspaces/projects/project-alpha/deliverables",
+      "targetRoot": "/home/user/workspaces/projects/project-alpha/deliverables",
+      "annotationsRoot": "/home/user/workspaces/projects/project-alpha/annotations"
+    }
+  ]
+}

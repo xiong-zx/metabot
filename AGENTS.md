@@ -107,6 +107,25 @@ These rules are mandatory for every Agent that changes MetaBot code.
 - Agent Teams provide durable Agents, Messages, Tasks, and Runs across engine
   sessions.
 
+## Savio Deliverables Mirror
+
+- `artifactDelivery` is a downstream-only, exact bot/chat/project publication
+  hook. When enabled, it must archive canonical regular-file bytes under the
+  configured Savio project `deliverables/` before IM delivery and refuse a
+  same-name/different-byte overwrite.
+- `metabot artifacts status` is the read-only mirror preview. A real mirror
+  change requires `metabot artifacts sync ... --apply`, an absolute non-secret
+  config, source/target SHA-256 verification, and rollback storage outside the
+  synchronized workspace.
+- AAM and Noise_LLM use Savio as the only deliverables payload writer. Their
+  iMac/MacBook deliverables are strict read-side mirrors; editable copies live
+  under `annotations/` and return to Savio only through explicit publication.
+- Never mirror bulk runs, data, logs, checkpoints, artifacts, review, reports,
+  or complete exports. `exports/` remains for genuine self-contained multi-file
+  machine handoffs; a normal user-facing report belongs only in deliverables.
+- Do not place SSH credentials, bot credentials, tokens, or private connection
+  material in artifact configs, logs, manifests, Rules, or commits.
+
 ## Public Boundary
 
 - Keep Personal Edition self-hostable and free of private identity providers,

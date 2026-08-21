@@ -45,7 +45,17 @@
       "ttsVoice": "zh_male_rap_mars_bigtts",
       "feishuAppId": "cli_xxx",
       "feishuAppSecret": "secret1",
-      "defaultWorkingDirectory": "/home/user/project-alpha"
+      "defaultWorkingDirectory": "/home/user/project-alpha",
+      "artifactDelivery": {
+        "mode": "enforce",
+        "projects": [
+          {
+            "projectId": "project-alpha",
+            "root": "/home/user/project-alpha",
+            "chatIds": ["oc_project_alpha_primary"]
+          }
+        ]
+      }
     },
     {
       "name": "project-beta",

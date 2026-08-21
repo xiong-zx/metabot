@@ -229,6 +229,20 @@ TTS 参数：
 | `--provider NAME` | TTS 服务商: `doubao`、`openai`、`elevenlabs`              |
 | `--voice ID`      | 声音/音色 ID（各服务商不同）                              |
 
+### 严格交付文件镜像
+
+```bash
+metabot artifacts status --config /absolute/path/artifact-mirror.json
+metabot artifacts sync --config /absolute/path/artifact-mirror.json --apply
+metabot artifacts publish --config /absolute/path/artifact-mirror.json \
+  --project project-alpha --file /absolute/path/annotations/marked.pdf \
+  --name project-alpha_review-tech_topic-annotations_lang-zh_20260821_v01.pdf --apply
+```
+
+`status` 只读。`sync --apply` 在保留回滚字节和本地编辑后，将本机
+deliverables payload 严格恢复为权威主机版本。`publish` 是显式把批注发布
+到权威主机的路径，不会覆盖同名的不同字节。
+
 ## 3. metabot-core 转发
 
 上面未列出的任何子命令都会转发给 metabot-core 功能 CLI

@@ -449,6 +449,22 @@ describe('downstream feature boundary gate', () => {
     for (const root of registry.roots) expect(fs.existsSync(path.join(repositoryRoot, root))).toBe(true);
   });
 
+  it('keeps artifact delivery and mirroring in one declared downstream feature', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as { features: Array<{ id: string; roots?: string[]; thinHooks?: string[]; validationSurface?: string[] }> };
+    const feature = manifest.features.find((candidate) => candidate.id === 'artifact-delivery-mirror');
+    expect(feature).toMatchObject({
+      roots: expect.arrayContaining(['src/extensions/artifact-delivery.ts', 'packages/cli/src/artifacts.ts']),
+      thinHooks: expect.arrayContaining(['src/bridge/output-handler.ts', 'src/bridge/message-bridge.ts']),
+      validationSurface: expect.arrayContaining([
+        'tests/artifact-delivery.test.ts',
+        'packages/cli/tests/artifacts.test.ts',
+      ]),
+    });
+  });
+
   it('forbids the retired ARC adapter packages and declarations', () => {
     const repositoryRoot = path.resolve(import.meta.dirname, '..');
     const manifest = JSON.parse(

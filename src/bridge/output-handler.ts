@@ -4,6 +4,11 @@ import type { CardState } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { StreamProcessor, extractImagePaths } from '../engines/index.js';
 import { OutputsManager } from './outputs-manager.js';
+import {
+  ArtifactDeliveryError,
+  type ArtifactDeliveryPublisher,
+  type PreparedArtifactDelivery,
+} from '../extensions/artifact-delivery.js';
 
 /**
  * Feishu API limits documented at
@@ -39,6 +44,7 @@ export class OutputHandler {
     private logger: Logger,
     private sender: IMessageSender,
     private outputsManager: OutputsManager,
+    private artifactPublisher?: ArtifactDeliveryPublisher,
   ) {}
 
   async sendOutputFiles(
@@ -54,18 +60,22 @@ export class OutputHandler {
     const outputFiles = this.outputsManager.scanOutputs(outputsDir);
     for (const file of outputFiles) {
       let delivered = false;
+      let deliveryPath = file.filePath;
+      let prepared: PreparedArtifactDelivery | undefined;
       try {
+        prepared = this.artifactPublisher?.prepare(chatId, file.filePath, file.fileName);
+        if (prepared) deliveryPath = prepared.filePath;
         if (file.isImage && file.sizeBytes <= IMAGE_MAX_BYTES) {
-          this.logger.info({ filePath: file.filePath }, 'Sending output image from outputs dir');
-          delivered = await this.sender.sendImageFile(chatId, file.filePath);
+          this.logger.info({ filePath: deliveryPath }, 'Sending output image');
+          delivered = await this.sender.sendImageFile(chatId, deliveryPath);
         } else if (!file.isImage && file.sizeBytes <= FILE_MAX_BYTES) {
-          this.logger.info({ filePath: file.filePath }, 'Sending output file from outputs dir');
-          const sent = await this.sender.sendLocalFile(chatId, file.filePath, file.fileName);
+          this.logger.info({ filePath: deliveryPath }, 'Sending output file');
+          const sent = await this.sender.sendLocalFile(chatId, deliveryPath, file.fileName);
           if (sent) {
             delivered = true;
           } else if (OutputsManager.isTextFile(file.extension) && file.sizeBytes < 30 * 1024) {
-            this.logger.info({ filePath: file.filePath }, 'File upload failed, sending as text message');
-            const content = fs.readFileSync(file.filePath, 'utf-8');
+            this.logger.info({ filePath: deliveryPath }, 'File upload failed, sending as text message');
+            const content = fs.readFileSync(deliveryPath, 'utf-8');
             await this.sender.sendText(chatId, `📄 ${file.fileName}\n\n${content}`);
             delivered = true;
           }
@@ -79,6 +89,16 @@ export class OutputHandler {
         sentPaths.add(file.filePath);
       } catch (err) {
         this.logger.warn({ err, filePath: file.filePath }, 'Failed to send output file');
+        if (err instanceof ArtifactDeliveryError) {
+          try {
+            await this.sender.sendTextNotice(
+              chatId,
+              'File Not Delivered',
+              `Could not durably archive **${file.fileName}** (${err.code}). The temporary file was retained for retry.`,
+              'orange',
+            );
+          } catch { /* retained temporary bytes remain the recovery boundary */ }
+        }
       }
       // Bind delivery to deletion: only once a file actually reached the user
       // (send resolved true, or the text fallback succeeded) remove it so the
@@ -136,6 +156,7 @@ export class OutputHandler {
         }
       }
     }
+
   }
 
   /** @returns true when the notice reached the user. */

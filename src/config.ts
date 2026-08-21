@@ -10,6 +10,7 @@ import {
   type RulesPackConfig,
   type RulesPackDefaultsConfig,
 } from '@metabot/rulespack-adapter';
+import { normalizeArtifactDeliveryConfig, type ArtifactDeliveryConfig } from './extensions/artifact-delivery.js';
 import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
 
 export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
@@ -149,6 +150,8 @@ export interface BotConfigBase {
   rulesPack?: RulesPackConfig;
   /** Non-secret provenance for inherited, overridden, opted-out, or unsupported RulesPack state. */
   rulesPackPolicy?: RulesPackBotPolicy;
+  /** Downstream durable publication of user-facing files before chat delivery. */
+  artifactDelivery?: ArtifactDeliveryConfig;
   /**
    * Stage 4 — opt-in to the persistent Claude process pool. When enabled,
    * each chatId is backed by a long-lived Claude Code process (managed by
@@ -338,6 +341,7 @@ interface EngineJsonFields {
   /** Per-bot override. False is an audited opt-out and requires rulesPackOptOutReason. */
   rulesPack?: RulesPackBotOverride;
   rulesPackOptOutReason?: string;
+  artifactDelivery?: ArtifactDeliveryConfig;
   /** Security-relevant opt-ins; omitted/false means no capability is minted. */
   workerTools?: boolean;
   arcTools?: boolean;
@@ -591,7 +595,7 @@ function slackBotFromJson(entry: SlackBotJsonEntry, defaults?: RulesPackDefaults
 function executionToolOptIns(
   entry: EngineJsonFields,
   defaults?: RulesPackDefaultsConfig,
-): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack' | 'rulesPackPolicy'> {
+): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack' | 'rulesPackPolicy' | 'artifactDelivery'> {
   const envEngine = process.env.METABOT_ENGINE;
   const engine = entry.engine ?? (envEngine === 'claude' || envEngine === 'kimi' || envEngine === 'codex'
     ? envEngine
@@ -608,6 +612,7 @@ function executionToolOptIns(
     ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
     ...(resolved.rulesPack ? { rulesPack: resolved.rulesPack } : {}),
     rulesPackPolicy: resolved.policy,
+    ...(entry.artifactDelivery ? { artifactDelivery: normalizeArtifactDeliveryConfig(entry.artifactDelivery) } : {}),
   };
 }
 

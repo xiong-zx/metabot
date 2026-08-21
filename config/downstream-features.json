@@ -297,10 +297,7 @@
     {
       "id": "rulespack-operator-routes",
       "status": "required",
-      "roots": [
-        "src/extensions/rulespack-routes.ts",
-        "src/extensions/rulespack-worker-coordinator.ts"
-      ],
+      "roots": ["src/extensions/rulespack-routes.ts", "src/extensions/rulespack-worker-coordinator.ts"],
       "forbiddenImports": [
         "src/bridge",
         "src/agent-teams",
@@ -423,6 +420,42 @@
         "packages/server/tests/agents.test.ts",
         "packages/server/tests/inbox.test.ts",
         "packages/cli/tests/agents.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "artifact-delivery-mirror",
+      "status": "required",
+      "roots": [
+        "src/extensions/artifact-delivery.ts",
+        "packages/cli/src/artifacts.ts",
+        "config/artifact-mirror.example.json",
+        "docs/features/artifact-delivery.md",
+        "docs/reference/cli-metabot.md",
+        "docs/reference/cli-metabot.zh.md",
+        "AGENTS.md"
+      ],
+      "thinHooks": [
+        "src/config.ts",
+        "src/bridge/output-handler.ts",
+        "src/bridge/message-bridge.ts",
+        "packages/cli/src/index.ts",
+        "packages/cli/src/help.ts",
+        "bots.example.json"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep host-specific durable output publication and strict research deliverables mirroring isolated from upstream runtime, Memory, ARC, Worker, and bulk experiment storage.",
+      "validationSurface": [
+        "tests/artifact-delivery.test.ts",
+        "tests/artifact-delivery-config.test.ts",
+        "tests/output-handler.test.ts",
+        "packages/cli/tests/artifacts.test.ts",
         "tests/downstream-boundaries.test.ts"
       ]
     },
