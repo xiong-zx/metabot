@@ -398,6 +398,7 @@
       "roots": [
         ".github/workflows/ci.yml",
         "config/rulespack/metabot-development.rules.json",
+        "config/rulespack/user-defaults.rules.json",
         "package.json",
         "packages/cli/src/agents.ts",
         "packages/server/src/agents/inbox-routes.ts",
@@ -416,6 +417,7 @@
       "reason": "Version the canonical Codex policy seed and enforce high-confidence secret and feature-history gates without coupling policy data to runtime services.",
       "validationSurface": [
         "tests/rulespack-canonical-policy.test.ts",
+        "tests/rulespack-user-defaults-policy.test.ts",
         "tests/rulespack-hard-gates.test.ts",
         "packages/server/tests/agents-store.test.ts",
         "packages/server/tests/agents.test.ts",

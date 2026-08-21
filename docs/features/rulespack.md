@@ -191,6 +191,21 @@ The same rule applies to `exclude`: values within one dimension are
 alternatives, while all dimensions declared in that one exclusion predicate
 must match before the Rule is excluded.
 
+### User-wide defaults
+
+Rules that express a personal default across every project and chat use
+`scope: "global"`, no binding, and no target predicate. Keep them in a
+separate required structured source such as
+`config/rulespack/user-defaults.rules.json`; do not place them in a
+project-bound native source, because project binding would narrow their
+scope.
+
+The shared `rulesPackDefaults` resolver applies this source to every current
+and future Codex bot. A host may obtain the same structured Rules from its
+local Meta Memory source or store them as `configRules`; the Rule IDs,
+versions, lifecycle, and text must remain identical. Claude and Kimi remain
+explicitly unsupported rather than pretending to receive these Rules.
+
 Every Rule uses schema v1 from the engine API. `platform` and `runtime`
 authority are accepted only from a source explicitly marked
 `trustedAuthority`; curated Rules also require `metadata.approved: true`, and

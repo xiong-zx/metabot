@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "revision": "user-defaults-2026-08-20.1",
+  "rules": [
+    {
+      "schemaVersion": 1,
+      "id": "user.latex-report-pdf-default",
+      "version": "1.0.0",
+      "text": "When the user asks for a report written in LaTeX, compile it and return the PDF by default, not the TeX source file. Return the TeX source file only when the user explicitly asks for it.",
+      "scope": "global",
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 360,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "config",
+        "adapterId": "personal-user-defaults",
+        "ref": "config/rulespack/user-defaults.rules.json",
+        "revision": "user-defaults-2026-08-20.1"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "admin chat 2026-08-20",
+        "outputDefault": "compiled-pdf"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "user.language-defaults",
+      "version": "1.0.0",
+      "text": "Use Chinese when conversing with the user. Write documents in English by default unless the user explicitly requests another language.",
+      "scope": "global",
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 350,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "config",
+        "adapterId": "personal-user-defaults",
+        "ref": "config/rulespack/user-defaults.rules.json",
+        "revision": "user-defaults-2026-08-20.1"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "admin chat 2026-08-20",
+        "conversationLanguage": "zh",
+        "documentDefaultLanguage": "en"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "user.plain-language",
+      "version": "1.0.0",
+      "text": "Use clear, natural language. Do not invent terms or combine words into made-up expressions. Established expressions and rigorously defined mathematical concepts are allowed.",
+      "scope": "global",
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 340,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "config",
+        "adapterId": "personal-user-defaults",
+        "ref": "config/rulespack/user-defaults.rules.json",
+        "revision": "user-defaults-2026-08-20.1"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "admin chat 2026-08-20"
+      }
+    }
+  ]
+}
