@@ -8,6 +8,10 @@ import type { BotConfigBase } from '../../config.js';
 import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import {
+  toClaudeMcpServers,
+  type ResolvedExternalMcpServer,
+} from '../../mcp/external-server.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import type { ApiContext } from '../prompt-context.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
@@ -261,6 +265,8 @@ export interface ExecutorOptions {
   reasoningEffort?: CodexReasoningEffort;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
+  /** Independently installed MCP products resolved by the thin adapter. */
+  mcpServers?: ResolvedExternalMcpServer[];
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
 }
@@ -326,7 +332,14 @@ export class ClaudeExecutor {
     private logger: Logger,
   ) {}
 
-  private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
+  private buildQueryOptions(
+    cwd: string,
+    sessionId: string | undefined,
+    abortController: AbortController,
+    outputsDir?: string,
+    apiContext?: ApiContext,
+    mcpServers?: readonly ResolvedExternalMcpServer[],
+  ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
       permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
@@ -352,6 +365,7 @@ export class ClaudeExecutor {
       // forwards task events into the card's "Background" panel, so enabling
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
+      ...(mcpServers?.length ? { mcpServers: toClaudeMcpServers(mcpServers) } : {}),
     };
 
     // Build system prompt appendix from sections
@@ -445,7 +459,14 @@ export class ClaudeExecutor {
     };
     inputQueue.enqueue(initialMessage);
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      apiContext,
+      options.mcpServers,
+    );
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }
@@ -659,7 +680,14 @@ export class ClaudeExecutor {
 
     this.logger.info({ cwd, hasSession: !!sessionId }, 'Starting Claude execution');
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      options.apiContext,
+      options.mcpServers,
+    );
 
     const stream = query({
       prompt,

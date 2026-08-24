@@ -97,6 +97,10 @@ The public adapter currently runs `codex exec --json` and resumes with
 `codex exec resume`. Codex app-server and native mid-turn steering are not part
 of the current public behavior.
 
+Each Bot can also opt into independently installed stdio MCP products. See
+[External MCP Products](external-mcp.md) for the product-neutral descriptor,
+executable discovery, approval, and failure-isolation contract.
+
 ## Kimi Code Options {#kimi-code-options}
 
 ```json

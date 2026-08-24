@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
 import { type CodexBotConfig, normalizeCodexReasoningEffort } from '../src/config.js';
+import type { ResolvedExternalMcpServer } from '../src/mcp/external-server.js';
 
 describe('buildCodexArgs', () => {
   const cwd = '/work/proj';
@@ -79,6 +80,22 @@ describe('buildCodexArgs', () => {
     const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);
     const execIdx = args.indexOf('exec');
     expect(args.slice(execIdx - 3, execIdx)).toEqual(['--foo', 'bar baz', '--qux']);
+  });
+
+  it('adds resolved external MCP servers before the exec subcommand', () => {
+    const server: ResolvedExternalMcpServer = {
+      name: 'example-server',
+      command: '/opt/example/bin/example-mcp',
+      args: ['--stdio'],
+      env: { EXAMPLE_MODE: 'read-only' },
+      approvalMode: 'writes',
+      toolApprovals: {},
+    };
+    const args = buildCodexArgs({}, cwd, prompt, undefined, undefined, undefined, [server]);
+    expect(args).toContain('mcp_servers.example-server.command="/opt/example/bin/example-mcp"');
+    expect(args).toContain('mcp_servers.example-server.default_tools_approval_mode="writes"');
+    expect(args).toContain('mcp_servers.example-server.env_vars=["EXAMPLE_MODE"]');
+    expect(args.indexOf('mcp_servers.example-server.command="/opt/example/bin/example-mcp"')).toBeLessThan(args.indexOf('exec'));
   });
 
   it('uses `exec resume <sessionId>` when a session id is provided', () => {

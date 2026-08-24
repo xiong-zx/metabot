@@ -75,6 +75,7 @@ plugins:
             - 产品:
                 - Core Console: features/web-ui.md
                 - 多 Bot 与引擎: configuration/multi-bot.md
+                - 外部 MCP 产品: configuration/external-mcp.md
                 - MetaMemory: features/metamemory.md
                 - MetaSkill: features/metaskill.md
                 - Agent 团队: features/agent-teams.md
@@ -113,6 +114,7 @@ nav:
   - Product:
       - Core Console: features/web-ui.md
       - Multi-Bot and Engines: configuration/multi-bot.md
+      - External MCP Products: configuration/external-mcp.md
       - MetaMemory: features/metamemory.md
       - MetaSkill: features/metaskill.md
       - Agent Teams: features/agent-teams.md

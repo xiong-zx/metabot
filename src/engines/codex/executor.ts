@@ -5,6 +5,11 @@ import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import {
+  buildCodexMcpConfigArgs,
+  externalMcpEnvironment,
+  type ResolvedExternalMcpServer,
+} from '../../mcp/external-server.js';
 import type {
   ApiContext,
   ExecutionHandle,
@@ -270,6 +275,7 @@ export function buildCodexArgs(
   sessionId: string | undefined,
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
+  mcpServers: readonly ResolvedExternalMcpServer[] = [],
 ): string[] {
   const args: string[] = [];
 
@@ -286,6 +292,7 @@ export function buildCodexArgs(
   if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
   const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
   if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
+  args.push(...buildCodexMcpConfigArgs(mcpServers));
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -314,7 +321,16 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
+    const mcpServers = options.mcpServers ?? [];
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      fullPrompt,
+      sessionId,
+      model,
+      options.reasoningEffort,
+      mcpServers,
+    );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
@@ -394,7 +410,7 @@ export class CodexExecutor {
     try {
       child = spawn(executable, args, {
         cwd,
-        env: buildCodexEnv(codexConfig),
+        env: buildCodexEnv(codexConfig, { ...process.env, ...externalMcpEnvironment(mcpServers) }),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: any) {

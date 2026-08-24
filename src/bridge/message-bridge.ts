@@ -55,6 +55,10 @@ import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontane
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
+import {
+  resolveExternalMcpServers,
+  type ResolvedExternalMcpServer,
+} from '../mcp/external-server.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -206,6 +210,8 @@ export class MessageBridge {
    * the PERSISTENT_EXECUTOR env feature flag is on. One pool per bot.
    */
   private persistentRegistry: ExecutorRegistry | null = null;
+  /** Product-neutral, independently resolved MCP entries for this bot. */
+  private readonly externalMcpServers: ResolvedExternalMcpServer[];
   /**
    * Stage 3 — track which persistent executors already have a spontaneous-
    * activity subscription, so we don't double-subscribe across acquisitions.
@@ -289,6 +295,14 @@ export class MessageBridge {
     this.executor = this.engine.createExecutor();
     const defaultEngineName = resolveEngineName(config);
     this.engineCache.set(defaultEngineName, { engine: this.engine, executor: this.executor });
+    const externalMcp = resolveExternalMcpServers(config.mcpServers);
+    this.externalMcpServers = externalMcp.servers;
+    for (const failure of externalMcp.failures) {
+      this.logger.warn(
+        { server: failure.server, reason: failure.reason },
+        'External MCP server omitted; other MCP products remain available',
+      );
+    }
     this.sessionManager = new SessionManager(config.claude.defaultWorkingDirectory, logger, config.name);
     this.outputsManager = new OutputsManager(config.claude.outputsBaseDir, logger);
     this.audit = new AuditLogger(logger);
@@ -689,6 +703,7 @@ export class MessageBridge {
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
         backend: this.config.claude.backend,
+        mcpServers: this.externalMcpServers,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -1503,6 +1518,7 @@ export class MessageBridge {
       onTeamEvent: opts.onTeamEvent,
       maxTurns: opts.maxTurns,
       allowedTools: opts.allowedTools,
+      mcpServers: this.externalMcpServers,
     });
   }
 
