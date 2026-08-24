@@ -1,0 +1,408 @@
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
+import type { EngineName } from './types.js';
+import { buildExecutionMcpEntries, type McpEntry } from './mcp-entries.js';
+import {
+  EXECUTION_MCP_SERVERS,
+  isLoopbackProxy,
+  type AnyMcpServerDescriptor,
+  type LoopbackProxyDescriptor,
+} from '../services/mcp-registry.js';
+
+interface McpMaterializeLogger {
+  warn(fields: Record<string, unknown>, message: string): void;
+  debug?(fields: Record<string, unknown>, message: string): void;
+}
+
+export interface MaterializeExecutionMcpInput {
+  executionEnv: Record<string, string> | undefined;
+  bridgeEnv: NodeJS.ProcessEnv;
+  runtimeRoot: string;
+  engineName: EngineName;
+  botName: string;
+  chatId: string;
+  logger: McpMaterializeLogger;
+  /** Defaults to the full registry; overridden by fixtures. */
+  servers?: readonly AnyMcpServerDescriptor[];
+  /** Product ids unavailable for this exact turn. */
+  excludedServerIds?: readonly string[];
+  /** Injectable only so tests can force a filename collision. */
+  nonce?: () => string;
+}
+
+export interface MaterializedExecutionMcp {
+  entries: McpEntry[];
+  claudeMcpConfigPath?: string;
+  attachRulesPackChildGrant(grant: string): void;
+  cleanup(): void;
+}
+
+/**
+ * Capability material older than this at Bridge startup cannot belong to a live
+ * turn: capabilities themselves expire in an hour, and any file still present
+ * is a crash leftover rather than state a running session depends on.
+ */
+export const CAPABILITY_SWEEP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+const CAPABILITY_SCRATCH_SEGMENTS = ['data', 'mcp-capabilities'] as const;
+
+/**
+ * Materialize short-lived capabilities without putting token bytes in argv,
+ * generated MCP config, prompts, or logs. Missing/unsafe inputs produce no
+ * MCP entries and leave the underlying engine usable without external tools.
+ */
+export function materializeExecutionMcp(
+  input: MaterializeExecutionMcpInput,
+): MaterializedExecutionMcp | undefined {
+  const executionEnv = input.executionEnv;
+  const excluded = new Set(input.excludedServerIds ?? []);
+  const servers = (input.servers ?? EXECUTION_MCP_SERVERS).filter((server) => !excluded.has(server.id));
+  const authorized = servers.filter((server) => hasValue(executionEnv?.[server.capabilityEnvVar]));
+  if (authorized.length === 0) return undefined;
+
+  if (input.engineName === 'kimi') {
+    input.logger.warn(
+      { engine: 'kimi', reason: 'no per-session MCP surface' },
+      'Execution MCP unavailable; external tools fail closed for this session',
+    );
+    return undefined;
+  }
+
+  if (
+    executionEnv?.METABOT_BOT_NAME !== input.botName ||
+    executionEnv.METABOT_CHAT_ID !== input.chatId
+  ) {
+    input.logger.warn(
+      { engine: input.engineName, reason: 'execution identity does not match this turn' },
+      'Execution MCP unavailable; external tools fail closed for this session',
+    );
+    return undefined;
+  }
+
+  if (
+    /^(?:teaminst|team):/.test(executionEnv.METABOT_CHAT_ID) ||
+    /^(?:teaminst|team):/.test(input.chatId)
+  ) {
+    input.logger.warn(
+      { engine: input.engineName, reason: 'team sessions are not authorized' },
+      'Execution MCP unavailable; external tools fail closed for this session',
+    );
+    return undefined;
+  }
+
+  try {
+    logEndpointRefusals(input, authorized);
+    return materializeAuthorizedExecutionMcp(input, executionEnv!, authorized);
+  } catch (error) {
+    input.logger.warn(
+      { engine: input.engineName, reason: errorMessage(error) },
+      'Execution MCP materialization failed; external tools fail closed for this session',
+    );
+    return undefined;
+  }
+}
+
+function materializeAuthorizedExecutionMcp(
+  input: MaterializeExecutionMcpInput,
+  executionEnv: Record<string, string>,
+  servers: readonly AnyMcpServerDescriptor[],
+): MaterializedExecutionMcp | undefined {
+  const runtimeRoot = canonicalRuntimeRoot(input.runtimeRoot);
+  const scratchDir = secureScratchDirectory(runtimeRoot);
+  // Two turns in one chat overlap routinely, and a shared per-chat filename
+  // makes the second turn's write visible to the first turn's already-running
+  // proxy and makes the first cleanup delete the second turn's credential.
+  // A per-turn nonce gives every turn its own path, so concurrent turns and
+  // crash leftovers can never collide.
+  const scopeName = `${safePrefix(input.botName)}-${scopeHash(input.botName, input.chatId)}-${(input.nonce ?? randomUUID)()}`;
+  const capabilityFiles: Record<string, string> = {};
+  for (const server of servers) {
+    capabilityFiles[server.id] = path.join(scratchDir, `${scopeName}-${server.id}.token`);
+  }
+  const candidates = buildExecutionMcpEntries({
+    executionEnv,
+    bridgeEnv: input.bridgeEnv,
+    runtimeRoot,
+    capabilityFiles,
+    servers,
+  });
+  if (candidates.length === 0) return undefined;
+
+  const byName = new Map(servers.map((server) => [server.serverName, server]));
+  const entries: McpEntry[] = [];
+  const leasedPaths: string[] = [];
+  try {
+    // Each product server is independent, so one unusable entry must remove
+    // only itself. A missing ARC proxy can never disable Worker Runner, and a
+    // failed Worker lease can never disable ARC.
+    for (const entry of candidates) {
+      const server = byName.get(entry.name)!;
+      try {
+        assertConfinedExecutionEntry(entry, runtimeRoot);
+        leasePrivateFile(capabilityFiles[server.id]!, executionEnv[server.capabilityEnvVar]!);
+        leasedPaths.push(capabilityFiles[server.id]!);
+      } catch (error) {
+        input.logger.warn(
+          { engine: input.engineName, server: entry.name, reason: errorMessage(error) },
+          'Execution MCP entry omitted; other external tools stay available',
+        );
+        continue;
+      }
+      entries.push(entry);
+    }
+    if (entries.length === 0) {
+      for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+      return undefined;
+    }
+
+    let claudeMcpConfigPath: string | undefined;
+    if (input.engineName === 'claude') {
+      // Assembled only from entries that actually survived leasing, so Claude
+      // never receives a server whose credential was not written.
+      claudeMcpConfigPath = path.join(scratchDir, `${scopeName}-claude-mcp.json`);
+      leasePrivateFile(
+        claudeMcpConfigPath,
+        `${JSON.stringify({ mcpServers: Object.fromEntries(entries.map((entry) => [entry.name, {
+          command: entry.command,
+          args: entry.args,
+          env: entry.env,
+        }])) }, null, 2)}\n`,
+      );
+      leasedPaths.push(claudeMcpConfigPath);
+    }
+
+    let cleaned = false;
+    return {
+      entries,
+      ...(claudeMcpConfigPath ? { claudeMcpConfigPath } : {}),
+      attachRulesPackChildGrant: (grant: string) => {
+        if (cleaned) throw new Error('Execution MCP material is already cleaned');
+        const server = servers.find((candidate) => candidate.id === 'worker');
+        const entry = entries.find((candidate) => candidate.name === server?.serverName);
+        if (!server?.rulesPackGrantFileEnvVar || !entry) {
+          throw new Error('Worker MCP entry is unavailable for a RulesPack child grant');
+        }
+        if (typeof grant !== 'string' || !grant || Buffer.byteLength(grant, 'utf8') > 1_048_576) {
+          throw new Error('RulesPack child grant is empty or too large');
+        }
+        if (entry.env[server.rulesPackGrantFileEnvVar]) {
+          throw new Error('RulesPack child grant is already attached');
+        }
+        const grantPath = path.join(scratchDir, `${scopeName}-worker-rulespack-grant.json`);
+        leasePrivateFile(grantPath, `${grant}\n`);
+        leasedPaths.push(grantPath);
+        entry.env[server.rulesPackGrantFileEnvVar] = grantPath;
+      },
+      cleanup: () => {
+        if (cleaned) return;
+        cleaned = true;
+        for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+      },
+    };
+  } catch (error) {
+    for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+    throw error;
+  }
+}
+
+/**
+ * Bridge-startup sweep.
+ *
+ * A crash between leasing and cleanup leaves capability material on disk with
+ * nothing left to delete it. Per-turn filenames mean those leftovers accumulate
+ * instead of being overwritten, so startup removes anything older than a
+ * capability could still be valid. Live turns are younger than the cutoff, so
+ * this never deletes credentials a running session still needs.
+ */
+export function sweepExpiredCapabilityFiles(
+  runtimeRoot: string,
+  logger: McpMaterializeLogger,
+  options: { now?: number; maxAgeMs?: number } = {},
+): { removed: string[]; kept: number } {
+  const removed: string[] = [];
+  let kept = 0;
+  let scratchDir: string;
+  try {
+    scratchDir = path.join(canonicalRuntimeRoot(runtimeRoot), ...CAPABILITY_SCRATCH_SEGMENTS);
+  } catch {
+    return { removed, kept };
+  }
+  if (!existsSync(scratchDir)) return { removed, kept };
+  const cutoff = (options.now ?? Date.now()) - (options.maxAgeMs ?? CAPABILITY_SWEEP_MAX_AGE_MS);
+  let names: string[];
+  try {
+    names = readdirSync(scratchDir);
+  } catch (error) {
+    logger.warn({ path: scratchDir, reason: errorMessage(error) }, 'Failed to sweep execution MCP material');
+    return { removed, kept };
+  }
+  for (const name of names) {
+    const candidate = path.join(scratchDir, name);
+    try {
+      const info = lstatSync(candidate);
+      if (!info.isFile()) continue;
+      if (statSync(candidate).mtimeMs > cutoff) {
+        kept += 1;
+        continue;
+      }
+      rmSync(candidate, { force: true });
+      removed.push(candidate);
+    } catch (error) {
+      logger.warn({ path: candidate, reason: errorMessage(error) }, 'Failed to sweep execution MCP material');
+    }
+  }
+  return { removed, kept };
+}
+
+/**
+ * An executable path only reaches an engine configuration after it is proven to
+ * be a real file inside the runtime root, so a stale workspace link or an
+ * uninstalled package cannot point an engine at an arbitrary binary.
+ */
+function assertConfinedExecutionEntry(entry: McpEntry, runtimeRoot: string): void {
+  let canonicalCommand: string;
+  try {
+    canonicalCommand = realpathSync(entry.command);
+  } catch {
+    throw new Error('MCP proxy executable is missing');
+  }
+  const canonicalNode = realpathSync(process.execPath);
+  if (canonicalCommand === canonicalNode) {
+    if (entry.args.length !== 1) throw new Error('Node MCP proxy must name exactly one entry script');
+    assertConfinedFile(entry.args[0], runtimeRoot, 'script');
+    return;
+  }
+  assertConfinedFile(entry.command, runtimeRoot, 'executable');
+}
+
+function assertConfinedFile(candidate: string, runtimeRoot: string, kind: 'executable' | 'script'): void {
+  let canonical: string;
+  try {
+    canonical = realpathSync(candidate);
+  } catch {
+    throw new Error(`MCP proxy ${kind} is missing`);
+  }
+  if (!isWithin(runtimeRoot, canonical)) throw new Error(`MCP proxy ${kind} escapes the runtime root`);
+  const info = lstatSync(canonical);
+  if (!info.isFile()) throw new Error(`MCP proxy ${kind} is not a regular file`);
+}
+
+function logEndpointRefusals(
+  input: MaterializeExecutionMcpInput,
+  servers: readonly AnyMcpServerDescriptor[],
+): void {
+  for (const server of servers) {
+    if (!isLoopbackProxy(server)) continue;
+    const endpoint = input.bridgeEnv[(server as LoopbackProxyDescriptor).endpointEnvVar];
+    if (!hasValue(endpoint)) {
+      input.logger.warn(
+        { engine: input.engineName, purpose: server.id, reason: 'daemon endpoint is not configured' },
+        'Execution MCP entry omitted; external tool fails closed',
+      );
+      continue;
+    }
+    if (!isAcceptedEndpoint(endpoint)) {
+      input.logger.warn(
+        { engine: input.engineName, purpose: server.id, reason: 'daemon endpoint is not loopback HTTP' },
+        'Execution MCP entry omitted; external tool fails closed',
+      );
+    }
+  }
+}
+
+function isAcceptedEndpoint(value: string): boolean {
+  try {
+    const endpoint = new URL(value);
+    return (
+      endpoint.protocol === 'http:' &&
+      ['127.0.0.1', '[::1]'].includes(endpoint.hostname) &&
+      !endpoint.username &&
+      !endpoint.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canonicalRuntimeRoot(value: string): string {
+  if (!path.isAbsolute(value)) throw new Error('runtime root must be absolute');
+  return realpathSync(value);
+}
+
+function secureScratchDirectory(runtimeRoot: string): string {
+  const scratchDir = path.join(runtimeRoot, ...CAPABILITY_SCRATCH_SEGMENTS);
+  mkdirSync(scratchDir, { recursive: true, mode: 0o700 });
+  const info = lstatSync(scratchDir);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('MCP capability scratch path is not a real directory');
+  const canonical = realpathSync(scratchDir);
+  if (!isWithin(runtimeRoot, canonical)) throw new Error('MCP capability scratch path escapes the runtime root');
+  if (process.getuid && info.uid !== process.getuid()) throw new Error('MCP capability scratch directory owner mismatch');
+  chmodSync(canonical, 0o700);
+  return canonical;
+}
+
+function leasePrivateFile(filePath: string, content: string): void {
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    chmodSync(temporaryPath, 0o600);
+    const temporaryInfo = lstatSync(temporaryPath);
+    if (!temporaryInfo.isFile() || temporaryInfo.isSymbolicLink()) {
+      throw new Error('MCP capability material is not a regular file');
+    }
+    if (process.getuid && temporaryInfo.uid !== process.getuid()) {
+      throw new Error('MCP capability material owner mismatch');
+    }
+    // Per-turn names make this exclusive, so an existing file is a real
+    // collision rather than a previous turn to overwrite.
+    if (existsSync(filePath)) throw new Error('MCP capability path is already leased');
+    renameSync(temporaryPath, filePath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+function releasePrivateFile(filePath: string, logger: McpMaterializeLogger): void {
+  try {
+    rmSync(filePath, { force: true });
+  } catch (error) {
+    logger.warn(
+      { path: filePath, reason: errorMessage(error) },
+      'Failed to clean execution MCP material',
+    );
+  }
+}
+
+function scopeHash(botName: string, chatId: string): string {
+  return createHash('sha256').update(botName).update('\0').update(chatId).digest('hex').slice(0, 24);
+}
+
+function safePrefix(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return normalized || 'bot';
+}
+
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function hasValue(value: string | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

@@ -24,9 +24,34 @@ import {
   truncate,
   truncateContent,
 } from './card-builder-utils.js';
+import { renderCompactTeamPanel } from './team-panel.js';
 
 // v2-only constant: font size used in the grey stats footer panel.
 const FOOTER_FONT_SIZE = 2;
+
+/**
+ * Conservative Card 2.0 budget. Lark rejects cards containing too many
+ * native table elements, so additional tables stay as readable Markdown
+ * instead of making the whole card invalid.
+ */
+export const DEFAULT_NATIVE_TABLE_BUDGET = 5;
+
+export interface CardV2BuildOptions {
+  nativeTableBudget?: number;
+}
+
+function tableToMarkdown(block: Extract<Block, { type: 'table' }>): string {
+  const alignment = block.align.map((value) => {
+    if (value === 'center') return ':---:';
+    if (value === 'right') return '---:';
+    return '---';
+  });
+  return [
+    `| ${block.headers.join(' | ')} |`,
+    `| ${alignment.join(' | ')} |`,
+    ...block.rows.map((row) => `| ${row.join(' | ')} |`),
+  ].join('\n');
+}
 
 function blockToElement(block: Block): unknown {
   switch (block.type) {
@@ -91,16 +116,33 @@ function blockToElement(block: Block): unknown {
   }
 }
 
-/** Split response text into blocks then map to v2 card elements */
-function responseToElements(text: string): unknown[] {
+/** Split response text into blocks while enforcing platform component budgets. */
+function responseToElements(text: string, nativeTableBudget: number): unknown[] {
   const truncated = truncateContent(text);
   const blocks    = parseMarkdownToBlocks(truncated);
-  return blocks.map(blockToElement);
+  let nativeTables = 0;
+  return blocks.map((block) => {
+    if (block.type === 'table') {
+      if (nativeTables >= nativeTableBudget) {
+        return {
+          tag: 'markdown',
+          content: tableToMarkdown(block),
+          text_align: 'left',
+        };
+      }
+      nativeTables += 1;
+    }
+    return blockToElement(block);
+  });
 }
 
-export function buildCardV2(state: CardState): string {
+export function buildCardV2(state: CardState, options: CardV2BuildOptions = {}): string {
   const config   = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
+  const nativeTableBudget = Math.max(
+    0,
+    Math.floor(options.nativeTableBudget ?? DEFAULT_NATIVE_TABLE_BUDGET),
+  );
 
   // Goal badge — pinned at the top so users see at a glance that the session
   // is in goal-driven mode (Claude /goal). Persists across turns until /goal
@@ -114,44 +156,9 @@ export function buildCardV2(state: CardState): string {
     elements.push({ tag: 'hr' });
   }
 
-  // Agent Teams panel — teammates + shared task list. Driven by Claude
-  // Code's TaskCreated / TaskCompleted / TeammateIdle hooks. Mirrors v1
-  // builder; removing this hides the entire Agent Teams UI from users.
-  if (state.teamState && (state.teamState.teammates.length > 0 || state.teamState.tasks.length > 0)) {
-    const ts    = state.teamState;
-    const lines: string[] = [];
-    const header = ts.name ? `🧑‍🤝‍🧑 **Team:** \`${ts.name}\`` : '🧑‍🤝‍🧑 **Team**';
-    lines.push(header);
-    if (ts.teammates.length > 0) {
-      lines.push('');
-      lines.push('**Teammates:**');
-      for (const m of ts.teammates) {
-        const icon = m.status === 'working' ? '⏳' : '💤';
-        const subj = m.lastSubject ? ` — _${truncate(m.lastSubject, 60)}_` : '';
-        lines.push(`${icon} \`${m.name}\` (${m.status})${subj}`);
-      }
-    }
-    if (ts.tasks.length > 0) {
-      // Show in-progress first, then the most recent completions
-      const pending    = ts.tasks.filter((t) => t.status === 'pending');
-      const inProgress = ts.tasks.filter((t) => t.status === 'in_progress');
-      const completed  = ts.tasks.filter((t) => t.status === 'completed').slice(-5);
-      lines.push('');
-      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter((t) => t.status === 'completed').length} done`);
-      for (const t of pending) {
-        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
-        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
-      }
-      for (const t of inProgress) {
-        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
-        lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);
-      }
-      for (const t of completed) {
-        const owner = t.teammate ? ` (\`${t.teammate}\`)` : '';
-        lines.push(`✅ ${truncate(t.subject, 80)}${owner}`);
-      }
-    }
-    elements.push({ tag: 'markdown', content: lines.join('\n') });
+  const teamPanel = state.teamState ? renderCompactTeamPanel(state.teamState) : null;
+  if (teamPanel) {
+    elements.push({ tag: 'markdown', content: teamPanel });
     elements.push({ tag: 'hr' });
   }
 
@@ -196,7 +203,7 @@ export function buildCardV2(state: CardState): string {
 
   // Response content (parsed into blocks)
   if (state.responseText) {
-    elements.push(...responseToElements(state.responseText));
+    elements.push(...responseToElements(state.responseText, nativeTableBudget));
   } else if (state.status === 'thinking') {
     elements.push({
       tag:     'markdown',

@@ -78,6 +78,18 @@ metabot restart
 
 详见[飞书应用配置](getting-started/feishu-app-setup.md)。
 
+## 飞书/Lark 卡片一直停留在 Running
+
+当前版本会使用保守的 Card 2.0 原生表格预算。超出预算的 Markdown 表格仍保留在
+卡片中，但不再转换为原生 `table` 元素。如果 Lark 仍拒绝最终 payload，MetaBot
+不会重复提交确定无效的结构性 4xx 请求，而是先用安全终态渲染更新原卡片；仍失败
+时再发送明确替代原 Running 卡片的新卡片，最后才使用有序的分段文本。暂态 5xx
+和网络错误只进行有界退避。
+
+日志会保留 HTTP status、Lark code、request ID、message ID 和所选降级路径，
+但不会写入请求 header、Token、Cookie 或原始 SDK 错误对象。提交 Issue 时也不要
+附加这些字段。
+
 ## 群 Bot 不回复
 
 群聊默认使用精确 `@Bot` 路由。@正确的 Bot 后检查当前回复模式：

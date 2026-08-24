@@ -57,6 +57,19 @@ GET    /admin/credentials
 GET    /admin/audit?date=YYYY-MM-DD[&principal=&op=]
 ```
 
+Bridge credentials may acquire a non-secret RulesPack `hostId`/`audience`
+binding through their first authenticated `POST /api/agents/bulk`. The binding
+uses trust on first use and is stored in nullable additive credential columns;
+the bearer token is not replaced or reissued. `/api/whoami` returns the bound
+`rulesPackIdentity`, and `GET /api/agents` exposes the Core-stamped identity on
+every bot owned by that credential. Subsequent attempts to change either value
+return a conflict. Active RulesPack registration without a binding fails
+closed; legacy unconfigured or `off` agents remain compatible.
+The authenticated bot status may also carry deterministic SHA-256 keys for
+exact project-bound chats. Core validates and stores those non-secret
+attestations inside the existing `rulespack_status` JSON without exposing raw
+chat IDs or adding another database column.
+
 Memory routes:
 
 ```

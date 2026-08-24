@@ -1,15 +1,63 @@
 import type { CardState } from '../types.js';
 
+export type CardUpdateFailureCategory =
+  | 'payload'
+  | 'authentication'
+  | 'not_found'
+  | 'rate_limit'
+  | 'transient'
+  | 'unknown';
+
+export interface CardUpdateFailure {
+  category: CardUpdateFailureCategory;
+  retryable: boolean;
+  httpStatus?: number;
+  providerCode?: string | number;
+  providerSubcode?: string | number;
+  requestId?: string;
+}
+
+export type CardUpdateResult =
+  | { ok: true }
+  | ({ ok: false } & CardUpdateFailure);
+
+/**
+ * Older and non-HTTP senders may still return a boolean. Delivery code treats
+ * `false` as an unknown transient failure so those platforms keep their
+ * existing bounded-retry behavior.
+ */
+export type CardUpdateOutcome = boolean | CardUpdateResult;
+
+export interface CardDeliveryOptions {
+  /** Avoid platform-sensitive native components while preserving the text. */
+  safeTerminal?: boolean;
+}
+
+export function normalizeCardUpdateOutcome(outcome: CardUpdateOutcome): CardUpdateResult {
+  if (typeof outcome !== 'boolean') return outcome;
+  return outcome
+    ? { ok: true }
+    : { ok: false, category: 'unknown', retryable: true };
+}
+
 /**
  * Platform-agnostic message sender interface.
  * Implemented by each IM platform (Feishu, Telegram, etc.).
  */
 export interface IMessageSender {
   /** Send a new streaming card/message for a CardState. Returns messageId for subsequent updates. */
-  sendCard(chatId: string, state: CardState): Promise<string | undefined>;
+  sendCard(
+    chatId: string,
+    state: CardState,
+    options?: CardDeliveryOptions,
+  ): Promise<string | undefined>;
 
-  /** Update an existing streaming card/message with new CardState. Returns false on failure. */
-  updateCard(messageId: string, state: CardState): Promise<boolean>;
+  /** Update an existing streaming card/message and classify delivery failures when available. */
+  updateCard(
+    messageId: string,
+    state: CardState,
+    options?: CardDeliveryOptions,
+  ): Promise<CardUpdateOutcome>;
 
   /**
    * Send a dedicated interactive question card for an AskUserQuestion call.
@@ -37,8 +85,8 @@ export interface IMessageSender {
   /** Send a simple notice message (for command responses: /help, /reset, /stop, etc.). */
   sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void>;
 
-  /** Send a plain text message. */
-  sendText(chatId: string, text: string): Promise<void>;
+  /** Send a plain text message. A boolean result is used when the platform can confirm delivery. */
+  sendText(chatId: string, text: string): Promise<boolean | void>;
 
   /** Send a local image file to the chat. */
   sendImageFile(chatId: string, filePath: string): Promise<boolean>;

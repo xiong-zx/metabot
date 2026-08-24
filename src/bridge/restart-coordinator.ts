@@ -57,6 +57,8 @@ export interface ControlledRestartPlan {
   updatedAt: number;
   completedAt?: number;
   cancelledAt?: number;
+  restartOutcome?: 'healthy' | 'failed';
+  healthError?: string;
 }
 
 export class RestartPreparationError extends Error {
@@ -210,6 +212,8 @@ export async function recoverControlledRestartAfterStartup(input: {
   scheduler: TaskScheduler;
   logger: Logger;
   now?: number;
+  clearBreadcrumb?: boolean;
+  startupHealth?: { ok: boolean; error?: string };
 }): Promise<ControlledRestartPlan | undefined> {
   const breadcrumb = getRestartBreadcrumb();
   const plan = readControlledRestartPlan();
@@ -228,26 +232,28 @@ export async function recoverControlledRestartAfterStartup(input: {
   if (breadcrumb && !breadcrumb.requestId) {
     // Legacy breadcrumb: keep its in-memory one-shot reminder, but do not leave
     // the file around to retrigger on a later cold start.
-    clearRestartBreadcrumb();
+    if (input.clearBreadcrumb !== false) clearRestartBreadcrumb();
     return undefined;
   }
   const requestId = breadcrumb?.requestId ?? plan?.requestId;
   if (!requestId || !plan || plan.requestId !== requestId || plan.status === 'cancelled') {
-    if (breadcrumb) clearRestartBreadcrumb(breadcrumb.requestId);
+    if (breadcrumb && input.clearBreadcrumb !== false) clearRestartBreadcrumb(breadcrumb.requestId);
     return plan;
   }
   clearPreparationLease(plan.requestId);
   if (plan.status === 'completed') {
-    if (breadcrumb) clearRestartBreadcrumb(plan.requestId);
+    if (breadcrumb && input.clearBreadcrumb !== false) clearRestartBreadcrumb(plan.requestId);
     return plan;
   }
 
   let next = plan;
+  const restartHealthy = input.startupHealth?.ok !== false;
   for (const participant of plan.participants) {
     if (participant.recoveredAt) continue;
     const now = input.now ?? Date.now();
     const bot = resolveParticipantBot(input.registry, participant);
-    const continuationRequired = plan.resume
+    const continuationRequired = restartHealthy
+      && plan.resume
       && participant.wasActive
       && !isInternalExecutionChat(participant.chatId);
     let continuationOutcome: ControlledRestartParticipant['continuationOutcome'] = 'skipped';
@@ -287,13 +293,21 @@ export async function recoverControlledRestartAfterStartup(input: {
             'Controlled restart continuation scheduling failed',
           );
         }
+      } else if (!restartHealthy && participant.wasActive) {
+        continuationOutcome = 'failed';
       }
 
       if (participant.wasActive && participant.messageId) {
         try {
           await withTimeout(bot.sender.updateCard(
             participant.messageId,
-            buildRecoveredCard(participant, continuationOutcome === 'scheduled', now),
+            buildRecoveredCard(
+              participant,
+              continuationOutcome === 'scheduled',
+              restartHealthy,
+              input.startupHealth?.error,
+              now,
+            ),
           ), NOTICE_TIMEOUT_MS, 'restart interrupted-card update timed out');
         } catch (error) {
           input.logger.warn(
@@ -306,9 +320,15 @@ export async function recoverControlledRestartAfterStartup(input: {
       if (participant.sendCards) try {
         await withTimeout(bot.sender.sendTextNotice(
           participant.chatId,
-          'MetaBot Restart Complete',
-          buildCompletionNotice(plan, participant, continuationOutcome),
-          continuationOutcome === 'failed' ? 'red' : 'green',
+          restartHealthy ? 'MetaBot Restart Complete' : 'MetaBot Restart Failed',
+          buildCompletionNotice(
+            plan,
+            participant,
+            continuationOutcome,
+            restartHealthy,
+            input.startupHealth?.error,
+          ),
+          !restartHealthy || continuationOutcome === 'failed' ? 'red' : 'green',
         ), NOTICE_TIMEOUT_MS, 'restart completion notice timed out');
         completionNotice = 'delivered';
       } catch (error) {
@@ -357,11 +377,15 @@ export async function recoverControlledRestartAfterStartup(input: {
       delete redacted.queuedPrompts;
       return redacted;
     }),
+    restartOutcome: restartHealthy ? 'healthy' : 'failed',
+    ...(!restartHealthy && input.startupHealth?.error
+      ? { healthError: input.startupHealth.error.slice(0, 1000) }
+      : {}),
     completedAt,
     updatedAt: completedAt,
   };
   writeControlledRestartPlan(next);
-  if (breadcrumb) clearRestartBreadcrumb(next.requestId);
+  if (breadcrumb && input.clearBreadcrumb !== false) clearRestartBreadcrumb(next.requestId);
   return next;
 }
 
@@ -485,7 +509,18 @@ function buildCompletionNotice(
   plan: ControlledRestartPlan,
   participant: ControlledRestartParticipant,
   outcome: ControlledRestartParticipant['continuationOutcome'],
+  restartHealthy: boolean,
+  healthError?: string,
 ): string {
+  if (!restartHealthy) {
+    return [
+      `Controlled restart ${plan.requestId} failed startup health checks.`,
+      healthError ? `Health error: ${healthError}` : '',
+      participant.wasActive
+        ? 'The interrupted task was not resumed automatically.'
+        : 'No continuation was scheduled.',
+    ].filter(Boolean).join('\n');
+  }
   return [
     `Controlled restart ${plan.requestId} completed and the Bridge is online.`,
     outcome === 'scheduled'
@@ -503,12 +538,16 @@ function buildCompletionNotice(
 function buildRecoveredCard(
   participant: ControlledRestartParticipant,
   continuationQueued: boolean,
+  restartHealthy: boolean,
+  healthError: string | undefined,
   now: number,
 ): CardState {
   const previous = participant.cardState;
-  const restartText = continuationQueued
-    ? 'MetaBot restarted successfully. A continuation turn was queued for the interrupted work.'
-    : 'MetaBot restarted, but no continuation turn was queued for this task.';
+  const restartText = !restartHealthy
+    ? `MetaBot restart failed startup health checks.${healthError ? ` ${healthError}` : ''}`
+    : continuationQueued
+      ? 'MetaBot restarted successfully. A continuation turn was queued for the interrupted work.'
+      : 'MetaBot restarted, but no continuation turn was queued for this task.';
   return {
     ...previous,
     status: continuationQueued ? 'complete' : 'error',
@@ -517,7 +556,9 @@ function buildRecoveredCard(
     toolCalls: previous?.toolCalls || [],
     durationMs: Math.max(previous?.durationMs || 0, now - participant.startedAt),
     pendingQuestion: undefined,
-    errorMessage: continuationQueued ? undefined : 'Task interrupted by service restart',
+    errorMessage: continuationQueued
+      ? undefined
+      : healthError || 'Task interrupted by service restart',
   };
 }
 

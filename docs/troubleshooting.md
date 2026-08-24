@@ -81,6 +81,20 @@ API and does not spawn the removed `--wire --work-dir` path.
 
 See [Feishu App Setup](getting-started/feishu-app-setup.md).
 
+## A Feishu/Lark card stays on Running
+
+Current releases keep Card 2.0 responses within a conservative native-table
+budget. Extra Markdown tables remain readable in the card without becoming
+native table elements. If Lark still rejects the final payload, MetaBot does
+not repeat a structural 4xx error: it retries the same card with safe terminal
+rendering, then uses a replacement card or ordered text chunks if necessary.
+Transient 5xx and network failures use bounded backoff.
+
+Check the logs for the HTTP status, Lark code, request ID, message ID, and the
+selected fallback. The logged delivery record intentionally omits request
+headers, tokens, cookies, and raw SDK error objects. Do not add those fields to
+an issue when reporting a delivery failure.
+
 ## A group bot does not reply
 
 Groups default to exact `@Bot` routing. Mention the intended bot, then inspect

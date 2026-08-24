@@ -808,6 +808,47 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/memory/search' && method === 'GET') {
         return jsonResult(res, memoryRoutes.search(memoryStore, query, cred));
       }
+      if (pathname === '/api/memory/events' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.listDocumentEvents(memoryStore, query, cred));
+      }
+      if (pathname === '/api/memory/events/stats' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.getDocumentEventStats(memoryStore, cred));
+      }
+      if (pathname === '/api/memory/events/consumer' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.getDocumentEventConsumer(memoryStore, query, cred));
+      }
+      if (pathname === '/api/memory/events/consumer/advance' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.advanceDocumentEventConsumer(memoryStore, body, cred));
+      }
+      if (pathname === '/api/memory/events/processing' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.listDocumentEventProcessing(memoryStore, query, cred));
+      }
+      if (pathname === '/api/memory/events/processing' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.recordDocumentEventProcessing(memoryStore, body, cred));
+      }
+      if (pathname === '/api/memory/events/processing/review' && method === 'PATCH') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.reviewDocumentEventProcessing(memoryStore, body, cred));
+      }
+      if (pathname === '/api/memory/events/prune' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.pruneDocumentEvents(memoryStore, body, cred));
+      }
+      if (pathname === '/api/memory/index-reconciliation' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.reconcileIndexes(memoryStore, query, cred));
+      }
+      if (pathname === '/api/memory/routing-index/preview' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.previewMemoryRoutingIndex(memoryStore, query, cred));
+      }
+      if (pathname === '/api/memory/routing-index/rebuild' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, memoryRoutes.rebuildMemoryRoutingIndex(memoryStore, body, cred));
+      }
+      if (pathname === '/api/memory/routing-index/snapshots' && method === 'GET') {
+        return jsonResult(res, memoryRoutes.listMemoryRoutingIndexSnapshots(memoryStore, query, cred));
+      }
       if (pathname === '/api/memory/documents' && method === 'GET') {
         return jsonResult(res, memoryRoutes.listDocuments(memoryStore, query, cred));
       }
@@ -870,7 +911,7 @@ export function startServer(options: ServerOptions): ServerHandle {
       }
       if (pathname === '/api/agents/bulk' && method === 'POST') {
         const body = await parseJsonBody(req);
-        return jsonResult(res, agentRoutes.registerAgentsBulk(agentStore, body, cred));
+        return jsonResult(res, agentRoutes.registerAgentsBulk(agentStore, credentialsStore, body, cred));
       }
       if (pathname === '/api/agents/heartbeat' && method === 'POST') {
         const body = await parseJsonBody(req);

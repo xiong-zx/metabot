@@ -10,8 +10,9 @@ metabot skills remove <name>
 ```
 
 A Skill bundle contains `SKILL.md` and may contain `references/`, `scripts/`,
-and `assets/`. Install the complete bundle. Project and global destinations are
-different discovery scopes.
+`assets/`, and `agents/`. `publish --from` uploads the complete bundle and
+`install` restores it, including binary files and executable script modes.
+Project and global destinations are different discovery scopes.
 
 `metabot skills install` defaults to `.metabot/skills/<name>` so you can review
 downloaded instructions before an engine auto-loads them. Passing `--to` with an

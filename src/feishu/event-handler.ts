@@ -1,7 +1,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import { MessageSender } from './message-sender.js';
+import { MessageSender, type FeishuMessageSnapshot } from './message-sender.js';
 import {
   type FeishuGroupReplyMode,
   FeishuGroupReplyModeStore,
@@ -35,37 +35,427 @@ const MEMBER_COUNT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const memberCountCache = new Map<string, { count: number; ts: number }>();
 
 // Cache for recent media messages in group chats (file/image sent without @mention).
-// When a user later @mentions the bot, cached media is attached automatically.
+// Entries are consumed only when the user replies to that exact message and @mentions the bot.
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_PENDING_MEDIA_PER_USER = 10;
+const MAX_REFERENCED_TEXT_CHARS = 16_000;
 interface CachedMedia {
   messageId: string;
+  provenanceChatId?: string;
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
   ts: number;
 }
-const pendingMediaCache = new Map<string, CachedMedia[]>(); // key: chatId:userId
+type PendingMediaCache = Map<string, CachedMedia[]>;
 
 function cacheMediaKey(chatId: string, userId: string): string {
   return `${chatId}:${userId}`;
 }
 
-function getCachedMedia(chatId: string, userId: string): CachedMedia[] {
+function consumeCachedMedia(
+  cache: PendingMediaCache,
+  chatId: string,
+  userId: string,
+  replyToMessageId: string,
+): CachedMedia[] {
   const key = cacheMediaKey(chatId, userId);
-  const items = pendingMediaCache.get(key);
+  const items = cache.get(key);
   if (!items) return [];
   const now = Date.now();
   const valid = items.filter(m => now - m.ts < MEDIA_CACHE_TTL_MS);
   if (valid.length === 0) {
-    pendingMediaCache.delete(key);
+    cache.delete(key);
     return [];
   }
-  pendingMediaCache.set(key, valid);
-  return valid;
+
+  const selected = valid.filter(
+    m => m.messageId === replyToMessageId && m.provenanceChatId === chatId,
+  );
+  if (selected.length === 0) {
+    cache.set(key, valid);
+    return [];
+  }
+  const remaining = valid.filter(m => m.messageId !== replyToMessageId);
+  if (remaining.length > 0) cache.set(key, remaining);
+  else cache.delete(key);
+  return selected;
 }
 
-function clearCachedMedia(chatId: string, userId: string): void {
-  pendingMediaCache.delete(cacheMediaKey(chatId, userId));
+function cachePendingMedia(
+  cache: PendingMediaCache,
+  chatId: string,
+  userId: string,
+  media: Omit<CachedMedia, 'ts' | 'provenanceChatId'>,
+): void {
+  const key = cacheMediaKey(chatId, userId);
+  const now = Date.now();
+  const valid = (cache.get(key) ?? []).filter(item => now - item.ts < MEDIA_CACHE_TTL_MS);
+  valid.push({ ...media, provenanceChatId: chatId, ts: now });
+  cache.set(key, valid.slice(-MAX_PENDING_MEDIA_PER_USER));
+}
+
+function cleanMessageText(text: string): string {
+  return text
+    .replace(/@_\w+\s*/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim();
+}
+
+function truncateReferencedText(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_REFERENCED_TEXT_CHARS) return { text, truncated: false };
+  return {
+    text: `${text.slice(0, MAX_REFERENCED_TEXT_CHARS)}\n[Referenced message truncated]`,
+    truncated: true,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+const METABOT_CARD_CHROME_PREFIXES = [
+  '\u{1F3AF} **Goal:**',
+  '**State:**',
+  '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team:**',
+  '\u{1F9D1}\u{200D}\u{1F91D}\u{200D}\u{1F9D1} **Team**',
+  '\u{1F4E1} **Background**',
+];
+const METABOT_TOOL_STATUS_PATTERN =
+  /^(?:\u{23F3}|\u{2705})\s+\*\*.+\*\*\s+\u{00B7}\s+\d+\s+tools?$/u;
+
+function isMetaBotCardChrome(node: unknown): boolean {
+  if (!isRecord(node) || node.tag !== 'markdown' || typeof node.content !== 'string') {
+    return false;
+  }
+  const content = node.content.trim();
+  return METABOT_CARD_CHROME_PREFIXES.some(prefix => content.startsWith(prefix))
+    || METABOT_TOOL_STATUS_PATTERN.test(content);
+}
+
+function stripLeadingMetaBotCardChrome(elements: unknown): unknown {
+  if (!Array.isArray(elements)) return elements;
+
+  let index = 0;
+  while (index < elements.length && isMetaBotCardChrome(elements[index])) {
+    index += 1;
+    const separator = elements[index];
+    if (isRecord(separator) && separator.tag === 'hr') index += 1;
+  }
+  return index > 0 ? elements.slice(index) : elements;
+}
+
+function isMetaBotStatsFooter(node: Record<string, unknown>): boolean {
+  if (node.tag !== 'column_set' || node.background_style !== 'grey' || !Array.isArray(node.columns)) {
+    return false;
+  }
+  return node.columns.some(column => {
+    if (!isRecord(column) || !Array.isArray(column.elements)) return false;
+    return column.elements.some(element => (
+      isRecord(element)
+      && element.tag === 'markdown'
+      && typeof element.content === 'string'
+      && element.content.startsWith('<font color="grey"')
+    ));
+  });
+}
+
+const METABOT_STATS_FOOTER_PATTERN = /^(?:ctx: \d|\$\d)/;
+const MAX_CARD_TRAVERSAL_DEPTH = 40;
+const MAX_CARD_TRAVERSAL_NODES = 4_000;
+
+const TEXT_LEAF_TAGS = new Set(['markdown', 'plain_text', 'lark_md', 'md', 'text', 'a', 'at']);
+const TEXT_CONTENT_KEYS = ['content', 'text', 'plain_text', 'lark_md'];
+const UI_CONTROL_TAGS = new Set(['note', 'button', 'select_static', 'overflow']);
+const DEEP_SCAN_SKIP_KEYS = new Set([
+  'config', 'header', 'i18n_header', 'card_link', 'style', 'styles',
+  'behaviors', 'action', 'value', 'confirm',
+]);
+const I18N_LOCALE_ORDER = ['zh_cn', 'zh_hk', 'zh_tw', 'en_us', 'ja_jp'];
+
+interface CardTextContext {
+  output: string[];
+  seen: Set<object>;
+  budget: { remaining: number };
+  /** Also read note/button/control labels (fallback pass only). */
+  permissive: boolean;
+  /** Descend every property, not just known element containers. */
+  deep: boolean;
+}
+
+function readLeafText(node: Record<string, unknown>): string {
+  for (const key of TEXT_CONTENT_KEYS) {
+    const value = node[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function collectInteractiveCardText(node: unknown, ctx: CardTextContext, depth = 0): void {
+  if (ctx.budget.remaining <= 0 || depth > MAX_CARD_TRAVERSAL_DEPTH) return;
+  ctx.budget.remaining -= 1;
+
+  if (typeof node === 'string') {
+    if (!ctx.deep && node.trim()) ctx.output.push(node.trim());
+    return;
+  }
+  if (Array.isArray(node)) {
+    if (ctx.seen.has(node)) return;
+    ctx.seen.add(node);
+    for (const item of node) collectInteractiveCardText(item, ctx, depth + 1);
+    return;
+  }
+  if (!isRecord(node) || ctx.seen.has(node)) return;
+  ctx.seen.add(node);
+
+  const tag = typeof node.tag === 'string' ? node.tag : '';
+  if (TEXT_LEAF_TAGS.has(tag)) {
+    const text = readLeafText(node);
+    if (text) ctx.output.push(text);
+    return;
+  }
+
+  if (UI_CONTROL_TAGS.has(tag)) {
+    if (!ctx.permissive) return;
+    const nested: string[] = [];
+    const probe: CardTextContext = { ...ctx, output: nested, permissive: false };
+    collectInteractiveCardText(node.elements ?? node.text ?? node.content, probe, depth + 1);
+    for (const text of nested) {
+      if (!METABOT_STATS_FOOTER_PATTERN.test(text)) ctx.output.push(text);
+    }
+    return;
+  }
+
+  if (tag === 'table') {
+    collectInteractiveTableText(node, ctx);
+    return;
+  }
+
+  if (tag === 'div') {
+    collectInteractiveCardText(node.text, ctx, depth + 1);
+    if (Array.isArray(node.fields)) {
+      for (const field of node.fields) {
+        if (isRecord(field)) collectInteractiveCardText(field.text, ctx, depth + 1);
+      }
+    }
+    return;
+  }
+
+  if (tag === 'column_set') {
+    if (!isMetaBotStatsFooter(node)) collectInteractiveCardText(node.columns, ctx, depth + 1);
+    return;
+  }
+
+  if (ctx.deep) {
+    for (const [key, value] of Object.entries(node)) {
+      if (DEEP_SCAN_SKIP_KEYS.has(key)) continue;
+      if (isRecord(value) || Array.isArray(value)) {
+        collectInteractiveCardText(value, ctx, depth + 1);
+      }
+    }
+    return;
+  }
+
+  collectInteractiveCardText(node.elements, ctx, depth + 1);
+}
+
+function collectInteractiveTableText(node: Record<string, unknown>, ctx: CardTextContext): void {
+  const columns = Array.isArray(node.columns) ? node.columns.filter(isRecord) : [];
+  const columnNames = columns
+    .map(column => typeof column.name === 'string' ? column.name : '')
+    .filter(Boolean);
+  const header = columns
+    .map(column => typeof column.display_name === 'string' ? column.display_name.trim() : '')
+    .filter(Boolean);
+  if (header.length > 0) ctx.output.push(header.join(' | '));
+
+  if (!Array.isArray(node.rows)) return;
+  for (const row of node.rows) {
+    if (!isRecord(row)) continue;
+    const values = (columnNames.length > 0 ? columnNames.map(name => row[name]) : Object.values(row))
+      .map(formatTableCell)
+      .filter(Boolean);
+    if (values.length > 0) ctx.output.push(values.join(' | '));
+  }
+}
+
+function formatTableCell(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  return '';
+}
+
+function pushI18nElementRoots(value: unknown, roots: unknown[]): void {
+  if (!isRecord(value)) return;
+  for (const locale of I18N_LOCALE_ORDER) {
+    if (value[locale] !== undefined) roots.push(value[locale]);
+  }
+  for (const [locale, elements] of Object.entries(value)) {
+    if (!I18N_LOCALE_ORDER.includes(locale)) roots.push(elements);
+  }
+}
+
+function cardElementRoots(card: Record<string, unknown>): unknown[] {
+  const roots: unknown[] = [];
+  const seen = new Set<Record<string, unknown>>();
+
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 3 || !isRecord(node) || seen.has(node)) return;
+    seen.add(node);
+    const body = isRecord(node.body) ? node.body : undefined;
+    if (body?.elements !== undefined) roots.push(body.elements);
+    if (node.elements !== undefined) roots.push(node.elements);
+    pushI18nElementRoots(body?.i18n_elements, roots);
+    pushI18nElementRoots(node.i18n_elements, roots);
+    visit(node.card, depth + 1);
+    visit(node.data, depth + 1);
+  };
+
+  visit(card, 0);
+  return roots;
+}
+
+function extractCardSummaryText(card: Record<string, unknown>): string {
+  const containers = [card, isRecord(card.card) ? card.card : undefined];
+  for (const container of containers) {
+    if (!container) continue;
+    const config = isRecord(container.config) ? container.config : undefined;
+    const summary = isRecord(config?.summary) ? config.summary : container.summary;
+    if (isRecord(summary) && typeof summary.content === 'string' && summary.content.trim()) {
+      return summary.content.trim();
+    }
+  }
+  return '';
+}
+
+function runCardTextPass(roots: unknown[], options: { permissive: boolean; deep: boolean }): string {
+  for (const root of roots) {
+    const ctx: CardTextContext = {
+      output: [],
+      seen: new Set<object>(),
+      budget: { remaining: MAX_CARD_TRAVERSAL_NODES },
+      permissive: options.permissive,
+      deep: options.deep,
+    };
+    collectInteractiveCardText(stripLeadingMetaBotCardChrome(root), ctx);
+    if (ctx.output.length > 0) return cleanMessageText(ctx.output.join('\n\n'));
+  }
+  return '';
+}
+
+function extractInteractiveCardText(card: unknown): string {
+  if (!isRecord(card)) return '';
+  const roots = cardElementRoots(card);
+  const strict = runCardTextPass(roots, { permissive: false, deep: false });
+  if (strict) return strict;
+
+  const permissive = runCardTextPass(roots, { permissive: true, deep: false });
+  if (permissive) return permissive;
+
+  const summary = extractCardSummaryText(card);
+  if (summary) return cleanMessageText(summary);
+
+  return runCardTextPass([card], { permissive: true, deep: true });
+}
+
+function parseReferencedMessage(
+  snapshot: FeishuMessageSnapshot,
+  logger: Logger,
+): {
+  replyContext?: IncomingMessage['replyContext'];
+  media: CachedMedia[];
+} {
+  const messageType = snapshot.messageType;
+  const content = snapshot.content;
+  if (!messageType || !content) return { media: [] };
+
+  try {
+    const parsed = JSON.parse(content);
+    let text = '';
+    let media: CachedMedia[] = [];
+    if (messageType === 'text') {
+      text = cleanMessageText(parsed.text || '');
+    } else if (messageType === 'post') {
+      const post = extractPostInterleaved(parsed);
+      text = cleanMessageText(post.text);
+      media = post.imageKeys.map(imageKey => ({
+        messageId: snapshot.messageId,
+        imageKey,
+        ts: Date.now(),
+      }));
+    } else if (messageType === 'image' && parsed.image_key) {
+      media = [{ messageId: snapshot.messageId, imageKey: parsed.image_key, ts: Date.now() }];
+    } else if (messageType === 'file' && parsed.file_key && parsed.file_name) {
+      media = [{
+        messageId: snapshot.messageId,
+        fileKey: parsed.file_key,
+        fileName: parsed.file_name,
+        ts: Date.now(),
+      }];
+    } else if (messageType === 'interactive') {
+      text = extractInteractiveCardText(parsed);
+      if (!text) {
+        logger.info(
+          { messageId: snapshot.messageId, messageType },
+          'Referenced interactive card contained no extractable text',
+        );
+      }
+    } else {
+      logger.info({ messageId: snapshot.messageId, messageType }, 'Referenced message type is unsupported');
+      return { media: [] };
+    }
+
+    const bounded = truncateReferencedText(text);
+    return {
+      replyContext: {
+        messageId: snapshot.messageId,
+        messageType,
+        text: bounded.text || undefined,
+        truncated: bounded.truncated || undefined,
+      },
+      media,
+    };
+  } catch (err) {
+    logger.warn({ err, messageId: snapshot.messageId, messageType }, 'Failed to parse referenced message');
+    return { media: [] };
+  }
+}
+
+async function resolveReferencedMessage(
+  cache: PendingMediaCache,
+  messageSender: MessageSender | undefined,
+  chatId: string,
+  userId: string,
+  messageId: string,
+  logger: Logger,
+): Promise<{
+  replyContext?: IncomingMessage['replyContext'];
+  media: CachedMedia[];
+  messageType?: string;
+}> {
+  const cachedMedia = consumeCachedMedia(cache, chatId, userId, messageId);
+  if (!messageSender || typeof messageSender.getMessage !== 'function') {
+    return { media: cachedMedia };
+  }
+
+  const snapshot = await messageSender.getMessage(messageId);
+  if (!snapshot) return { media: cachedMedia };
+  if (!snapshot.chatId) {
+    logger.warn({ messageId, chatId }, 'Ignoring reply reference without chat provenance');
+    return { media: [], messageType: snapshot.messageType };
+  }
+  if (snapshot.chatId !== chatId) {
+    logger.warn({ messageId, chatId, referencedChatId: snapshot.chatId }, 'Ignoring cross-chat reply reference');
+    return { media: [], messageType: snapshot.messageType };
+  }
+
+  const parsed = parseReferencedMessage(snapshot, logger);
+  return {
+    replyContext: parsed.replyContext,
+    media: parsed.media.length > 0 ? parsed.media : cachedMedia,
+    messageType: snapshot.messageType,
+  };
 }
 
 async function isPrivateLikeGroup(chatId: string, sender: MessageSender): Promise<boolean> {
@@ -194,6 +584,9 @@ export function createEventDispatcher(
   onGroupReplyModeNotice?: GroupReplyModeNoticeHandler,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
+  // Each bot dispatcher owns its own fallback cache so one bot cannot consume
+  // another bot's pending attachment state.
+  const pendingMediaCache: PendingMediaCache = new Map();
 
   // Register the card action trigger handler (fired when a user clicks a button
   // on an interactive card). The lark SDK types omit this event so we cast.
@@ -255,6 +648,7 @@ export function createEventDispatcher(
         const chatId = message.chat_id;
         const chatType = message.chat_type;
         const messageId = message.message_id;
+        const replyToMessageId = message.parent_id || undefined;
         const mentions = message.mentions;
 
         let commandText = '';
@@ -277,7 +671,8 @@ export function createEventDispatcher(
           }
           if (groupReplyCommand && groupReplyModeStore && onGroupReplyModeNotice) {
             const storedMode = groupReplyModeStore.get(config.name, chatId);
-            const inheritedPrivateLike = !storedMode && !config.groupNoMention && messageSender
+            const inheritedPrivateLike = !storedMode && !config.groupNoMention
+              && messageSender && typeof messageSender.getChatMemberCount === 'function'
               ? await isPrivateLikeGroup(chatId, messageSender)
               : false;
             const canChangeMode = groupReplyCommand.action !== 'set'
@@ -299,7 +694,8 @@ export function createEventDispatcher(
 
         if (chatType === 'group') {
           const storedMode = groupReplyModeStore?.get(config.name, chatId);
-          const privateLikeGroup = !storedMode && !config.groupNoMention && messageSender
+          const privateLikeGroup = !storedMode && !config.groupNoMention
+            && messageSender && typeof messageSender.getChatMemberCount === 'function'
             ? await isPrivateLikeGroup(chatId, messageSender)
             : false;
           if (!shouldProcessGroupMessage({
@@ -309,14 +705,11 @@ export function createEventDispatcher(
             privateLikeGroup,
           })) {
             if (msgType === 'image' || msgType === 'file') {
-              // Cache media messages for later retrieval when user @mentions bot
+              // Cache media only as a fallback for a later reply to this exact message.
               const media = parseMediaMessage(message, msgType, logger);
               if (media) {
-                const key = cacheMediaKey(chatId, userId);
-                const items = pendingMediaCache.get(key) || [];
-                items.push({ ...media, messageId, ts: Date.now() });
-                pendingMediaCache.set(key, items);
-                logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for later @mention');
+                cachePendingMedia(pendingMediaCache, chatId, userId, { ...media, messageId });
+                logger.info({ chatId, userId, msgType, ...media }, 'Cached group media for an explicit reply');
               }
               return;
             }
@@ -393,15 +786,15 @@ export function createEventDispatcher(
 
         // Common text cleanup for text and post messages
         if (msgType === 'text' || msgType === 'post') {
-          // Strip @mention tags (format: @_user_xxx or similar)
-          text = text.replace(/@_\w+\s*/g, '').trim();
+          text = cleanMessageText(text);
 
-          // Strip Feishu auto-generated markdown links: [text](url) → text
-          text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-
-          if (!text && !imageKey) {
+          if (!text && !imageKey && !replyToMessageId) {
             logger.debug('Empty message after stripping mentions');
             return;
+          }
+
+          if (!text && replyToMessageId) {
+            text = '请处理我回复的消息';
           }
 
           // If text is empty but we have an image (e.g. @bot + image in group chat), set default prompt
@@ -412,7 +805,30 @@ export function createEventDispatcher(
           logger.info({ userId, chatId, chatType, text: text.slice(0, 100), imageKey }, 'Received message');
         }
 
-        // Collect extra media: post images (2nd+) and cached group media
+        let replyContext: IncomingMessage['replyContext'];
+        let referencedMedia: CachedMedia[] = [];
+        if (chatType === 'group' && replyToMessageId) {
+          const resolved = await resolveReferencedMessage(
+            pendingMediaCache,
+            messageSender,
+            chatId,
+            userId,
+            replyToMessageId,
+            logger,
+          );
+          replyContext = resolved.replyContext;
+          referencedMedia = resolved.media;
+          logger.info({
+            chatId,
+            userId,
+            replyToMessageId,
+            referencedMessageType: resolved.messageType,
+            parsedMessageType: replyContext?.messageType,
+            mediaCount: referencedMedia.length,
+          }, 'Resolved replied message context');
+        }
+
+        // Collect extra media: post images (2nd+) and explicitly referenced media.
         let extraMedia: IncomingMessage['extraMedia'];
         if (postExtraImages.length > 0) {
           extraMedia = postExtraImages.map(key => ({
@@ -421,22 +837,34 @@ export function createEventDispatcher(
           }));
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
-        if (chatType === 'group') {
-          const cached = getCachedMedia(chatId, userId);
-          if (cached.length > 0) {
-            const cachedMedia = cached.map(m => ({
-              messageId: m.messageId,
-              imageKey: m.imageKey,
-              fileKey: m.fileKey,
-              fileName: m.fileName,
-            }));
-            extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
-            clearCachedMedia(chatId, userId);
-            logger.info({ chatId, userId, mediaCount: cached.length }, 'Attached cached media to @mention message');
-          }
+        if (referencedMedia.length > 0) {
+          const media = referencedMedia.map(item => ({
+            messageId: item.messageId,
+            imageKey: item.imageKey,
+            fileKey: item.fileKey,
+            fileName: item.fileName,
+          }));
+          extraMedia = extraMedia ? [...extraMedia, ...media] : media;
+          logger.info({
+            chatId,
+            userId,
+            replyToMessageId,
+            mediaCount: referencedMedia.length,
+          }, 'Attached referenced media to @mention message');
         }
 
-        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia });
+        onMessage({
+          messageId,
+          chatId,
+          chatType,
+          userId,
+          text,
+          imageKey,
+          fileKey,
+          fileName,
+          replyContext,
+          extraMedia,
+        });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }

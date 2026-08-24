@@ -11,6 +11,14 @@ export interface ApiContext {
   groupMembers?: string[];
   /** Group ID — used to build grouptalk chatIds for inter-bot communication. */
   groupId?: string;
+  /** Authenticated runtime facts for the downstream RulesPack hook; never rendered. */
+  rulesPack?: {
+    principal: import('@metabot/rulespack-adapter').RulesPackExecutionPrincipal;
+    dispatch?: {
+      envelope: import('@metabot/rulespack').RulesPackDispatchEnvelopeV1;
+      authenticatedIssuer: string;
+    };
+  };
 }
 
 function compactContextValue(value: string | undefined, fallback: string): string {

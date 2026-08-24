@@ -106,6 +106,7 @@ export function getWhoami(cred: Credential, agentStore?: AgentStore): RouteResul
       authSource: cred.authSource ?? 'bearer',
       credentialId: cred.id,
       memoryPublic,
+      ...(cred.rulesPackIdentity ? { rulesPackIdentity: cred.rulesPackIdentity } : {}),
     },
   };
 }

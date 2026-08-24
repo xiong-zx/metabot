@@ -64,9 +64,18 @@ Failed-run handling:
 
 The bridge builds a team snapshot from the Agent Teams store:
 
-- The **Team** panel shows active agents, their working or idle state, and visible tasks.
+- The **Team** panel stays compact: it shows a shortened Team label, a
+  `working/total` count, at most two active-agent lines, and one collapsed
+  all-idle line. Visible task counts and task ownership remain available.
 - The **Background activity** panel shows runs with status and the latest output or error.
 - Task statuses shown on cards are `pending`, `in_progress`, and `completed`; deleted tasks are hidden.
+- Between-turn Agent Team and spontaneous activity is deduplicated and deferred
+  with exponential backoff while the chat has a foreground turn. The queue is
+  bounded to 25 bodies and delivers at the 30-minute cap instead of dropping
+  completion output.
+- Activity emitted in one short burst is coalesced into one card. Later
+  activity within 30 minutes updates that same card; an update failure falls
+  back to a new card so delivery remains reliable.
 
 This card state is derived from `/api/agent-teams/<team>` data, so CLI updates immediately affect what the bridge can render.
 

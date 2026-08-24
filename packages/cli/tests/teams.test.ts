@@ -7,6 +7,9 @@ beforeEach(() => {
   process.env.API_SECRET = 'test-secret';
   delete process.env.METABOT_URL;
   delete process.env.METABOT_TEAM_AGENT;
+  delete process.env.METABOT_TEAM_CAPABILITY;
+  delete process.env.METABOT_BOT_NAME;
+  delete process.env.METABOT_CHAT_ID;
 });
 
 afterEach(() => {
@@ -31,6 +34,48 @@ function calls(fetchMock: typeof fetch): [string, RequestInit][] {
 }
 
 describe('metabot teams CLI ergonomics', () => {
+  it('forwards the runtime-issued execution capability and exposes governed commands', async () => {
+    process.env.METABOT_TEAM_CAPABILITY = 'signed-token';
+    process.env.METABOT_BOT_NAME = 'pm-codex';
+    process.env.METABOT_CHAT_ID = 'teaminst:atg_1:lead';
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['templates', 'publish', 'implementation', '--body', '{"agents":[{"name":"coder"}]}']);
+    await mod.run([
+      'instances',
+      'resolve',
+      'implementation',
+      '--scope',
+      'project',
+      '--scope-key',
+      'p1',
+      '--pm-bot',
+      'pm-codex',
+    ]);
+
+    const firstHeaders = calls(fetchMock)[0]![1].headers as Record<string, string>;
+    expect(firstHeaders).toMatchObject({
+      'X-MetaBot-Team-Capability': 'signed-token',
+      'X-MetaBot-Bot-Name': 'pm-codex',
+      'X-MetaBot-Chat-Id': 'teaminst:atg_1:lead',
+    });
+    expect(calls(fetchMock)[0]![0]).toBe('http://localhost:9100/api/agent-team-governance/templates');
+    expect(JSON.parse(String(calls(fetchMock)[0]![1].body))).toEqual({
+      name: 'implementation',
+      body: { agents: [{ name: 'coder' }] },
+    });
+    expect(calls(fetchMock)[1]![0]).toBe('http://localhost:9100/api/agent-team-governance/instances');
+    expect(JSON.parse(String(calls(fetchMock)[1]![1].body))).toMatchObject({
+      templateName: 'implementation',
+      scopeType: 'project',
+      scopeKey: 'p1',
+      pmBot: 'pm-codex',
+    });
+  });
+
   it('agents spawn defaults new teammates to Codex', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ name: 'worker', engine: 'codex' })) as unknown as typeof fetch;
     vi.stubGlobal('fetch', fetchMock);

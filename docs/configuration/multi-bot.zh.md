@@ -61,6 +61,8 @@
 | `model`                     | 否   | 引擎默认      | Session 模型覆盖                          |
 | `visible`                   | 否   | `true`        | 是否注册到 Agent Bus 供发现               |
 | `memoryPublic`              | 否   | 粘性/默认策略 | 显式设置时固定 Bot 的默认 Memory 可见性   |
+| `workerTools`               | 否   | `false`       | 为非团队 `pm`/`user` 会话启用 Worker Runner 能力 |
+| `arcTools`                  | 否   | `false`       | 为非团队 `pm`/`user` 会话启用 ARC 能力    |
 | `maxTurns` / `maxBudgetUsd` | 否   | 不限制        | Claude 兼容限制                           |
 | `outputsBaseDir`            | 否   | 用户临时目录  | 自动回传到聊天的文件目录                  |
 
@@ -68,10 +70,34 @@
 
 | 渠道      | 字段                                                                           |
 | --------- | ------------------------------------------------------------------------------ |
-| 飞书/Lark | `feishuAppId`、`feishuAppSecret`，可选 `groupNoMention`                        |
+| 飞书/Lark | `feishuAppId`、`feishuAppSecret`，可选 `feishuDomain`（`feishu` 或 `lark`）和 `groupNoMention` |
 | Telegram  | `telegramBotToken`                                                             |
 | 微信      | 可选 `wechatBotToken`；省略时扫码登录                                          |
 | Slack     | `slackBotToken`、`slackSigningSecret`，可选 `slackBotUserId`、`groupNoMention` |
+
+## Codex RulesPack 共享默认值
+
+在 `bots.json` 根级配置 `rulesPackDefaults` 后，所有渠道中当前及未来新增的
+Codex Bot 都会继承它。`dbPath` 必须同时包含 `{surface}` 和 `{bot}`，以隔离
+Bridge、Worker 及各 Bot 的状态。`required` 默认值不允许 Bot 退出或替换必需
+source；`optional` 默认值允许设置 `"rulesPack": false`，但必须同时提供
+`rulesPackOptOutReason`。Claude 和 Kimi 引擎仍可使用，但 RulesPack 状态会明确
+显示为 `unsupported`，因为规则注入仅支持 Codex。详见
+[Codex RulesPack](../features/rulespack.md)。
+
+如果一个 project 对应多个 chat，请用 `projectChatBindings` 列出精确的
+`(bot, chatId)`。凡是声明为该 project scope 的 Rule，都会自动适用于这些
+chat。用于 peer 和 Agent Bus 路由时，目标 Bridge 只发布这些精确 tuple 的
+SHA-256 key 及 project ID，不会在发现结果中暴露原始 chat ID；接收端仍会用
+本地配置重新验证 project。Rule target 中，同一个列表里的值是“任意一个即可”（例如 bot 是 `pm`
+或 `pm-savio`）；不同字段则必须“同时满足”（例如 bot 命中上述列表，并且
+认证角色包含 `pm`）。
+
+同一 Bridge 的全部 Bot 共用一个 Core credential，因此也必须共用同一个
+`dispatch.issuer`。请使用 Bridge 实际使用的 token 运行 `metabot agents whoami`，
+把返回的 `botName` 原样填入 `dispatch.issuer`；不要在 `issuer` 或
+`allowedIssuers` 中使用 `{bot}` / `{surface}`。旧版模板化身份配置会在启动时
+给出明确迁移错误，不会静默弱化传输身份绑定。
 
 ## Codex 配置
 
@@ -146,6 +172,16 @@ MetaBot 使用与 Kimi Web 前端同源的官方本地 Server API，支持持久
 - 飞书群回复模式按 Bot 和群持久化。
 - Agent Teams 和 Agent Bus 可以协调不同引擎的 Bot。
 - 环境变量提供默认值；显式 `bots.json` 字段优先。
+- `workerTools` 和 `arcTools` 是授权设置，不是普通便利开关。非团队会话
+  默认会得到 `user` 角色，因此每个 Bot 的开关才是真正的派发边界。Agent
+  Team 的 `manager`/`agent` 会话永远拿不到这些凭证。引擎侧还会同时检查
+  本轮已经签发的凭证，以及仅监听本机的 `METABOT_WORKER_DAEMON_URL` /
+  `METABOT_ARC_DAEMON_URL`；端点缺失或不安全时不会安装对应工具。Codex
+  使用单次调用配置，Claude 使用追加式会话配置，都不会覆盖用户共享的
+  MCP 设置。Kimi 目前没有隔离的单会话 MCP 配置入口，因此即使开关已启用
+  也不会获得这两个工具。
+- 所有渠道的 Bot 名称在 Unicode 规范化及忽略大小写后必须全局唯一；这也
+  能避免大小写不敏感文件系统上的每 Bot 状态路径碰撞。
 
 设置 `BOTS_CONFIG` 后，单 Bot 的渠道环境变量会被忽略。
 

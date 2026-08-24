@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PeerManager } from '../src/api/peer-manager.js';
 
 const SHARED_KEY = 'two-bridge-peer-key-0000000000000000000000001';
@@ -20,10 +20,17 @@ describe('two-Bridge peer capability topology', () => {
   let imac: PeerManager | undefined;
   let savio: PeerManager | undefined;
 
+  beforeEach(() => {
+    vi.stubEnv('METABOT_CORE_AGENT_BUS_URL', '');
+    vi.stubEnv('METABOT_CORE_URL', '');
+    vi.stubEnv('METABOT_CORE_TOKEN', '');
+  });
+
   afterEach(() => {
     imac?.destroy();
     savio?.destroy();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it('discovers and sends in both directions across loopback endpoints without administrator credentials', async () => {

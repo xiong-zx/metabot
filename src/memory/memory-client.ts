@@ -39,6 +39,11 @@ export interface DocumentSummary {
   tags: string[];
   created_by: string;
   updated_at: string;
+  version: number;
+  index_role: string | null;
+  project_key: string | null;
+  index_keywords: string[];
+  index_summary: string | null;
 }
 
 export interface SearchResult {
@@ -60,6 +65,102 @@ export interface FullDocument {
   created_by: string;
   created_at: string;
   updated_at: string;
+  version: number;
+  index_role: string | null;
+  project_key: string | null;
+  index_keywords: string[];
+  index_summary: string | null;
+}
+
+export interface DocumentRoutingMetadata {
+  index_role: string | null;
+  project_key: string | null;
+  index_keywords: string[];
+  index_summary: string | null;
+}
+
+export interface DocumentChangeEvent {
+  id: number;
+  event_uuid: string;
+  ts: string;
+  op: 'create' | 'update' | 'delete' | 'move';
+  cascade_of: string | null;
+  doc_id: string;
+  actor: string;
+  origin: 'api' | 'indexer' | 'reconciler' | 't5t';
+  old_path: string | null;
+  new_path: string | null;
+  old_title: string | null;
+  new_title: string | null;
+  old_tags: string[];
+  new_tags: string[];
+  old_shared: boolean | null;
+  new_shared: boolean | null;
+  old_version: number | null;
+  new_version: number | null;
+  old_content_hash: string | null;
+  new_content_hash: string | null;
+  content_changed: boolean;
+  changed_fields: string[];
+  old_excerpt: string | null;
+  new_excerpt: string | null;
+  old_routing: DocumentRoutingMetadata | null;
+  new_routing: DocumentRoutingMetadata | null;
+}
+
+export interface DocumentChangeFeed {
+  events: DocumentChangeEvent[];
+  next_after: number;
+}
+
+export interface DocumentChangeConsumerState {
+  consumer: string;
+  last_event_id: number;
+  updated_at: string;
+  initialized: boolean;
+  latest_event_id: number;
+}
+
+export interface RecordDocumentChangeProcessingInput {
+  consumer: string;
+  event_ids: number[];
+  through_event_id: number;
+  status: 'pending' | 'proposed' | 'applied' | 'skipped' | 'failed' | 'dead';
+  proposal_ref?: string;
+  proposal?: Record<string, unknown>;
+  tokens_in?: number;
+  tokens_out?: number;
+  latency_ms?: number;
+  review_outcome?: 'pending' | 'accepted' | 'corrected' | 'rejected';
+  error?: string;
+  advance_cursor?: boolean;
+  increment_attempts?: boolean;
+}
+
+export interface DocumentChangeProcessing {
+  consumer: string;
+  event_id: number;
+  status: 'pending' | 'proposed' | 'applied' | 'skipped' | 'failed' | 'dead';
+  attempts: number;
+  proposal_ref: string | null;
+  proposal_json: Record<string, unknown> | null;
+  tokens_in: number;
+  tokens_out: number;
+  latency_ms: number;
+  review_outcome: 'pending' | 'accepted' | 'corrected' | 'rejected' | null;
+  error: string | null;
+  updated_at: string;
+}
+
+export class MemoryClientRequestError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number | null,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'MemoryClientRequestError';
+  }
 }
 
 export interface HealthStatus {
@@ -124,13 +225,22 @@ export class MemoryClient {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
-    const res = await proxyFetch(url, {
-      headers: { ...headers, ...options?.headers },
-      ...options,
-    });
+    let res: Response;
+    try {
+      res = await proxyFetch(url, {
+        headers: { ...headers, ...options?.headers },
+        ...options,
+      });
+    } catch (error) {
+      throw new MemoryClientRequestError(
+        `metabot-core request failed: ${error instanceof Error ? error.message : String(error)}`,
+        null,
+        { cause: error },
+      );
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`metabot-core ${res.status}: ${body}`);
+      throw new MemoryClientRequestError(`metabot-core ${res.status}: ${body}`, res.status);
     }
     return res.json() as Promise<T>;
   }
@@ -194,17 +304,154 @@ export class MemoryClient {
           created_by: doc.created_by || '',
           created_at: doc.created_at || '',
           updated_at: doc.updated_at || '',
+          version: Number.isInteger(doc.version) ? doc.version : 0,
+          index_role: typeof doc.index_role === 'string' ? doc.index_role : null,
+          project_key: typeof doc.project_key === 'string' ? doc.project_key : null,
+          index_keywords: Array.isArray(doc.index_keywords) ? doc.index_keywords : [],
+          index_summary: typeof doc.index_summary === 'string' ? doc.index_summary : null,
         };
       }
       return null;
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof MemoryClientRequestError && error.statusCode === 404) {
+        return null;
+      }
+      throw error;
     }
   }
 
   async search(query: string, limit = 20): Promise<SearchResult[]> {
     const raw = await this.request<unknown>(`/api/memory/search?q=${encodeURIComponent(query)}&limit=${limit}`);
     return this.unwrapArray<SearchResult>(raw, 'results');
+  }
+
+  async updateDocument(
+    idOrPath: string,
+    patch: {
+      title?: string;
+      content?: string;
+      tags?: string[];
+      shared?: boolean;
+      expected_version?: number;
+      change_origin?: 'indexer' | 'reconciler';
+      index_role?: string | null;
+      project_key?: string | null;
+      index_keywords?: string[];
+      index_summary?: string | null;
+    },
+  ): Promise<FullDocument> {
+    const encoded = encodeURIComponent(idOrPath);
+    return this.request<FullDocument>(`/api/memory/documents/${encoded}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async listDocumentChangeEvents(
+    after = 0,
+    limit = 100,
+    prefix?: string,
+  ): Promise<DocumentChangeFeed> {
+    const params = new URLSearchParams({
+      after: String(after),
+      limit: String(limit),
+    });
+    if (prefix) params.set('prefix', prefix);
+    return this.request<DocumentChangeFeed>(`/api/memory/events?${params}`);
+  }
+
+  async getDocumentChangeConsumerState(
+    consumer: string,
+  ): Promise<DocumentChangeConsumerState> {
+    return this.request<DocumentChangeConsumerState>(
+      `/api/memory/events/consumer?consumer=${encodeURIComponent(consumer)}`,
+    );
+  }
+
+  async advanceDocumentChangeConsumer(
+    consumer: string,
+    throughEventId: number,
+  ): Promise<DocumentChangeConsumerState> {
+    return this.request<DocumentChangeConsumerState>('/api/memory/events/consumer/advance', {
+      method: 'POST',
+      body: JSON.stringify({
+        consumer,
+        through_event_id: throughEventId,
+      }),
+    });
+  }
+
+  async recordDocumentChangeProcessing(
+    input: RecordDocumentChangeProcessingInput,
+  ): Promise<DocumentChangeConsumerState> {
+    return this.request<DocumentChangeConsumerState>('/api/memory/events/processing', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  async listDocumentChangeProcessing(
+    consumer: string,
+    after = 0,
+    limit = 100,
+  ): Promise<DocumentChangeProcessing[]> {
+    const params = new URLSearchParams({
+      consumer,
+      after: String(after),
+      limit: String(limit),
+    });
+    const raw = await this.request<{ processing: DocumentChangeProcessing[] }>(
+      `/api/memory/events/processing?${params}`,
+    );
+    return raw.processing;
+  }
+
+  async reviewDocumentChangeProcessing(
+    consumer: string,
+    eventIds: number[],
+    reviewOutcome: 'pending' | 'accepted' | 'corrected' | 'rejected',
+  ): Promise<{ updated: number }> {
+    return this.request<{ updated: number }>('/api/memory/events/processing/review', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        consumer,
+        event_ids: eventIds,
+        review_outcome: reviewOutcome,
+      }),
+    });
+  }
+
+  async reconcileIndexes(root?: string): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams();
+    if (root) params.set('root', root);
+    const query = params.size > 0 ? `?${params}` : '';
+    return this.request<Record<string, unknown>>(`/api/memory/index-reconciliation${query}`);
+  }
+
+  async previewRoutingIndex(root?: string): Promise<{
+    root: string;
+    target_path: string;
+    target_version: number;
+    source_document_count: number;
+    changed: boolean;
+    content: string;
+    rebuild_enabled: boolean;
+  }> {
+    const params = new URLSearchParams();
+    if (root) params.set('root', root);
+    const query = params.size > 0 ? `?${params}` : '';
+    return this.request(`/api/memory/routing-index/preview${query}`);
+  }
+
+  async rebuildRoutingIndex(root: string, expectedVersion: number): Promise<{
+    changed: boolean;
+    target_version: number;
+    snapshot_id: number | null;
+  }> {
+    return this.request('/api/memory/routing-index/rebuild', {
+      method: 'POST',
+      body: JSON.stringify({ root, expected_version: expectedVersion }),
+    });
   }
 
   /** Format folder tree as indented text for Feishu card display */

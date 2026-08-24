@@ -1,6 +1,94 @@
 import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
+import type { CardUpdateFailure, CardUpdateResult } from '../bridge/message-sender.interface.js';
 import type { Logger } from '../utils/logger.js';
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringOrNumber(value: unknown): string | number | undefined {
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function responseHeader(response: Record<string, unknown> | undefined, name: string): string | undefined {
+  const headers = response ? record(response.headers) : undefined;
+  const value = headers?.[name] ?? headers?.[name.toLowerCase()];
+  if (typeof value === 'string') return value;
+  const get = headers?.get;
+  if (typeof get === 'function') {
+    const result = get.call(headers, name);
+    return typeof result === 'string' ? result : undefined;
+  }
+  return undefined;
+}
+
+/** Extract only stable, non-secret fields from an SDK/HTTP error. */
+export function classifyFeishuDeliveryError(error: unknown): CardUpdateFailure {
+  const root = record(error);
+  const response = record(root?.response);
+  const data = record(response?.data);
+  const nestedError = record(data?.error);
+  const httpStatus = numberValue(response?.status) ?? numberValue(root?.status);
+  const providerCode = stringOrNumber(data?.code)
+    ?? stringOrNumber(nestedError?.code)
+    ?? stringOrNumber(root?.code);
+  const providerMessage = typeof data?.msg === 'string'
+    ? data.msg
+    : typeof data?.message === 'string'
+      ? data.message
+      : undefined;
+  const subcodeMatch = providerMessage?.match(/(?:ErrCode|error[_ ]?code)\s*[:=]\s*([\w-]+)/i);
+  const providerSubcode = subcodeMatch?.[1];
+  const requestId = [
+    data?.request_id,
+    data?.requestId,
+    nestedError?.request_id,
+    root?.requestId,
+    responseHeader(response, 'x-request-id'),
+    responseHeader(response, 'x-lark-request-id'),
+    responseHeader(response, 'x-tt-logid'),
+  ].find((value): value is string => typeof value === 'string' && value.length > 0);
+
+  let category: CardUpdateFailure['category'] = 'unknown';
+  let retryable = true;
+  if (httpStatus === 401 || httpStatus === 403) {
+    category = 'authentication';
+    retryable = false;
+  } else if (httpStatus === 404) {
+    category = 'not_found';
+    retryable = false;
+  } else if (httpStatus === 429) {
+    category = 'rate_limit';
+  } else if (httpStatus === 408 || httpStatus === 425 || (httpStatus !== undefined && httpStatus >= 500)) {
+    category = 'transient';
+  } else if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500) {
+    category = 'payload';
+    retryable = false;
+  }
+
+  return {
+    category,
+    retryable,
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+    ...(providerCode !== undefined ? { providerCode } : {}),
+    ...(providerSubcode !== undefined ? { providerSubcode } : {}),
+    ...(requestId !== undefined ? { requestId } : {}),
+  };
+}
+
+export interface FeishuMessageSnapshot {
+  messageId: string;
+  chatId?: string;
+  messageType?: string;
+  content?: string;
+}
 
 export class MessageSender {
   private chatOwnerCache = new Map<string, { ownerId?: string; expiresAt: number }>();
@@ -23,25 +111,26 @@ export class MessageSender {
 
       const messageId = resp?.data?.message_id;
       if (!messageId) {
-        this.logger.error({ resp }, 'Failed to get message_id from send response');
+        this.logger.error({ chatId }, 'Failed to get message_id from send response');
       }
       return messageId;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to send card');
+      this.logger.error({ chatId, ...classifyFeishuDeliveryError(err) }, 'Failed to send card');
       return undefined;
     }
   }
 
-  async updateCard(messageId: string, cardContent: string): Promise<boolean> {
+  async updateCard(messageId: string, cardContent: string): Promise<CardUpdateResult> {
     try {
       await this.client.im.v1.message.patch({
         path: { message_id: messageId },
         data: { content: cardContent },
       });
-      return true;
+      return { ok: true };
     } catch (err) {
-      this.logger.error({ err, messageId }, 'Failed to update card');
-      return false;
+      const failure = classifyFeishuDeliveryError(err);
+      this.logger.error({ messageId, ...failure }, 'Failed to update card');
+      return { ok: false, ...failure };
     }
   }
 
@@ -60,7 +149,7 @@ export class MessageSender {
       this.logger.error({ messageId, imageKey }, 'Empty response when downloading image');
       return false;
     } catch (err) {
-      this.logger.error({ err, messageId, imageKey }, 'Failed to download image');
+      this.logger.error({ messageId, imageKey, ...classifyFeishuDeliveryError(err) }, 'Failed to download image');
       return false;
     }
   }
@@ -80,7 +169,7 @@ export class MessageSender {
       this.logger.error({ messageId, fileKey }, 'Empty response when downloading file');
       return false;
     } catch (err) {
-      this.logger.error({ err, messageId, fileKey }, 'Failed to download file');
+      this.logger.error({ messageId, fileKey, ...classifyFeishuDeliveryError(err) }, 'Failed to download file');
       return false;
     }
   }
@@ -99,7 +188,7 @@ export class MessageSender {
       }
       return imageKey;
     } catch (err) {
-      this.logger.error({ err, filePath }, 'Failed to upload image');
+      this.logger.error({ filePath, ...classifyFeishuDeliveryError(err) }, 'Failed to upload image');
       return undefined;
     }
   }
@@ -116,7 +205,7 @@ export class MessageSender {
       });
       return true;
     } catch (err) {
-      this.logger.error({ err, chatId, imageKey }, 'Failed to send image');
+      this.logger.error({ chatId, imageKey, ...classifyFeishuDeliveryError(err) }, 'Failed to send image');
       return false;
     }
   }
@@ -142,7 +231,7 @@ export class MessageSender {
       }
       return fileKey;
     } catch (err) {
-      this.logger.error({ err, filePath, fileType }, 'Failed to upload file');
+      this.logger.error({ filePath, fileType, ...classifyFeishuDeliveryError(err) }, 'Failed to upload file');
       return undefined;
     }
   }
@@ -159,7 +248,7 @@ export class MessageSender {
       });
       return true;
     } catch (err) {
-      this.logger.error({ err, chatId, fileKey }, 'Failed to send file');
+      this.logger.error({ chatId, fileKey, ...classifyFeishuDeliveryError(err) }, 'Failed to send file');
       return false;
     }
   }
@@ -182,7 +271,7 @@ export class MessageSender {
       });
       return true;
     } catch (err) {
-      this.logger.error({ err, chatId, fileKey }, 'Failed to send audio');
+      this.logger.error({ chatId, fileKey, ...classifyFeishuDeliveryError(err) }, 'Failed to send audio');
       return false;
     }
   }
@@ -191,6 +280,29 @@ export class MessageSender {
     const fileKey = await this.uploadFile(filePath, fileName, 'opus');
     if (!fileKey) return false;
     return this.sendAudio(chatId, fileKey);
+  }
+
+  async getMessage(messageId: string): Promise<FeishuMessageSnapshot | undefined> {
+    try {
+      const resp = await this.client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+      });
+      const item = resp?.data?.items?.find(candidate => candidate.message_id === messageId);
+      if (!item?.message_id) {
+        this.logger.warn({ messageId }, 'Referenced message lookup returned no message');
+        return undefined;
+      }
+      return {
+        messageId: item.message_id,
+        chatId: item.chat_id,
+        messageType: item.msg_type,
+        content: item.body?.content,
+      };
+    } catch (err) {
+      this.logger.error({ messageId, ...classifyFeishuDeliveryError(err) }, 'Failed to get referenced message');
+      return undefined;
+    }
   }
 
   async getChatMemberCount(chatId: string): Promise<number | undefined> {
@@ -202,7 +314,7 @@ export class MessageSender {
       const botCount = parseInt(resp?.data?.bot_count, 10) || 0;
       return userCount + botCount;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      this.logger.error({ chatId, ...classifyFeishuDeliveryError(err) }, 'Failed to get chat member count');
       return undefined;
     }
   }
@@ -225,12 +337,12 @@ export class MessageSender {
       });
       return typeof ownerId === 'string' ? ownerId === userId : undefined;
     } catch (err) {
-      this.logger.error({ err, chatId, userId }, 'Failed to verify Feishu chat owner');
+      this.logger.error({ chatId, userId, ...classifyFeishuDeliveryError(err) }, 'Failed to verify Feishu chat owner');
       return undefined;
     }
   }
 
-  async sendText(chatId: string, text: string): Promise<void> {
+  async sendText(chatId: string, text: string): Promise<boolean> {
     try {
       await this.client.im.v1.message.create({
         params: { receive_id_type: 'chat_id' },
@@ -240,8 +352,10 @@ export class MessageSender {
           msg_type: 'text',
         },
       });
+      return true;
     } catch (err) {
-      this.logger.error({ err, chatId }, 'Failed to send text');
+      this.logger.error({ chatId, ...classifyFeishuDeliveryError(err) }, 'Failed to send text');
+      return false;
     }
   }
 }

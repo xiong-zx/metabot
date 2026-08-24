@@ -21,12 +21,18 @@ metabot update                                  # Package 安装：最新 GitHub
 metabot update --package                        # 强制使用最新 GitHub Release 包
 metabot update --package --version 1.3.0        # 固定不可变 Release v1.3.0
 metabot update --git                            # 强制 git pull + 构建 + 重启
-metabot start                       # 启动（PM2）
-metabot stop                        # 停止
+metabot start                       # 启动 Bridge、Worker Runner 与 ARC
+metabot stop                        # 停止整套三个 PM2 应用
 metabot restart                     # 多 Bot 协调式 Bridge 重启
 metabot restart --bot admin --chat oc_x --reason "升级"  # 向指定会话回报
 metabot restart --no-resume         # 只通知，不自动续接被中断任务
 metabot restart --force             # 准备失败时的紧急显式覆盖
+metabot restart --wait --json       # 受保护的 Bridge 单独重启
+metabot restart --request-id ID     # 调用方提供的稳定去重键
+metabot restart --force             # 会话准备失败时的紧急显式覆盖
+metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
+metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
+metabot deploy-runtime --runtime /absolute/checkout --wait  # 从外部安全切换整套运行目录
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态
 ```
@@ -45,7 +51,50 @@ Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--
 5. 保留 `~/.metabot/` 和 `~/.metabot-core/` 下的用户/Core 状态；只有 Package 管理的 `~/.metabot/default.env` 可能刷新。
 6. 安装依赖并构建 Bridge、Core、Web UI 和委托 CLI。
 7. 刷新内置/工作区 Skills，以及已有的 Lark CLI Skills。
-8. 重启受管理的 PM2 服务。
+8. 重启 Bridge 与两个执行守护进程，健康检查通过后再保存 PM2 状态。
+
+普通 `restart` 支持 `--request-id`、`--bot`、`--chat`、`--source`、
+`--reason`、`--resume`/`--no-resume`、`--wait`、`--timeout`、`--force` 和 `--json`。
+`deploy-runtime` 还支持 `--wait`/`--no-wait` 与 `--force`。相同 request ID
+再次提交时只读取已有的持久结果，不会重复执行 PM2 操作。
+
+旧 Bridge 会原子写入 breadcrumb（用于告诉新进程这次重启的结构化小文件）和
+SQLite 请求记录，然后只就地更换已注册的 `metabot` 进程。新 Bridge 依次验证
+自身 HTTP 健康、两个执行守护进程的通信健康，以及 PM2 的运行目录、脚本、解释器、
+解释器参数和环境；全部通过后才执行 `pm2 save --force` 并把请求标为健康。密钥、
+代理等环境值只以 SHA-256 指纹写入重启台账，不保存明文。完成通知和恢复归属都持久化
+之后才删除 breadcrumb，从而避免恢复后的会话再次重启。
+
+在进入持久 PM2 切换前，已鉴权的本地 Bridge 会短暂暂停所有已注册 Bot 接收新任务，
+并快照所有活跃 chat。每个受影响的用户 chat 都由自己的 Bot 发送 **Restart Preparing**
+通知；任一通知失败都会取消重启并解除暂停，除非操作者明确传入 `--force`。准备状态还有
+两分钟租约，控制器若在修改 PM2 前消失，Bridge 会自动恢复接收工作。
+CLI 在带签名能力的引擎会话内运行时，只转发该会话的作用域能力，不暴露 Bridge 管理员
+密钥。只有 `user`、`pm` 或 `admin` 角色可以为签名中完全一致的 Bot 与 chat 准备或取消
+重启；Agent Team agent 和 Worker 仍会被拒绝。
+
+带 `--resume` 时，启动流程会为每个被中断的用户 chat 创建可去重的持久续做任务，
+而不再只恢复发起者；每个受影响 Bot 都会发送自己的 **Restart Complete** 通知。
+调度器会先原子写盘，再启动计时器；如果写盘或完成通知失败，系统会保留 breadcrumb，
+供下一次启动重试。无卡片的 Agent Bus 任务仍会恢复，但不会向虚拟 chat ID 发消息。Agent Team、Worker 和 ARC
+内部 chat 不走通用恢复，而由各自的持久 supervisor 或守护进程负责。状态文件位于
+`SESSION_STORE_DIR`、`METABOT_STATE_DIR` 或 `~/.metabot/` 下，文件名为
+`restart-state.sqlite`、`controlled-restart.json` 和 `last-restart.json`。该功能不迁移
+`sessions.db`。
+
+守护进程有活跃工作时会拒绝重启。`--force` 明确接受状态不明的工作可能变为
+`recovery_required`。`deploy-runtime` 使用相同检查，并且必须在 MetaBot 进程树之外执行。
+它会先核对当前 Bridge PID 与调用者的父进程链；任一项无法读取时会拒绝切换，
+不会把“无法判断”当成“确认来自外部”。
+它会先校验目标配置和回退配置，再按 Worker Runner、ARC、可选的本地 Core、Bridge
+顺序就地重启，不删除 PM2 条目；任何切换失败都会回退已经改变的应用。Core 仍使用
+独立 ecosystem，只有当前 PM2 cwd 和脚本都精确属于 Bridge 运行目录时才会加入切换；
+外部 Core 完全不动。`uninstall.sh` 使用相同的所有权检查。只有健康的新 Bridge 会保存
+PM2 进程列表。
+
+在线运行目录的包更新必须从 SSH 或其他位于 Bridge 进程树之外的控制器发起。
+更新器会在下载前拒绝内部调用者或无法验证的调用者，然后使用带 request ID 的
+无删除原地切换。首次安装或服务离线时可以创建缺失的 PM2 条目，但不会删除已有条目。
 
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。
@@ -87,7 +136,9 @@ metabot talk alice/bot <chatId> <prompt>  # 指定 peer 的 Bot 对话
 
 Bot 名称支持[限定名](../features/peers.md#qualified-names)（`peerName/botName`）实现跨实例
 路由。这是 bridge 本地的对话路径；`metabot agents talk` 是基于中心注册表的 P2P
-变体。
+变体。CLI-only 变体没有发送端 RulesPack runtime，因此会拒绝 required、shadow 或
+enforce 的受保护目标；这类目标必须使用 Bridge 本地的 `metabot talk`，由 Bridge
+先编译并绑定精确 envelope。
 
 ### Peers
 
@@ -142,6 +193,10 @@ metabot schedule resume <id>                                   # 恢复
 metabot schedule cancel <id>                                   # 取消
 ```
 
+目标 chat 忙碌时，定时任务会保持 pending，并使用持久化指数退避等待最多 30 分钟；
+Bridge 重启不会重置剩余等待窗口。周期任务的单次 occurrence 超时后只记录日志，不重复
+发送失败卡片；一次性任务超时后只发送一条失败通知。
+
 ### 统计、指标与健康
 
 ```bash
@@ -173,6 +228,20 @@ TTS 参数：
 | `-o FILE`         | 保存到指定文件（默认: `/tmp/metabot-voice-<时间戳>.mp3`） |
 | `--provider NAME` | TTS 服务商: `doubao`、`openai`、`elevenlabs`              |
 | `--voice ID`      | 声音/音色 ID（各服务商不同）                              |
+
+### 严格交付文件镜像
+
+```bash
+metabot artifacts status --config /absolute/path/artifact-mirror.json
+metabot artifacts sync --config /absolute/path/artifact-mirror.json --apply
+metabot artifacts publish --config /absolute/path/artifact-mirror.json \
+  --project project-alpha --file /absolute/path/annotations/marked.pdf \
+  --name project-alpha_review-tech_topic-annotations_lang-zh_20260821_v01.pdf --apply
+```
+
+`status` 只读。`sync --apply` 在保留回滚字节和本地编辑后，将本机
+deliverables payload 严格恢复为权威主机版本。`publish` 是显式把批注发布
+到权威主机的路径，不会覆盖同名的不同字节。
 
 ## 3. metabot-core 转发
 

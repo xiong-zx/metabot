@@ -13,6 +13,14 @@ import {
   cmdShare,
   cmdHealth,
   cmdVisibility,
+  cmdEvents,
+  cmdEventStats,
+  cmdIndexProposals,
+  cmdIndexReconcile,
+  cmdIndexReview,
+  cmdRoutingPreview,
+  cmdRoutingRebuild,
+  cmdRoutingSnapshots,
   printHelp,
 } from './commands.js';
 
@@ -77,6 +85,30 @@ export async function main(argv: string[]): Promise<void> {
       case 'visibility':
       case 'vis':
         await cmdVisibility(cfg, args);
+        break;
+      case 'events':
+        await cmdEvents(cfg, args);
+        break;
+      case 'event-stats':
+        await cmdEventStats(cfg);
+        break;
+      case 'index-proposals':
+        await cmdIndexProposals(cfg, args);
+        break;
+      case 'index-reconcile':
+        await cmdIndexReconcile(cfg, args);
+        break;
+      case 'index-review':
+        await cmdIndexReview(cfg, args);
+        break;
+      case 'routing-preview':
+        await cmdRoutingPreview(cfg, args);
+        break;
+      case 'routing-rebuild':
+        await cmdRoutingRebuild(cfg, args);
+        break;
+      case 'routing-snapshots':
+        await cmdRoutingSnapshots(cfg, args);
         break;
       default:
         process.stderr.write(`mm: unknown command '${sub}'\n`);

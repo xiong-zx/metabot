@@ -65,6 +65,9 @@ export async function handleSyncRoutes(
     jsonResponse(res, 200, {
       syncing: docSync.isSyncing(),
       wikiSpaceId: stats.wikiSpaceId,
+      rootNodeToken: stats.rootNodeToken,
+      sourceRoot: stats.sourceRoot,
+      lastFullSyncAt: stats.lastFullSyncAt,
       documentCount: stats.documentCount,
       folderCount: stats.folderCount,
     });

@@ -30,6 +30,26 @@ import { RtcVoiceChatService } from './rtc-voice-chat.js';
 import { ActivityStore } from './activity-store.js';
 import { AgentTeamStore } from '../agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
+import { AgentTeamGovernanceExtension, createAgentTeamGovernanceHost } from '../agent-teams/governance-extension.js';
+import { isAgentTeamCapabilityScheduleRoute } from '../agent-teams/schedule-capability.js';
+import {
+  AGENT_TEAM_BOT_HEADER,
+  AGENT_TEAM_CAPABILITY_ENV,
+  AGENT_TEAM_CAPABILITY_HEADER,
+  AGENT_TEAM_CHAT_HEADER,
+  AgentTeamCapabilityError,
+  AgentTeamExecutionCapabilityService,
+} from '../agent-teams/governance-capability.js';
+import { ExecutionCapabilityService } from '../services/execution-capabilities.js';
+import {
+  TerminalEventDeferredError,
+  TerminalEventDispatcher,
+  TerminalEventStore,
+} from '../services/terminal-event-store.js';
+import {
+  deriveExecutionPrincipal,
+  mintOptedInExecutionCapabilities,
+} from '../services/execution-principal.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import { handleSlackEventsRoute, isSlackEventsRoute } from '../slack/slack-bot.js';
@@ -50,11 +70,22 @@ import {
   handleExecutorRoutes,
   handleAgentTeamRoutes,
   handleRestartRoutes,
+  handleAgentTeamGovernanceRoutes,
+  handleWorkerEventsRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
+import {
+  buildTerminalWakePrompt,
+  TerminalEventRateLimiter,
+} from './routes/worker-events-routes.js';
 import type { RouteContext } from './routes/index.js';
+import { resolveRulesPackApiPrincipal } from '../extensions/rulespack-api-principal.js';
+import {
+  LocalRulesPackWorkerCoordinator,
+  type RulesPackWorkerCoordinator,
+} from '../extensions/rulespack-worker-coordinator.js';
 
-interface ApiServerOptions {
+export interface ApiServerOptions {
   port: number;
   secret?: string;
   registry: BotRegistry;
@@ -68,6 +99,12 @@ interface ApiServerOptions {
   budgetManager?: BudgetManager;
   teamManager?: TeamManager;
   agentTeamStore?: AgentTeamStore;
+  agentTeamGovernance?: AgentTeamGovernanceExtension;
+  agentTeamCapabilityService?: AgentTeamExecutionCapabilityService;
+  executionCapabilityService?: ExecutionCapabilityService;
+  rulesPackWorkerCoordinator?: RulesPackWorkerCoordinator;
+  terminalEventStore?: TerminalEventStore;
+  terminalEventRateLimiter?: TerminalEventRateLimiter;
   agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
 }
@@ -77,6 +114,8 @@ const startTime = Date.now();
 (globalThis as any).__metabot_start_time = startTime;
 
 const WHOAMI_VERIFY_TIMEOUT_MS = 5_000;
+const AGENT_TEAM_CAPABILITY_TTL_MS = 60 * 60 * 1000;
+const AGENT_TEAM_CAPABILITY_RETIRE_SKEW_MS = 5 * 60 * 1000;
 
 export function resolveApiHost(env: NodeJS.ProcessEnv = process.env): string {
   return (env.API_HOST || env.METABOT_API_HOST || '127.0.0.1').trim() || '127.0.0.1';
@@ -122,6 +161,26 @@ export function isCrossVerifyRoute(method: string, url: string): boolean {
   return false;
 }
 
+/**
+ * Non-Team Bridge reads that an engine session may perform with its scoped
+ * Agent Team execution capability. Keep this list exact: bot detail/profile
+ * and every mutation remain local-administrator-only.
+ */
+export function isAgentTeamCapabilityReadRoute(method: string, url: string): boolean {
+  return method === 'GET'
+    && (url === '/api/bots' || url === '/api/peers' || url === '/api/stats' || url === '/api/metrics');
+}
+
+/**
+ * A user or PM engine session may coordinate only its own controlled restart.
+ * The route handler applies the role and exact bot/chat scope checks after the
+ * signed capability passes this outer authentication gate.
+ */
+export function isAgentTeamCapabilityRestartRoute(method: string, url: string): boolean {
+  return method === 'POST'
+    && (url === '/api/runtime/restart/prepare' || url === '/api/runtime/restart/cancel');
+}
+
 function metabotCoreBaseUrl(): string | undefined {
   const candidates = [process.env.METABOT_CORE_AGENT_BUS_URL, process.env.METABOT_CORE_URL];
   for (const raw of candidates) {
@@ -135,21 +194,29 @@ function metabotCoreBaseUrl(): string | undefined {
  * Verify a Bearer header against metabot-core `GET /api/whoami`. Returns true
  * only on HTTP 200. Fails closed on any error (network, non-200, timeout).
  */
-async function verifyBearerViaMetabotCore(authHeader: string, logger: Logger): Promise<boolean> {
+async function verifyBearerViaMetabotCore(
+  authHeader: string,
+  logger: Logger,
+): Promise<{ verified: boolean; botName?: string }> {
   const base = metabotCoreBaseUrl();
   if (!base) {
     logger.warn('cross-bridge talk attempted but METABOT_CORE_AGENT_BUS_URL/METABOT_CORE_URL is unset — cannot verify');
-    return false;
+    return { verified: false };
   }
   try {
     const resp = await fetch(`${base}/api/whoami`, {
       headers: { Authorization: authHeader },
       signal: AbortSignal.timeout(WHOAMI_VERIFY_TIMEOUT_MS),
     });
-    return resp.ok;
+    if (!resp.ok) return { verified: false };
+    const body = await resp.json().catch(() => ({})) as { botName?: unknown };
+    return {
+      verified: true,
+      ...(typeof body.botName === 'string' && body.botName.trim() ? { botName: body.botName.trim() } : {}),
+    };
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'whoami verification failed');
-    return false;
+    return { verified: false };
   }
 }
 
@@ -165,17 +232,71 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const budgetManager = options.budgetManager ?? new BudgetManager(logger);
   const teamManager = options.teamManager ?? new TeamManager(logger);
   const agentTeamStore = options.agentTeamStore ?? new AgentTeamStore(logger);
+  const ownsAgentTeamStore = !options.agentTeamStore;
+  const agentTeamGovernance =
+    options.agentTeamGovernance ??
+    new AgentTeamGovernanceExtension(createAgentTeamGovernanceHost(agentTeamStore), logger);
+  const ownsAgentTeamGovernance = !options.agentTeamGovernance;
+  const agentTeamCapabilityService = options.agentTeamCapabilityService ?? new AgentTeamExecutionCapabilityService();
+  const executionCapabilityService = options.executionCapabilityService ?? new ExecutionCapabilityService();
+  const rulesPackWorkerCoordinator = options.rulesPackWorkerCoordinator ?? new LocalRulesPackWorkerCoordinator({
+    capabilityService: executionCapabilityService,
+    endpoint: process.env.METABOT_WORKER_DAEMON_URL?.trim()
+      || process.env.METABOT_WORKER_LISTEN?.trim()
+      || 'http://127.0.0.1:9311/mcp',
+  });
+  const terminalEventStore = options.terminalEventStore ?? new TerminalEventStore(logger);
+  const ownsTerminalEventStore = !options.terminalEventStore;
+  const terminalEventRateLimiter = options.terminalEventRateLimiter ?? new TerminalEventRateLimiter();
+  const terminalEventDispatcher = new TerminalEventDispatcher({
+    store: terminalEventStore,
+    logger,
+    wake: async (envelope) => {
+      const bot = registry.get(envelope.bot_name);
+      if (!bot) throw new Error(`Terminal callback bot no longer exists: ${envelope.bot_name}`);
+      const result = await bot.bridge.executeApiTask({
+        prompt: buildTerminalWakePrompt(envelope),
+        chatId: envelope.chat_id,
+        userId: 'terminal-event-dispatcher',
+        sendCards: true,
+        maxTurns: 1,
+      });
+      if (!result.success) {
+        if (result.cancelled) {
+          logger.info(
+            { eventId: envelope.event_id, botName: envelope.bot_name, chatId: envelope.chat_id },
+            'Terminal callback wake cancelled by the user; event acknowledged',
+          );
+          return;
+        }
+        if (result.error === 'Chat is busy with another task') {
+          throw new TerminalEventDeferredError(result.error);
+        }
+        throw new Error(result.error || `Failed to wake terminal callback chat ${envelope.chat_id}`);
+      }
+    },
+  });
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
-  const agentTeamSupervisor = new AgentTeamSupervisor({ registry, store: agentTeamStore, logger });
   if (options.agentTeams?.length) {
     agentTeamStore.reconcileTeams(options.agentTeams);
     logger.info({ count: options.agentTeams.length }, 'Agent teams reconciled from config');
   }
+  const governanceReconciliation = agentTeamGovernance.reconcile();
+  if (Object.values(governanceReconciliation).some((items) => items.length > 0)) {
+    logger.warn({ governanceReconciliation }, 'Agent Team governance startup reconciliation repaired state');
+  }
+  const agentTeamSupervisor = new AgentTeamSupervisor({
+    registry,
+    store: agentTeamStore,
+    governance: agentTeamGovernance,
+    logger,
+  });
   const agentTeamsConfigWatcher = watchAgentTeamsConfig({
     botsConfigPath,
     store: agentTeamStore,
+    governance: agentTeamGovernance,
     logger,
   });
   const rtcService = new RtcVoiceChatService(logger);
@@ -184,6 +305,11 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   }
 
   const ws: { handle?: WebSocketHandle } = {};
+  const locallyAuthenticatedRequests = new WeakSet<http.IncomingMessage>();
+  const rulesPackTransportIssuers = new WeakMap<http.IncomingMessage, string>();
+  const coreBearerPrincipals = new WeakMap<http.IncomingMessage, { botName?: string }>();
+  const capabilityRetirementTimers = new Set<ReturnType<typeof setTimeout>>();
+  let closing = false;
 
   // Per-IP in-memory rate limiter (global ceiling + failed-auth backoff).
   // Configurable via METABOT_RATE_LIMIT_MAX / METABOT_RATE_LIMIT_AUTH_FAILS,
@@ -213,6 +339,24 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     activityStore,
     agentTeamStore,
     agentTeamSupervisor,
+    agentTeamGovernance,
+    executionCapabilityService,
+    rulesPackWorkerCoordinator,
+    terminalEventStore,
+    terminalEventDispatcher,
+    terminalEventRateLimiter,
+    resolveAgentTeamPrincipal: (req) =>
+      agentTeamCapabilityService.resolve({
+        capability: headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]),
+        botName: headerValue(req.headers[AGENT_TEAM_BOT_HEADER]),
+        chatId: headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]),
+        localApiSecretAuthenticated: locallyAuthenticatedRequests.has(req),
+      }),
+    resolveRulesPackTransportIssuer: (req) => rulesPackTransportIssuers.get(req),
+    resolveRulesPackApiPrincipal: (req, target) => resolveRulesPackApiPrincipal({
+      localAdministrator: locallyAuthenticatedRequests.has(req),
+      ...(coreBearerPrincipals.get(req)?.botName ? { coreBearerBotName: coreBearerPrincipals.get(req)!.botName } : {}),
+    }, target),
   };
 
   if (peerManager) {
@@ -272,6 +416,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           ? parsedContent.chatId
           : message.chatId || `agent-inbox-${botName}`;
       const sendCards = typeof parsedContent?.sendCards === 'boolean' ? parsedContent.sendCards : true;
+      const rulesPackDispatch = parsedContent?.rulesPackDispatch;
+      const authenticatedRelayIssuer = message.fromBot || message.fromOwner;
       const bot = registry.get(botName);
       if (!bot) {
         logger.warn(
@@ -284,19 +430,108 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         { messageId: message.id, botName, chatId, fromBot: message.fromBot, fromOwner: message.fromOwner },
         'executing relay inbox talk message',
       );
+      const dispatchEnvelope = rulesPackDispatch as Parameters<typeof resolveRulesPackApiPrincipal>[1]['dispatch'];
+      if (dispatchEnvelope && (dispatchEnvelope.target.bot !== botName || dispatchEnvelope.target.chatId !== chatId)) {
+        logger.warn({ messageId: message.id, botName, chatId }, 'relay RulesPack target does not match authenticated inbox target');
+        return;
+      }
+      const relayPrincipal = dispatchEnvelope
+        ? resolveRulesPackApiPrincipal(
+            { localAdministrator: false, coreBearerBotName: authenticatedRelayIssuer },
+            { botName, chatId, dispatch: dispatchEnvelope },
+          )
+        : {
+            kind: 'scoped' as const,
+            source: 'agent-bus' as const,
+            botName,
+            chatId,
+            roles: ['agent-bus'],
+            userId: authenticatedRelayIssuer,
+            dataClasses: ['agent-bus'],
+            outputTypes: ['text'],
+          };
       await bot.bridge.executeApiTask({
         prompt,
         chatId,
         userId: message.fromBot || message.fromOwner || 'agent-bus',
         sendCards,
+        rulesPack: {
+          principal: relayPrincipal,
+          ...(dispatchEnvelope && authenticatedRelayIssuer
+            ? { dispatch: { envelope: dispatchEnvelope, authenticatedIssuer: authenticatedRelayIssuer } }
+            : {}),
+        },
       });
     });
   }
 
   for (const bot of registry.listRegistered()) {
     bot.bridge.setAgentTeamStore(agentTeamStore);
+    const executionPrincipalFor = ({ botName, chatId }: { botName: string; chatId: string }) =>
+      deriveExecutionPrincipal(agentTeamGovernance, agentTeamStore, botName, chatId);
+    bot.bridge.setExecutionPrincipalProvider?.(executionPrincipalFor);
+    bot.bridge.setRulesPackChildGrantProvider?.((capability, parent) =>
+      executionCapabilityService.issueRulesPackChildGrant(capability, parent));
+    const capabilityCache = new Map<
+      string,
+      { env: Record<string, string>; refreshAt: number; timer: ReturnType<typeof setTimeout> }
+    >();
+    bot.bridge.setExecutionEnvProvider(({ botName, chatId }) => {
+      const now = Date.now();
+      const cached = capabilityCache.get(chatId);
+      if (cached && cached.refreshAt > now) return cached.env;
+      if (cached) {
+        clearTimeout(cached.timer);
+        capabilityRetirementTimers.delete(cached.timer);
+      }
+      const principal = executionPrincipalFor({ botName, chatId });
+      const env = {
+        [AGENT_TEAM_CAPABILITY_ENV]: agentTeamCapabilityService.issue({
+          ...principal,
+          ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
+        }, now),
+        METABOT_BOT_NAME: botName,
+        METABOT_CHAT_ID: chatId,
+        ...mintOptedInExecutionCapabilities({
+          service: executionCapabilityService,
+          principal,
+          config: bot.config,
+          ttlMs: AGENT_TEAM_CAPABILITY_TTL_MS,
+          now,
+          onError: (purpose, error) => {
+            logger.error(
+              { error, purpose, botName, chatId },
+              'Execution capability unavailable; external tools fail closed for this session',
+            );
+          },
+        }),
+      };
+      const refreshAt = now + AGENT_TEAM_CAPABILITY_TTL_MS - AGENT_TEAM_CAPABILITY_RETIRE_SKEW_MS;
+      const entry = { env, refreshAt, timer: undefined as unknown as ReturnType<typeof setTimeout> };
+      const retireWhenIdle = () => {
+        capabilityRetirementTimers.delete(entry.timer);
+        if (capabilityCache.get(chatId) === entry) capabilityCache.delete(chatId);
+        void bot.bridge
+          .releaseChatExecutorIfIdle(chatId, 'agent-team-capability-expiring')
+          .then((released) => {
+            if (closing || released || capabilityCache.has(chatId)) return;
+            entry.timer = setTimeout(retireWhenIdle, 30_000);
+            entry.timer.unref?.();
+            capabilityRetirementTimers.add(entry.timer);
+          })
+          .catch((err) => {
+            logger.warn({ err, botName, chatId }, 'Failed to retire executor before Team capability expiry');
+          });
+      };
+      entry.timer = setTimeout(retireWhenIdle, Math.max(1, refreshAt - now));
+      entry.timer.unref?.();
+      capabilityRetirementTimers.add(entry.timer);
+      capabilityCache.set(chatId, entry);
+      return env;
+    });
   }
   agentTeamSupervisor.start();
+  terminalEventDispatcher.start();
 
   // Route handlers in priority order
   const routeHandlers = [
@@ -312,6 +547,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleSessionRoutes,
     handleExecutorRoutes,
     handleAgentTeamRoutes,
+    handleAgentTeamGovernanceRoutes,
+    handleWorkerEventsRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {
@@ -368,22 +605,70 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
-    if (!isPublicHealth) {
+    const isSignedTerminalCallback = method === 'POST' && url === '/api/worker-events';
+    const isPublicOutputFile = url.startsWith('/api/files/');
+    if (!isPublicHealth && !isSignedTerminalCallback && !isPublicOutputFile) {
       const auth = req.headers.authorization;
       // Timing-safe comparison so the secret can't be recovered byte-by-byte.
       const localOk = isLocalSecretAuthorized(secret, auth);
+      if (localOk) {
+        locallyAuthenticatedRequests.add(req);
+        const claimedIssuer = headerValue(req.headers['x-metabot-rulespack-issuer']);
+        if (claimedIssuer) rulesPackTransportIssuers.set(req, claimedIssuer);
+      }
+      const capability = headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]);
+      const capabilityBotName = headerValue(req.headers[AGENT_TEAM_BOT_HEADER]);
+      const capabilityChatId = headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]);
+      const hasExecutionCapabilityHeaders = !!capability || !!capabilityBotName || !!capabilityChatId;
+      const acceptsExecutionCapability = url.startsWith('/api/agent-team')
+        || isAgentTeamCapabilityReadRoute(method, url)
+        || isAgentTeamCapabilityScheduleRoute(method, url)
+        || isAgentTeamCapabilityRestartRoute(method, url);
+      let executionCapabilityOk = false;
+      let executionCapabilityError: AgentTeamCapabilityError | undefined;
+      if (acceptsExecutionCapability && hasExecutionCapabilityHeaders) {
+        try {
+          agentTeamCapabilityService.resolve({
+            capability,
+            botName: capabilityBotName,
+            chatId: capabilityChatId,
+            localApiSecretAuthenticated: false,
+          });
+          executionCapabilityOk = true;
+        } catch (error) {
+          if (error instanceof AgentTeamCapabilityError) executionCapabilityError = error;
+          executionCapabilityOk = false;
+        }
+      }
 
-      const rejectUnauthorized = (status: 401 | 403 = 401, code?: string) => {
+      const rejectUnauthorized = (options: {
+        executionError?: AgentTeamCapabilityError;
+        status?: 401 | 403;
+        code?: string;
+      } = {}) => {
         // Count this as a failed auth attempt; trips the per-IP lockout once the
         // threshold is crossed. The next request from this IP will see 429.
         rateLimiter.recordAuthFailure(clientIp);
-        jsonResponse(res, status, { error: 'Unauthorized', ...(code ? { code } : {}) });
+        const status = options.status ?? 401;
+        jsonResponse(res, status, options.executionError
+          ? { error: options.executionError.message, code: options.executionError.code }
+          : { error: 'Unauthorized', ...(options.code ? { code: options.code } : {}) });
       };
 
-      if (!localOk) {
+      // A request marked as an engine session must never fall back to the
+      // bridge-wide secret or metabot-core cross verification. Its signed
+      // capability is accepted only on Agent Team routes, the four exact
+      // read-only Bridge endpoints, and the self-scoped controlled-restart
+      // endpoints whose handler performs an additional role/scope check.
+      if (hasExecutionCapabilityHeaders && !executionCapabilityOk) {
+        rejectUnauthorized({ executionError: executionCapabilityError });
+        return;
+      }
+
+      if (!localOk && !executionCapabilityOk) {
         if (isPeerAuthorization(auth)) {
           if (!peerManager) {
-            rejectUnauthorized(401, 'peer_auth_unavailable');
+            rejectUnauthorized({ code: 'peer_auth_unavailable' });
             return;
           }
           let rawBody: string;
@@ -393,7 +678,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
             jsonResponse(res, error?.statusCode || 400, { error: error?.message || 'Invalid request body' });
             return;
           }
-          const verified = peerManager.verifyInboundPeerRequest({
+          const peerVerification = peerManager.verifyInboundPeerRequest({
             authorization: auth,
             method,
             path: url,
@@ -401,26 +686,29 @@ export function startApiServer(options: ApiServerOptions): http.Server {
             origin: req.headers['x-metabot-origin'],
             rawBody,
           });
-          if (!verified.ok) {
+          if (!peerVerification.ok) {
             logger.warn(
-              { code: verified.code, method, url, clientIp },
+              { code: peerVerification.code, method, url, clientIp },
               'peer capability rejected',
             );
-            rejectUnauthorized(verified.status, verified.code);
+            rejectUnauthorized({ status: peerVerification.status, code: peerVerification.code });
             return;
           }
-          setPeerRequestClaims(req, verified.claims);
+          setPeerRequestClaims(req, peerVerification.claims);
+          rulesPackTransportIssuers.set(req, peerVerification.claims.sourceBot);
         } else {
           const canCrossVerify = isCrossVerifyRoute(method, url) && bearerTokenFromAuthorization(auth) !== undefined;
           if (!canCrossVerify) {
             rejectUnauthorized();
             return;
           }
-          const verified = await verifyBearerViaMetabotCore(auth!, logger);
-          if (!verified) {
+          const coreVerification = await verifyBearerViaMetabotCore(auth!, logger);
+          if (!coreVerification.verified) {
             rejectUnauthorized();
             return;
           }
+          coreBearerPrincipals.set(req, coreVerification.botName ? { botName: coreVerification.botName } : {});
+          if (coreVerification.botName) rulesPackTransportIssuers.set(req, coreVerification.botName);
         }
       }
       // Successful auth — clear any accumulated failed-auth counter so a
@@ -518,13 +806,25 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     logger.info({ host, port }, 'API server started');
   });
   server.on('close', () => {
+    closing = true;
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
     asyncTaskStore.destroy();
+    terminalEventDispatcher.stop();
+    for (const timer of capabilityRetirementTimers) clearTimeout(timer);
+    capabilityRetirementTimers.clear();
+    if (ownsAgentTeamGovernance) agentTeamGovernance.close();
+    if (ownsAgentTeamStore) agentTeamStore.close();
+    if (ownsTerminalEventStore) terminalEventStore.close();
     rateLimiter.stopSweep();
   });
 
   return server;
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  const item = Array.isArray(value) ? value[0] : value;
+  return item?.trim() || undefined;
 }
 
 function parseRelayContent(content: string): Record<string, any> | undefined {
@@ -541,6 +841,7 @@ function parseRelayContent(content: string): Record<string, any> | undefined {
 function watchAgentTeamsConfig(options: {
   botsConfigPath?: string;
   store: AgentTeamStore;
+  governance?: AgentTeamGovernanceExtension;
   logger: Logger;
 }): fs.FSWatcher | undefined {
   if (!options.botsConfigPath || process.env.METABOT_AGENT_TEAMS_HOT_RELOAD === '0') return undefined;
@@ -551,6 +852,7 @@ function watchAgentTeamsConfig(options: {
       try {
         const config = loadAppConfig();
         options.store.reconcileTeams(config.agentTeams);
+        options.governance?.reconcile();
         options.logger.info({ count: config.agentTeams.length }, 'Agent teams hot-reloaded from bots.json');
       } catch (err: any) {
         options.logger.warn({ err: err?.message || err }, 'Agent teams hot reload failed');

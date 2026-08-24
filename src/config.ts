@@ -3,6 +3,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import {
+  resolveRulesPackBotConfig,
+  type RulesPackBotOverride,
+  type RulesPackBotPolicy,
+  type RulesPackConfig,
+  type RulesPackDefaultsConfig,
+} from '@metabot/rulespack-adapter';
+import { normalizeArtifactDeliveryConfig, type ArtifactDeliveryConfig } from './extensions/artifact-delivery.js';
+import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
+
+export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
+export type { FeishuDomain } from './feishu/domain.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -88,6 +100,10 @@ export interface BotConfigBase {
    * the bridge re-asserts it on every bulk-register.
    */
   memoryPublic?: boolean;
+  /** Security-relevant opt-in for Worker Runner tools in pm/user chats. Default off. */
+  workerTools?: boolean;
+  /** Security-relevant opt-in for ARC tools in pm/user chats. Default off. */
+  arcTools?: boolean;
   /** Agent engine. Defaults to 'codex' unless METABOT_ENGINE or bots.json overrides it. */
   engine?: EngineName;
   claude: {
@@ -130,6 +146,12 @@ export interface BotConfigBase {
   };
   /** Codex-specific overrides. Populated only when engine === 'codex'. */
   codex?: CodexBotConfig;
+  /** Downstream Codex-only deterministic RulesPack integration. Default mode is off. */
+  rulesPack?: RulesPackConfig;
+  /** Non-secret provenance for inherited, overridden, opted-out, or unsupported RulesPack state. */
+  rulesPackPolicy?: RulesPackBotPolicy;
+  /** Downstream durable publication of user-facing files before chat delivery. */
+  artifactDelivery?: ArtifactDeliveryConfig;
   /**
    * Stage 4 — opt-in to the persistent Claude process pool. When enabled,
    * each chatId is backed by a long-lived Claude Code process (managed by
@@ -188,6 +210,7 @@ export interface BotConfig extends BotConfigBase {
   feishu: {
     appId: string;
     appSecret: string;
+    domain: FeishuDomain;
   };
   /** When true, respond to all messages in group chats without requiring @mention. */
   groupNoMention?: boolean;
@@ -283,6 +306,7 @@ export interface AppConfig {
   feishuService?: {
     appId: string;
     appSecret: string;
+    domain: FeishuDomain;
   };
   log: {
     level: string;
@@ -361,6 +385,13 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
+  /** Per-bot override. False is an audited opt-out and requires rulesPackOptOutReason. */
+  rulesPack?: RulesPackBotOverride;
+  rulesPackOptOutReason?: string;
+  artifactDelivery?: ArtifactDeliveryConfig;
+  /** Security-relevant opt-ins; omitted/false means no capability is minted. */
+  workerTools?: boolean;
+  arcTools?: boolean;
   /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
   backend?: 'sdk' | 'pty';
 }
@@ -380,6 +411,8 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   memoryPublic?: boolean;
   feishuAppId: string;
   feishuAppSecret: string;
+  /** API tenant. Defaults to "feishu"; use "lark" for Lark international. */
+  feishuDomain?: FeishuDomain;
   defaultWorkingDirectory: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -391,7 +424,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   groupNoMention?: boolean;
 }
 
-function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
+function feishuBotFromJson(entry: FeishuBotJsonEntry, defaults?: RulesPackDefaultsConfig): BotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -404,6 +437,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -411,6 +445,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,
+      domain: parseFeishuDomain(entry.feishuDomain, `Feishu bot "${entry.name}" feishuDomain`),
     },
     claude: buildClaudeConfig(entry),
   };
@@ -441,7 +476,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
+function telegramBotFromJson(entry: TelegramBotJsonEntry, defaults?: RulesPackDefaultsConfig): TelegramBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -454,6 +489,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -487,7 +523,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
+export function webBotFromJson(entry: WebBotJsonEntry, defaults?: RulesPackDefaultsConfig): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -500,6 +536,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -527,13 +564,14 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
 }
 
-function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
+function wechatBotFromJson(entry: WechatBotJsonEntry, defaults?: RulesPackDefaultsConfig): WechatBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -574,7 +612,7 @@ export interface SlackBotJsonEntry extends EngineJsonFields {
   groupNoMention?: boolean;
 }
 
-function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
+function slackBotFromJson(entry: SlackBotJsonEntry, defaults?: RulesPackDefaultsConfig): SlackBotConfig {
   const codex = buildCodexConfig(entry.codex);
   return {
     name: entry.name,
@@ -587,6 +625,7 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
     ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
+    ...executionToolOptIns(entry, defaults),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -597,6 +636,30 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
       ...(entry.slackBotUserId ? { botUserId: entry.slackBotUserId } : {}),
     },
     claude: buildClaudeConfig(entry),
+  };
+}
+
+function executionToolOptIns(
+  entry: EngineJsonFields,
+  defaults?: RulesPackDefaultsConfig,
+): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack' | 'rulesPackPolicy' | 'artifactDelivery'> {
+  const envEngine = process.env.METABOT_ENGINE;
+  const engine = entry.engine ?? (envEngine === 'claude' || envEngine === 'kimi' || envEngine === 'codex'
+    ? envEngine
+    : 'codex');
+  const resolved = resolveRulesPackBotConfig({
+    botName: (entry as EngineJsonFields & { name?: string }).name ?? 'default',
+    engine,
+    defaults,
+    ...(entry.rulesPack !== undefined ? { override: entry.rulesPack } : {}),
+    ...(entry.rulesPackOptOutReason !== undefined ? { optOutReason: entry.rulesPackOptOutReason } : {}),
+  });
+  return {
+    ...(entry.workerTools !== undefined ? { workerTools: entry.workerTools } : {}),
+    ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
+    ...(resolved.rulesPack ? { rulesPack: resolved.rulesPack } : {}),
+    rulesPackPolicy: resolved.policy,
+    ...(entry.artifactDelivery ? { artifactDelivery: normalizeArtifactDeliveryConfig(entry.artifactDelivery) } : {}),
   };
 }
 
@@ -671,6 +734,7 @@ function feishuBotFromEnv(): BotConfig {
     feishu: {
       appId: required('FEISHU_APP_ID'),
       appSecret: required('FEISHU_APP_SECRET'),
+      domain: parseFeishuDomain(process.env.FEISHU_DOMAIN, 'FEISHU_DOMAIN'),
     },
     claude: {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
@@ -775,6 +839,8 @@ export interface PeerJsonEntry {
 }
 
 export interface BotsJsonNewFormat {
+  /** Shared Codex-only RulesPack defaults for current and future bot entries. */
+  rulesPackDefaults?: RulesPackDefaultsConfig;
   feishuBots?: FeishuBotJsonEntry[];
   telegramBots?: TelegramBotJsonEntry[];
   webBots?: WebBotJsonEntry[];
@@ -806,24 +872,25 @@ export function loadAppConfig(): AppConfig {
       if (parsed.length === 0) {
         throw new Error(`BOTS_CONFIG file must contain a non-empty array or object: ${resolved}`);
       }
-      feishuBots = (parsed as FeishuBotJsonEntry[]).map(feishuBotFromJson);
+      feishuBots = (parsed as FeishuBotJsonEntry[]).map((entry) => feishuBotFromJson(entry));
     } else if (parsed && typeof parsed === 'object') {
       // New format: { feishuBots: [...], telegramBots: [...], webBots: [...] }
       const cfg = parsed as BotsJsonNewFormat;
+      const rulesPackDefaults = cfg.rulesPackDefaults;
       if (cfg.feishuBots) {
-        feishuBots = cfg.feishuBots.map(feishuBotFromJson);
+        feishuBots = cfg.feishuBots.map((entry) => feishuBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.telegramBots) {
-        telegramBots = cfg.telegramBots.map(telegramBotFromJson);
+        telegramBots = cfg.telegramBots.map((entry) => telegramBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.webBots) {
-        webBots = cfg.webBots.map(webBotFromJson);
+        webBots = cfg.webBots.map((entry) => webBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.wechatBots) {
-        wechatBots = cfg.wechatBots.map(wechatBotFromJson);
+        wechatBots = cfg.wechatBots.map((entry) => wechatBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.slackBots) {
-        slackBots = cfg.slackBots.map(slackBotFromJson);
+        slackBots = cfg.slackBots.map((entry) => slackBotFromJson(entry, rulesPackDefaults));
       }
       if (cfg.agentTeams) {
         agentTeams = cfg.agentTeams.map(normalizeAgentTeamConfig);
@@ -861,6 +928,14 @@ export function loadAppConfig(): AppConfig {
     }
   }
 
+  assertUniqueBotNames([
+    ...feishuBots,
+    ...telegramBots,
+    ...webBots,
+    ...wechatBots,
+    ...slackBots,
+  ]);
+
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
   const apiSecret = process.env.API_SECRET || undefined;
 
@@ -876,11 +951,13 @@ export function loadAppConfig(): AppConfig {
     feishuService = {
       appId: process.env.FEISHU_SERVICE_APP_ID,
       appSecret: process.env.FEISHU_SERVICE_APP_SECRET,
+      domain: parseFeishuDomain(process.env.FEISHU_SERVICE_DOMAIN, 'FEISHU_SERVICE_DOMAIN'),
     };
   } else if (feishuBots.length > 0) {
     feishuService = {
       appId: feishuBots[0].feishu.appId,
       appSecret: feishuBots[0].feishu.appSecret,
+      domain: feishuBots[0].feishu.domain,
     };
   }
 
@@ -947,6 +1024,18 @@ export function loadAppConfig(): AppConfig {
     peers,
     agentTeams,
   };
+}
+
+function assertUniqueBotNames(bots: readonly Pick<BotConfigBase, 'name'>[]): void {
+  const names = new Map<string, string>();
+  for (const bot of bots) {
+    const canonical = bot.name.normalize('NFKC').toLowerCase();
+    const existing = names.get(canonical);
+    if (existing !== undefined) {
+      throw new Error(`Bot names must be globally unique ignoring case: "${existing}" and "${bot.name}"`);
+    }
+    names.set(canonical, bot.name);
+  }
 }
 
 function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {

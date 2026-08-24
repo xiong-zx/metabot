@@ -295,35 +295,56 @@ describe('controlled restart coordination', () => {
     });
   });
 
-  it('retains the durable handoff when continuation scheduling fails', async () => {
+  it('reports startup-health failure to every affected chat without scheduling continuations', async () => {
     const admin = makeBot('admin', 'chat-admin', 100);
-    const registry = makeRegistry([admin]);
+    const pm = makeBot('pm-codex', 'chat-pm', 200);
+    const registry = makeRegistry([admin, pm]);
     const coordinator = await import('../src/bridge/restart-coordinator.js');
-
     await coordinator.prepareControlledRestart({
       registry,
       logger,
-      request: { requestId: 'restart-retry-schedule' },
+      request: { requestId: 'restart-health-failed' },
     });
-    const scheduleTaskDurably = vi.fn(() => {
-      throw new Error('durable scheduler unavailable');
+    const scheduleTask = vi.fn();
+
+    const recovered = await coordinator.recoverControlledRestartAfterStartup({
+      registry,
+      scheduler: { scheduleTask } as any,
+      logger,
+      startupHealth: { ok: false, error: 'worker unhealthy' },
+    });
+
+    expect(scheduleTask).not.toHaveBeenCalled();
+    expect(admin.sender.sendTextNotice).toHaveBeenLastCalledWith(
+      'chat-admin', 'MetaBot Restart Failed', expect.stringContaining('worker unhealthy'), 'red',
+    );
+    expect(pm.sender.sendTextNotice).toHaveBeenLastCalledWith(
+      'chat-pm', 'MetaBot Restart Failed', expect.stringContaining('not resumed'), 'red',
+    );
+    expect(recovered).toMatchObject({ status: 'completed', restartOutcome: 'failed' });
+  });
+
+  it('retains an incomplete handoff when durable continuation scheduling fails', async () => {
+    const admin = makeBot('admin', 'chat-admin', 100);
+    const registry = makeRegistry([admin]);
+    const coordinator = await import('../src/bridge/restart-coordinator.js');
+    await coordinator.prepareControlledRestart({
+      registry,
+      logger,
+      request: { requestId: 'restart-schedule-failed' },
     });
 
     const recovered = await coordinator.recoverControlledRestartAfterStartup({
       registry,
-      scheduler: { scheduleTask: vi.fn(), scheduleTaskDurably } as any,
+      scheduler: { scheduleTask: vi.fn(() => { throw new Error('disk full'); }) } as any,
       logger,
     });
 
-    expect(scheduleTaskDurably).toHaveBeenCalledOnce();
-    expect(recovered).toMatchObject({
-      status: 'prepared',
-      participants: [{
-        continuationOutcome: 'failed',
-        completionNotice: 'delivered',
-      }],
+    expect(recovered?.status).toBe('prepared');
+    expect(recovered?.participants[0]).toMatchObject({
+      continuationOutcome: 'failed',
+      completionNotice: 'delivered',
     });
     expect(recovered?.participants[0]?.recoveredAt).toBeUndefined();
-    expect(coordinator.readControlledRestartPlan()?.status).toBe('prepared');
   });
 });

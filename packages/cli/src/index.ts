@@ -11,6 +11,7 @@
  *   metabot inbox <…>    → in-tree (./inbox.js); wraps /api/inbox/*
  *   metabot teams <…>    → in-tree (./teams.js); wraps local bridge /api/agent-teams/*
  *   metabot t5t <…>      → in-tree (./t5t.js); wraps /api/t5t/cli/*
+ *   metabot artifacts <…> → in-tree (./artifacts.js); strict deliverables mirror
  *   metabot help         → top-level help (also: bare invocation, --help, -h)
  */
 
@@ -53,6 +54,11 @@ export async function main(argv: string[]): Promise<void> {
     }
     case 't5t': {
       const m = await import('./t5t.js');
+      await m.run(rest);
+      return;
+    }
+    case 'artifacts': {
+      const m = await import('./artifacts.js');
       await m.run(rest);
       return;
     }

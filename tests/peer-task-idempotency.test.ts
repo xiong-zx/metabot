@@ -5,9 +5,9 @@ import { setPeerRequestClaims, sha256Base64Url, type PeerCapabilityClaims } from
 import { handleTaskRoutes } from '../src/api/routes/task-routes.js';
 import type { RouteContext } from '../src/api/routes/types.js';
 
-function makeReq(body?: Record<string, unknown>) {
+function makeReq(body?: Record<string, unknown>, headers: Record<string, string> = {}) {
   const req = new EventEmitter() as any;
-  req.headers = { 'x-metabot-origin': 'peer' };
+  req.headers = { 'x-metabot-origin': 'peer', ...headers };
   req.destroy = vi.fn();
   process.nextTick(() => {
     if (body) req.emit('data', Buffer.from(JSON.stringify(body)));
@@ -88,6 +88,7 @@ describe('peer task idempotency and status scope', () => {
         recordFailure: vi.fn(),
       },
       budgetManager: { canAcceptTask: vi.fn(() => ({ allowed: true })), recordCost: vi.fn() },
+      resolveRulesPackTransportIssuer: () => 'bot-imac',
       ws: {},
     } as unknown as RouteContext;
     const body = {
@@ -125,6 +126,20 @@ describe('peer task idempotency and status scope', () => {
     await handleTaskRoutes(ctx, changedOptionsReq, changedOptionsRes, 'POST', '/api/talk');
     expect(changedOptionsRes.statusCode).toBe(409);
     expect(changedOptionsRes.json()).toMatchObject({ code: 'peer_request_conflict' });
+    expect(executeApiTask).toHaveBeenCalledTimes(1);
+
+    const changedEnvelopeBody = {
+      ...body,
+      rulesPackDispatch: { issuer: 'bot-imac', envelopeId: 'changed-envelope' },
+    };
+    const changedEnvelopeReq = makeReq(changedEnvelopeBody, {
+      'x-metabot-rulespack-issuer': 'bot-imac',
+    });
+    setPeerRequestClaims(changedEnvelopeReq, claims(changedEnvelopeBody));
+    const changedEnvelopeRes = makeRes();
+    await handleTaskRoutes(ctx, changedEnvelopeReq, changedEnvelopeRes, 'POST', '/api/talk');
+    expect(changedEnvelopeRes.statusCode).toBe(409);
+    expect(changedEnvelopeRes.json()).toMatchObject({ code: 'peer_request_conflict' });
     expect(executeApiTask).toHaveBeenCalledTimes(1);
 
     const conflictingBody = { ...body, prompt: 'different' };

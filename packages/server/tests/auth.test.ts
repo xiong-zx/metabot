@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { makeKit, type TestKit } from './helpers.js';
 import { hashToken } from '../src/auth/credentials.js';
+import { CredentialRulesPackIdentityMismatchError } from '../src/auth/credentials-store.js';
 
 let kit: TestKit | undefined;
 
@@ -35,6 +36,27 @@ describe('CredentialsStore', () => {
     expect(first?.id).toBe(credential.id);
     const second = kit.credentials.lookupByToken(token);
     expect(second?.id).toBe(credential.id);
+  });
+
+  it('binds one RulesPack host identity to an existing credential without rotating its token', () => {
+    kit = makeKit('auth-rulespack-identity');
+    const columns = kit.db.prepare('PRAGMA table_info(credentials)').all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      'rulespack_host_id', 'rulespack_audience',
+    ]));
+    const { token, credential } = kit.credentials.issue({
+      botName: 'bridge-a', ownerName: 'a', role: 'member',
+    });
+    expect(kit.credentials.lookupByToken(token)?.rulesPackIdentity).toBeUndefined();
+
+    const identity = { hostId: 'imac', audience: 'metabot-host:imac' };
+    expect(kit.credentials.bindRulesPackIdentity(credential.id, identity).rulesPackIdentity).toEqual(identity);
+    expect(kit.credentials.bindRulesPackIdentity(credential.id, identity).rulesPackIdentity).toEqual(identity);
+    expect(kit.credentials.lookupByToken(token)?.rulesPackIdentity).toEqual(identity);
+    expect(() => kit!.credentials.bindRulesPackIdentity(credential.id, {
+      hostId: 'savio', audience: 'metabot-host:savio',
+    })).toThrow(CredentialRulesPackIdentityMismatchError);
+    expect(kit.credentials.lookupByToken(token)?.rulesPackIdentity).toEqual(identity);
   });
 
   it('lookupByToken: null for unknown; revoked tokens still resolve so callers can distinguish', () => {

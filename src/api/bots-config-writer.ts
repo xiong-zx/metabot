@@ -48,7 +48,8 @@ export function addBot(
   const config = readBotsConfig(configPath);
 
   // Check for duplicate names across all platforms
-  if (allBotNames(config).includes(entry.name)) {
+  const canonical = canonicalBotName(entry.name);
+  if (allBotNames(config).some((name) => canonicalBotName(name) === canonical)) {
     throw new Error(`Bot with name "${entry.name}" already exists`);
   }
 
@@ -70,6 +71,10 @@ export function addBot(
   }
 
   writeBotsConfig(configPath, config);
+}
+
+function canonicalBotName(name: string): string {
+  return name.normalize('NFKC').toLowerCase();
 }
 
 export function removeBot(configPath: string, name: string): boolean {

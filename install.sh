@@ -122,6 +122,11 @@ metabot_install_skill_bundle() {
   cp -R "$source/." "$destination/"
 }
 
+is_lark_cli_brand() {
+  local brand="${1:-}"
+  [[ "$brand" == "feishu" || "$brand" == "lark" ]]
+}
+
 # Safe prompt — reads from /dev/tty, uses printf -v (no eval)
 prompt_input() {
   local varname="$1"
@@ -406,7 +411,7 @@ fi
 success "MetaBot code ready at ${METABOT_HOME}"
 
 # GitHub Releases ship the complete self-hosted personal edition. Private or
-# legacy bridge packages retain the smaller four-workspace layout.
+# legacy bridge packages retain the smaller five-workspace layout.
 PERSONAL_EDITION_PACKAGE=false
 PACKAGE_MANIFEST="$METABOT_HOME/.metabot-package/manifest.json"
 if node -e '
@@ -427,6 +432,116 @@ if node -e '
 fi
 
 # ============================================================================
+# Phase 2.5: Provision cross-process execution trust keys (TOFU)
+# ============================================================================
+step "Phase 2.5: Provisioning execution trust keys"
+
+# These keys deliberately live outside the replaceable Git runtime. Creation
+# is trust-on-first-use and create-if-missing only: incomplete, mismatched, or
+# unsafe existing material fails rather than being silently replaced. File
+# modes do not contain arbitrary code running under the same OS uid; they are
+# scope-hygiene until the optional service-user isolation is deployed.
+METABOT_KEYS_DIR="${METABOT_KEYS_DIR:-$HOME/.metabot/keys}" node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const keysDir = process.env.METABOT_KEYS_DIR;
+const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
+const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+
+function nodeType(value) {
+  if (value.isSymbolicLink()) return 'symbolic-link';
+  if (value.isFile()) return 'regular-file';
+  if (value.isDirectory()) return 'directory';
+  if (value.isFIFO()) return 'fifo';
+  if (value.isSocket()) return 'socket';
+  if (value.isBlockDevice()) return 'block-device';
+  if (value.isCharacterDevice()) return 'character-device';
+  return 'unknown';
+}
+
+function lstatIfPresent(file) {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if (error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) return undefined;
+    throw error;
+  }
+}
+
+function assertStat(value, mode, label, expectedType) {
+  const typeOk = expectedType === 'directory' ? value.isDirectory() : value.isFile();
+  if (value.isSymbolicLink() || !typeOk) {
+    throw new Error(`unsafe ${label} node type: expected ${expectedType}, got ${nodeType(value)}`);
+  }
+  const actual = value.mode & 0o777;
+  if (actual !== mode) throw new Error(`unsafe ${label} mode ${actual.toString(8)}; expected ${mode.toString(8)}`);
+  if (uid !== undefined && value.uid !== uid) throw new Error(`unexpected ${label} owner uid ${value.uid}; expected ${uid}`);
+}
+
+function assertPath(file, mode, label, expectedType) {
+  const value = fs.lstatSync(file);
+  assertStat(value, mode, label, expectedType);
+  return value;
+}
+
+function readKey(file, label) {
+  const before = assertPath(file, 0o600, label, 'regular-file');
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fs.constants.O_NONBLOCK === 'number' ? fs.constants.O_NONBLOCK : 0;
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    assertStat(opened, 0o600, label, 'regular-file');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) {
+      throw new Error(`unsafe ${label} path changed while opening`);
+    }
+    return fs.readFileSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+const existingKeysDir = lstatIfPresent(keysDir);
+if (existingKeysDir) {
+  assertStat(existingKeysDir, 0o700, 'key directory', 'directory');
+} else {
+  fs.mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(keysDir, 0o700);
+  assertPath(keysDir, 0o700, 'key directory', 'directory');
+}
+
+for (const name of names) {
+  const privatePath = path.join(keysDir, `${name}.key`);
+  const publicPath = path.join(keysDir, `${name}.pub`);
+  const previousPath = `${publicPath}.prev`;
+  const privateStat = lstatIfPresent(privatePath);
+  const publicStat = lstatIfPresent(publicPath);
+  const previousStat = lstatIfPresent(previousPath);
+  if (privateStat) assertStat(privateStat, 0o600, `${name} private key`, 'regular-file');
+  if (publicStat) assertStat(publicStat, 0o600, `${name} public key`, 'regular-file');
+  if (previousStat) assertStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+  const privateExists = Boolean(privateStat);
+  const publicExists = Boolean(publicStat);
+  if (privateExists !== publicExists) throw new Error(`refusing to replace incomplete ${name} keypair`);
+  if (!privateExists) {
+    const pair = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(privatePath, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(publicPath, pair.publicKey.export({ type: 'spki', format: 'pem' }), { flag: 'wx', mode: 0o600 });
+  }
+  assertPath(privatePath, 0o600, `${name} private key`, 'regular-file');
+  assertPath(publicPath, 0o600, `${name} public key`, 'regular-file');
+  const challenge = Buffer.from('metabot-ed25519-keypair-check-v1');
+  const signature = crypto.sign(null, challenge, readKey(privatePath, `${name} private key`));
+  if (!crypto.verify(null, challenge, readKey(publicPath, `${name} public key`), signature)) {
+    throw new Error(`${name} public/private keys do not correspond`);
+  }
+}
+NODE
+success "Execution trust keys ready at ${METABOT_KEYS_DIR} (TOFU; outside METABOT_HOME)"
+
+# ============================================================================
 # Phase 3: Install dependencies
 # ============================================================================
 step "Phase 3: Installing dependencies"
@@ -436,6 +551,8 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
+#   - independent ARC MCP and Worker Runner MCP
+#     (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
 # personal edition and excluded only from the legacy/private bridge flavor.
@@ -450,6 +567,8 @@ else
     --workspace=@xvirobotics/cli-core \
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
+    --workspace=@xvirobotics/arc-mcp \
+    --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
 fi
@@ -877,9 +996,14 @@ API_TIMEOUT_MS=600000"
 
   FEISHU_APP_ID=""
   FEISHU_APP_SECRET=""
+  FEISHU_DOMAIN="feishu"
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     echo ""
     echo -e "  ${BOLD}Feishu/Lark Credentials:${NC}"
+    echo "    1) Feishu (China)"
+    echo "    2) Lark (international)"
+    prompt_choice FEISHU_DOMAIN_CHOICE "1"
+    [[ "$FEISHU_DOMAIN_CHOICE" == "2" ]] && FEISHU_DOMAIN="lark"
     prompt_input FEISHU_APP_ID "App ID (e.g. cli_xxxx)"
     prompt_secret FEISHU_APP_SECRET "App Secret"
     if [[ -z "$FEISHU_APP_ID" || -z "$FEISHU_APP_SECRET" ]]; then
@@ -1028,18 +1152,19 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
 
   if [[ "$SETUP_FEISHU" == "true" ]]; then
     FEISHU_BOTS_JSON=$(node -e "
-      const engine = process.argv[5];
+      const engine = process.argv[6];
       const bot = {
         name: process.argv[1],
         engine,
         feishuAppId: process.argv[2],
         feishuAppSecret: process.argv[3],
-        defaultWorkingDirectory: process.argv[4],
+        feishuDomain: process.argv[4],
+        defaultWorkingDirectory: process.argv[5],
       };
       if (engine === 'kimi') { bot.kimi = { model: 'kimi-code/k3', thinking: true, permissionMode: 'auto' }; }
       if (engine === 'codex') { bot.codex = { approvalPolicy: 'never', sandbox: 'workspace-write' }; }
       console.log(JSON.stringify([bot], null, 2))
-    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$WORK_DIR" "${BOT_ENGINE:-claude}")
+    " "$BOT_NAME" "$FEISHU_APP_ID" "$FEISHU_APP_SECRET" "$FEISHU_DOMAIN" "$WORK_DIR" "${BOT_ENGINE:-claude}")
   fi
 
   if [[ "$SETUP_TELEGRAM" == "true" ]]; then
@@ -1214,10 +1339,15 @@ if [[ "$SETUP_LARK_CLI" == "true" ]]; then
   if [[ ! -f "$HOME/.lark-cli/config.json" && -f "$METABOT_HOME/bots.json" ]]; then
     FEISHU_APP_ID=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppId||'')" 2>/dev/null)
     FEISHU_APP_SECRET=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppSecret||'')" 2>/dev/null)
+    FEISHU_CLI_BRAND=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); const d=(c.feishuBots||[])[0]?.feishuDomain||'feishu'; if (!['feishu','lark'].includes(d)) process.exit(1); console.log(d)" 2>/dev/null || true)
     if [[ -n "$FEISHU_APP_ID" && -n "$FEISHU_APP_SECRET" ]]; then
-      echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand feishu 2>/dev/null && \
-        success "lark-cli configured with app $FEISHU_APP_ID" || \
-        warn "lark-cli config failed — you can run manually: lark-cli config init"
+      if ! is_lark_cli_brand "$FEISHU_CLI_BRAND"; then
+        warn "lark-cli config skipped — feishuDomain must be 'feishu' or 'lark'"
+      else
+        echo "$FEISHU_APP_SECRET" | lark-cli config init --app-id "$FEISHU_APP_ID" --app-secret-stdin --brand "$FEISHU_CLI_BRAND" 2>/dev/null && \
+          success "lark-cli configured with app $FEISHU_APP_ID" || \
+          warn "lark-cli config failed — you can run manually: lark-cli config init"
+      fi
     fi
   fi
 
@@ -1425,6 +1555,25 @@ step "Phase 8: Starting MetaBot"
 
 cd "$METABOT_HOME"
 
+# The Bridge imports the RulesPack adapter through its compiled workspace
+# entrypoint. Release archives contain source rather than dist, so build the
+# engine first and the adapter second before compiling Bridge.
+info "Building deterministic RulesPack engine..."
+if npm run build -w @metabot/rulespack; then
+  success "RulesPack engine build complete"
+else
+  error "RulesPack engine build failed. MetaBot was not started."
+  exit 1
+fi
+
+info "Building Codex RulesPack adapter..."
+if npm run build -w @metabot/rulespack-adapter; then
+  success "RulesPack adapter build complete"
+else
+  error "RulesPack adapter build failed. MetaBot was not started."
+  exit 1
+fi
+
 info "Building bridge TypeScript..."
 if npm run build:bridge; then
   success "Bridge build complete"
@@ -1444,16 +1593,80 @@ else
   exit 1
 fi
 
-# Always delete + start fresh to avoid stale/stopped process issues
-if pm2 describe metabot &>/dev/null 2>&1; then
-  info "Removing old MetaBot PM2 process..."
-  pm2 delete metabot 2>/dev/null || true
+# ARC ships both an independent stdio binary and the authenticated daemon used
+# by the PM2 lifecycle below. The daemon receives its scope and runner adapter
+# only through trusted process configuration.
+info "Building independent ARC MCP..."
+if npm run build -w @xvirobotics/arc-mcp; then
+  success "ARC MCP build complete"
+else
+  error "ARC MCP build failed. MetaBot was not started."
+  exit 1
 fi
-info "Starting MetaBot with PM2..."
-pm2 start ecosystem.config.cjs
 
-pm2 save --force 2>/dev/null || true
-success "MetaBot is running!"
+# Worker Runner ships both an independent stdio binary and the authenticated
+# PM2 daemon. The daemon receives principal scope per signed MCP connection;
+# its state directory and completion callback remain trusted process config.
+info "Building independent Worker Runner MCP..."
+if npm run build -w @xvirobotics/worker-runner-mcp; then
+  success "Worker Runner MCP build complete"
+else
+  error "Worker Runner MCP build failed. MetaBot was not started."
+  exit 1
+fi
+
+# Package refreshes never delete live PM2 registrations. Daemons are never
+# Bridge children, so an externally controlled protected deployment can update
+# them before replacing Bridge while preserving registration IDs.
+for daemon in worker arc; do
+  app="metabot-${daemon}"
+  [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
+  [[ "$daemon" == "arc" ]] && app="metabot-arcd"
+  if pm2 describe "$app" &>/dev/null 2>&1; then
+    set +e
+    METABOT_HOME="$METABOT_HOME" node --import tsx \
+      "$METABOT_HOME/src/services/local-daemon-health.ts" --busy "$daemon" >/dev/null
+    DAEMON_BUSY_STATUS=$?
+    set -e
+    if [[ "$DAEMON_BUSY_STATUS" -eq 10 ]]; then
+      warn "$app has in-flight work; package replacement may leave it recovery_required."
+    elif [[ "$DAEMON_BUSY_STATUS" -ne 0 ]]; then
+      error "Could not verify whether $app is idle. Refusing package replacement."
+      exit 1
+    fi
+  fi
+done
+EXISTING_METABOT_STATUS=""
+if pm2 describe metabot &>/dev/null 2>&1; then
+  EXISTING_METABOT_STATUS="$(pm2 jlist 2>/dev/null | node -e '
+    let input="";
+    process.stdin.on("data",c=>input+=c).on("end",()=>{
+      try {
+        const row=JSON.parse(input).find(entry=>entry.name==="metabot");
+        process.stdout.write(String(row?.pm2_env?.status||""));
+      } catch { process.exitCode=2; }
+    });
+  ')" || {
+    error "Could not inspect the existing MetaBot PM2 registration. Refusing lifecycle change."
+    exit 1
+  }
+fi
+
+if [[ "${METABOT_PACKAGE_UPDATE:-0}" == "1" && "$EXISTING_METABOT_STATUS" == "online" ]]; then
+  info "Applying package refresh through the protected no-delete runtime switch..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" deploy-runtime \
+    --runtime "$METABOT_HOME" \
+    --request-id "${METABOT_RESTART_REQUEST_ID:?package update requestId is required}" \
+    --source package-update \
+    --reason "MetaBot package update" \
+    --resume \
+    --wait \
+    --timeout 120
+else
+  info "Starting MetaBot Bridge and execution daemons with PM2..."
+  METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start
+fi
+success "MetaBot Bridge and execution daemons are running!"
 
 # --- WeChat QR login: wait for URL and display it ---
 HAS_WECHAT_BOT=false
@@ -1494,6 +1707,8 @@ if [[ "$HAS_WECHAT_BOT" == "true" ]]; then
   else
     warn "QR URL not yet available. Check logs to get it:"
     echo "    pm2 logs metabot --lines 30"
+    echo "    pm2 logs metabot-worker-runnerd --lines 30"
+    echo "    pm2 logs metabot-arcd --lines 30"
   fi
 fi
 
@@ -1523,12 +1738,15 @@ echo -e "  ${BOLD}metabot-core:${NC}    ${CORE_URL_DISPLAY}"
 echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
+echo "    pm2 logs metabot-worker-runnerd  # View Worker Runner daemon logs"
+echo "    pm2 logs metabot-arcd      # View ARC daemon logs"
 if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
   echo "    pm2 logs metabot-core     # View local Core logs"
   echo "    open http://localhost:9200 # Personal Web UI (or use your browser)"
 fi
-echo "    pm2 restart metabot       # Restart MetaBot"
-echo "    pm2 stop metabot          # Stop MetaBot"
+echo "    metabot restart           # Restart Bridge only"
+echo "    metabot restart --daemon worker  # Guarded Worker Runner restart"
+echo "    metabot stop              # Stop the whole MetaBot runtime"
 echo "    metabot memory list       # Browse central memory (delegated to metabot-core)"
 echo "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 echo "    metabot skills list       # List shared skills"

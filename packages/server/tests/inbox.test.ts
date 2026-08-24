@@ -26,11 +26,18 @@ async function registerInboxOnlyAgent(
   k: ServerKit,
   token: string,
   botName: string,
+  rulesPackStatus?: Record<string, unknown>,
 ): Promise<void> {
-  const res = await call(k.baseUrl, 'POST', '/api/agents', token, {
-    botName,
-    url: 'inbox:',
-  });
+  if (rulesPackStatus) {
+    const res = await call(k.baseUrl, 'POST', '/api/agents/bulk', token, {
+      rulesPackIdentity: { hostId: 'test-host', audience: 'metabot-host:test-host' },
+      bots: [{ botName, url: 'inbox:', rulesPackStatus }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe(201);
+    return;
+  }
+  const res = await call(k.baseUrl, 'POST', '/api/agents', token, { botName, url: 'inbox:' });
   expect(res.status).toBe(201);
 }
 
@@ -87,6 +94,59 @@ describe('/api/inbox/* — central inbox for CLI agents', () => {
         chatId: 'c1', content: 'hello',
       });
       expect(res.status).toBe(401);
+    });
+
+    it('rejects envelope-free relay to a RulesPack-protected target', async () => {
+      const ownerToken = await issueMember(kit!, 'recv-bot');
+      await registerInboxOnlyAgent(kit!, ownerToken, 'recv-bot', {
+        state: 'inherited', required: true, mode: 'enforce', defaultProjectId: 'metabot',
+      });
+      const senderToken = await issueMember(kit!, 'bridge-issuer');
+      const res = await call(kit!.baseUrl, 'POST', '/api/inbox/recv-bot', senderToken, {
+        chatId: 'chat-a', content: 'unprotected direct CLI relay',
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('rulespack_dispatch_required_use_bridge_talk');
+    });
+
+    it('accepts only an issuer-bound exact envelope for a protected target', async () => {
+      const ownerToken = await issueMember(kit!, 'recv-bot');
+      await registerInboxOnlyAgent(kit!, ownerToken, 'recv-bot', {
+        state: 'overridden', required: false, mode: 'shadow', defaultProjectId: null,
+      });
+      const senderToken = await issueMember(kit!, 'bridge-issuer');
+      const dispatch = {
+        schemaVersion: 1,
+        envelopeId: 'envelope-a',
+        replayId: 'replay-a',
+        packDigest: 'digest-a',
+        issuer: 'bridge-issuer',
+        target: { bot: 'recv-bot', chatId: 'chat-a' },
+      };
+      const accepted = await call(kit!.baseUrl, 'POST', '/api/inbox/recv-bot', senderToken, {
+        chatId: 'chat-a',
+        content: JSON.stringify({ type: 'talk', prompt: 'work', rulesPackDispatch: dispatch }),
+      });
+      expect(accepted.status).toBe(201);
+
+      const wrongTarget = await call(kit!.baseUrl, 'POST', '/api/inbox/recv-bot', senderToken, {
+        chatId: 'chat-a',
+        content: JSON.stringify({
+          type: 'talk', prompt: 'work',
+          rulesPackDispatch: { ...dispatch, target: { bot: 'other', chatId: 'chat-a' } },
+        }),
+      });
+      expect(wrongTarget.status).toBe(400);
+      expect(wrongTarget.body.error).toBe('rulespack_dispatch_target_mismatch');
+
+      const wrongIssuer = await call(kit!.baseUrl, 'POST', '/api/inbox/recv-bot', senderToken, {
+        chatId: 'chat-a',
+        content: JSON.stringify({
+          type: 'talk', prompt: 'work', rulesPackDispatch: { ...dispatch, issuer: 'forged' },
+        }),
+      });
+      expect(wrongIssuer.status).toBe(403);
+      expect(wrongIssuer.body.error).toBe('rulespack_dispatch_issuer_mismatch');
     });
   });
 

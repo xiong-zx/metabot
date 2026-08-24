@@ -103,6 +103,8 @@ export interface PtyQueryOptions {
    * interactive default (NOT 'sdk-cli') so billing lands on the subscription.
    */
   env?: NodeJS.ProcessEnv;
+  /** Private additive MCP config passed as `--mcp-config`; never strict. */
+  mcpConfigPath?: string;
   /** Path to the claude executable (defaults to resolveClaudePath()). */
   pathToClaudeExecutable?: string;
   /** PTY geometry. Defaults: 120x40. */
@@ -231,6 +233,8 @@ export interface PtyClaudeSessionOptions {
   appendSystemPrompt?: string;
   /** Absolute path to a settings.json (contains Stop + team hooks). */
   settingsPath: string;
+  /** Private additive MCP config passed as `--mcp-config`; never strict. */
+  mcpConfigPath?: string;
   env?: NodeJS.ProcessEnv;
   pathToClaudeExecutable?: string;
   cols?: number;

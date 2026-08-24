@@ -7,6 +7,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import type { ApiTaskResult } from '../bridge/message-bridge.js';
 
 export interface AsyncTask {
   id: string;
@@ -16,13 +17,10 @@ export interface AsyncTask {
   status: 'accepted' | 'running' | 'completed' | 'failed';
   createdAt: number;
   completedAt?: number;
-  result?: {
-    success: boolean;
-    responseText: string;
-    costUsd?: number;
-    durationMs?: number;
-    error?: string;
-  };
+  result?: Pick<
+    ApiTaskResult,
+    'success' | 'responseText' | 'costUsd' | 'durationMs' | 'error' | 'rulesPackDelivery'
+  >;
   callbackChatId?: string;
   callbackBotName?: string;
   requestIssuer?: string;

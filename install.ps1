@@ -688,9 +688,14 @@ if (-not $SkipConfig) {
 
     $FeishuAppId = ""
     $FeishuAppSecret = ""
+    $FeishuDomain = "feishu"
     if ($SetupFeishu) {
         Write-Host ""
         Write-Host "  Feishu/Lark Credentials:" -ForegroundColor White
+        Write-Host "    1) Feishu (China)"
+        Write-Host "    2) Lark (international)"
+        $FeishuDomainChoice = Read-Choice "1"
+        if ($FeishuDomainChoice -eq "2") { $FeishuDomain = "lark" }
         $FeishuAppId = Read-Input "App ID (e.g. cli_xxxx)"
         $FeishuAppSecret = Read-Secret "App Secret"
         if ([string]::IsNullOrWhiteSpace($FeishuAppId) -or [string]::IsNullOrWhiteSpace($FeishuAppSecret)) {
@@ -790,7 +795,7 @@ METABOT_CORE_URL=$CoreUrl
     $TelegramBotsJson = "[]"
 
     if ($SetupFeishu) {
-        $FeishuBotsJson = node -e "const e=process.argv[5];const b={name:process.argv[1],engine:e,feishuAppId:process.argv[2],feishuAppSecret:process.argv[3],defaultWorkingDirectory:process.argv[4]};if(e==='kimi')b.kimi={model:'kimi-code/k3',thinking:true,permissionMode:'auto'};if(e==='codex')b.codex={approvalPolicy:'never',sandbox:'workspace-write'};console.log(JSON.stringify([b],null,2))" $BotName $FeishuAppId $FeishuAppSecret $WorkDir $BotEngine
+        $FeishuBotsJson = node -e "const e=process.argv[6];const b={name:process.argv[1],engine:e,feishuAppId:process.argv[2],feishuAppSecret:process.argv[3],feishuDomain:process.argv[4],defaultWorkingDirectory:process.argv[5]};if(e==='kimi')b.kimi={model:'kimi-code/k3',thinking:true,permissionMode:'auto'};if(e==='codex')b.codex={approvalPolicy:'never',sandbox:'workspace-write'};console.log(JSON.stringify([b],null,2))" $BotName $FeishuAppId $FeishuAppSecret $FeishuDomain $WorkDir $BotEngine
         $FeishuBotsJson = $FeishuBotsJson -join "`n"
     }
 

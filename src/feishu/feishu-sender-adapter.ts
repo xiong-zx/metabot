@@ -1,5 +1,10 @@
 import * as path from 'node:path';
-import type { IMessageSender } from '../bridge/message-sender.interface.js';
+import {
+  normalizeCardUpdateOutcome,
+  type CardDeliveryOptions,
+  type CardUpdateOutcome,
+  type IMessageSender,
+} from '../bridge/message-sender.interface.js';
 import type { CardState } from '../types.js';
 import { MessageSender } from './message-sender.js';
 import { buildCard, buildTextCard } from './card-builder.js';
@@ -17,12 +22,26 @@ const USE_V2 = process.env.CARD_SCHEMA_V2 !== 'false';
 export class FeishuSenderAdapter implements IMessageSender {
   constructor(private sender: MessageSender) {}
 
-  async sendCard(chatId: string, state: CardState): Promise<string | undefined> {
-    return this.sender.sendCard(chatId, USE_V2 ? buildCardV2(state) : buildCard(state));
+  async sendCard(
+    chatId: string,
+    state: CardState,
+    options?: CardDeliveryOptions,
+  ): Promise<string | undefined> {
+    return this.sender.sendCard(
+      chatId,
+      USE_V2 ? buildCardV2(state, options?.safeTerminal ? { nativeTableBudget: 0 } : {}) : buildCard(state),
+    );
   }
 
-  async updateCard(messageId: string, state: CardState): Promise<boolean> {
-    return this.sender.updateCard(messageId, USE_V2 ? buildCardV2(state) : buildCard(state));
+  async updateCard(
+    messageId: string,
+    state: CardState,
+    options?: CardDeliveryOptions,
+  ): Promise<CardUpdateOutcome> {
+    return this.sender.updateCard(
+      messageId,
+      USE_V2 ? buildCardV2(state, options?.safeTerminal ? { nativeTableBudget: 0 } : {}) : buildCard(state),
+    );
   }
 
   /**
@@ -45,14 +64,14 @@ export class FeishuSenderAdapter implements IMessageSender {
   }
 
   async updateQuestionCard(messageId: string, state: CardState): Promise<boolean> {
-    return this.sender.updateCard(messageId, buildCard(state));
+    return normalizeCardUpdateOutcome(await this.sender.updateCard(messageId, buildCard(state))).ok;
   }
 
   async sendTextNotice(chatId: string, title: string, content: string, color: string = 'blue'): Promise<void> {
     await this.sender.sendCard(chatId, USE_V2 ? buildTextCardV2(title, content, color) : buildTextCard(title, content, color));
   }
 
-  async sendText(chatId: string, text: string): Promise<void> {
+  async sendText(chatId: string, text: string): Promise<boolean> {
     return this.sender.sendText(chatId, text);
   }
 
