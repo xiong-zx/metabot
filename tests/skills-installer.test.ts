@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -96,6 +96,43 @@ describe('skills installer', () => {
           expect(readFileSync(join(workDir, root, skill, 'SKILL.md'), 'utf-8')).toBe(`name: ${skill}\n`);
         }
       }
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+    }
+  });
+
+  it('configures lark-cli with the bot tenant as its brand', () => {
+    const priorHome = process.env.HOME;
+    const home = tempDir('metabot-lark-cli-home-');
+    const workDir = tempDir('metabot-lark-cli-work-');
+    const argsPath = join(home, 'lark-cli-args');
+    const inputPath = join(home, 'lark-cli-input');
+    try {
+      process.env.HOME = home;
+      const binDir = join(home, '.npm-global', 'bin');
+      mkdirSync(binDir, { recursive: true });
+      const larkCli = join(binDir, 'lark-cli');
+      writeFileSync(larkCli, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsPath}'\ncat > '${inputPath}'\n`);
+      chmodSync(larkCli, 0o755);
+
+      installSkillsToWorkDir(workDir, logger, {
+        platform: 'feishu',
+        feishuAppId: 'cli_lark_test',
+        feishuAppSecret: 'test-only',
+        feishuDomain: 'lark',
+      });
+
+      expect(readFileSync(argsPath, 'utf-8').trim().split('\n')).toEqual([
+        'config',
+        'init',
+        '--app-id',
+        'cli_lark_test',
+        '--app-secret-stdin',
+        '--brand',
+        'lark',
+      ]);
+      expect(readFileSync(inputPath, 'utf-8')).toBe('test-only');
     } finally {
       if (priorHome === undefined) delete process.env.HOME;
       else process.env.HOME = priorHome;

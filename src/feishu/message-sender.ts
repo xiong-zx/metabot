@@ -83,6 +83,13 @@ export function classifyFeishuDeliveryError(error: unknown): CardUpdateFailure {
   };
 }
 
+export interface FeishuMessageSnapshot {
+  messageId: string;
+  chatId?: string;
+  messageType?: string;
+  content?: string;
+}
+
 export class MessageSender {
   private chatOwnerCache = new Map<string, { ownerId?: string; expiresAt: number }>();
 
@@ -273,6 +280,29 @@ export class MessageSender {
     const fileKey = await this.uploadFile(filePath, fileName, 'opus');
     if (!fileKey) return false;
     return this.sendAudio(chatId, fileKey);
+  }
+
+  async getMessage(messageId: string): Promise<FeishuMessageSnapshot | undefined> {
+    try {
+      const resp = await this.client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { user_id_type: 'open_id' },
+      });
+      const item = resp?.data?.items?.find(candidate => candidate.message_id === messageId);
+      if (!item?.message_id) {
+        this.logger.warn({ messageId }, 'Referenced message lookup returned no message');
+        return undefined;
+      }
+      return {
+        messageId: item.message_id,
+        chatId: item.chat_id,
+        messageType: item.msg_type,
+        content: item.body?.content,
+      };
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'Failed to get referenced message');
+      return undefined;
+    }
   }
 
   async getChatMemberCount(chatId: string): Promise<number | undefined> {

@@ -16,6 +16,7 @@ import xterm from '@xterm/headless';
 const { Terminal } = xterm;
 type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
+import { stripBridgeLocalAdminCredentials } from '../../execution-env.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
@@ -25,6 +26,19 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
+
+export function buildPtyClaudeArgs(
+  opts: Pick<PtyClaudeSessionOptions, 'resume' | 'settingsPath' | 'mcpConfigPath' | 'appendSystemPrompt' | 'model'>,
+  sessionId: string,
+): string[] {
+  const args: string[] = opts.resume ? ['--resume', opts.resume] : ['--session-id', sessionId];
+  args.push('--settings', opts.settingsPath);
+  if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
+  args.push('--dangerously-skip-permissions');
+  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  if (opts.model) args.push('--model', opts.model);
+  return args;
+}
 
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
@@ -118,23 +132,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   private spawn(): void {
     const { opts } = this;
     this.ensureFolderTrusted(opts.cwd);
-    const args: string[] = [];
-
-    if (opts.resume) {
-      args.push('--resume', opts.resume);
-    } else {
-      args.push('--session-id', this.sessionId);
-    }
-
-    args.push('--settings', opts.settingsPath);
-    args.push('--dangerously-skip-permissions');
-
-    if (opts.appendSystemPrompt) {
-      args.push('--append-system-prompt', opts.appendSystemPrompt);
-    }
-    if (opts.model) {
-      args.push('--model', opts.model);
-    }
+    const args = buildPtyClaudeArgs(opts, this.sessionId);
 
     // Build the child env: process.env + caller overrides.
     const env: Record<string, string> = {};
@@ -172,7 +170,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       cols,
       rows,
       cwd: spawnCwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
     });
 
     this.term.onData((data: string) => {

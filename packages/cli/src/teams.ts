@@ -57,6 +57,12 @@ async function bridgeRequest<T = unknown>(
     Authorization: `Bearer ${cfg.token}`,
     Accept: 'application/json',
   };
+  const capability = process.env.METABOT_TEAM_CAPABILITY;
+  const botName = process.env.METABOT_BOT_NAME;
+  const chatId = process.env.METABOT_CHAT_ID || process.env.METABOT_CHAT;
+  if (capability) headers['X-MetaBot-Team-Capability'] = capability;
+  if (botName) headers['X-MetaBot-Bot-Name'] = botName;
+  if (chatId) headers['X-MetaBot-Chat-Id'] = chatId;
   let payload: string | undefined;
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -114,6 +120,15 @@ Subcommands:
   runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
   runs output <team> <runId>
   runs stop <team> <runId>
+
+  templates list [name]
+  templates publish <name> --body <json>
+  rules list [name]
+  rules publish <name> --scope global|team-template|team-instance|project --rules <json>
+  instances list
+  instances resolve <template> [--version <n>] [--scope chat|project|global] [--scope-key <key>] [--global] [--pm-bot <bot>]
+  instances start|stop|delete <instanceId>
+  audit [--instance <instanceId>] [--limit <n>]
 `;
 }
 
@@ -210,7 +225,139 @@ export async function run(argv: string[]): Promise<void> {
     await runRuns(cfg, rest);
     return;
   }
+  if (cmd === 'templates') {
+    await runTemplates(cfg, rest);
+    return;
+  }
+  if (cmd === 'rules') {
+    await runRuleSets(cfg, rest);
+    return;
+  }
+  if (cmd === 'instances') {
+    await runInstances(cfg, rest);
+    return;
+  }
+  if (cmd === 'audit') {
+    const { flags } = parseArgs(rest);
+    const query = new URLSearchParams();
+    const instanceId = stringFlag(flags, 'instance');
+    const limit = stringFlag(flags, 'limit');
+    if (instanceId) query.set('instanceId', instanceId);
+    if (limit) query.set('limit', limit);
+    print(await bridgeRequest(cfg, 'GET', `/api/agent-team-governance/audit${query.size ? `?${query}` : ''}`));
+    return;
+  }
   throw new Error(`metabot teams: unknown subcommand '${cmd}'`);
+}
+
+function jsonFlag<T>(flags: Record<string, string | true>, name: string): T {
+  const raw = stringFlag(flags, name);
+  if (!raw) throw new Error(`--${name} <json> required`);
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(`--${name} must be valid JSON`);
+  }
+}
+
+async function runTemplates(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const { positional, flags } = parseArgs(argv.slice(1));
+  if (sub === 'list') {
+    const name = positional[0];
+    print(
+      await bridgeRequest(
+        cfg,
+        'GET',
+        `/api/agent-team-governance/templates${name ? `?name=${encodeURIComponent(name)}` : ''}`,
+      ),
+    );
+    return;
+  }
+  if (sub === 'publish') {
+    const name = positional[0];
+    if (!name) throw new Error('metabot teams templates publish: <name> required');
+    print(
+      await bridgeRequest(cfg, 'POST', '/api/agent-team-governance/templates', {
+        name,
+        body: jsonFlag(flags, 'body'),
+      }),
+    );
+    return;
+  }
+  throw new Error('metabot teams templates: expected list|publish');
+}
+
+async function runRuleSets(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const { positional, flags } = parseArgs(argv.slice(1));
+  if (sub === 'list') {
+    const name = positional[0];
+    print(
+      await bridgeRequest(
+        cfg,
+        'GET',
+        `/api/agent-team-governance/rules${name ? `?name=${encodeURIComponent(name)}` : ''}`,
+      ),
+    );
+    return;
+  }
+  if (sub === 'publish') {
+    const name = positional[0];
+    const scope = stringFlag(flags, 'scope');
+    if (!name || !scope) throw new Error('metabot teams rules publish: <name> --scope <scope> required');
+    print(
+      await bridgeRequest(cfg, 'POST', '/api/agent-team-governance/rules', {
+        name,
+        scope,
+        rules: jsonFlag(flags, 'rules'),
+      }),
+    );
+    return;
+  }
+  throw new Error('metabot teams rules: expected list|publish');
+}
+
+async function runInstances(cfg: BridgeConfig, argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const { positional, flags } = parseArgs(argv.slice(1));
+  if (sub === 'list') {
+    print(await bridgeRequest(cfg, 'GET', '/api/agent-team-governance/instances'));
+    return;
+  }
+  if (sub === 'resolve') {
+    const templateName = positional[0];
+    if (!templateName) throw new Error('metabot teams instances resolve: <template> required');
+    const version = Number(stringFlag(flags, 'version'));
+    print(
+      await bridgeRequest(cfg, 'POST', '/api/agent-team-governance/instances', {
+        templateName,
+        ...(Number.isSafeInteger(version) && version > 0 ? { templateVersion: version } : {}),
+        scopeType: stringFlag(flags, 'scope') ?? (boolFlag(flags, 'global') ? 'global' : 'chat'),
+        scopeKey: stringFlag(flags, 'scope-key'),
+        chatId: stringFlag(flags, 'chat') ?? process.env.METABOT_CHAT_ID ?? process.env.METABOT_CHAT,
+        projectId: stringFlag(flags, 'project'),
+        allowGlobal: boolFlag(flags, 'global'),
+        pmBot: stringFlag(flags, 'pm-bot'),
+      }),
+    );
+    return;
+  }
+  if (sub === 'start' || sub === 'stop' || sub === 'delete') {
+    const instanceId = positional[0];
+    if (!instanceId) throw new Error(`metabot teams instances ${sub}: <instanceId> required`);
+    const method = sub === 'delete' ? 'DELETE' : 'POST';
+    const suffix = sub === 'delete' ? '' : `/${sub}`;
+    print(
+      await bridgeRequest(
+        cfg,
+        method,
+        `/api/agent-team-governance/instances/${encodeURIComponent(instanceId)}${suffix}`,
+      ),
+    );
+    return;
+  }
+  throw new Error('metabot teams instances: expected list|resolve|start|stop|delete');
 }
 
 function unique(values: string[]): string[] {

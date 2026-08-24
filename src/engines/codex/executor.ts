@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type {
@@ -12,6 +13,7 @@ import type {
   SDKMessage,
 } from '../claude/executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import type { McpEntry } from '../mcp-entries.js';
 import {
   createCodexTranslatorState,
   translateCodexJsonEvent,
@@ -253,11 +255,13 @@ export function buildCodexEnv(
     env.OPENAI_API_KEY = explicitApiKey;
   }
 
-  return env;
+  return stripBridgeLocalAdminCredentials(env);
 }
 
 /**
- * Build the argv array for `codex exec`. Exported for unit testing.
+ * Build the argv array for `codex exec`. The complete prompt is transported
+ * through stdin; argv contains only Codex options and the documented `-`
+ * stdin marker. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
  * `extraArgs` / `profile` / `model` cannot introduce shell-injection even
  * if they contain metacharacters — but they will still be visible to the
@@ -266,10 +270,10 @@ export function buildCodexEnv(
 export function buildCodexArgs(
   codexConfig: CodexBotConfig,
   cwd: string,
-  prompt: string,
   sessionId: string | undefined,
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
+  mcpEntries: readonly McpEntry[] = [],
 ): string[] {
   const args: string[] = [];
 
@@ -286,13 +290,24 @@ export function buildCodexArgs(
   if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
   const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
   if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
+  for (const entry of mcpEntries) {
+    args.push('-c', `mcp_servers.${entry.name}.command=${tomlString(entry.command)}`);
+    args.push('-c', `mcp_servers.${entry.name}.default_tools_approval_mode=${tomlString(entry.codexToolsApprovalMode)}`);
+    if (entry.args.length > 0) {
+      args.push('-c', `mcp_servers.${entry.name}.args=[${entry.args.map(tomlString).join(',')}]`);
+    }
+    for (const [key, value] of Object.entries(entry.env).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`Invalid MCP environment key: ${key}`);
+      args.push('-c', `mcp_servers.${entry.name}.env.${key}=${tomlString(value)}`);
+    }
+  }
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
   if (sessionId) {
-    args.push('resume', '--json', '--skip-git-repo-check', sessionId, prompt);
+    args.push('resume', '--json', '--skip-git-repo-check', sessionId, '-');
   } else {
-    args.push('--json', '--color', 'never', '--skip-git-repo-check', prompt);
+    args.push('--json', '--color', 'never', '--skip-git-repo-check', '-');
   }
   return args;
 }
@@ -308,13 +323,20 @@ export class CodexExecutor {
     const codexConfig = this.config.codex ?? {};
     const model = options.model ?? codexConfig.model;
     const modelMetadata = resolveCodexModelMetadata(codexConfig, model);
-    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
+    const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext, options.rulesPack?.injectionText);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      sessionId,
+      model,
+      options.reasoningEffort,
+      options.mcpEntries,
+    );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
@@ -323,9 +345,24 @@ export class CodexExecutor {
     let stdoutBuffer = '';
     let terminalResultDelivered = false;
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    let promptTransportState: 'pending' | 'written' | 'rejected' = 'pending';
 
     const executable = resolveCodexPath(codexConfig.executable);
     this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
+
+    const acceptPromptTransport = (): void => {
+      if (promptTransportState !== 'pending') return;
+      promptTransportState = 'written';
+      options.rulesPack?.markInjected();
+    };
+
+    const rejectPromptTransport = (error: unknown): boolean => {
+      if (promptTransportState !== 'pending') return false;
+      promptTransportState = 'rejected';
+      options.rulesPack?.markRejected(error);
+      this.logger.warn({ err: error }, 'Codex prompt stdin transport failed');
+      return true;
+    };
 
     const finishWithError = (message: string): void => {
       if (terminalResultDelivered) return;
@@ -394,29 +431,65 @@ export class CodexExecutor {
     try {
       child = spawn(executable, args, {
         cwd,
-        env: buildCodexEnv(codexConfig),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildCodexEnv(codexConfig, { ...process.env, ...(options.env ?? {}) }),
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (err: any) {
+      rejectPromptTransport(err);
       finishWithError(err?.message || String(err));
       queue.finish();
     }
 
     if (child) {
-      if (abortController.signal.aborted) {
+      const promptInput = child.stdin;
+      if (!promptInput) {
+        const error = new Error('Codex stdin pipe is unavailable');
+        rejectPromptTransport(error);
+        finishWithError(error.message);
         child.kill('SIGTERM');
       } else {
-        abortController.signal.addEventListener('abort', () => child?.kill('SIGTERM'), { once: true });
+        promptInput.once('error', (error) => {
+          if (!rejectPromptTransport(error)) return;
+          finishWithError(`Failed to write Codex prompt to stdin: ${error.message}`);
+          if (child && !child.killed) child.kill('SIGTERM');
+        });
+        child.once('spawn', () => {
+          if (abortController.signal.aborted) {
+            rejectPromptTransport(new Error('Codex execution was cancelled before prompt delivery completed'));
+            promptInput.destroy();
+            if (child && !child.killed) child.kill('SIGTERM');
+            return;
+          }
+          promptInput.end(fullPrompt, (error?: Error | null) => {
+            if (error) {
+              if (!rejectPromptTransport(error)) return;
+              finishWithError(`Failed to write Codex prompt to stdin: ${error.message}`);
+              if (child && !child.killed) child.kill('SIGTERM');
+              return;
+            }
+            acceptPromptTransport();
+          });
+        });
       }
+
+      const abortExecution = () => {
+        rejectPromptTransport(new Error('Codex execution was cancelled before prompt delivery completed'));
+        child?.stdin?.destroy();
+        child?.kill('SIGTERM');
+      };
+      if (abortController.signal.aborted) abortExecution();
+      else abortController.signal.addEventListener('abort', abortExecution, { once: true });
 
       child.stdout?.on('data', processStdout);
       child.stderr?.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8');
       });
       child.on('error', (err) => {
+        rejectPromptTransport(err);
         finishWithError(err.message);
       });
       child.on('close', (code, signal) => {
+        rejectPromptTransport(new Error('Codex exited before prompt delivery completed'));
         if (exitTimer) clearTimeout(exitTimer);
         if (stdoutBuffer.trim()) {
           try {
@@ -448,6 +521,8 @@ export class CodexExecutor {
       },
       finish: () => {
         if (exitTimer) clearTimeout(exitTimer);
+        rejectPromptTransport(new Error('Codex execution finished before prompt delivery completed'));
+        child?.stdin?.destroy();
         if (child && !child.killed) child.kill('SIGTERM');
         queue.finish();
       },
@@ -469,6 +544,7 @@ export class CodexExecutor {
     prompt: string,
     outputsDir: string | undefined,
     apiContext: ApiContext | undefined,
+    rulesPackInjection?: string,
   ): string {
     const sections: string[] = [];
 
@@ -493,7 +569,10 @@ export class CodexExecutor {
       }
     }
 
-    if (sections.length === 0) return prompt;
-    return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    const userBody = sections.length === 0 ? prompt : `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
+    if (!rulesPackInjection) return userBody;
+    // Codex CLI exposes one user-channel turn. Put approved RulesPack bytes in
+    // the strongest truthful pre-user position and keep metadata out of context.
+    return `${rulesPackInjection}\n\n---\n\n${userBody}`;
   }
 }

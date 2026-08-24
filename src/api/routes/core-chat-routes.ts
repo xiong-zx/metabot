@@ -679,6 +679,7 @@ export function acceptCoreChatRun(ctx: RouteContext, request: CoreChatRunRequest
 function apiTaskResultPayload(result: ApiTaskResult): Record<string, unknown> {
   return {
     success: result.success,
+    cancelled: result.cancelled,
     responseText: result.responseText,
     sessionId: result.sessionId,
     costUsd: result.costUsd,

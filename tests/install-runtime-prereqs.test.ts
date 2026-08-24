@@ -63,4 +63,18 @@ version_at_least v23.0.0 22.19.0
       expect(source).toContain('workspace-harness.sha256');
     }
   });
+
+  it('requires a nonempty supported brand before lark-cli initialization', () => {
+    const brandFunction = extractBashFunction('is_lark_cli_brand');
+    const script = `${brandFunction}
+is_lark_cli_brand feishu
+is_lark_cli_brand lark
+! is_lark_cli_brand ''
+! is_lark_cli_brand global
+`;
+
+    expect(() => execFileSync('bash', ['-c', script])).not.toThrow();
+    expect(SH_SOURCE).toContain('if ! is_lark_cli_brand "$FEISHU_CLI_BRAND"; then');
+    expect(SH_SOURCE).toContain("lark-cli config skipped — feishuDomain must be 'feishu' or 'lark'");
+  });
 });

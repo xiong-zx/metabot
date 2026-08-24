@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Use Node.js 22.19.0
         uses: actions/setup-node@v5
@@ -19,18 +21,70 @@ jobs:
           node-version: 22.19.0
           cache: npm
 
+      # node-pty may need a source build when its prebuilt binary is absent.
+      # Reuse setup-node's local headers instead of downloading them from
+      # nodejs.org during npm ci, which makes CI sensitive to a second network
+      # endpoint and has caused intermittent ETIMEDOUT failures.
+      - name: Use setup-node headers for native builds
+        run: echo "npm_config_nodedir=$(node -p 'require(\"node:path\").dirname(require(\"node:path\").dirname(process.execPath))')" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Enforce downstream boundaries
+        run: npm run check:downstream-boundaries
+
+      - name: Enforce feature history and added-secret gates
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          npm run check:feature-history -- --base "$BASE_SHA" --head "$HEAD_SHA" --branch "$HEAD_BRANCH"
+          npm run check:added-secrets -- --base "$BASE_SHA" --head "$HEAD_SHA"
+
+      - name: Scan pushed additions for secrets
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # A force-with-lease can make github.event.before unreachable from
+          # every current ref. Fetch the exact event object or fail closed.
+          git fetch --no-tags origin "$BASE_SHA"
+          npm run check:added-secrets -- --base "$BASE_SHA" --head "$HEAD_SHA"
+
+      # Root TypeScript and adapter sources resolve workspace packages through
+      # their published dist entrypoints. Build the engine first, then the
+      # adapter, before the repository-wide no-emit check.
+      - name: Build RulesPack entrypoints
+        run: npm run build -w @metabot/rulespack -w @metabot/rulespack-adapter
+
       - name: Type check
-        run: npx tsc --noEmit
+        run: |
+          npx tsc --noEmit
+          npm run typecheck -w @xvirobotics/arc-mcp
+          npm run typecheck -w @xvirobotics/worker-runner-mcp
 
       # Workspace test suites (packages/cli, metamemory, skill-hub) import the
       # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
       # exports -> dist/). `tsc --noEmit` above does not emit, so build them
-      # before running tests or the imports fail to resolve.
-      - name: Build workspace libraries
-        run: npm run build -w @xvirobotics/cli-core -w @xvirobotics/metamemory -w @xvirobotics/skill-hub
+      # before running tests or the imports fail to resolve. Build the retained
+      # runtime packages here too so their independently shipped binaries and
+      # restart preflight are covered.
+      # The controlled-restart CLI tests run the production runtime-artifact
+      # preflight, which requires the compiled ARC and Worker Runner daemons.
+      # RulesPack's adapter also imports the engine's compiled public entry
+      # during tests.
+      - name: Build workspace libraries and restart prerequisites
+        run: >-
+          npm run build
+          -w @xvirobotics/cli-core
+          -w @xvirobotics/metamemory
+          -w @xvirobotics/skill-hub
+          -w @xvirobotics/arc-mcp
+          -w @xvirobotics/worker-runner-mcp
 
       - name: Run tests
         run: npm test

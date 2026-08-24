@@ -8,12 +8,26 @@ const repoRoot = path.resolve(import.meta.dirname, '..');
 let tempDir = '';
 let fakeBin = '';
 let callLog = '';
+let switchHelper = '';
 
 beforeEach(() => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-restart-cli-'));
   fakeBin = path.join(tempDir, 'bin');
   callLog = path.join(tempDir, 'calls.log');
+  switchHelper = path.join(tempDir, 'protected-switch.cjs');
   fs.mkdirSync(fakeBin, { recursive: true });
+  fs.writeFileSync(switchHelper, [
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "const value = (name) => args[args.indexOf(name) + 1];",
+    "const planOnly = value('--plan-only') === 'true';",
+    "fs.appendFileSync(process.env.CALL_LOG, `${planOnly ? 'protected-plan' : 'protected-switch'} ${args.join(' ')}\\n`);",
+    "if (planOnly) {",
+    "  const root = value('--runtime');",
+    "  process.stdout.write(JSON.stringify({ metabot: { cwd: root, script: require('node:path').join(root, 'src/index.ts'), interpreter: 'node', interpreterArgs: [], envHashes: {} } }) + '\\n');",
+    "} else if (process.env.FAKE_SWITCH_FAIL === 'true') process.exit(1);",
+    "else process.stdout.write(JSON.stringify({ ok: true }) + '\\n');",
+  ].join('\n'));
 });
 
 afterEach(() => {
@@ -38,7 +52,7 @@ printf '${status}'
 `);
 }
 
-function runRestart(extraArgs: string[] = []) {
+function runRestart(extraArgs: string[] = [], extraEnv: NodeJS.ProcessEnv = {}) {
   return spawnSync('bash', [path.join(repoRoot, 'bin/metabot'), 'restart', '--request-id', 'restart-cli-test', ...extraArgs], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -47,8 +61,15 @@ function runRestart(extraArgs: string[] = []) {
       PATH: `${fakeBin}:${process.env.PATH}`,
       METABOT_HOME: repoRoot,
       SESSION_STORE_DIR: path.join(tempDir, 'state'),
+      METABOT_PROTECTED_SWITCH_HELPER: switchHelper,
+      METABOT_RESTART_REQUEST_ID: '',
+      METABOT_BOT_NAME: '',
+      METABOT_CHAT_ID: '',
+      METABOT_CHAT: '',
+      METABOT_TEAM_CAPABILITY: '',
       CALL_LOG: callLog,
       NO_COLOR: '1',
+      ...extraEnv,
     },
   });
 }
@@ -56,14 +77,19 @@ function runRestart(extraArgs: string[] = []) {
 describe('metabot controlled restart CLI', () => {
   it('prepares the Bridge before writing the breadcrumb and invoking PM2', () => {
     installCurl(200);
-    writeExecutable('pm2', 'printf \'pm2 %s\\n\' "$*" >> "$CALL_LOG"');
+    writeExecutable('pm2', `
+printf 'pm2 %s\\n' "$*" >> "$CALL_LOG"
+if [[ "\${1:-}" == "jlist" ]]; then
+  printf '[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}}]\\n' "$METABOT_HOME" "$METABOT_HOME"
+fi
+`);
 
     const result = runRestart(['--bot', 'admin', '--chat', 'oc_test', '--reason', 'test restart']);
 
     expect(result.status).toBe(0);
     const calls = fs.readFileSync(callLog, 'utf8');
     expect(calls).toContain('/api/runtime/restart/prepare');
-    expect(calls).toContain('pm2 restart metabot');
+    expect(calls).toContain('protected-switch');
     const breadcrumb = JSON.parse(fs.readFileSync(path.join(tempDir, 'state', 'last-restart.json'), 'utf8'));
     expect(breadcrumb).toMatchObject({
       requestId: 'restart-cli-test',
@@ -76,20 +102,30 @@ describe('metabot controlled restart CLI', () => {
 
   it('refuses to restart when prepare is rejected', () => {
     installCurl(409);
-    writeExecutable('pm2', 'printf \'pm2 %s\\n\' "$*" >> "$CALL_LOG"');
+    writeExecutable('pm2', `
+printf 'pm2 %s\\n' "$*" >> "$CALL_LOG"
+if [[ "\${1:-}" == "jlist" ]]; then
+  printf '[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}}]\\n' "$METABOT_HOME" "$METABOT_HOME"
+fi
+`);
 
     const result = runRestart();
 
     expect(result.status).not.toBe(0);
-    expect(fs.readFileSync(callLog, 'utf8')).not.toContain('pm2 restart');
+    expect(fs.readFileSync(callLog, 'utf8')).not.toContain('protected-switch');
     expect(fs.existsSync(path.join(tempDir, 'state', 'last-restart.json'))).toBe(false);
   });
 
   it('cancels quiesce and removes the breadcrumb when PM2 rejects the restart', () => {
     installCurl(200);
-    writeExecutable('pm2', 'printf \'pm2 %s\\n\' "$*" >> "$CALL_LOG"; exit 1');
+    writeExecutable('pm2', `
+printf 'pm2 %s\\n' "$*" >> "$CALL_LOG"
+if [[ "\${1:-}" == "jlist" ]]; then
+  printf '[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}}]\\n' "$METABOT_HOME" "$METABOT_HOME"
+fi
+`);
 
-    const result = runRestart();
+    const result = runRestart([], { FAKE_SWITCH_FAIL: 'true' });
 
     expect(result.status).not.toBe(0);
     const calls = fs.readFileSync(callLog, 'utf8');

@@ -6,15 +6,19 @@
   "main": "dist/index.js",
   "type": "module",
   "workspaces": [
+    "packages/arc-mcp",
+    "packages/rulespack",
+    "packages/rulespack-adapter",
     "packages/cli",
     "packages/cli-core",
     "packages/metamemory",
     "packages/skill-hub",
+    "packages/worker-runner-mcp",
     "packages/server",
     "packages/web-ui"
   ],
   "scripts": {
-    "build": "tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
+    "build": "npm run build -w @metabot/rulespack -w @metabot/rulespack-adapter && tsc -b --force && npm run build -w @xvirobotics/metabot-core-web-ui && npm run pack:standalone -w @xvirobotics/cli && npm run pack:metabot -w @xvirobotics/metabot-core-server",
     "build:bridge": "tsc -p tsconfig.bridge.json",
     "build:packages": "npm run build --workspaces --if-present",
     "start": "node dist/index.js",
@@ -22,6 +26,10 @@
     "test": "vitest run && npm run test --workspaces --if-present",
     "test:bridge": "vitest run",
     "test:packages": "npm run test --workspaces --if-present",
+    "check:downstream-boundaries": "node scripts/check-downstream-boundaries.mjs",
+    "check:downstream-boundaries:release": "node scripts/check-downstream-boundaries.mjs --release",
+    "check:added-secrets": "node scripts/check-added-secrets.mjs",
+    "check:feature-history": "node scripts/check-feature-history.mjs",
     "lint": "eslint src/ tests/ && npm run lint --workspaces --if-present",
     "lint:fix": "eslint src/ tests/ --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
@@ -30,6 +38,8 @@
     "update-cli": "cp bin/metabot ~/.local/bin/metabot && chmod +x ~/.local/bin/metabot && echo \"Updated: metabot\" && rm -f ~/.local/bin/mb ~/.local/bin/mm ~/.local/bin/mh"
   },
   "dependencies": {
+    "@metabot/rulespack": "*",
+    "@metabot/rulespack-adapter": "*",
     "@anthropic-ai/claude-agent-sdk": "^0.3.154",
     "@anthropic-ai/sdk": "^0.100.0",
     "@larksuiteoapi/node-sdk": "^1.64.0",
@@ -48,6 +58,7 @@
     "openai": "^6.29.0",
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0",
+    "tsx": "^4.21.0",
     "undici": "^7.28.0",
     "ws": "^8.21.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
@@ -58,7 +69,6 @@
     "@types/node": "^22.0.0",
     "eslint": "^10.0.2",
     "prettier": "^3.8.1",
-    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "vitest": "^3.2.4"

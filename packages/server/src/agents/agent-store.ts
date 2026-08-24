@@ -15,6 +15,9 @@ export interface AgentRecord {
    * `--path` / `--folder` still wins. ACL itself is unchanged (path-based).
    */
   memoryPublic: boolean;
+  rulesPackStatus?: AgentRulesPackStatus;
+  /** Core-stamped identity from the authenticated owner credential. */
+  rulesPackIdentity?: AgentRulesPackIdentity;
   ownerCredentialId: string;
   /**
    * Snapshot of the owning credential's `ownerName` at register time. Used by
@@ -36,11 +39,29 @@ export interface AgentRecord {
   lastSeenAt: string;
 }
 
+export interface AgentRulesPackStatus {
+  state: 'inherited' | 'overridden' | 'opted-out' | 'unconfigured' | 'unsupported';
+  required: boolean;
+  mode?: 'off' | 'shadow' | 'enforce';
+  operatorModeVersion?: number;
+  operatorModeOperationId?: string;
+  defaultProjectId?: string | null;
+  projectChatAttestations?: Array<{ subjectKey: string; projectId: string }>;
+  optOutReason?: string;
+}
+
+export interface AgentRulesPackIdentity {
+  hostId: string;
+  audience: string;
+}
+
 export interface RegisterInput {
   botName: string;
   url: string;
   visible?: boolean;
   memoryPublic?: boolean;
+  rulesPackStatus?: AgentRulesPackStatus;
+  rulesPackIdentity?: AgentRulesPackIdentity;
   ownerCredentialId: string;
   /**
    * Snapshot of the caller's `cred.ownerName`. Optional in the unit-test
@@ -69,6 +90,13 @@ export class AgentNotFoundError extends Error {
   constructor(botName: string) {
     super(`agent '${botName}' not registered`);
     this.name = 'AgentNotFoundError';
+  }
+}
+
+export class RulesPackStatusConflictError extends Error {
+  constructor(botName: string) {
+    super(`RulesPack status for '${botName}' is stale or conflicts with the current mode generation`);
+    this.name = 'RulesPackStatusConflictError';
   }
 }
 
@@ -142,6 +170,15 @@ export class AgentStore {
     if (!cols.some((c) => c.name === 'visible_to_owners')) {
       this.db.exec(`ALTER TABLE agents ADD COLUMN visible_to_owners TEXT NOT NULL DEFAULT '[]'`);
     }
+    if (!cols.some((c) => c.name === 'rulespack_status')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN rulespack_status TEXT`);
+    }
+    if (!cols.some((c) => c.name === 'rulespack_host_id')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN rulespack_host_id TEXT`);
+    }
+    if (!cols.some((c) => c.name === 'rulespack_audience')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN rulespack_audience TEXT`);
+    }
   }
 
   register(input: RegisterInput): AgentRecord {
@@ -149,9 +186,18 @@ export class AgentStore {
     const visible = input.visible !== false;
 
     const existing = this.db.prepare(
-      'SELECT id, owner_credential_id, memory_public FROM agents WHERE bot_name = ?',
+      `SELECT id, owner_credential_id, memory_public, rulespack_status,
+              rulespack_host_id, rulespack_audience
+         FROM agents WHERE bot_name = ?`,
     ).get(input.botName) as
-      | { id: string; owner_credential_id: string; memory_public: 0 | 1 }
+      | {
+          id: string;
+          owner_credential_id: string;
+          memory_public: 0 | 1;
+          rulespack_status: string | null;
+          rulespack_host_id: string | null;
+          rulespack_audience: string | null;
+        }
       | undefined;
 
     if (existing) {
@@ -165,15 +211,34 @@ export class AgentStore {
       const memoryPublic = input.memoryPublic === undefined
         ? existing.memory_public === 1
         : input.memoryPublic === true;
+      const rulesPackIdentity = input.rulesPackIdentity ?? (
+        existing.rulespack_host_id && existing.rulespack_audience
+          ? { hostId: existing.rulespack_host_id, audience: existing.rulespack_audience }
+          : undefined
+      );
+      const rulesPackStatus = resolveRulesPackStatusUpdate(
+        input.botName,
+        parseRulesPackStatus(existing.rulespack_status),
+        input.rulesPackStatus,
+      );
       // ownerName re-sync on every register so a credential rotation that
       // preserves ownerCredentialId but changes ownerName keeps the row
       // accurate. Owner-bypass reads owner_name directly.
       this.db.prepare(`
         UPDATE agents SET
-          url = ?, visible = ?, memory_public = ?, owner_name = ?, last_seen_at = ?
+          url = ?, visible = ?, memory_public = ?, rulespack_status = ?,
+          rulespack_host_id = ?, rulespack_audience = ?, owner_name = ?, last_seen_at = ?
         WHERE bot_name = ?
       `).run(
-        input.url, visible ? 1 : 0, memoryPublic ? 1 : 0, input.ownerName ?? '', now, input.botName,
+        input.url,
+        visible ? 1 : 0,
+        memoryPublic ? 1 : 0,
+        rulesPackStatus ? JSON.stringify(rulesPackStatus) : null,
+        rulesPackIdentity?.hostId ?? null,
+        rulesPackIdentity?.audience ?? null,
+        input.ownerName ?? '',
+        now,
+        input.botName,
       );
       this.logger.info({ botName: input.botName }, 'agent re-registered');
       return this.getByName(input.botName)!;
@@ -182,15 +247,31 @@ export class AgentStore {
     const id = crypto.randomUUID();
     const memoryPublic = input.memoryPublic !== false;
     this.db.prepare(`
-      INSERT INTO agents (id, bot_name, url, talk_secret, visible, memory_public,
-        owner_credential_id, owner_name, registered_at, last_seen_at)
-      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, bot_name, url, talk_secret, visible, memory_public, rulespack_status,
+        rulespack_host_id, rulespack_audience, owner_credential_id, owner_name, registered_at, last_seen_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.botName, input.url, visible ? 1 : 0, memoryPublic ? 1 : 0,
+      input.rulesPackStatus ? JSON.stringify(input.rulesPackStatus) : null,
+      input.rulesPackIdentity?.hostId ?? null,
+      input.rulesPackIdentity?.audience ?? null,
       input.ownerCredentialId, input.ownerName ?? '', now, now,
     );
     this.logger.info({ botName: input.botName, id }, 'agent registered');
     return this.getByName(input.botName)!;
+  }
+
+  /** Stamp every existing bot owned by a newly TOFU-bound credential. */
+  stampRulesPackIdentityForOwner(
+    ownerCredentialId: string,
+    identity: AgentRulesPackIdentity,
+  ): number {
+    const result = this.db.prepare(`
+      UPDATE agents
+         SET rulespack_host_id = ?, rulespack_audience = ?
+       WHERE owner_credential_id = ?
+    `).run(identity.hostId, identity.audience, ownerCredentialId);
+    return result.changes as number;
   }
 
   heartbeat(botName: string, ownerCredentialId: string): string {
@@ -320,6 +401,9 @@ interface RawAgentRow {
   talk_secret: string | null;
   visible: 0 | 1;
   memory_public: 0 | 1;
+  rulespack_status: string | null;
+  rulespack_host_id: string | null;
+  rulespack_audience: string | null;
   owner_credential_id: string;
   owner_name: string | null;
   visible_to_owners: string | null;
@@ -334,12 +418,46 @@ function rowToRecord(row: RawAgentRow): AgentRecord {
     url: row.url,
     visible: row.visible === 1,
     memoryPublic: row.memory_public === 1,
+    ...(parseRulesPackStatus(row.rulespack_status) ? { rulesPackStatus: parseRulesPackStatus(row.rulespack_status)! } : {}),
+    ...(row.rulespack_host_id && row.rulespack_audience
+      ? { rulesPackIdentity: { hostId: row.rulespack_host_id, audience: row.rulespack_audience } }
+      : {}),
     ownerCredentialId: row.owner_credential_id,
     ownerName: row.owner_name || '',
     visibleToOwners: parseOwnerList(row.visible_to_owners),
     registeredAt: row.registered_at,
     lastSeenAt: row.last_seen_at,
   };
+}
+
+function parseRulesPackStatus(raw: string | null): AgentRulesPackStatus | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as AgentRulesPackStatus;
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveRulesPackStatusUpdate(
+  botName: string,
+  current: AgentRulesPackStatus | undefined,
+  incoming: AgentRulesPackStatus | undefined,
+): AgentRulesPackStatus | undefined {
+  const currentVersion = current?.operatorModeVersion;
+  if (currentVersion === undefined) return incoming;
+  const incomingVersion = incoming?.operatorModeVersion;
+  if (incomingVersion === undefined) return current;
+  if (incomingVersion < currentVersion) throw new RulesPackStatusConflictError(botName);
+  if (incomingVersion > currentVersion) return incoming;
+  if (
+    current?.operatorModeOperationId !== incoming?.operatorModeOperationId ||
+    current?.mode !== incoming?.mode
+  ) {
+    throw new RulesPackStatusConflictError(botName);
+  }
+  return { ...current!, ...incoming! };
 }
 
 function parseOwnerList(raw: string | null): string[] {

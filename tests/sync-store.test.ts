@@ -45,6 +45,46 @@ describe('SyncStore', () => {
     expect(store.getWikiSpaceId()).toBe('space_123');
   });
 
+  it('binds empty state to a Wiki Space, root, and Memory source', () => {
+    setup();
+    store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: 'root_imac', sourceRoot: '/imac' });
+    expect(store.getWikiSpaceId()).toBe('space_123');
+    expect(store.getRootNodeToken()).toBe('root_imac');
+    expect(store.getSourceRoot()).toBe('/imac');
+  });
+
+  it('refuses to rebind populated state to another root', () => {
+    setup();
+    store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: 'root_imac', sourceRoot: '/imac' });
+    store.upsertFolderMapping({ memoryFolderId: 'f1', memoryPath: '/a', feishuNodeToken: 'n1' });
+    expect(() => store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: 'root_savio', sourceRoot: '/imac' }))
+      .toThrow('use a new WIKI_SYNC_STATE_DIR');
+    expect(store.getRootNodeToken()).toBe('root_imac');
+  });
+
+  it('refuses to reuse populated state for another Memory source', () => {
+    setup();
+    store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: 'root_host', sourceRoot: '/imac' });
+    store.upsertFolderMapping({ memoryFolderId: 'f1', memoryPath: '/imac/a', feishuNodeToken: 'n1' });
+
+    expect(() => store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: 'root_host', sourceRoot: '/savio' }))
+      .toThrow('state is bound to Memory source /imac');
+    expect(store.getSourceRoot()).toBe('/imac');
+  });
+
+  it('treats populated legacy state without a root token as Space-root state', () => {
+    setup();
+    store.setWikiSpaceId('space_123');
+    store.upsertDocMapping({
+      memoryDocId: 'legacy', memoryPath: '/legacy', feishuNodeToken: 'n1',
+      feishuDocId: 'd1', contentHash: '11', syncedAt: '2024-01-01',
+    });
+
+    expect(() => store.bindTarget({ wikiSpaceId: 'space_123', rootNodeToken: '', sourceRoot: '/' })).not.toThrow();
+    expect(store.getRootNodeToken()).toBe('');
+    expect(store.getSourceRoot()).toBe('/');
+  });
+
   // --- Document mappings ---
 
   it('upserts and retrieves document mapping by ID', () => {

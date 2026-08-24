@@ -75,6 +75,7 @@ plugins:
             - 产品:
                 - Core Console: features/web-ui.md
                 - 多 Bot 与引擎: configuration/multi-bot.md
+                - Lark 域名迁移: configuration/lark-domain-migration.md
                 - MetaMemory: features/metamemory.md
                 - MetaSkill: features/metaskill.md
                 - Agent 团队: features/agent-teams.md
@@ -113,6 +114,7 @@ nav:
   - Product:
       - Core Console: features/web-ui.md
       - Multi-Bot and Engines: configuration/multi-bot.md
+      - Lark Domain Migration: configuration/lark-domain-migration.md
       - MetaMemory: features/metamemory.md
       - MetaSkill: features/metaskill.md
       - Agent Teams: features/agent-teams.md
@@ -128,4 +130,5 @@ nav:
       - Architecture: concepts/architecture.md
       - Security: concepts/security.md
       - Production: deployment/production.md
+      - Downstream fork workflow: development/downstream-fork-workflow.md
       - Contributing: development/contributing.md

@@ -209,6 +209,77 @@ describe('AgentStore', () => {
     expect(priv.memoryPublic).toBe(false);
   });
 
+  it('persists RulesPack adoption status and clears stale claims from legacy re-registration', () => {
+    const status = {
+      state: 'inherited' as const,
+      required: true,
+      mode: 'enforce' as const,
+      defaultProjectId: 'project-a',
+    };
+    const first = store.register({
+      botName: 'policy-bot', url: 'http://x', ownerCredentialId: 'c', rulesPackStatus: status,
+    });
+    expect(first.rulesPackStatus).toEqual(status);
+    const legacy = store.register({ botName: 'policy-bot', url: 'http://y', ownerCredentialId: 'c' });
+    expect(legacy.rulesPackStatus).toBeUndefined();
+  });
+
+  it('persists and stamps one Core-authenticated RulesPack identity across owned bots', () => {
+    store.register({ botName: 'alpha', url: 'inbox:', ownerCredentialId: 'bridge' });
+    store.register({ botName: 'beta', url: 'inbox:', ownerCredentialId: 'bridge' });
+    store.register({ botName: 'other', url: 'inbox:', ownerCredentialId: 'other' });
+    const identity = { hostId: 'imac', audience: 'metabot-host:imac' };
+    expect(store.stampRulesPackIdentityForOwner('bridge', identity)).toBe(2);
+    expect(store.getByName('alpha')?.rulesPackIdentity).toEqual(identity);
+    expect(store.getByName('beta')?.rulesPackIdentity).toEqual(identity);
+    expect(store.getByName('other')?.rulesPackIdentity).toBeUndefined();
+
+    const created = store.register({
+      botName: 'gamma', url: 'inbox:', ownerCredentialId: 'bridge', rulesPackIdentity: identity,
+    });
+    expect(created.rulesPackIdentity).toEqual(identity);
+    expect(store.register({ botName: 'gamma', url: 'inbox:', ownerCredentialId: 'bridge' }).rulesPackIdentity)
+      .toEqual(identity);
+  });
+
+  it('fences versioned RulesPack mode publication against stale or conflicting updates', () => {
+    const first = {
+      state: 'inherited' as const,
+      required: true,
+      mode: 'shadow' as const,
+      operatorModeVersion: 1,
+      operatorModeOperationId: 'operation-1',
+    };
+    store.register({
+      botName: 'policy-bot', url: 'http://x', ownerCredentialId: 'c', rulesPackStatus: first,
+    });
+    expect(() => store.register({
+      botName: 'policy-bot', url: 'http://x', ownerCredentialId: 'c',
+      rulesPackStatus: { ...first, mode: 'off', operatorModeVersion: 0, operatorModeOperationId: undefined },
+    })).toThrow('stale or conflicts');
+    expect(() => store.register({
+      botName: 'policy-bot', url: 'http://x', ownerCredentialId: 'c',
+      rulesPackStatus: { ...first, operatorModeOperationId: 'different-operation' },
+    })).toThrow('stale or conflicts');
+
+    const unversioned = store.register({ botName: 'policy-bot', url: 'http://y', ownerCredentialId: 'c' });
+    expect(unversioned.rulesPackStatus).toEqual(first);
+    const idempotent = store.register({
+      botName: 'policy-bot', url: 'http://z', ownerCredentialId: 'c',
+      rulesPackStatus: { ...first, defaultProjectId: 'metabot' },
+    });
+    expect(idempotent.rulesPackStatus?.defaultProjectId).toBe('metabot');
+    const next = store.register({
+      botName: 'policy-bot', url: 'http://z', ownerCredentialId: 'c',
+      rulesPackStatus: {
+        ...first, mode: 'enforce', operatorModeVersion: 2, operatorModeOperationId: 'operation-2',
+      },
+    });
+    expect(next.rulesPackStatus).toMatchObject({
+      mode: 'enforce', operatorModeVersion: 2, operatorModeOperationId: 'operation-2',
+    });
+  });
+
   it('re-register WITHOUT memoryPublic preserves the existing value (runtime toggle stickiness)', () => {
     store.register({ botName: 'a', url: 'http://x', ownerCredentialId: 'c' });
     store.setMemoryPublic('a', false);

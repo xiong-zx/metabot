@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { OutputHandler } from '../src/bridge/output-handler.js';
 import { OutputsManager } from '../src/bridge/outputs-manager.js';
+import { ArtifactDeliveryPublisher } from '../src/extensions/artifact-delivery.js';
 import type { CardState } from '../src/types.js';
 
 /**
@@ -102,6 +103,25 @@ describe('OutputHandler.sendOutputFiles', () => {
     const { sender, sends, notices } = buildSender();
     await new OutputHandler(mockLogger, sender, outputs).sendOutputFiles('chat-1', chatDir, mockProcessor, emptyState());
     expect(sends).toEqual([expect.objectContaining({ type: 'file', fileName: 'report.pdf' })]);
+    expect(notices).toHaveLength(0);
+  });
+
+  it('archives a configured project output before sending without an extra success notice', async () => {
+    const name = 'aam_report-tech_sync-design_20260821_v01.pdf';
+    const source = path.join(chatDir, name);
+    fs.writeFileSync(source, Buffer.from('durable'));
+    const projectRoot = path.join(tmpDir, 'aam');
+    fs.mkdirSync(projectRoot);
+    const publisher = new ArtifactDeliveryPublisher({
+      mode: 'enforce', projects: [{ projectId: 'aam', root: projectRoot, chatIds: ['chat-1'] }],
+    }, mockLogger);
+    const { sender, sends, notices } = buildSender();
+    await new OutputHandler(mockLogger, sender, outputs, publisher)
+      .sendOutputFiles('chat-1', chatDir, mockProcessor, emptyState());
+    const permanent = path.join(fs.realpathSync(projectRoot), 'deliverables', name);
+    expect(sends).toEqual([expect.objectContaining({ type: 'file', filePath: permanent, fileName: name })]);
+    expect(fs.existsSync(source)).toBe(false);
+    expect(fs.readFileSync(permanent, 'utf8')).toBe('durable');
     expect(notices).toHaveLength(0);
   });
 

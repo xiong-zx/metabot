@@ -6,10 +6,12 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
 import type { CodexReasoningEffort } from '../../config.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import type { ApiContext } from '../prompt-context.js';
+import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 
 export type { ApiContext } from '../prompt-context.js';
@@ -153,7 +155,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
 
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
       signal: options.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -263,6 +265,16 @@ export interface ExecutorOptions {
   allowedTools?: string[];
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
+  /** Short-lived bridge-issued environment values scoped to this engine session. */
+  env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
+  /** Prepared only by MessageBridge's authenticated Codex turn boundary. */
+  rulesPack?: {
+    injectionText: string;
+    markInjected(): void;
+    markRejected(reason: unknown): void;
+  };
 }
 
 export type SDKMessage = {
@@ -309,6 +321,14 @@ export type SDKMessage = {
 
 export interface ExecutionHandle {
   stream: AsyncGenerator<SDKMessage>;
+  /** Present only for an authenticated received RulesPack envelope. */
+  rulesPackDelivery?: () => {
+    status: 'consumed';
+    envelopeId: string;
+    replayId: string;
+    packDigest: string;
+    effectivePackDigest: string;
+  } | undefined;
   sendAnswer(toolUseId: string, sessionId: string, answerText: string): void;
   /**
    * Resolve a pending AskUserQuestion PreToolUse hook with the user's answers.
@@ -326,7 +346,15 @@ export class ClaudeExecutor {
     private logger: Logger,
   ) {}
 
-  private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
+  private buildQueryOptions(
+    cwd: string,
+    sessionId: string | undefined,
+    abortController: AbortController,
+    outputsDir?: string,
+    apiContext?: ApiContext,
+    env?: Record<string, string>,
+    mcpEntries?: readonly McpEntry[],
+  ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
       permissionMode: isRoot ? 'auto' : ('bypassPermissions' as const),
@@ -352,6 +380,8 @@ export class ClaudeExecutor {
       // forwards task events into the card's "Background" panel, so enabling
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
+      ...(env ? { env } : {}),
+      ...(mcpEntries?.length ? { mcpServers: toSdkMcpServers(mcpEntries) } : {}),
     };
 
     // Build system prompt appendix from sections
@@ -445,7 +475,15 @@ export class ClaudeExecutor {
     };
     inputQueue.enqueue(initialMessage);
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir, apiContext);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      apiContext,
+      options.env,
+      options.mcpEntries,
+    );
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }
@@ -659,7 +697,14 @@ export class ClaudeExecutor {
 
     this.logger.info({ cwd, hasSession: !!sessionId }, 'Starting Claude execution');
 
-    const queryOptions = this.buildQueryOptions(cwd, sessionId, abortController, outputsDir);
+    const queryOptions = this.buildQueryOptions(
+      cwd,
+      sessionId,
+      abortController,
+      outputsDir,
+      options.apiContext,
+      options.env,
+    );
 
     const stream = query({
       prompt,

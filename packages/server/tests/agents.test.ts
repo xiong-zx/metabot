@@ -572,4 +572,144 @@ describe('/api/agents — routes + audit (token-auth era)', () => {
     );
     expect(alpha2?.memoryPublic).toBe(false);
   });
+
+  it('bulk-register publishes validated RulesPack adoption status', async () => {
+    kit = await startTestServer('agents-bulk-rulespack-status');
+    const token = await issueMember(kit, 'bridge-cred');
+    const accepted = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+      bots: [{
+        botName: 'rules-bot',
+        url: 'inbox:',
+        rulesPackStatus: {
+          state: 'inherited', required: true, mode: 'shadow', defaultProjectId: 'project-a',
+          projectChatAttestations: [{
+            subjectKey: `sha256:${'a'.repeat(64)}`,
+            projectId: 'project-chat',
+          }],
+        },
+      }],
+    });
+    expect(accepted.status).toBe(200);
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    const bot = (list.body.agents as Array<{ botName: string; rulesPackStatus?: unknown }>).find(
+      (agent) => agent.botName === 'rules-bot',
+    );
+    expect(bot?.rulesPackStatus).toEqual({
+      state: 'inherited', required: true, mode: 'shadow', defaultProjectId: 'project-a',
+      projectChatAttestations: [{
+        subjectKey: `sha256:${'a'.repeat(64)}`,
+        projectId: 'project-chat',
+      }],
+    });
+    expect((bot as any)?.rulesPackIdentity).toEqual({ hostId: 'imac', audience: 'metabot-host:imac' });
+    const whoami = await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    expect(whoami.body.rulesPackIdentity).toEqual({ hostId: 'imac', audience: 'metabot-host:imac' });
+
+    const rejected = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{ botName: 'bad-rules-bot', url: 'inbox:', rulesPackStatus: { state: 'pretend', required: true } }],
+    });
+    expect(rejected.body.results[0]).toMatchObject({ status: 400, error: 'rulespack_status_invalid' });
+    const invalidProject = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{
+        botName: 'bad-project-bot',
+        url: 'inbox:',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'enforce', defaultProjectId: '' },
+      }],
+    });
+    expect(invalidProject.body.results[0]).toMatchObject({ status: 400, error: 'rulespack_status_invalid' });
+    const invalidAttestations = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{
+        botName: 'bad-attestation-bot',
+        url: 'inbox:',
+        rulesPackStatus: {
+          state: 'inherited', required: true, mode: 'enforce', defaultProjectId: null,
+          projectChatAttestations: [
+            { subjectKey: `sha256:${'b'.repeat(64)}`, projectId: 'project-a' },
+            { subjectKey: `sha256:${'b'.repeat(64)}`, projectId: 'project-b' },
+          ],
+        },
+      }],
+    });
+    expect(invalidAttestations.body.results[0]).toMatchObject({ status: 400, error: 'rulespack_status_invalid' });
+
+    const versioned = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{
+        botName: 'rules-bot', url: 'inbox:',
+        rulesPackStatus: {
+          state: 'inherited', required: true, mode: 'enforce',
+          operatorModeVersion: 2, operatorModeOperationId: 'operation-2',
+        },
+      }],
+    });
+    expect(versioned.body.results[0]).toMatchObject({ status: 201 });
+    const stale = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{
+        botName: 'rules-bot', url: 'inbox:',
+        rulesPackStatus: {
+          state: 'inherited', required: true, mode: 'shadow',
+          operatorModeVersion: 1, operatorModeOperationId: 'operation-1',
+        },
+      }],
+    });
+    expect(stale.body.results[0]).toMatchObject({ status: 409, error: 'rulespack_status_stale' });
+    const missingOperation = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{
+        botName: 'new-rules-bot', url: 'inbox:',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'shadow', operatorModeVersion: 1 },
+      }],
+    });
+    expect(missingOperation.body.results[0]).toMatchObject({ status: 400, error: 'rulespack_status_invalid' });
+  });
+
+  it('TOFU-binds one credential identity, stamps all owned bots, and rejects later mismatch', async () => {
+    kit = await startTestServer('agents-rulespack-identity-tofu');
+    const token = await issueMember(kit, 'bridge-cred');
+    await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{ botName: 'legacy-off', url: 'inbox:', rulesPackStatus: {
+        state: 'overridden', required: false, mode: 'off',
+      } }],
+    });
+
+    const identity = { hostId: 'savio', audience: 'metabot-host:savio' };
+    const bound = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      rulesPackIdentity: identity,
+      bots: [{ botName: 'active-pm', url: 'inbox:', rulesPackStatus: {
+        state: 'inherited', required: true, mode: 'enforce', defaultProjectId: null,
+      } }],
+    });
+    expect(bound.status).toBe(200);
+    expect(bound.body.results[0]).toMatchObject({ botName: 'active-pm', status: 201, rulesPackIdentity: identity });
+    const listed = await call(kit.baseUrl, 'GET', '/api/agents', token);
+    for (const bot of listed.body.agents as Array<Record<string, unknown>>) {
+      expect(bot.rulesPackIdentity).toEqual(identity);
+    }
+
+    const mismatch = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      rulesPackIdentity: { hostId: 'imac', audience: 'metabot-host:imac' },
+      bots: [{ botName: 'active-pm', url: 'inbox:' }],
+    });
+    expect(mismatch).toMatchObject({ status: 409, body: { error: 'rulespack_identity_mismatch' } });
+    const after = await call(kit.baseUrl, 'GET', '/api/whoami', token);
+    expect(after.body.rulesPackIdentity).toEqual(identity);
+  });
+
+  it('fails active RulesPack registration closed without identity but preserves legacy off registration', async () => {
+    kit = await startTestServer('agents-rulespack-identity-required');
+    const token = await issueMember(kit, 'bridge-cred');
+    const active = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{ botName: 'active', url: 'inbox:', rulesPackStatus: {
+        state: 'inherited', required: true, mode: 'shadow',
+      } }],
+    });
+    expect(active).toMatchObject({ status: 409, body: { error: 'rulespack_identity_required' } });
+
+    const off = await call(kit.baseUrl, 'POST', '/api/agents/bulk', token, {
+      bots: [{ botName: 'off', url: 'inbox:', rulesPackStatus: {
+        state: 'overridden', required: false, mode: 'off',
+      } }],
+    });
+    expect(off.status).toBe(200);
+    expect(off.body.results[0]).toEqual({ botName: 'off', status: 201 });
+  });
 });

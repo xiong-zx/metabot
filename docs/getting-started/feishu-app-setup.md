@@ -35,6 +35,9 @@ Step-by-step procedure to configure a Feishu bot for MetaBot.
     - **`im:chat:readonly`** — Read chat info (needed for 2-member group detection)
 4. Click **"Add Scopes"**
 
+!!! note "Reply context requires message read access"
+    The **`im:message:readonly`** scope lets MetaBot retrieve the exact parent selected by Feishu/Lark's **Reply** action. In mention-only groups, an unmentioned message or attachment does not enter model context by itself; reply to that message and @mention the intended bot. MetaBot supports replied text, rich-text posts, images, files, and interactive cards. Same-chat card text is preserved regardless of author, cross-chat references are rejected, and extracted text is capped at 16,000 characters. A later bare mention does not attach unrelated cached media. Grant the same scope on Lark apps configured with `feishuDomain: "lark"`.
+
 !!! note "Optional permissions for advanced features"
     For wiki sync and document reading, also add:
 

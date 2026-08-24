@@ -1,6 +1,5 @@
 import * as https from 'node:https';
 import * as path from 'node:path';
-import { once } from 'node:events';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
 import { createLogger, type Logger } from './utils/logger.js';
@@ -9,8 +8,10 @@ import { FeishuGroupReplyModeStore } from './feishu/group-reply-mode-store.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
 import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
+import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-factory.js';
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
+import { finalizeControlledRestartAfterStartup } from './bridge/restart-recovery.js';
 import { recoverControlledRestartAfterStartup } from './bridge/restart-coordinator.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
@@ -22,10 +23,16 @@ import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
-import { DocSync } from './sync/doc-sync.js';
+import { createWikiSyncRuntime } from './sync/wiki-sync-runtime.js';
 import { MemoryClient } from './memory/memory-client.js';
-
+import {
+  MemoryIndexAutomation,
+  parseMemoryIndexAutomationMode,
+  shouldInitializeMemoryIndexAutomation,
+} from './memory/index-automation.js';
 import { SessionRegistry } from './session/session-registry.js';
+import { sweepExpiredCapabilityFiles } from './engines/mcp-materialize.js';
+import { assertDistinctMcpServers } from './services/mcp-registry.js';
 
 interface FeishuBotHandle {
   name: string;
@@ -34,6 +41,21 @@ interface FeishuBotHandle {
   config: BotConfigBase;
   sender: IMessageSender;
   feishuClient: lark.Client;
+}
+
+function envPositiveInt(name: string, defaultValue: number, logger: Logger): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn({ name, value: raw, defaultValue }, 'Invalid positive integer env value; using default');
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function envExplicitTrue(name: string): boolean {
+  return process.env[name]?.trim().toLowerCase() === 'true';
 }
 
 /**
@@ -81,7 +103,7 @@ async function startFeishuBot(
   botLogger.info('Starting Feishu bot...');
 
   // Create Feishu API client
-  const client = new lark.Client({
+  const client = createFeishuRestClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     disableTokenCache: false,
@@ -133,7 +155,7 @@ async function startFeishuBot(
 
   // Create WebSocket client with bounded liveness/reconnect controls.
   const wsRecovery = resolveFeishuWsRecoveryOptions();
-  const wsClient = new lark.WSClient({
+  const wsClient = createFeishuWsClient(botConfig.feishu.domain, {
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     loggerLevel: lark.LoggerLevel.info,
@@ -229,9 +251,9 @@ async function main() {
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
 
-  // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
-  // so the first turn in each chat after a restart can be reminded not to
-  // restart again. Must run before any message can be handled.
+  // Load but retain the restart breadcrumb. The new process clears it only
+  // after startup health, PM2 persistence, reporting, and continuation
+  // ownership have all reached a durable decision.
   loadRestartBreadcrumb();
 
   const feishuCount = appConfig.feishuBots.length;
@@ -242,6 +264,21 @@ async function main() {
     { feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount, slackBots: slackCount },
     'Starting MetaBot bridge...',
   );
+
+  // A crash between leasing an MCP capability file and cleaning it up leaves
+  // credential material with nothing left to remove it, so the new process
+  // sweeps leftovers before any bot can start a turn. Registry validation runs
+  // here too: two servers sharing an audience or environment variable is a
+  // startup defect, not something to discover mid-turn.
+  try {
+    assertDistinctMcpServers();
+    const swept = sweepExpiredCapabilityFiles(process.env.METABOT_HOME ?? process.cwd(), logger);
+    if (swept.removed.length > 0) {
+      logger.info({ removed: swept.removed.length, kept: swept.kept }, 'Swept stale execution MCP capability material');
+    }
+  } catch (err) {
+    logger.error({ err }, 'Execution MCP registry is invalid; external tools stay unavailable');
+  }
 
   // Create bot registry
   const registry = new BotRegistry();
@@ -350,13 +387,24 @@ async function main() {
   // on the first poll tick. The local bot list is the full set of bots
   // configured in bots.json; visibility (per bot) is passed through to the
   // bulk-register call so `visible:false` rows are hidden in the registry.
-  const localBotsForRegistry = [
-    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
-    ...appConfig.slackBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+  const configuredBots = [
+    ...appConfig.feishuBots,
+    ...appConfig.telegramBots,
+    ...appConfig.webBots,
+    ...appConfig.wechatBots,
+    ...appConfig.slackBots,
   ];
+  const configuredByName = new Map(configuredBots.map((bot) => [bot.name, bot]));
+  const localBotsForRegistry = registry.list().map((bot) => {
+    const configured = configuredByName.get(bot.name);
+    return {
+      name: bot.name,
+      visible: configured?.visible,
+      memoryPublic: configured?.memoryPublic,
+      rulesPackStatus: bot.rulesPackStatus,
+      rulesPackIdentity: bot.rulesPackIdentity,
+    };
+  });
   let peerManager: PeerManager | undefined;
   if (
     appConfig.peers.length > 0 ||
@@ -373,7 +421,7 @@ async function main() {
   // Create a dedicated Feishu service client for wiki sync & doc reader
   let feishuServiceClient: lark.Client | undefined;
   if (appConfig.feishuService) {
-    feishuServiceClient = new lark.Client({
+    feishuServiceClient = createFeishuRestClient(appConfig.feishuService.domain, {
       appId: appConfig.feishuService.appId,
       appSecret: appConfig.feishuService.appSecret,
       disableTokenCache: false,
@@ -381,31 +429,42 @@ async function main() {
     logger.info('Feishu service client initialized (for wiki sync & doc reader)');
   }
 
-  // Initialize wiki sync service (uses dedicated service app credentials)
-  let docSync: DocSync | undefined;
-  if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
-    const syncMemoryClient = new MemoryClient(logger);
-    const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
-      ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
-      : path.join(process.cwd(), 'data');
-    docSync = new DocSync(
-      {
-        feishuAppId: appConfig.feishuService.appId,
-        feishuAppSecret: appConfig.feishuService.appSecret,
-        databaseDir: syncStateDir,
-        wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
-        wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
-        throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
-      },
-      syncMemoryClient,
-      logger,
-    );
-    // Inject into all Feishu bot bridges
-    for (const handle of feishuHandles) {
-      handle.bridge.setDocSync(docSync);
-    }
-    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
+  // Keep downstream Wiki change-feed behavior behind one narrow startup hook.
+  const { docSync, wikiAutoSync } = createWikiSyncRuntime({
+    feishuService: appConfig.feishuService,
+    logger,
+  });
+  if (docSync) {
+    for (const handle of feishuHandles) handle.bridge.setDocSync(docSync);
   }
+
+  const memoryIndexMode = parseMemoryIndexAutomationMode(
+    process.env.METABOT_MEMORY_INDEX_AUTOMATION,
+  );
+  const memoryIndexAutomation = shouldInitializeMemoryIndexAutomation(memoryIndexMode)
+    ? new MemoryIndexAutomation(
+        {
+          mode: memoryIndexMode,
+          pollMs: envPositiveInt('METABOT_MEMORY_INDEX_POLL_MS', 60_000, logger),
+          reconcileMs: envPositiveInt(
+            'METABOT_MEMORY_INDEX_RECONCILE_MS',
+            15 * 60_000,
+            logger,
+          ),
+          batchSize: envPositiveInt('METABOT_MEMORY_INDEX_BATCH_SIZE', 50, logger),
+          maxAttempts: envPositiveInt('METABOT_MEMORY_INDEX_MAX_ATTEMPTS', 3, logger),
+          consumer: process.env.METABOT_MEMORY_INDEX_CONSUMER?.trim() || undefined,
+          targetBot: process.env.METABOT_MEMORY_INDEX_TARGET_BOT?.trim() || undefined,
+          root: process.env.METABOT_MEMORY_INDEX_WATCH_ROOT?.trim() || undefined,
+          statusPath: process.env.METABOT_MEMORY_INDEX_STATUS_PATH?.trim() || undefined,
+          qualityApproved: envExplicitTrue('METABOT_MEMORY_INDEX_QUALITY_APPROVED'),
+          autoApplyEnabled: envExplicitTrue('METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED'),
+        },
+        new MemoryClient(logger),
+        registry,
+        logger,
+      )
+    : undefined;
 
   // Initialize cross-platform session registry
   const sessionRegistry = new SessionRegistry(logger);
@@ -432,12 +491,30 @@ async function main() {
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
   });
+  wikiAutoSync?.start();
+  memoryIndexAutomation?.start();
+  logger.info(
+    {
+      mode: memoryIndexMode,
+      consumer: process.env.METABOT_MEMORY_INDEX_CONSUMER?.trim()
+        || 'memory-status-dry-run',
+    },
+    'Memory index automation configured',
+  );
 
-  // Restart recovery must run in the new process, after every bot sender and
-  // the local health endpoint are ready. It resumes every affected chat, not
-  // only the chat that submitted the restart command.
-  if (!apiServer.listening) await once(apiServer, 'listening');
-  await recoverControlledRestartAfterStartup({ registry, scheduler, logger });
+  await finalizeControlledRestartAfterStartup({
+    registry,
+    scheduler,
+    logger,
+    apiServer,
+    recoverParticipants: (startupHealth) => recoverControlledRestartAfterStartup({
+      registry,
+      scheduler,
+      logger,
+      clearBreadcrumb: false,
+      startupHealth,
+    }),
+  });
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -447,9 +524,9 @@ async function main() {
       peerManager.destroy();
     }
     apiServer.close();
-    if (docSync) {
-      docSync.destroy();
-    }
+    await wikiAutoSync?.destroy();
+    docSync?.destroy();
+    memoryIndexAutomation?.destroy();
     sessionRegistry.close();
     const teardowns: Promise<void>[] = [];
     for (const handle of feishuHandles) {

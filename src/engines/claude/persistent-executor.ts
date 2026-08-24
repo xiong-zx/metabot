@@ -36,7 +36,9 @@ import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
 import { apply1MContextSettings } from './executor.js';
+import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
 import type {
@@ -116,7 +118,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     }
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      env,
+      env: stripBridgeLocalAdminCredentials(env),
       signal: options.signal,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -150,6 +152,14 @@ export interface PersistentExecutorOptions {
    * The bridge scans this dir for new files at turn end.
    */
   outputsDir?: string;
+  /** Short-lived bridge-issued environment values scoped to this chat executor. */
+  env?: Record<string, string>;
+  /** Additive per-session MCP servers materialized by the bridge. */
+  mcpEntries?: McpEntry[];
+  /** Private per-session Claude CLI MCP config for the PTY backend. */
+  mcpConfigPath?: string;
+  /** Releases capability/config file leases when this executor closes. */
+  mcpCleanup?: () => void;
   /** Auto-shutdown after this many ms of silence (no turn, no spontaneous msg). 0 disables. Default 30 min. */
   idleTimeoutMs?: number;
   /** Max consecutive restart attempts before giving up. Default 3. */
@@ -386,6 +396,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
   private turnCounter = 0;
   /** Resolved when consumeLoop exits (cleanly or due to crash). */
   private consumePromise?: Promise<void>;
+  private mcpCleaned = false;
 
   constructor(private options: PersistentExecutorOptions) {
     super();
@@ -423,6 +434,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
       settings: { teammateMode: 'in-process' },
       agentProgressSummaries: true,
+      ...(this.options.env ? { env: this.options.env } : {}),
+      ...(this.options.mcpEntries?.length ? { mcpServers: toSdkMcpServers(this.options.mcpEntries) } : {}),
     };
     if (this.options.model) queryOptions.model = this.options.model;
     // resume: prefer the most-recent observed sessionId; fall back to the
@@ -508,6 +521,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
         logger: this.options.logger,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
+        env: this.options.env,
+        mcpConfigPath: this.options.mcpConfigPath,
       };
       const stream = ptyQuery({
         prompt: this.inputQueue as unknown as PtyPromptSource,
@@ -746,6 +761,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
     this.options.logger.debug({ from: prev, to: next }, 'PersistentExecutor: state');
     this.emit('state-changed', prev, next);
     if (next === 'closed') this.emit('closed');
+    if (next === 'closed' && !this.mcpCleaned) {
+      this.mcpCleaned = true;
+      this.options.mcpCleanup?.();
+    }
     if (next === 'ready' && prev === 'restarting') this.emit('restarted', this.sessionId);
   }
 

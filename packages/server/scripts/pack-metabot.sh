@@ -9,7 +9,9 @@
 #   - bin/, install.sh, ecosystem.config.cjs, tsconfig*.json
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
-#   - packages/cli, cli-core, metamemory, skill-hub  (4 bot-host workspaces)
+#   - packages/cli, cli-core, metamemory, skill-hub, rulespack,
+#     rulespack-adapter, arc-mcp, and worker-runner-mcp
+#     (8 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -89,7 +91,9 @@ TAR_EXCLUDES=(
 INCLUDES=(
   'bin'
   'install.sh'
+  'uninstall.sh'
   'ecosystem.config.cjs'
+  'scripts/pm2-protected-runtime-switch.cjs'
   'package-lock.json'
   'tsconfig.bridge.json'
   'src'
@@ -97,6 +101,10 @@ INCLUDES=(
   'packages/cli-core'
   'packages/metamemory'
   'packages/skill-hub'
+  'packages/rulespack'
+  'packages/rulespack-adapter'
+  'packages/arc-mcp'
+  'packages/worker-runner-mcp'
   'packages/skills'
   'LICENSE'
   'README.md'
@@ -125,12 +133,25 @@ done
 # install.sh and the metabot SKILL bundle are load-bearing — if either is
 # missing, the bootstrap → install.sh → Phase 6 chain will explode on the
 # bot host. Fail loud here instead.
-for required in 'install.sh' 'packages/skills/metabot/SKILL.md' 'packages/skills/metabot-team/SKILL.md'; do
+for required in \
+  'install.sh' \
+  'uninstall.sh' \
+  'packages/skills/metabot/SKILL.md' \
+  'packages/skills/metabot-team/SKILL.md' \
+  'packages/rulespack/package.json' \
+  'packages/rulespack-adapter/package.json' \
+  'packages/arc-mcp/package.json' \
+  'packages/worker-runner-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
   fi
 done
+
+if [[ ! -f "$REPO_ROOT/scripts/pm2-protected-runtime-switch.cjs" ]]; then
+  echo "error: required protected restart helper is missing" >&2
+  exit 1
+fi
 
 mkdir -p "$SERVER_STATIC_DIR"
 
@@ -169,6 +190,10 @@ if (flavor === 'bridge') {
     'packages/cli-core',
     'packages/metamemory',
     'packages/skill-hub',
+    'packages/rulespack',
+    'packages/rulespack-adapter',
+    'packages/arc-mcp',
+    'packages/worker-runner-mcp',
   ];
   pkg.scripts = {
     ...pkg.scripts,

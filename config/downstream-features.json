@@ -1,0 +1,511 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "remote": "upstream",
+    "repository": "https://github.com/xvirobotics/metabot.git",
+    "branch": "main"
+  },
+  "features": [
+    {
+      "id": "lark-domain",
+      "status": "required",
+      "roots": ["src/feishu/domain.ts", "src/feishu/client-factory.ts"]
+    },
+    {
+      "id": "metamemory-index-automation",
+      "status": "required",
+      "roots": [
+        "src/memory/index-automation.ts",
+        "packages/server/src/memory/index-reconciliation.ts",
+        "packages/server/src/memory/routing-index.ts"
+      ]
+    },
+    {
+      "id": "wiki-change-feed-adapter",
+      "status": "required",
+      "roots": ["src/sync/wiki-auto-sync.ts", "src/sync/wiki-sync-runtime.ts"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/restart",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Consume durable MetaMemory changes while keeping Wiki target selection and runtime wiring isolated from unrelated downstream services.",
+      "validationSurface": [
+        "tests/doc-sync.test.ts",
+        "tests/sync-store.test.ts",
+        "tests/wiki-auto-sync.test.ts",
+        "tests/wiki-sync-runtime.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-governance",
+      "status": "required",
+      "roots": [
+        "src/agent-teams/governance-extension.ts",
+        "src/agent-teams/governance-capability.ts",
+        "src/agent-teams/schedule-capability.ts"
+      ],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/arc-mcp", "@xvirobotics/worker-runner-mcp"],
+      "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
+      "validationSurface": [
+        "tests/agent-team-governance-capability.test.ts",
+        "tests/agent-team-schedule-capability.test.ts",
+        "tests/agent-team-http-auth.test.ts",
+        "tests/agent-team-cli-capability.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-compact-card-upstream-gap",
+      "status": "required",
+      "roots": ["src/feishu/team-panel.ts"],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
+      "reason": "Track the generic compact Agent Team card renderer as a removable upstreamable patch until upstream accepts it.",
+      "validationSurface": [
+        "tests/card-builder.test.ts",
+        "tests/card-builder-v2.test.ts",
+        "tests/feishu-event-handler.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-busy-chat-reliability-upstream-gap",
+      "status": "required",
+      "roots": ["src/scheduler/busy-retry-policy.ts", "src/bridge/deferred-activity-delivery.ts"],
+      "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/worker-runner-mcp"],
+      "reason": "Track generic bounded busy-chat retry, burst coalescing, and reusable activity-card delivery as removable upstreamable patches until upstream accepts them.",
+      "validationSurface": [
+        "tests/busy-retry-policy.test.ts",
+        "tests/task-scheduler-one-time.test.ts",
+        "tests/deferred-activity-delivery.test.ts",
+        "tests/message-bridge.test.ts"
+      ]
+    },
+    {
+      "id": "codex-stdin-prompt-transport-upstream-gap",
+      "status": "required",
+      "roots": ["src/engines/codex/executor.ts"],
+      "reason": "Track the generic Codex stdin prompt transport as a removable upstreamable patch until upstream accepts it; full prompts must not remain in argv or depend on option-like leading bytes.",
+      "validationSurface": [
+        "tests/codex-build-args.test.ts",
+        "tests/codex-executor-stdin.test.ts",
+        "tests/codex-executor-terminal-result.test.ts"
+      ]
+    },
+    {
+      "id": "terminal-callback-inbox",
+      "status": "required",
+      "roots": [
+        "src/services/terminal-event-store.ts",
+        "src/api/routes/worker-events-routes.ts",
+        "src/api/http-server.ts"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Durably deliver detached Worker and ARC terminal metadata to the authorized chat without coupling upstream core to either runner package.",
+      "validationSurface": [
+        "tests/terminal-event-store.test.ts",
+        "tests/worker-events-route.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "arc-mcp",
+      "status": "required",
+      "reason": "Independent AutoResearchClaw MCP server: sole ARC lifecycle database writer, official external release verifier, detached execution supervisor, HITL gate bridge, and provenance manifest. It is a standalone product server rather than a MetaBot subsystem, and must stay usable without any other research product.",
+      "validation": "npm run test -w @xvirobotics/arc-mcp; npm run typecheck -w @xvirobotics/arc-mcp; npm run lint -w @xvirobotics/arc-mcp",
+      "roots": ["packages/arc-mcp"],
+      "importRoots": ["packages/arc-mcp/src"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/mcp/worker-manager",
+        "src/workers",
+        "src/api/routes/research-memory",
+        "src/engines",
+        "src/bridge",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/research-stack-mcp",
+        "@xvirobotics/metaclaw-mcp"
+      ],
+      "validationSurface": [
+        "packages/arc-mcp/tests/contract.test.ts",
+        "packages/arc-mcp/tests/lifecycle.test.ts",
+        "packages/arc-mcp/tests/daemon-auth.test.ts",
+        "packages/arc-mcp/tests/recovery-races.test.ts",
+        "packages/arc-mcp/tests/official-supervisor.test.ts",
+        "packages/arc-mcp/tests/releases.test.ts",
+        "packages/arc-mcp/tests/provenance.test.ts"
+      ]
+    },
+    {
+      "id": "execution-mcp-registry",
+      "status": "required",
+      "reason": "Downstream-only MCP registry, capability issuance, and per-turn materialization for the independent product servers. These files are absent from upstream/main, so they are declared here instead of staying undeclared roots under src/. Servers are described by data in src/services/mcp-registry.ts: each carries its own audience, signing keys, opt-in flag, and failure boundary, so registering one never widens a union in core and never edits a product package. This root builds configuration and leases credentials only: no product package is imported and no unified product gateway is introduced.",
+      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-mcp-registry.test.ts tests/arc-mcp-client-registration.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts",
+      "roots": [
+        "src/engines/mcp-entries.ts",
+        "src/engines/mcp-materialize.ts",
+        "src/services/mcp-registry.ts",
+        "src/services/execution-capabilities.ts",
+        "src/services/execution-principal.ts"
+      ],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/research-stack-mcp",
+        "@xvirobotics/metaclaw-mcp"
+      ]
+    },
+    {
+      "id": "worker-runner-mcp",
+      "status": "required",
+      "roots": ["packages/worker-runner-mcp"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "src/agent-teams/team-store",
+        "src/bridge",
+        "@xvirobotics/arc-mcp"
+      ],
+      "reason": "Keep durable one-shot Worker execution and callback delivery isolated behind an authenticated local MCP boundary.",
+      "validationSurface": [
+        "packages/worker-runner-mcp/tests/mcp-integration.test.ts",
+        "packages/worker-runner-mcp/tests/service.test.ts",
+        "packages/worker-runner-mcp/tests/daemon.test.ts",
+        "packages/worker-runner-mcp/tests/rulespack.test.ts",
+        "packages/worker-runner-mcp/tests/notifier.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-engine",
+      "status": "required",
+      "roots": ["packages/rulespack"],
+      "importRoots": ["packages/rulespack/src"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep the deterministic vendored RulesPack engine independent of MetaBot runtime and downstream daemon implementations.",
+      "validationSurface": [
+        "packages/rulespack/test/compiler.test.ts",
+        "packages/rulespack/test/store-engine.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-metabot-adapter",
+      "status": "required",
+      "roots": ["packages/rulespack-adapter"],
+      "importRoots": ["packages/rulespack-adapter/src"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "thinHooks": [
+        "src/config.ts",
+        "src/index.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/engines/claude/executor.ts",
+        "src/engines/claude/session-manager.ts",
+        "src/engines/codex/executor.ts",
+        "src/api/http-server.ts",
+        "src/api/bot-registry.ts",
+        "src/api/peer-manager.ts",
+        "src/api/routes/bot-routes.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts",
+        "packages/server/src/auth/credentials.ts",
+        "packages/server/src/auth/credentials-store.ts",
+        "packages/server/src/agents/agent-routes.ts",
+        "packages/server/src/agents/agent-store.ts",
+        "packages/server/src/web/web-routes.ts",
+        "packages/server/src/server.ts",
+        "src/agent-teams/team-supervisor.ts",
+        "src/scheduler/task-scheduler.ts",
+        "packages/worker-runner-mcp/src/runtime.ts",
+        "packages/worker-runner-mcp/src/service.ts",
+        "packages/worker-runner-mcp/src/process-runner.ts",
+        "packages/worker-runner-mcp/src/store.ts",
+        "packages/worker-runner-mcp/src/types.ts"
+      ],
+      "allowedImporters": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/api/routes/bot-routes.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts"
+      ],
+      "reason": "Keep MetaBot-specific Codex/source/session/transport bindings, including exact authenticated chat-to-project membership, in an isolated downstream package with enumerated thin runtime hooks.",
+      "validationSurface": [
+        "packages/rulespack-adapter/tests/config.test.ts",
+        "packages/rulespack-adapter/tests/runtime.test.ts",
+        "packages/server/tests/agents.test.ts",
+        "packages/server/tests/agents-store.test.ts",
+        "packages/server/tests/auth.test.ts",
+        "tests/rulespack-codex-integration.test.ts",
+        "tests/rulespack-in-process-smoke.test.ts",
+        "tests/rulespack-operator-routes.test.ts",
+        "tests/peer-manager.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-worker-adapter",
+      "status": "required",
+      "roots": ["packages/worker-runner-mcp/src/rulespack.ts"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep the detached Worker RulesPack binding confined to the Worker package public contracts and the RulesPack adapter.",
+      "validationSurface": [
+        "packages/worker-runner-mcp/tests/rulespack.test.ts",
+        "packages/worker-runner-mcp/tests/service.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-operator-routes",
+      "status": "required",
+      "roots": ["src/extensions/rulespack-routes.ts", "src/extensions/rulespack-worker-coordinator.ts"],
+      "forbiddenImports": [
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Bind the authenticated HTTP operator surface and fail-closed loopback Worker coordination without importing Bridge, Memory, or detached runner implementations.",
+      "validationSurface": [
+        "tests/rulespack-operator-routes.test.ts",
+        "tests/rulespack-worker-coordinator.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-detached-dispatch-grant",
+      "status": "required",
+      "roots": [
+        "packages/rulespack/src/transport.ts",
+        "packages/rulespack-adapter/src/runtime.ts",
+        "src/services/execution-capabilities.ts",
+        "src/services/mcp-registry.ts",
+        "src/engines/mcp-materialize.ts",
+        "src/bridge/message-bridge.ts",
+        "src/api/http-server.ts",
+        "src/api/bot-registry.ts",
+        "packages/worker-runner-mcp/src/local-auth.ts",
+        "packages/worker-runner-mcp/src/proxy.ts",
+        "packages/worker-runner-mcp/src/proxy-cli.ts",
+        "packages/worker-runner-mcp/src/daemon.ts",
+        "packages/worker-runner-mcp/src/mcp-server.ts",
+        "packages/worker-runner-mcp/src/service.ts",
+        "packages/worker-runner-mcp/src/store.ts",
+        "packages/worker-runner-mcp/src/types.ts",
+        "packages/worker-runner-mcp/src/rulespack.ts",
+        "docs/features/rulespack.md",
+        "packages/worker-runner-mcp/README.md"
+      ],
+      "forbiddenImports": ["src/memory-core", "@xvirobotics/arc-mcp"],
+      "reason": "Carry an accepted remote RulesPack dispatch to one exact detached Codex Worker descendant through a signed capability-bound companion while preserving separate databases and keeping native ARC unsupported.",
+      "validationSurface": [
+        "tests/execution-capabilities.test.ts",
+        "tests/mcp-materialize.test.ts",
+        "packages/worker-runner-mcp/tests/local-auth.test.ts",
+        "packages/worker-runner-mcp/tests/daemon.test.ts",
+        "packages/worker-runner-mcp/tests/store.test.ts",
+        "packages/worker-runner-mcp/tests/service.test.ts",
+        "packages/worker-runner-mcp/tests/rulespack.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-api-principal",
+      "status": "required",
+      "roots": ["src/extensions/rulespack-api-principal.ts"],
+      "forbiddenImports": [
+        "src/api",
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Keep authenticated API principal derivation independent of API, Bridge, Memory, and daemon internals.",
+      "validationSurface": ["tests/rulespack-operator-routes.test.ts", "tests/downstream-boundaries.test.ts"]
+    },
+    {
+      "id": "rulespack-peer-dispatch",
+      "status": "required",
+      "roots": [
+        "src/extensions/rulespack-peer-dispatch.ts",
+        "src/extensions/rulespack-peer-project.ts"
+      ],
+      "forbiddenImports": [
+        "src/bridge",
+        "src/agent-teams",
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep authenticated peer envelope compilation, hashed exact-chat project attestation, and receipt accounting behind the public peer and registry contracts.",
+      "validationSurface": [
+        "tests/rulespack-operator-routes.test.ts",
+        "packages/server/tests/agents.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "rulespack-operationalization",
+      "status": "required",
+      "roots": [
+        ".github/workflows/ci.yml",
+        "config/rulespack/metabot-development.rules.json",
+        "config/rulespack/user-defaults.rules.json",
+        "package.json",
+        "packages/cli/src/agents.ts",
+        "packages/server/src/agents/inbox-routes.ts",
+        "packages/server/src/agents/agent-routes.ts",
+        "packages/server/src/agents/agent-store.ts",
+        "scripts/check-added-secrets.mjs",
+        "scripts/check-feature-history.mjs"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Version the canonical Codex policy seed and enforce high-confidence secret and feature-history gates without coupling policy data to runtime services.",
+      "validationSurface": [
+        "tests/rulespack-canonical-policy.test.ts",
+        "tests/rulespack-user-defaults-policy.test.ts",
+        "tests/rulespack-hard-gates.test.ts",
+        "packages/server/tests/agents-store.test.ts",
+        "packages/server/tests/agents.test.ts",
+        "packages/server/tests/inbox.test.ts",
+        "packages/cli/tests/agents.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "artifact-delivery-mirror",
+      "status": "required",
+      "roots": [
+        "src/extensions/artifact-delivery.ts",
+        "packages/cli/src/artifacts.ts",
+        "config/artifact-mirror.example.json",
+        "docs/features/artifact-delivery.md",
+        "docs/reference/cli-metabot.md",
+        "docs/reference/cli-metabot.zh.md",
+        "AGENTS.md"
+      ],
+      "thinHooks": [
+        "src/config.ts",
+        "src/bridge/output-handler.ts",
+        "src/bridge/message-bridge.ts",
+        "packages/cli/src/index.ts",
+        "packages/cli/src/help.ts",
+        "bots.example.json"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter"
+      ],
+      "reason": "Keep host-specific durable output publication and strict research deliverables mirroring isolated from upstream runtime, Memory, ARC, Worker, and bulk experiment storage.",
+      "validationSurface": [
+        "tests/artifact-delivery.test.ts",
+        "tests/artifact-delivery-config.test.ts",
+        "tests/output-handler.test.ts",
+        "packages/cli/tests/artifacts.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "ci-runtime-prerequisites",
+      "status": "required",
+      "roots": [".github/workflows/ci.yml", "tests/ci-workflow.test.ts"],
+      "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
+      "validationSurface": [
+        "tests/ci-workflow.test.ts",
+        "tests/metabot-controlled-restart-cli.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    }
+  ],
+  "reverseBoundaries": [
+    {
+      "id": "upstream-runtime-isolation",
+      "roots": ["src"],
+      "allowedImporters": [
+        "src/config.ts",
+        "src/bridge/message-bridge.ts",
+        "src/engines/prompt-context.ts",
+        "src/api/http-server.ts",
+        "src/api/routes/bot-routes.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts",
+        "src/extensions/rulespack-api-principal.ts",
+        "src/extensions/rulespack-peer-dispatch.ts",
+        "src/services/execution-capabilities.ts"
+      ],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter",
+        "@metabot/rulespack",
+        "@metabot/rulespack-adapter"
+      ]
+    }
+  ],
+  "forbiddenPaths": [
+    "src/memory-core",
+    "src/api/routes/research-memory-routes.ts",
+    "src/mcp/worker-manager-mcp.ts",
+    "src/workers/worker-manager.ts",
+    "src/engines/home-instructions.ts",
+    "src/workspace",
+    "packages/arc-researchclaw-adapter",
+    "packages/arc-worker-runner-adapter",
+    "web"
+  ]
+}

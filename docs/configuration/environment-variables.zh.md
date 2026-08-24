@@ -19,10 +19,26 @@
 | `METABOT_CORE_PORT`             | `9200`                  | Core 端口                                                      |
 | `METABOT_CORE_DATA_DIR`         | `~/.metabot-core/data`  | Core 数据目录                                                  |
 | `METABOT_PUBLIC_DISTRIBUTION`   | `0`                     | 匿名提供 Core 安装/CLI 资源；仅在明确需要时开启                |
+| `METABOT_NODE_INTERPRETER`      | 当前 `node` 可执行文件  | 固定到所有 PM2 应用的 Node.js >=22.19 绝对路径                  |
 | `LOG_LEVEL`                     | `info`                  | Bridge 日志级别                                                |
 
 Memory、Skills、Agents 和 T5T 都由 `METABOT_CORE_URL` 指向的 Core 提供。旧的独立
 MetaMemory 变量和 `8100` 端口不属于当前个人版。
+
+## 执行守护进程
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `METABOT_STATE_DIR` | `~/.metabot` | 守护进程 SQLite 状态与默认 ARC 项目根目录的上级目录 |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | 运行目录之外的 Ed25519 密钥与 ARC 服务凭证目录 |
+| `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner 本机 MCP 地址 |
+| `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite 状态与独占锁 |
+| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC 本机 MCP 地址 |
+| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite 状态与独占锁 |
+| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | ARC 信任的规范项目根目录 JSON 数组 |
+| `METABOT_ARC_WORKER_ENGINE` | `codex` | ARC 适配器调用的一次性工作引擎 |
+
+健康检查通过短期签名凭证执行只读 MCP 调用；守护进程不提供未鉴权健康接口。
 
 ## 工作区与引擎
 
@@ -52,6 +68,7 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | ---------------------------------------- | ------- | --------------------------------------------------------- |
 | `FEISHU_APP_ID`                          | —       | 单 Bot 飞书/Lark App ID                                   |
 | `FEISHU_APP_SECRET`                      | —       | 单 Bot 飞书/Lark App Secret                               |
+| `FEISHU_DOMAIN`                          | `feishu`| API 租户：`feishu` 或 `lark`；其他值会报错                |
 | `TELEGRAM_BOT_TOKEN`                     | —       | 单 Bot Telegram Token                                     |
 | `SLACK_BOT_TOKEN`                        | —       | 单 Bot Slack Bot Token（`xoxb-...`）                      |
 | `SLACK_SIGNING_SECRET`                   | —       | 单 Bot Slack Events API Signing Secret                    |
@@ -65,28 +82,56 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
 ## 可选服务
 
-| 变量                         | 默认值         | 作用                             |
-| ---------------------------- | -------------- | -------------------------------- |
-| `SCHEDULE_TIMEZONE`          | 系统时区       | Cron 任务使用的 IANA 时区        |
-| `METABOT_PEERS`              | —              | 逗号分隔的 Peer URL              |
-| `METABOT_PEER_SECRETS`       | —              | 与 Peer URL 对应的 Secret        |
-| `METABOT_PEER_NAMES`         | 自动           | Peer 显示名称                    |
-| `METABOT_ALLOWED_PEER_CIDRS` | —              | 可选 IPv4 CIDR 转发白名单        |
-| `FEISHU_SERVICE_APP_ID`      | 第一个飞书 Bot | 可选 Wiki/文档读取 Service App   |
-| `FEISHU_SERVICE_APP_SECRET`  | 第一个飞书 Bot | Service App Secret               |
-| `WIKI_SYNC_ENABLED`          | `true`         | 启用可选 Memory-to-Wiki 同步     |
-| `WIKI_SPACE_ID`              | —              | 已有 Wiki Space ID               |
-| `WIKI_SPACE_NAME`            | `MetaMemory`   | Wiki Space 名称                  |
-| `VOLCENGINE_TTS_APPID`       | —              | 豆包 STT/TTS App ID              |
-| `VOLCENGINE_TTS_ACCESS_KEY`  | —              | 豆包 STT/TTS Access Key          |
-| `OPENAI_API_KEY`             | —              | 可选 Whisper/OpenAI TTS Fallback |
-| `ELEVENLABS_API_KEY`         | —              | 可选 ElevenLabs TTS Key          |
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | 公开 Memory API 允许创建或更新的顶层路径 |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | 本服务器额外的 MetaMemory 顶层命名空间，例如 `/cargo1` |
+| `METABOT_MEMORY_INDEX_AUTOMATION` | `off` | 增量索引模式：`off`、`events`（仅 outbox）、`dry-run`、`routing` 或双门禁 `full` |
+| `METABOT_MEMORY_INDEX_QUALITY_APPROVED` | `false` | 操作者确认已通过文档中的 P5 质量合同；`full` 必需 |
+| `METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED` | `false` | P5 状态写入的独立 kill switch；`full` 必需 |
+| `METABOT_MEMORY_INDEX_WATCH_ROOT` | server root 或 `/cargo1` | 索引消费者监视的语义范围 |
+| `METABOT_MEMORY_INDEX_STATUS_PATH` | `<watch-root>/status/project-progress-status` | dry-run 提案使用的状态文档 |
+| `METABOT_MEMORY_INDEX_TARGET_BOT` | `memory` | 生成有界状态提案的 Bot |
+| `METABOT_MEMORY_INDEX_CONSUMER` | 按模式 | 持久化事件消费者游标名；`full` 默认为 `memory-status-full`，其他模式默认为 `memory-status-dry-run` |
+| `METABOT_MEMORY_INDEX_POLL_MS` | `60000` | 事件轮询间隔 |
+| `METABOT_MEMORY_INDEX_RECONCILE_MS` | `900000` | 只读对账间隔 |
+| `METABOT_MEMORY_INDEX_BATCH_SIZE` | `50` | 每轮最多读取的事件数 |
+| `METABOT_MEMORY_INDEX_MAX_ATTEMPTS` | `3` | 提案失败进入 dead-letter 前的重试次数 |
+| `METABOT_MEMORY_ROUTING_REBUILD_ENABLED` | `false` | Core 端确定性路由索引重建写入门禁 |
+| `SCHEDULE_TIMEZONE` | 系统时区 | Cron 任务使用的 IANA 时区 |
+| `METABOT_PEERS` | — | 逗号分隔的 Peer URL |
+| `METABOT_PEER_SECRETS` | — | 与 Peer URL 对应的 Secret |
+| `METABOT_PEER_NAMES` | 自动 | Peer 显示名称 |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | 可选 IPv4 CIDR 转发白名单 |
+| `FEISHU_SERVICE_APP_ID` | 第一个飞书 Bot | 可选 Wiki/文档读取 Service App |
+| `FEISHU_SERVICE_APP_SECRET` | 第一个飞书 Bot | Service App Secret |
+| `FEISHU_SERVICE_DOMAIN` | `feishu` | 独立 Service App 的租户：`feishu` 或 `lark` |
+| `WIKI_SYNC_ENABLED` | `true` | 启用可选 Memory-to-Wiki 同步 |
+| `WIKI_SPACE_ID` | — | 已有 Wiki Space ID |
+| `WIKI_SPACE_NAME` | `MetaMemory` | Wiki Space 名称 |
+| `WIKI_SYNC_ROOT_NODE_TOKEN` | — | 当前同步目标的固定父节点 |
+| `WIKI_SYNC_SOURCE_ROOT` | `/` | 直接投影到 Wiki 根节点的 MetaMemory 子树 |
+| `WIKI_SYNC_STATE_DIR` | `./data` | 目标绑定映射数据库目录 |
+| `WIKI_SYNC_DELETE_REMOTE` | `false` | 删除已映射 Wiki 页面；必须配置根节点 |
+| `WIKI_AUTO_SYNC` | `false` | 自动消费持久化 Memory 变更流 |
+| `WIKI_AUTO_SYNC_CONSUMER` | 目标哈希 | 可选的持久化消费者游标名称 |
+| `WIKI_AUTO_SYNC_POLL_MS` | `5000` | 变更流轮询间隔 |
+| `WIKI_AUTO_SYNC_BATCH_SIZE` | `100` | 每轮最多处理的事件数 |
+| `WIKI_AUTO_SYNC_FULL_RECONCILE_MS` | `21600000` | 周期性全量对账间隔 |
+| `WIKI_AUTO_SYNC_MAX_ATTEMPTS` | `5` | 批次进入 dead-letter 前的重试次数 |
+| `WIKI_AUTO_SYNC_WATCH_ROOT` | 来源根目录 | 来源根目录兼容别名；显式配置时必须一致 |
+| `VOLCENGINE_TTS_APPID` | — | 豆包 STT/TTS App ID |
+| `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包 STT/TTS Access Key |
+| `OPENAI_API_KEY` | — | 可选 Whisper/OpenAI TTS Fallback |
+| `ELEVENLABS_API_KEY` | — | 可选 ElevenLabs TTS Key |
 
 完整 Provider 与 RTC 变量仍以内联注释写在 `.env.example` 中；源码部署以它为真值。
 
 ## 代理
 
-支持标准 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`。应在 `NO_PROXY` 中包含
+生产守护进程支持 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy`、
+`NO_PROXY` 和 `no_proxy`。这些普通代理变量可以进入 Worker Runner 的安全白名单；
+看起来像密码、Token 或 API 凭证的代理变量即使写入白名单也会被拒绝。应在 `NO_PROXY` 中包含
 `localhost` 和 `127.0.0.1`，保证 Core、Bridge 与本地 Kimi Server 流量不经过代理。
 
 不要提交已填写的 `.env` 或 `bots.json`。

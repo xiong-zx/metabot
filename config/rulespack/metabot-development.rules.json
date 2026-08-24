@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "revision": "fix-012-2026-08-20.3",
+  "rules": [
+    {
+      "schemaVersion": 1,
+      "id": "metabot.upstream-first",
+      "version": "1.0.0",
+      "text": "Before material MetaBot code work, refresh upstream/main and origin/main, compare them, classify the change as upstreamable, downstream-only, or mixed, and preserve auditable upstream ancestry.",
+      "scope": "project",
+      "binding": { "projectId": "metabot" },
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 400,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "metamemory",
+        "adapterId": "imac-metabot-development",
+        "ref": "/imac/rules/codex/metabot-development",
+        "revision": "fix-012-2026-08-20.3"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "FIX-012",
+        "classification": "downstream-policy"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "metabot.one-feature-one-final-commit",
+      "version": "1.1.0",
+      "text": "Keep exactly one final commit in shared history for each MetaBot feature or FIX. Consolidate temporary checkpoints, tests, documentation, and review repairs into that commit before integration; retaining any additional commit requires explicit user approval.",
+      "scope": "project",
+      "binding": { "projectId": "metabot" },
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 390,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "metamemory",
+        "adapterId": "imac-metabot-development",
+        "ref": "/imac/rules/codex/metabot-development",
+        "revision": "fix-012-2026-08-20.3"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "FIX-012",
+        "mechanicalGate": "feature-history"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "metabot.runtime-change-authorization",
+      "version": "1.0.0",
+      "text": "Do not deploy, switch runtime, restart services, or replace a live database without explicit user authorization for that operation; report migration and rollback details before execution.",
+      "scope": "project",
+      "binding": { "projectId": "metabot" },
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 380,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "metamemory",
+        "adapterId": "imac-metabot-development",
+        "ref": "/imac/rules/codex/metabot-development",
+        "revision": "fix-012-2026-08-20.3"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "FIX-012",
+        "mechanicalGate": "controlled-runtime"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "metabot.credential-safety",
+      "version": "1.0.0",
+      "text": "Never place credentials, tokens, keys, private authorization URLs, cookies, or PM2 secret state in Rule text, logs, receipts, commits, screenshots, or user-facing output. Use existing secret-safe channels and redaction.",
+      "scope": "project",
+      "binding": { "projectId": "metabot" },
+      "targets": {},
+      "authority": "user-approved",
+      "priority": 370,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": { "status": "approved" },
+      "source": {
+        "kind": "metamemory",
+        "adapterId": "imac-metabot-development",
+        "ref": "/imac/rules/codex/metabot-development",
+        "revision": "fix-012-2026-08-20.3"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "FIX-012",
+        "mechanicalGate": "secret-diff-scan"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "metabot.fix012-rollout-marker",
+      "version": "1.0.0",
+      "text": "For the FIX-012 rollout-only validation chat, respond with exactly FIX012_RULE_APPLIED.",
+      "scope": "project",
+      "binding": { "projectId": "metabot" },
+      "targets": { "include": { "bots": ["admin"] } },
+      "authority": "user-approved",
+      "priority": 1000,
+      "overridable": false,
+      "mandatory": true,
+      "lifecycle": {
+        "status": "revoked",
+        "revokedAt": "2026-08-19T23:30:00.000Z",
+        "revokeReason": "FIX-012 bounded rollout completed"
+      },
+      "source": {
+        "kind": "metamemory",
+        "adapterId": "imac-metabot-development",
+        "ref": "/imac/rules/codex/metabot-development",
+        "revision": "fix-012-2026-08-20.3"
+      },
+      "metadata": {
+        "approvedBy": "user",
+        "approvedIn": "FIX-012",
+        "rolloutOnly": true
+      }
+    }
+  ]
+}

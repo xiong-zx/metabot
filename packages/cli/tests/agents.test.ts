@@ -59,4 +59,27 @@ describe('metabot agents talk', () => {
     expect(stdout.mock.calls.map((c) => String(c[0])).join('')).toContain('(relay)');
     expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toContain('id=msg_1');
   });
+
+  it('refuses a protected target because CLI-only relay cannot compile an exact envelope', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === 'https://example.test/core/api/agents') {
+        return new Response(JSON.stringify({
+          agents: [
+            { botName: 'alice', url: 'http://alice:9100', visible: true, lastSeenAt: 'now' },
+            {
+              botName: 'worker', url: 'http://alice:9100', visible: true, lastSeenAt: 'now',
+              rulesPackStatus: { state: 'inherited', required: true, mode: 'enforce' },
+            },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected', url }), { status: 500 });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const mod = await importFresh();
+    await expect(mod.run(['talk', 'alice/worker', 'chat1', 'hello']))
+      .rejects.toThrow('requires a sender-compiled RulesPack envelope');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

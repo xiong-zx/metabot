@@ -20,11 +20,31 @@ values you need.
 | `METABOT_CORE_PORT`             | `9200`                  | Core port                                                                    |
 | `METABOT_CORE_DATA_DIR`         | `~/.metabot-core/data`  | Core data directory                                                          |
 | `METABOT_PUBLIC_DISTRIBUTION`   | `0`                     | Serve Core install/CLI assets anonymously; enable only intentionally         |
+| `METABOT_NODE_INTERPRETER`      | current `node` executable | Absolute Node.js >=22.19 path pinned into every PM2 app                      |
 | `LOG_LEVEL`                     | `info`                  | Bridge log level                                                             |
 
 Memory, Skills, Agents, and T5T are served by Core at `METABOT_CORE_URL`. The
 old standalone MetaMemory variables and port `8100` are not part of the current
 Personal Edition.
+
+## Execution daemons
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `METABOT_STATE_DIR` | `~/.metabot` | Parent for daemon SQLite state and the default ARC project root |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | Out-of-runtime Ed25519 key and ARC service-capability directory |
+| `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner loopback MCP endpoint |
+| `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite state and exclusive lock |
+| `METABOT_WORKER_ENV_ALLOWLIST` | ordinary proxy names | Extra non-secret child environment names |
+| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC loopback MCP endpoint |
+| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite state and exclusive lock |
+| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | JSON array of canonical project roots trusted by ARC |
+| `METABOT_ARC_WORKER_ENGINE` | `codex` | One-shot engine used by the ARC runner adapter |
+
+The lifecycle probes make authenticated, read-only MCP calls; there is no
+unauthenticated daemon health endpoint. Daemon callbacks use the Bridge port
+and distinct callback signing keys. Capability private keys remain outside the
+replaceable runtime checkout.
 
 ## Workspace and engines
 
@@ -54,6 +74,7 @@ settings in `bots.json`. See [Multi-Bot and Engines](multi-bot.md).
 | ---------------------------------------- | ------- | --------------------------------------------------------------- |
 | `FEISHU_APP_ID`                          | —       | Single-bot Feishu/Lark App ID                                   |
 | `FEISHU_APP_SECRET`                      | —       | Single-bot Feishu/Lark App Secret                               |
+| `FEISHU_DOMAIN`                          | `feishu`| API tenant: `feishu` or `lark`; other values are rejected       |
 | `TELEGRAM_BOT_TOKEN`                     | —       | Single-bot Telegram token                                       |
 | `SLACK_BOT_TOKEN`                        | —       | Single-bot Slack bot token (`xoxb-...`)                         |
 | `SLACK_SIGNING_SECRET`                   | —       | Single-bot Slack Events API signing secret                      |
@@ -68,29 +89,58 @@ Multi-bot deployments should store channel credentials in the protected
 
 ## Optional services
 
-| Variable                     | Default          | Purpose                                 |
-| ---------------------------- | ---------------- | --------------------------------------- |
-| `SCHEDULE_TIMEZONE`          | system timezone  | IANA timezone for cron tasks            |
-| `METABOT_PEERS`              | —                | Comma-separated peer URLs               |
-| `METABOT_PEER_SECRETS`       | —                | Positional secrets for peer URLs        |
-| `METABOT_PEER_NAMES`         | auto             | Positional peer display names           |
-| `METABOT_ALLOWED_PEER_CIDRS` | —                | Optional IPv4 CIDR forwarding allowlist |
-| `FEISHU_SERVICE_APP_ID`      | first Feishu bot | Optional Wiki/doc-reader service app    |
-| `FEISHU_SERVICE_APP_SECRET`  | first Feishu bot | Service app secret                      |
-| `WIKI_SYNC_ENABLED`          | `true`           | Enable optional Memory-to-Wiki sync     |
-| `WIKI_SPACE_ID`              | —                | Existing Wiki space ID                  |
-| `WIKI_SPACE_NAME`            | `MetaMemory`     | Wiki space name                         |
-| `VOLCENGINE_TTS_APPID`       | —                | Doubao STT/TTS App ID                   |
-| `VOLCENGINE_TTS_ACCESS_KEY`  | —                | Doubao STT/TTS access key               |
-| `OPENAI_API_KEY`             | —                | Optional Whisper/OpenAI TTS fallback    |
-| `ELEVENLABS_API_KEY`         | —                | Optional ElevenLabs TTS key             |
+| Variable | Default | Purpose |
+|---|---|---|
+| `METABOT_CORE_MEMORY_WRITE_ROOTS` | `/users,/shared,/metabot` | Top-level paths that public Memory API writes may create or update |
+| `METABOT_CORE_MEMORY_SERVER_ROOT` | — | This server's additional top-level MetaMemory namespace, for example `/cargo1` |
+| `METABOT_MEMORY_INDEX_AUTOMATION` | `off` | Incremental index mode: `off`, `events` (outbox only), `dry-run`, `routing`, or dual-gated `full` |
+| `METABOT_MEMORY_INDEX_QUALITY_APPROVED` | `false` | Operator attestation that the documented P5 quality contract passed; required by `full` |
+| `METABOT_MEMORY_INDEX_AUTO_APPLY_ENABLED` | `false` | Independent P5 status-write kill switch; required by `full` |
+| `METABOT_MEMORY_INDEX_WATCH_ROOT` | server root or `/cargo1` | Semantic scope watched by the index consumer |
+| `METABOT_MEMORY_INDEX_STATUS_PATH` | `<watch-root>/status/project-progress-status` | Curated status document used for dry-run proposals |
+| `METABOT_MEMORY_INDEX_TARGET_BOT` | `memory` | Bot used for bounded semantic status proposals |
+| `METABOT_MEMORY_INDEX_CONSUMER` | mode-specific | Durable event-consumer cursor name; defaults to `memory-status-full` in `full`, otherwise `memory-status-dry-run` |
+| `METABOT_MEMORY_INDEX_POLL_MS` | `60000` | Event poll interval |
+| `METABOT_MEMORY_INDEX_RECONCILE_MS` | `900000` | Read-only reconciliation interval |
+| `METABOT_MEMORY_INDEX_BATCH_SIZE` | `50` | Maximum events fetched per poll |
+| `METABOT_MEMORY_INDEX_MAX_ATTEMPTS` | `3` | Retry count before dead-lettering a proposal failure |
+| `METABOT_MEMORY_ROUTING_REBUILD_ENABLED` | `false` | Core-side write gate for deterministic routing-index rebuilds |
+| `SCHEDULE_TIMEZONE` | system timezone | IANA timezone for cron tasks |
+| `METABOT_PEERS` | — | Comma-separated peer URLs |
+| `METABOT_PEER_SECRETS` | — | Positional secrets for peer URLs |
+| `METABOT_PEER_NAMES` | auto | Positional peer display names |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | Optional IPv4 CIDR forwarding allowlist |
+| `FEISHU_SERVICE_APP_ID` | first Feishu bot | Optional Wiki/doc-reader service app |
+| `FEISHU_SERVICE_APP_SECRET` | first Feishu bot | Service app secret |
+| `FEISHU_SERVICE_DOMAIN` | `feishu` | Dedicated service app tenant: `feishu` or `lark` |
+| `WIKI_SYNC_ENABLED` | `true` | Enable optional Memory-to-Wiki sync |
+| `WIKI_SPACE_ID` | — | Existing Wiki space ID |
+| `WIKI_SPACE_NAME` | `MetaMemory` | Wiki space name |
+| `WIKI_SYNC_ROOT_NODE_TOKEN` | — | Immutable parent node for this sync target |
+| `WIKI_SYNC_SOURCE_ROOT` | `/` | MetaMemory subtree projected directly onto the Wiki root |
+| `WIKI_SYNC_STATE_DIR` | `./data` | Target-bound mapping database directory |
+| `WIKI_SYNC_DELETE_REMOTE` | `false` | Delete mapped Wiki pages; requires a root node |
+| `WIKI_AUTO_SYNC` | `false` | Consume the durable Memory change feed automatically |
+| `WIKI_AUTO_SYNC_CONSUMER` | target hash | Optional durable consumer cursor name |
+| `WIKI_AUTO_SYNC_POLL_MS` | `5000` | Change-feed polling interval |
+| `WIKI_AUTO_SYNC_BATCH_SIZE` | `100` | Maximum events processed per poll |
+| `WIKI_AUTO_SYNC_FULL_RECONCILE_MS` | `21600000` | Periodic full reconciliation interval |
+| `WIKI_AUTO_SYNC_MAX_ATTEMPTS` | `5` | Retries before a batch is dead-lettered |
+| `WIKI_AUTO_SYNC_WATCH_ROOT` | source root | Legacy source-root alias; explicit values must match |
+| `VOLCENGINE_TTS_APPID` | — | Doubao STT/TTS App ID |
+| `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao STT/TTS access key |
+| `OPENAI_API_KEY` | — | Optional Whisper/OpenAI TTS fallback |
+| `ELEVENLABS_API_KEY` | — | Optional ElevenLabs TTS key |
 
 The complete provider and RTC variable list remains documented inline in
 `.env.example`, which is the source of truth for source deployments.
 
 ## Proxy
 
-Standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables are supported.
+Standard `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `NO_PROXY`,
+and `no_proxy` variables are supported by the production daemons and are in
+Worker Runner's default safe child allowlist. Secret-looking proxy variables
+remain hard-denied even if named in `METABOT_WORKER_ENV_ALLOWLIST`.
 Include `localhost` and `127.0.0.1` in `NO_PROXY` so Core, Bridge, and local Kimi
 Server traffic stays local.
 

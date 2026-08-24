@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Logger } from '../utils/logger.js';
+import { parseFeishuDomain, type FeishuDomain } from '../feishu/domain.js';
 
 /** Historical project mirrors retired by the installer. */
 const PROJECT_METABOT_SKILL_MIRRORS = ['metabot', 'metabot-team', 'voice'];
@@ -62,6 +63,8 @@ export interface InstallSkillsOptions {
   /** Feishu app credentials for optional lark-cli auto-config. */
   feishuAppId?: string;
   feishuAppSecret?: string;
+  /** lark-cli brand matching the bot's API tenant. Defaults to Feishu. */
+  feishuDomain?: FeishuDomain;
 }
 
 export function installSkillsToWorkDir(workDir: string, logger: Logger, options?: InstallSkillsOptions): void {
@@ -129,11 +132,11 @@ export function installSkillsToWorkDir(workDir: string, logger: Logger, options?
   }
 
   if (options?.platform === 'feishu' && options.feishuAppId && options.feishuAppSecret) {
-    ensureLarkCliConfig(options.feishuAppId, options.feishuAppSecret, logger);
+    ensureLarkCliConfig(options.feishuAppId, options.feishuAppSecret, parseFeishuDomain(options.feishuDomain), logger);
   }
 }
 
-function ensureLarkCliConfig(appId: string, appSecret: string, logger: Logger): void {
+function ensureLarkCliConfig(appId: string, appSecret: string, brand: FeishuDomain, logger: Logger): void {
   const configPath = path.join(os.homedir(), '.lark-cli', 'config.json');
   if (fs.existsSync(configPath)) {
     logger.debug('lark-cli already configured, skipping');
@@ -149,7 +152,7 @@ function ensureLarkCliConfig(appId: string, appSecret: string, logger: Logger): 
   }
 
   try {
-    execFileSync(larkCliBin, ['config', 'init', '--app-id', appId, '--app-secret-stdin', '--brand', 'feishu'], {
+    execFileSync(larkCliBin, ['config', 'init', '--app-id', appId, '--app-secret-stdin', '--brand', brand], {
       input: appSecret,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15_000,

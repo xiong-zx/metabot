@@ -22,12 +22,18 @@ metabot update                                  # package install: latest GitHub
 metabot update --package                        # force latest GitHub Release package
 metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
 metabot update --git                            # force git pull + rebuild + restart
-metabot start                       # start with PM2
-metabot stop                        # stop
+metabot start                       # start Bridge + Worker Runner + ARC
+metabot stop                        # stop the whole three-app runtime
 metabot restart                     # coordinated Bridge restart
 metabot restart --bot admin --chat oc_x --reason "upgrade"  # report back to a chat
 metabot restart --no-resume         # notify, but do not queue interrupted turns
 metabot restart --force             # emergency override if prepare cannot complete
+metabot restart --wait --json       # protected Bridge-only restart
+metabot restart --request-id ID     # caller-stable idempotency key
+metabot restart --force             # emergency override if chat preparation fails
+metabot restart --daemon worker     # guarded Worker Runner restart
+metabot restart --daemon arc        # guarded ARC restart
+metabot deploy-runtime --runtime /absolute/checkout --wait  # protected external runtime switch
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
@@ -46,7 +52,65 @@ instead of `latest`. Package updating performs:
 5. Preserve user/Core state under `~/.metabot/` and `~/.metabot-core/`; only package-owned `~/.metabot/default.env` may be refreshed.
 6. Install dependencies and build the Bridge, Core, Web UI, and delegated CLI.
 7. Refresh bundled/workspace Skills and existing Lark CLI Skills when present.
-8. Restart the managed PM2 services.
+8. Restart Bridge and both execution daemons, then save PM2 only after health.
+
+Plain `restart` accepts `--request-id`, `--bot`, `--chat`, `--source`,
+`--reason`, `--resume`/`--no-resume`, `--wait`, `--timeout`, `--force`, and `--json`.
+`deploy-runtime` accepts the same request metadata plus `--wait`/`--no-wait`
+and `--force`. A repeated request ID reads the existing durable result and
+does not repeat the PM2 action.
+
+The old Bridge process writes an atomic breadcrumb and a transactional SQLite
+request record, then changes only the registered `metabot` process in place.
+The new Bridge verifies its HTTP health, both execution-daemon wire probes,
+and the expected PM2 cwd, script, interpreter, interpreter arguments, and
+environment before it runs `pm2 save --force` and marks the request healthy.
+Environment values, including credentials and proxy settings, are stored in
+the restart ledger only as SHA-256 fingerprints. The breadcrumb is retained until reporting and continuation
+ownership are recorded, preventing a recovered session from starting a
+restart loop.
+
+Before that durable PM2 transition, the authenticated local Bridge briefly
+quiesces every registered bot and snapshots all active chats. Each affected
+user-facing chat receives a **Restart Preparing** notice from its own bot. A
+notification failure cancels the restart and releases the quiesce unless the
+operator explicitly passes `--force`. A two-minute preparation lease also
+unfreezes the Bridge if the controller disappears before changing PM2 state.
+When the CLI runs inside a signed engine session, it forwards that scoped
+capability instead of the Bridge administrator secret. Only `user`, `pm`, or
+`admin` roles may prepare or cancel a restart, and only for the exact signed
+bot and chat; Agent Team agents and workers remain denied.
+
+When `--resume` has a normal user or PM bot/chat scope, startup schedules one
+durable continuation for every interrupted user-facing chat, not just the
+requester, so each affected bot continues exactly once and sends its own
+**Restart Complete** notice. The scheduler writes each task atomically before
+it arms the timer; a persistence or completion-notice failure retains the
+restart breadcrumb for the next startup replay. Non-card Agent Bus work is
+resumed without attempting to send to synthetic chat IDs. Agent Team and Worker/ARC internal chats are not
+generically resumed; their durable supervisors and daemons remain responsible
+for recovery. Restart state is under `SESSION_STORE_DIR`, `METABOT_STATE_DIR`,
+or `~/.metabot/` (`restart-state.sqlite`, `controlled-restart.json`, and
+`last-restart.json`). This addition does not migrate `sessions.db`.
+
+Daemon restarts refuse while work is active. `--force` explicitly accepts that
+ambiguous in-flight work can become `recovery_required`. `deploy-runtime` has
+the same guard and must run outside the MetaBot process tree. It prevalidates
+the live Bridge PID and the caller ancestry; if either cannot be read, it
+refuses the switch instead of assuming the caller is external. It then
+prevalidates the target/rollback configurations, restarts Worker Runner, ARC, an optional
+checkout-owned local Core, then Bridge without deleting their PM2
+registrations, and rolls back every changed app if PM2 rejects or cannot verify
+a switch. Core stays in its separate ecosystem. It is included only when its
+current PM2 cwd/script exactly match the Bridge runtime; an external Core is
+left untouched. `uninstall.sh` uses the same ownership check. Only the healthy
+new Bridge saves the process list.
+
+Package updates of an online runtime must be launched from SSH or another
+controller outside the live Bridge process tree. The updater refuses internal
+or unverifiable callers before downloading the package, then uses the same
+request-ID-backed no-delete runtime switch. Initial or offline installation
+may start missing registrations, but never deletes an existing registration.
 
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and
@@ -76,6 +140,13 @@ Bridge's prepare state and removes the breadcrumb before returning an error.
 
 These commands curl the local bridge daemon at `localhost:9100`, reading
 `API_PORT` / `API_SECRET` (and optional `METABOT_URL`) from the bridge `.env`.
+Human or local management mutations require `API_SECRET`, including on
+loopback; the Bridge does not restore unauthenticated local mutation access.
+An Agent Team engine session instead forwards its short-lived scoped
+credential for only `metabot bots`, `metabot peers`, `metabot stats`, and
+`metabot metrics` outside the Team coordination API. It never forwards
+`API_SECRET` or `METABOT_API_SECRET`, and the scoped credential cannot read bot
+details/profiles or call other Bridge routes.
 
 ### Bot management
 
@@ -94,6 +165,9 @@ metabot talk alice/bot <chatId> <prompt>  # talk to a specific peer's bot
 The bot name supports [qualified names](../features/peers.md#qualified-names)
 (`peerName/botName`) for cross-instance routing. This is the bridge-local talk
 path; `metabot agents talk` is the separate central-registry P2P variant.
+The CLI-only variant has no sender RulesPack runtime and refuses protected
+targets. Use the Bridge-local `metabot talk` form when the target advertises a
+required, shadow, or enforce RulesPack state.
 
 ### Peers
 
@@ -104,6 +178,25 @@ metabot peers                       # list peers and status
 ### Agent Teams
 
 `metabot teams` talks to the local bridge `/api/agent-teams/*` API. It is the coordination surface for MetaBot Agent Teams: agents, mailbox messages, shared tasks, and background runs.
+
+Governed Teams add separate versioned resources without changing legacy or
+`bots.json` Teams:
+
+```bash
+metabot teams templates list
+metabot teams templates publish implementation --body '{"agents":[{"name":"coder","engine":"codex"}]}'
+metabot teams rules publish implementation-policy --scope team-template --rules '[{"text":"Keep changes focused."}]'
+metabot teams instances resolve implementation --scope project --scope-key project-a --pm-bot metabot
+metabot teams instances stop atg_0123456789abcdef
+metabot teams audit --instance atg_0123456789abcdef
+```
+
+Chat scope is the default. Global scope requires the explicit `--global`
+option. Engine sessions automatically forward a short-lived bridge-issued
+credential and do not inherit the bridge administrator secret. Persistent
+executor retirement begins before that credential expires, waits for an active
+turn to finish, and provides a fresh credential on the next turn. Callers
+cannot gain authority with body or CLI role fields.
 
 ```bash
 metabot teams list
@@ -148,6 +241,11 @@ metabot schedule resume <id>                                   # resume a task
 metabot schedule cancel <id>                                   # cancel a task
 ```
 
+When the target chat is busy, scheduled work remains pending with persisted
+exponential backoff for up to 30 minutes. A bridge restart preserves the
+remaining retry window. Exhausted recurring occurrences are logged without a
+repeated failure card; an exhausted one-time task sends one failure notice.
+
 ### Stats, metrics & health
 
 ```bash
@@ -179,6 +277,21 @@ TTS flags:
 | `-o FILE`         | Save to specific file (default: `/tmp/metabot-voice-<timestamp>.mp3`) |
 | `--provider NAME` | TTS provider: `doubao`, `openai`, or `elevenlabs`                     |
 | `--voice ID`      | Voice/speaker ID (provider-specific)                                  |
+
+### Strict artifact mirrors
+
+```bash
+metabot artifacts status --config /absolute/path/artifact-mirror.json
+metabot artifacts sync --config /absolute/path/artifact-mirror.json --apply
+metabot artifacts publish --config /absolute/path/artifact-mirror.json \
+  --project project-alpha --file /absolute/path/annotations/marked.pdf \
+  --name project-alpha_review-tech_topic-annotations_lang-en_20260821_v01.pdf --apply
+```
+
+`status` is read-only. `sync --apply` strictly restores the configured local
+deliverables payload from its authority after preserving rollback bytes and
+local edits. `publish` is the explicit annotations-to-authority path and never
+overwrites different bytes.
 
 ## 3. metabot-core delegation
 

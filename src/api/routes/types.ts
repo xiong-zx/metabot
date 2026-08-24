@@ -19,6 +19,13 @@ import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
 import type { AgentTeamStore } from '../../agent-teams/team-store.js';
 import type { AgentTeamSupervisor } from '../../agent-teams/team-supervisor.js';
+import type { AgentTeamGovernanceExtension } from '../../agent-teams/governance-extension.js';
+import type { AgentTeamExecutionPrincipal } from '../../agent-teams/governance-capability.js';
+import type { ExecutionCapabilityService } from '../../services/execution-capabilities.js';
+import type { TerminalEventDispatcher, TerminalEventStore } from '../../services/terminal-event-store.js';
+import type { TerminalEventRateLimiter } from './worker-events-routes.js';
+import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
+import type { RulesPackWorkerCoordinator } from '../../extensions/rulespack-worker-coordinator.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -41,6 +48,18 @@ export interface RouteContext {
   activityStore?: ActivityStore;
   agentTeamStore?: AgentTeamStore;
   agentTeamSupervisor?: AgentTeamSupervisor;
+  agentTeamGovernance?: AgentTeamGovernanceExtension;
+  resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
+  resolveRulesPackTransportIssuer?: (req: http.IncomingMessage) => string | undefined;
+  resolveRulesPackApiPrincipal?: (
+    req: http.IncomingMessage,
+    target: Parameters<typeof import('../../extensions/rulespack-api-principal.js').resolveRulesPackApiPrincipal>[1],
+  ) => RulesPackExecutionPrincipal;
+  executionCapabilityService?: ExecutionCapabilityService;
+  rulesPackWorkerCoordinator?: RulesPackWorkerCoordinator;
+  terminalEventStore?: TerminalEventStore;
+  terminalEventDispatcher?: TerminalEventDispatcher;
+  terminalEventRateLimiter?: TerminalEventRateLimiter;
 }
 
 /**

@@ -231,10 +231,11 @@ describe('buildCard', () => {
     };
     const json = JSON.parse(buildCard(state));
     const team = json.elements.find(
-      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Teammates/.test(e.content),
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content),
     );
     expect(team).toBeDefined();
     expect(team.content).toContain('feishu-ux-review');
+    expect(team.content).toContain('1/1 working');
     expect(team.content).toContain('ux-researcher');
     expect(team.content).toContain('UX audit');
   });

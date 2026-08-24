@@ -4,7 +4,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
-import { parseArgs, resolveContentTypeFlag, resolveShareFlag, cmdCreate, cmdMkdir, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
+import {
+  cmdCreate,
+  cmdIndexReview,
+  cmdMkdir,
+  cmdMoveFolder,
+  cmdRoutingPreview,
+  cmdRoutingRebuild,
+  cmdRoutingSnapshots,
+  cmdUpdate,
+  cmdVisibility,
+  defaultWritePrefix,
+  parseArgs,
+  resolveContentTypeFlag,
+  resolveShareFlag,
+} from '../src/commands.js';
 
 describe('parseArgs', () => {
   it('splits positional and flags', () => {
@@ -216,6 +230,52 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
+  it('create/update forward structured routing metadata and CAS version', async () => {
+    const createCalls = stubFetch();
+    await cmdCreate(cfg, parseArgs([
+      'Memory ToDos',
+      'content',
+      '--path',
+      '/cargo1/todo/memory-todos',
+      '--index-role',
+      'todo',
+      '--project-key',
+      'memory',
+      '--index-keywords',
+      'todo,memory',
+      '--index-summary',
+      'Canonical memory tasks.',
+    ]));
+    expect(bodyOf(
+      createCalls.find((call) => call.url.endsWith('/api/memory/documents'))!,
+    )).toMatchObject({
+      index_role: 'todo',
+      project_key: 'memory',
+      index_keywords: ['todo', 'memory'],
+      index_summary: 'Canonical memory tasks.',
+    });
+
+    vi.unstubAllGlobals();
+    const updateCalls = stubFetch();
+    await cmdUpdate(cfg, parseArgs([
+      '/cargo1/todo/memory-todos',
+      'updated',
+      '--expected-version',
+      '4',
+      '--index-summary',
+      'Updated summary.',
+    ]));
+    const patch = updateCalls.find(
+      (call) => call.url.endsWith('/api/memory/documents/%2Fcargo1%2Ftodo%2Fmemory-todos'),
+    )!;
+    expect(patch.init.method).toBe('PATCH');
+    expect(bodyOf(patch)).toMatchObject({
+      content: 'updated',
+      expected_version: 4,
+      index_summary: 'Updated summary.',
+    });
+  });
+
   it('create: bare invocation by a member defaults into its own /users/<bot> namespace', async () => {
     // user-kind stub (ownerName defaults to botName) → /users/<bot>
     const calls = stubFetch({ botName: 'bot-x', role: 'member' });
@@ -319,6 +379,70 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
     expect(bodyOf(post).path).toBe('/users/bot-x/forced');
+  });
+});
+
+describe('index maintenance CLI commands', () => {
+  const cfg = { url: 'http://x', token: 't' };
+  let calls: Array<{ url: string; init: RequestInit }>;
+
+  beforeEach(() => {
+    calls = [];
+    vi.stubGlobal('fetch', (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('previews, rebuilds, lists snapshots, and records human review', async () => {
+    await cmdRoutingPreview(cfg, parseArgs(['--root', '/cargo1']));
+    await cmdRoutingRebuild(cfg, parseArgs([
+      '--root',
+      '/cargo1',
+      '--expected-version',
+      '7',
+    ]));
+    await cmdRoutingSnapshots(cfg, parseArgs(['--limit', '5']));
+    await cmdIndexReview(cfg, parseArgs([
+      'memory-status-dry-run',
+      '12',
+      'corrected',
+    ]));
+
+    expect(calls[0].url).toBe(
+      'http://x/api/memory/routing-index/preview?root=%2Fcargo1',
+    );
+    expect(JSON.parse(calls[1].init.body as string)).toMatchObject({
+      root: '/cargo1',
+      expected_version: 7,
+    });
+    expect(calls[2].url).toBe(
+      'http://x/api/memory/routing-index/snapshots?limit=5',
+    );
+    expect(JSON.parse(calls[3].init.body as string)).toEqual({
+      consumer: 'memory-status-dry-run',
+      event_ids: [12],
+      review_outcome: 'corrected',
+    });
+  });
+
+  it('requires CAS for routing rebuild and validates review outcomes', async () => {
+    await expect(cmdRoutingRebuild(cfg, parseArgs([]))).rejects.toThrow(
+      '--expected-version',
+    );
+    await expect(cmdIndexReview(cfg, parseArgs([
+      'memory-status-dry-run',
+      '12',
+      'maybe',
+    ]))).rejects.toThrow('outcome must be');
+    expect(calls).toHaveLength(0);
   });
 });
 
