@@ -30,10 +30,11 @@ export async function forwardAuthenticatedPeerTask(input: AuthenticatedPeerForwa
   }
   const targetStatus = requireDispatchableTarget(input);
   const targetIdentity = requireAuthenticatedTargetIdentity(input);
-  const operator = resolveDispatcher(input.registry, input.principal)?.bridge.getRulesPackOperator?.();
+  const dispatcher = resolveDispatcher(input.registry, input.principal, input.peer.auth?.sourceBot);
+  const operator = dispatcher?.bridge.getRulesPackOperator?.();
   if (input.body.rulesPackDispatch) {
     assertEnvelopeTargetIdentity(input.body.rulesPackDispatch, targetIdentity);
-    return forwardEnvelope(input, input.body.rulesPackDispatch, operator);
+    return forwardEnvelope(input, input.body.rulesPackDispatch, dispatcher, operator);
   }
   if (!operator) {
     if (targetStatus.required || targetStatus.mode === 'enforce') {
@@ -50,7 +51,7 @@ export async function forwardAuthenticatedPeerTask(input: AuthenticatedPeerForwa
     audience: targetIdentity.audience,
     targetHostId: targetIdentity.hostId,
   });
-  return forwardEnvelope(input, envelope, operator);
+  return forwardEnvelope(input, envelope, dispatcher, operator);
 }
 
 function remoteExecutionSubject(
@@ -114,10 +115,15 @@ function assertEnvelopeTargetIdentity(
 async function forwardEnvelope(
   input: AuthenticatedPeerForwardInput,
   envelope: RulesPackDispatchEnvelopeV1,
+  dispatcher: RegisteredBot | undefined,
   operator: RulesPackOperator | undefined,
 ): Promise<object> {
   try {
-    const result = await input.peerManager.forwardTask(input.peer, { ...input.body, rulesPackDispatch: envelope });
+    const result = await input.peerManager.forwardTask(input.peer, {
+      ...input.body,
+      ...(dispatcher ? { sourceBot: dispatcher.name } : {}),
+      rulesPackDispatch: envelope,
+    });
     if (input.peer.url === 'inbox:' || (result as { relay?: unknown }).relay === 'inbox') {
       if (isExplicitRemoteRejection(result)) {
         throw new Error('RulesPack peer explicitly rejected the dispatched envelope');
@@ -171,7 +177,15 @@ function remoteAgentIdentity(chatId: string): Pick<ExecutionSubject, 'agent'> | 
   return team?.[1] ? { agent: team[1] } : {};
 }
 
-function resolveDispatcher(registry: BotRegistry, principal: RulesPackExecutionPrincipal): RegisteredBot | undefined {
+function resolveDispatcher(
+  registry: BotRegistry,
+  principal: RulesPackExecutionPrincipal,
+  configuredSourceBot?: string,
+): RegisteredBot | undefined {
+  if (configuredSourceBot) {
+    const configured = registry.get(configuredSourceBot.trim());
+    return rulesPackOperatorBot(configured) ? configured : undefined;
+  }
   if (principal.kind === 'generic' && principal.botName) {
     return bridgeTransportDispatcher(registry, principal.botName);
   }

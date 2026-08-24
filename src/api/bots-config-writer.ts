@@ -181,6 +181,7 @@ export function addPeer(configPath: string, entry: PeerJsonEntry): void {
   const normalized: PeerJsonEntry = {
     name: entry.name,
     url: entry.url.replace(/\/+$/, ''),
+    ...(entry.auth ? { auth: entry.auth } : {}),
     ...(entry.secret ? { secret: entry.secret } : {}),
   };
   if (idx !== -1) {

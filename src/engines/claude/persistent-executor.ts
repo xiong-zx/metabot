@@ -38,7 +38,7 @@ import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
 import { apply1MContextSettings } from './executor.js';
-import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
+import { removeMetaBotRuntimeSecrets, stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
 import type {
@@ -105,6 +105,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
       if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
       env[key] = value;
     }
+    removeMetaBotRuntimeSecrets(env);
     if (explicitApiKey) env.ANTHROPIC_API_KEY = explicitApiKey;
     if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === undefined) {
       env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';

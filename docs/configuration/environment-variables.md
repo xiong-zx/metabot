@@ -106,9 +106,13 @@ Multi-bot deployments should store channel credentials in the protected
 | `METABOT_MEMORY_INDEX_MAX_ATTEMPTS` | `3` | Retry count before dead-lettering a proposal failure |
 | `METABOT_MEMORY_ROUTING_REBUILD_ENABLED` | `false` | Core-side write gate for deterministic routing-index rebuilds |
 | `SCHEDULE_TIMEZONE` | system timezone | IANA timezone for cron tasks |
+| `METABOT_PEER_ID` | — | Stable identity for this Bridge |
 | `METABOT_PEERS` | — | Comma-separated peer URLs |
-| `METABOT_PEER_SECRETS` | — | Positional secrets for peer URLs |
 | `METABOT_PEER_NAMES` | auto | Positional peer display names |
+| `METABOT_PEER_KEY_IDS` | — | Positional scoped peer key IDs |
+| `METABOT_PEER_AUTH_SECRETS` | — | Positional scoped peer secrets |
+| `METABOT_PEER_SOURCE_BOTS` | — | Positional local outbound Bot names |
+| `METABOT_PEER_SECRETS` | — | Deprecated; detected but never sent |
 | `METABOT_ALLOWED_PEER_CIDRS` | — | Optional IPv4 CIDR forwarding allowlist |
 | `FEISHU_SERVICE_APP_ID` | first Feishu bot | Optional Wiki/doc-reader service app |
 | `FEISHU_SERVICE_APP_SECRET` | first Feishu bot | Service app secret |

@@ -88,6 +88,9 @@ startup rejects either placeholder in `issuer` or `allowedIssuers`. This is an
 intentional migration error for the earlier `{bot}` example, not a silent
 fallback. The sender also verifies Core-backed dispatches against `/api/whoami`
 before direct or inbox delivery, and rejects/logs any mismatch.
+For a static scoped peer, configure that peer's `auth.sourceBot` separately.
+It names the local Bot whose operator compiles the envelope and whose task
+identity the peer capability signs; it does not replace `dispatch.issuer`.
 An authenticated scoped local principal selects that exact bot's operator even
 though its bot name differs from the shared issuer. A generic Core bearer
 selects a Bridge-wide operator only among bots configured with its authenticated

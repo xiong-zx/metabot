@@ -6,7 +6,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
 import type { CodexReasoningEffort } from '../../config.js';
-import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
+import { removeMetaBotRuntimeSecrets, stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
@@ -128,6 +128,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
       if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
       env[key] = value;
     }
+    removeMetaBotRuntimeSecrets(env);
 
     // Inject explicit API key from bots.json (after filtering, so it takes effect)
     if (explicitApiKey) {

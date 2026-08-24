@@ -516,6 +516,57 @@ describe('RulesPack operator and transport routes', () => {
     expect(forwardTask).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ rulesPackDispatch: envelope }));
   });
 
+  it('uses the peer-configured local dispatcher when several operators share one issuer', async () => {
+    const envelope = {
+      envelopeId: 'savio-envelope', replayId: 'savio-replay', packDigest: 'savio-digest',
+      issuer: 'metabot-core-admin',
+    } as any;
+    const selectedDispatcher = vi.fn(async () => envelope);
+    const otherDispatcher = vi.fn(async () => envelope);
+    const source = (name: string, dispatcher: ReturnType<typeof vi.fn>) => ({
+      name,
+      platform: 'web',
+      config: { rulesPack: { dispatch: { issuer: 'metabot-core-admin' } } },
+      bridge: { getRulesPackOperator: () => ({ createDispatchEnvelope: dispatcher }) },
+    });
+    const selected = source('pm-savio', selectedDispatcher);
+    const other = source('research-savio', otherDispatcher);
+    const forwardTask = vi.fn(async () => ({
+      success: true,
+      rulesPackDelivery: {
+        status: 'consumed', envelopeId: 'savio-envelope', replayId: 'savio-replay', packDigest: 'savio-digest',
+      },
+    }));
+
+    await forwardAuthenticatedPeerTask({
+      registry: {
+        get: (name: string) => name === 'pm-savio' ? selected : name === 'research-savio' ? other : undefined,
+        listRegistered: () => [other, selected],
+      } as any,
+      peerManager: { forwardTask } as any,
+      peer: {
+        name: 'imac',
+        url: 'http://imac',
+        auth: { keyId: 'peer-v1', secret: 'not-used-in-this-unit-test', sourceBot: 'pm-savio' },
+      },
+      peerBot: {
+        name: 'admin', engine: 'codex',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'enforce', defaultProjectId: null },
+      } as any,
+      principal: {
+        kind: 'scoped', source: 'local-admin', botName: 'admin', chatId: 'chat-a', roles: ['api-admin'],
+      },
+      body: { botName: 'admin', chatId: 'chat-a', prompt: 'work' },
+    });
+
+    expect(selectedDispatcher).toHaveBeenCalledOnce();
+    expect(otherDispatcher).not.toHaveBeenCalled();
+    expect(forwardTask).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      sourceBot: 'pm-savio',
+      rulesPackDispatch: envelope,
+    }));
+  });
+
   it('selects a deterministic Bridge dispatcher for a shared authenticated transport issuer', async () => {
     const envelope = { envelopeId: 'e', replayId: 'r', packDigest: 'd', issuer: 'bridge-credential' } as any;
     const source = (name: string, platform: string, issuer: string, dispatcher: ReturnType<typeof vi.fn>) => ({
@@ -1450,6 +1501,36 @@ describe('RulesPack operator and transport routes', () => {
       request(
         { botName: 'admin', chatId: 'chat', prompt: 'work', rulesPackDispatch: {} },
         { 'x-metabot-origin': 'peer', 'x-metabot-rulespack-issuer': 'spoofed-peer' },
+      ),
+      res,
+      'POST',
+      '/api/talk',
+    );
+    expect(handled).toBe(true);
+    expect(output).toEqual({
+      status: 400,
+      body: { error: 'RulesPack dispatch requires authenticated peer transport headers' },
+    });
+  });
+
+  it('rejects an envelope issuer that differs from the signed transport issuer', async () => {
+    const ctx = {
+      resolveRulesPackTransportIssuer: () => 'authenticated-peer',
+    } as unknown as RouteContext;
+    const { res, output } = response();
+    const handled = await handleTaskRoutes(
+      ctx,
+      request(
+        {
+          botName: 'admin',
+          chatId: 'chat',
+          prompt: 'work',
+          rulesPackDispatch: { issuer: 'other-peer' },
+        },
+        {
+          'x-metabot-origin': 'peer',
+          'x-metabot-rulespack-issuer': 'authenticated-peer',
+        },
       ),
       res,
       'POST',

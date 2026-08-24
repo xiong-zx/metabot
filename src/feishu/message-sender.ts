@@ -300,7 +300,7 @@ export class MessageSender {
         content: item.body?.content,
       };
     } catch (err) {
-      this.logger.error({ err, messageId }, 'Failed to get referenced message');
+      this.logger.error({ messageId, ...classifyFeishuDeliveryError(err) }, 'Failed to get referenced message');
       return undefined;
     }
   }

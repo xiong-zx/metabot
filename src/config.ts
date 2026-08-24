@@ -243,10 +243,62 @@ export interface SlackBotConfig extends BotConfigBase {
   groupNoMention?: boolean;
 }
 
+export interface PeerAuthKeyConfig {
+  keyId: string;
+  secret: string;
+  /** Optional ISO-8601 cutoff for an inbound rotation key. */
+  acceptUntil?: string;
+}
+
+export interface PeerAuthConfig extends PeerAuthKeyConfig {
+  /** Explicit local Bot used as the outbound peer task identity. */
+  sourceBot?: string;
+  /** Previous inbound keys accepted only during a bounded rotation window. */
+  acceptKeys?: PeerAuthKeyConfig[];
+  /** Key IDs rejected immediately even if they remain in acceptKeys. */
+  revokedKeyIds?: string[];
+  /** Optional inbound scopes. Empty or omitted means any configured local/remote bot. */
+  allowedSourceBots?: string[];
+  allowedTargetBots?: string[];
+}
+
 export interface PeerConfig {
   name: string;
   url: string;
+  auth?: PeerAuthConfig;
+  /** @deprecated Bridge administrator secrets are never used for peer calls. */
   secret?: string;
+}
+
+function assertValidPeerAuth(peerName: string, auth: PeerAuthConfig): void {
+  if (!auth.keyId?.trim() || typeof auth.secret !== 'string' || auth.secret.length < 32) {
+    throw new Error(`Invalid scoped peer auth for "${peerName}": the active key requires keyId and a 32+ character secret`);
+  }
+  if (auth.acceptKeys !== undefined && !Array.isArray(auth.acceptKeys)) {
+    throw new Error(`Invalid scoped peer auth for "${peerName}": acceptKeys must be an array`);
+  }
+  if (auth.sourceBot !== undefined && (typeof auth.sourceBot !== 'string' || !auth.sourceBot.trim())) {
+    throw new Error(`Invalid scoped peer auth for "${peerName}": sourceBot must be a non-empty local Bot name`);
+  }
+  for (const key of auth.acceptKeys ?? []) {
+    if (!key || typeof key !== 'object'
+      || !key.keyId?.trim() || typeof key.secret !== 'string' || key.secret.length < 32) {
+      throw new Error(`Invalid scoped peer auth for "${peerName}": every accepted rotation key requires keyId and a 32+ character secret`);
+    }
+    if (!key.acceptUntil || !Number.isFinite(Date.parse(key.acceptUntil))) {
+      throw new Error(`Invalid scoped peer auth for "${peerName}": every accepted rotation key requires an ISO-8601 acceptUntil cutoff`);
+    }
+  }
+  for (const [field, values] of [
+    ['revokedKeyIds', auth.revokedKeyIds],
+    ['allowedSourceBots', auth.allowedSourceBots],
+    ['allowedTargetBots', auth.allowedTargetBots],
+  ] as const) {
+    if (values !== undefined
+      && (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || !value.trim()))) {
+      throw new Error(`Invalid scoped peer auth for "${peerName}": ${field} must be an array of non-empty strings`);
+    }
+  }
 }
 
 export interface AppConfig {
@@ -786,6 +838,8 @@ function slackBotFromEnv(): SlackBotConfig {
 export interface PeerJsonEntry {
   name: string;
   url: string;
+  auth?: PeerAuthConfig;
+  /** @deprecated Retained only so migration can report and remove it safely. */
   secret?: string;
 }
 
@@ -918,7 +972,13 @@ export function loadAppConfig(): AppConfig {
     const cfg = parsedConfig as BotsJsonNewFormat;
     if (cfg.peers) {
       for (const p of cfg.peers) {
-        peers.push({ name: p.name, url: p.url.replace(/\/+$/, ''), secret: p.secret });
+        if (p.auth) assertValidPeerAuth(p.name, p.auth);
+        peers.push({
+          name: p.name,
+          url: p.url.replace(/\/+$/, ''),
+          ...(p.auth ? { auth: p.auth } : {}),
+          ...(p.secret ? { secret: p.secret } : {}),
+        });
       }
     }
   }
@@ -927,12 +987,34 @@ export function loadAppConfig(): AppConfig {
       .map((u) => u.trim())
       .filter(Boolean);
     const secrets = (process.env.METABOT_PEER_SECRETS || '').split(',').map((s) => s.trim());
+    const authSecrets = (process.env.METABOT_PEER_AUTH_SECRETS || '').split(',').map((s) => s.trim());
+    const keyIds = (process.env.METABOT_PEER_KEY_IDS || '').split(',').map((s) => s.trim());
+    const sourceBots = (process.env.METABOT_PEER_SOURCE_BOTS || '').split(',').map((s) => s.trim());
     const names = (process.env.METABOT_PEER_NAMES || '').split(',').map((s) => s.trim());
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i].replace(/\/+$/, '');
       if (!peers.some((p) => p.url === url)) {
         const autoName = names[i] || url.replace(/^https?:\/\//, '').replace(/[:.]/g, '-');
-        peers.push({ name: autoName, url, secret: secrets[i] || undefined });
+        const authSecret = authSecrets[i];
+        const keyId = keyIds[i];
+        if ((authSecret && !keyId) || (!authSecret && keyId)) {
+          throw new Error(`Peer auth for "${autoName}" requires both METABOT_PEER_KEY_IDS and METABOT_PEER_AUTH_SECRETS`);
+        }
+        if (authSecret && authSecret.length < 32) {
+          throw new Error(`Scoped peer auth secret for "${autoName}" must contain at least 32 characters`);
+        }
+        peers.push({
+          name: autoName,
+          url,
+          ...(authSecret && keyId ? {
+            auth: {
+              keyId,
+              secret: authSecret,
+              ...(sourceBots[i] ? { sourceBot: sourceBots[i] } : {}),
+            },
+          } : {}),
+          ...(secrets[i] ? { secret: secrets[i] } : {}),
+        });
       }
     }
   }

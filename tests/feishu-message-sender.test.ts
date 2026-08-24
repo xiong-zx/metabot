@@ -64,15 +64,47 @@ describe('MessageSender.getMessage', () => {
   });
 
   it('fails closed instead of fabricating context when lookup fails', async () => {
+    const credential = 'snapshot-credential-must-not-appear';
     const log = logger();
     const sender = new MessageSender({
-      im: { v1: { message: { get: vi.fn(async () => { throw new Error('forbidden'); }) } } },
+      im: {
+        v1: {
+          message: {
+            get: vi.fn(async () => {
+              throw {
+                response: {
+                  status: 403,
+                  data: { code: 230001, msg: 'forbidden' },
+                  headers: { 'x-request-id': 'req-snapshot-denied' },
+                },
+                config: {
+                  headers: {
+                    Authorization: `Bearer ${credential}`,
+                    Cookie: `session=${credential}`,
+                  },
+                },
+              };
+            }),
+          },
+        },
+      },
     } as any, log);
 
     await expect(sender.getMessage('om-parent')).resolves.toBeUndefined();
     expect(log.error).toHaveBeenCalledWith(
-      expect.objectContaining({ messageId: 'om-parent' }),
+      expect.objectContaining({
+        messageId: 'om-parent',
+        category: 'authentication',
+        retryable: false,
+        httpStatus: 403,
+        providerCode: 230001,
+        requestId: 'req-snapshot-denied',
+      }),
       'Failed to get referenced message',
     );
+    const serialized = JSON.stringify(log.error.mock.calls);
+    expect(serialized).not.toContain(credential);
+    expect(serialized).not.toContain('Authorization');
+    expect(serialized).not.toContain('Cookie');
   });
 });

@@ -101,6 +101,9 @@ share one Core credential. Set it to the exact `botName` reported by
 `metabot agents whoami`; do not use `{bot}` or `{surface}` in `issuer` or
 `allowedIssuers`. Legacy templated identity config is rejected at startup with
 a migration error so transport binding cannot silently weaken.
+Static scoped peers additionally set `peers[].auth.sourceBot` to one explicit
+Bot on the sending Bridge. That local dispatcher is separate from the shared
+RulesPack transport issuer.
 
 ## Codex Options
 

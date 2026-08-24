@@ -98,6 +98,9 @@ SHA-256 key 及 project ID，不会在发现结果中暴露原始 chat ID；接�
 把返回的 `botName` 原样填入 `dispatch.issuer`；不要在 `issuer` 或
 `allowedIssuers` 中使用 `{bot}` / `{surface}`。旧版模板化身份配置会在启动时
 给出明确迁移错误，不会静默弱化传输身份绑定。
+静态 scoped peer 还应把 `peers[].auth.sourceBot` 设置为发送 Bridge 上一个
+明确的本机 Bot。这个本机 dispatcher 与共享的 RulesPack transport issuer
+是两个不同身份。
 
 ## Codex 配置
 

@@ -7,6 +7,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import type { ApiTaskResult } from '../bridge/message-bridge.js';
 
 export interface AsyncTask {
   id: string;
@@ -16,15 +17,15 @@ export interface AsyncTask {
   status: 'accepted' | 'running' | 'completed' | 'failed';
   createdAt: number;
   completedAt?: number;
-  result?: {
-    success: boolean;
-    responseText: string;
-    costUsd?: number;
-    durationMs?: number;
-    error?: string;
-  };
+  result?: Pick<
+    ApiTaskResult,
+    'success' | 'responseText' | 'costUsd' | 'durationMs' | 'error' | 'rulesPackDelivery'
+  >;
   callbackChatId?: string;
   callbackBotName?: string;
+  requestIssuer?: string;
+  requestSourceBot?: string;
+  requestBodySha256?: string;
 }
 
 export class AsyncTaskStore {
@@ -44,14 +45,20 @@ export class AsyncTaskStore {
   }
 
   create(opts: {
+    id?: string;
     botName: string;
     chatId: string;
     prompt: string;
     callbackChatId?: string;
     callbackBotName?: string;
+    requestIssuer?: string;
+    requestSourceBot?: string;
+    requestBodySha256?: string;
   }): AsyncTask {
+    const id = opts.id ?? crypto.randomUUID().slice(0, 8);
+    if (this.tasks.has(id)) throw new Error(`Async task already exists: ${id}`);
     const task: AsyncTask = {
-      id: crypto.randomUUID().slice(0, 8),
+      id,
       botName: opts.botName,
       chatId: opts.chatId,
       prompt: opts.prompt,
@@ -59,6 +66,9 @@ export class AsyncTaskStore {
       createdAt: Date.now(),
       callbackChatId: opts.callbackChatId,
       callbackBotName: opts.callbackBotName,
+      requestIssuer: opts.requestIssuer,
+      requestSourceBot: opts.requestSourceBot,
+      requestBodySha256: opts.requestBodySha256,
     };
     this.tasks.set(task.id, task);
     return task;

@@ -16,7 +16,7 @@ import xterm from '@xterm/headless';
 const { Terminal } = xterm;
 type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
-import { stripBridgeLocalAdminCredentials } from '../../execution-env.js';
+import { removeMetaBotRuntimeSecrets, stripBridgeLocalAdminCredentials } from '../../execution-env.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
   PtyClaudeSessionOptions,
@@ -155,6 +155,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
       delete env[k];
     }
+    removeMetaBotRuntimeSecrets(env);
 
     const claudePath = opts.pathToClaudeExecutable ?? 'claude';
     const cols = opts.cols ?? 120;

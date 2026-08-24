@@ -8,6 +8,8 @@ import type { BotChannelStatus, BotRegistry } from './bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type { PeerManager } from './peer-manager.js';
+import { isPeerAuthorization, setPeerRequestClaims } from './peer-auth.js';
+import { readBody } from './routes/helpers.js';
 
 import { AsyncTaskStore } from './async-task-store.js';
 import {
@@ -154,6 +156,7 @@ export function isCrossVerifyRoute(method: string, url: string): boolean {
   if (method === 'GET' && url.startsWith('/api/talk/')) return true;
   if (method === 'GET' && (url === '/api/bots' || url.startsWith('/api/bots?'))) return true;
   if (method === 'GET' && (url === '/api/skills' || url.startsWith('/api/skills?'))) return true;
+  if (method === 'GET' && /^\/api\/skills\/[^/?]+(?:\?.*)?$/.test(url)) return true;
   if (method === 'GET' && (url === '/api/peers' || url.startsWith('/api/peers?'))) return true;
   return false;
 }
@@ -596,11 +599,9 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
     // Auth check (output-file routes remain publicly fetchable by opaque URL).
     //
-    // /api/talk and /api/tasks routes accept dual auth: the local secret
-    // (metabot CLI shortcut, local cross-bot dispatch) OR any Bearer that
-    // metabot-core `GET /api/whoami` validates (cross-bridge peer calls,
-    // `metabot talk` from any user with a metabot-core token). Every other
-    // API stays single-secret.
+    // Cross-bridge routes accept either a scoped MetaBotPeer capability or,
+    // for same-Core registry peers, a Bearer that metabot-core validates.
+    // Neither path grants access to administrator routes.
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
@@ -640,13 +641,18 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         }
       }
 
-      const rejectUnauthorized = (error?: AgentTeamCapabilityError) => {
+      const rejectUnauthorized = (options: {
+        executionError?: AgentTeamCapabilityError;
+        status?: 401 | 403;
+        code?: string;
+      } = {}) => {
         // Count this as a failed auth attempt; trips the per-IP lockout once the
         // threshold is crossed. The next request from this IP will see 429.
         rateLimiter.recordAuthFailure(clientIp);
-        jsonResponse(res, 401, error
-          ? { error: error.message, code: error.code }
-          : { error: 'Unauthorized' });
+        const status = options.status ?? 401;
+        jsonResponse(res, status, options.executionError
+          ? { error: options.executionError.message, code: options.executionError.code }
+          : { error: 'Unauthorized', ...(options.code ? { code: options.code } : {}) });
       };
 
       // A request marked as an engine session must never fall back to the
@@ -655,23 +661,57 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       // read-only Bridge endpoints, and the self-scoped controlled-restart
       // endpoints whose handler performs an additional role/scope check.
       if (hasExecutionCapabilityHeaders && !executionCapabilityOk) {
-        rejectUnauthorized(executionCapabilityError);
+        rejectUnauthorized({ executionError: executionCapabilityError });
         return;
       }
 
       if (!localOk && !executionCapabilityOk) {
-        const canCrossVerify = isCrossVerifyRoute(method, url) && bearerTokenFromAuthorization(auth) !== undefined;
-        if (!canCrossVerify) {
-          rejectUnauthorized();
-          return;
+        if (isPeerAuthorization(auth)) {
+          if (!peerManager) {
+            rejectUnauthorized({ code: 'peer_auth_unavailable' });
+            return;
+          }
+          let rawBody: string;
+          try {
+            rawBody = method === 'GET' || method === 'HEAD' ? '' : await readBody(req);
+          } catch (error: any) {
+            jsonResponse(res, error?.statusCode || 400, { error: error?.message || 'Invalid request body' });
+            return;
+          }
+          const peerVerification = peerManager.verifyInboundPeerRequest({
+            authorization: auth,
+            method,
+            path: url,
+            host: req.headers.host,
+            origin: req.headers['x-metabot-origin'],
+            rawBody,
+          });
+          if (!peerVerification.ok) {
+            logger.warn(
+              { code: peerVerification.code, method, url, clientIp },
+              'peer capability rejected',
+            );
+            rejectUnauthorized({ status: peerVerification.status, code: peerVerification.code });
+            return;
+          }
+          setPeerRequestClaims(req, peerVerification.claims);
+          if (peerVerification.claims.rulesPackIssuer) {
+            rulesPackTransportIssuers.set(req, peerVerification.claims.rulesPackIssuer);
+          }
+        } else {
+          const canCrossVerify = isCrossVerifyRoute(method, url) && bearerTokenFromAuthorization(auth) !== undefined;
+          if (!canCrossVerify) {
+            rejectUnauthorized();
+            return;
+          }
+          const coreVerification = await verifyBearerViaMetabotCore(auth!, logger);
+          if (!coreVerification.verified) {
+            rejectUnauthorized();
+            return;
+          }
+          coreBearerPrincipals.set(req, coreVerification.botName ? { botName: coreVerification.botName } : {});
+          if (coreVerification.botName) rulesPackTransportIssuers.set(req, coreVerification.botName);
         }
-        const verified = await verifyBearerViaMetabotCore(auth!, logger);
-        if (!verified.verified) {
-          rejectUnauthorized();
-          return;
-        }
-        coreBearerPrincipals.set(req, verified.botName ? { botName: verified.botName } : {});
-        if (verified.botName) rulesPackTransportIssuers.set(req, verified.botName);
       }
       // Successful auth — clear any accumulated failed-auth counter so a
       // legitimate client is never throttled by the backoff guard.
@@ -771,6 +811,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     closing = true;
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
+    asyncTaskStore.destroy();
     terminalEventDispatcher.stop();
     for (const timer of capabilityRetirementTimers) clearTimeout(timer);
     capabilityRetirementTimers.clear();

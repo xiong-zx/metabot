@@ -5,6 +5,7 @@ export interface JsonBody {
 }
 
 const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1 MB
+const bodyCache = new WeakMap<http.IncomingMessage, Promise<string>>();
 
 export class PayloadTooLargeError extends Error {
   statusCode = 413;
@@ -37,7 +38,9 @@ p{margin:.6em 0}
 }
 
 export function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
+  const cached = bodyCache.get(req);
+  if (cached) return cached;
+  const pending = new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
     req.on('data', (chunk: Buffer) => {
@@ -52,6 +55,8 @@ export function readBody(req: http.IncomingMessage): Promise<string> {
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });
+  bodyCache.set(req, pending);
+  return pending;
 }
 
 export async function parseJsonBody(req: http.IncomingMessage): Promise<JsonBody> {

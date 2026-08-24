@@ -382,9 +382,10 @@
         "@xvirobotics/arc-worker-runner-adapter",
         "@xvirobotics/arc-researchclaw-adapter"
       ],
-      "reason": "Keep authenticated peer envelope compilation, hashed exact-chat project attestation, and receipt accounting behind the public peer and registry contracts.",
+      "reason": "Keep authenticated peer envelope compilation, explicit local dispatcher selection, separate transport-issuer binding, hashed exact-chat project attestation, and receipt accounting behind the public peer and registry contracts.",
       "validationSurface": [
         "tests/rulespack-operator-routes.test.ts",
+        "tests/peer-rulespack-auth.test.ts",
         "packages/server/tests/agents.test.ts",
         "tests/downstream-boundaries.test.ts"
       ]
