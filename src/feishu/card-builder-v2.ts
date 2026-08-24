@@ -28,6 +28,30 @@ import {
 // v2-only constant: font size used in the grey stats footer panel.
 const FOOTER_FONT_SIZE = 2;
 
+/**
+ * Conservative Card 2.0 budget. Lark rejects cards containing too many
+ * native table elements, so additional tables stay as readable Markdown
+ * instead of making the whole card invalid.
+ */
+export const DEFAULT_NATIVE_TABLE_BUDGET = 5;
+
+export interface CardV2BuildOptions {
+  nativeTableBudget?: number;
+}
+
+function tableToMarkdown(block: Extract<Block, { type: 'table' }>): string {
+  const alignment = block.align.map((value) => {
+    if (value === 'center') return ':---:';
+    if (value === 'right') return '---:';
+    return '---';
+  });
+  return [
+    `| ${block.headers.join(' | ')} |`,
+    `| ${alignment.join(' | ')} |`,
+    ...block.rows.map((row) => `| ${row.join(' | ')} |`),
+  ].join('\n');
+}
+
 function blockToElement(block: Block): unknown {
   switch (block.type) {
     case 'heading':
@@ -91,16 +115,33 @@ function blockToElement(block: Block): unknown {
   }
 }
 
-/** Split response text into blocks then map to v2 card elements */
-function responseToElements(text: string): unknown[] {
+/** Split response text into blocks while enforcing platform component budgets. */
+function responseToElements(text: string, nativeTableBudget: number): unknown[] {
   const truncated = truncateContent(text);
   const blocks    = parseMarkdownToBlocks(truncated);
-  return blocks.map(blockToElement);
+  let nativeTables = 0;
+  return blocks.map((block) => {
+    if (block.type === 'table') {
+      if (nativeTables >= nativeTableBudget) {
+        return {
+          tag: 'markdown',
+          content: tableToMarkdown(block),
+          text_align: 'left',
+        };
+      }
+      nativeTables += 1;
+    }
+    return blockToElement(block);
+  });
 }
 
-export function buildCardV2(state: CardState): string {
+export function buildCardV2(state: CardState, options: CardV2BuildOptions = {}): string {
   const config   = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
+  const nativeTableBudget = Math.max(
+    0,
+    Math.floor(options.nativeTableBudget ?? DEFAULT_NATIVE_TABLE_BUDGET),
+  );
 
   // Goal badge — pinned at the top so users see at a glance that the session
   // is in goal-driven mode (Claude /goal). Persists across turns until /goal
@@ -196,7 +237,7 @@ export function buildCardV2(state: CardState): string {
 
   // Response content (parsed into blocks)
   if (state.responseText) {
-    elements.push(...responseToElements(state.responseText));
+    elements.push(...responseToElements(state.responseText, nativeTableBudget));
   } else if (state.status === 'thinking') {
     elements.push({
       tag:     'markdown',

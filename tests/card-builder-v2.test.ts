@@ -4,6 +4,7 @@ import {
   buildHelpCardV2,
   buildStatusCardV2,
   buildTextCardV2,
+  DEFAULT_NATIVE_TABLE_BUDGET,
 } from '../src/feishu/card-builder-v2.js';
 import type { CardState } from '../src/types.js';
 
@@ -337,6 +338,51 @@ describe('buildCardV2', () => {
     expect(table.rows[0].col0).toContain('**上装38%**');
     expect(table.rows[0].col0).toContain('下装32%');
     expect(table.rows[1].col2).toContain('[详情](https://example.com)');
+  });
+
+  it('keeps a seven-table ToDo response within the native table budget without losing content', () => {
+    const responseText = Array.from({ length: 7 }, (_, index) => [
+      `## Group ${index + 1}`,
+      '',
+      '| ToDo | Status |',
+      '| --- | --- |',
+      `| FIX-${String(index + 1).padStart(3, '0')} | waiting-${index + 1} |`,
+    ].join('\n')).join('\n\n');
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'show todos',
+      responseText,
+      toolCalls: [],
+    };
+
+    const json = JSON.parse(buildCardV2(state));
+    const elements = findElements(json);
+    expect(elements.filter((element) => element.tag === 'table')).toHaveLength(DEFAULT_NATIVE_TABLE_BUDGET);
+    const serialized = JSON.stringify(json);
+    for (let index = 1; index <= 7; index++) {
+      expect(serialized).toContain(`FIX-${String(index).padStart(3, '0')}`);
+      expect(serialized).toContain(`waiting-${index}`);
+    }
+  });
+
+  it('safe terminal rendering preserves tables as Markdown without native table elements', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'show table',
+      responseText: [
+        '| Item | Result |',
+        '| --- | --- |',
+        '| final-row | delivered |',
+      ].join('\n'),
+      toolCalls: [],
+    };
+
+    const json = JSON.parse(buildCardV2(state, { nativeTableBudget: 0 }));
+    const elements = findElements(json);
+    expect(elements.some((element) => element.tag === 'table')).toBe(false);
+    const markdown = elements.find((element) => element.tag === 'markdown' && element.content.includes('final-row'));
+    expect(markdown?.content).toContain('| Item | Result |');
+    expect(markdown?.content).toContain('| final-row | delivered |');
   });
 });
 

@@ -103,6 +103,27 @@ describe('FeishuSenderAdapter.sendQuestionCard / updateQuestionCard', () => {
     expect(cardJson).toContain('"schema":"2.0"');
   });
 
+  it('safe terminal updates preserve table text without native table elements', async () => {
+    const { adapter, updateCard } = makeAdapter();
+    const tableState: CardState = {
+      status: 'complete',
+      userPrompt: 'show result',
+      responseText: [
+        '| Item | Result |',
+        '| --- | --- |',
+        '| final-row | delivered |',
+      ].join('\n'),
+      toolCalls: [],
+    };
+
+    await adapter.updateCard('om_running', tableState, { safeTerminal: true });
+    const cardJson = updateCard.mock.calls[0][1] as string;
+    const card = JSON.parse(cardJson);
+    expect(card.body.elements.some((element: any) => element.tag === 'table')).toBe(false);
+    expect(cardJson).toContain('final-row');
+    expect(cardJson).toContain('delivered');
+  });
+
   it('sendQuestionCard returns the underlying messageId from sender.sendCard', async () => {
     const { adapter, sendCard } = makeAdapter();
     sendCard.mockResolvedValueOnce('msg_specific');
