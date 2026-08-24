@@ -1,7 +1,12 @@
 import path from 'node:path';
+import {
+  EXECUTION_MCP_SERVERS,
+  isLoopbackProxy,
+  type AnyMcpServerDescriptor,
+} from '../services/mcp-registry.js';
 
 export interface McpEntry {
-  name: 'metabot-worker' | 'metabot-arc';
+  name: string;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -13,7 +18,10 @@ export interface McpEntryInput {
   executionEnv: Record<string, string> | undefined;
   bridgeEnv: NodeJS.ProcessEnv;
   runtimeRoot: string;
-  capabilityFiles: { worker?: string; arc?: string };
+  /** Capability file leased for each server, keyed by registry id. */
+  capabilityFiles: Readonly<Record<string, string | undefined>>;
+  /** Defaults to the full registry; overridden by fixtures. */
+  servers?: readonly AnyMcpServerDescriptor[];
 }
 
 export interface StdioMcpServerConfig {
@@ -25,6 +33,10 @@ export interface StdioMcpServerConfig {
 /**
  * Pure authority/config builder. It performs no IO and imports no downstream
  * package: Bridge-to-daemon contact stays on the package-owned proxy wire.
+ *
+ * Every server is built from its registry descriptor, so registering a new one
+ * never means editing this function, and one server's missing endpoint or
+ * capability drops only that server's entry.
  */
 export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
   const executionEnv = input.executionEnv;
@@ -33,37 +45,30 @@ export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
   }
 
   const entries: McpEntry[] = [];
-  const workerEndpoint = loopbackHttpEndpoint(input.bridgeEnv.METABOT_WORKER_DAEMON_URL);
-  if (
-    hasValue(executionEnv.METABOT_WORKER_CAPABILITY) &&
-    workerEndpoint &&
-    isAbsoluteFilePath(input.capabilityFiles.worker)
-  ) {
+  for (const server of input.servers ?? EXECUTION_MCP_SERVERS) {
+    const capabilityFile = input.capabilityFiles[server.id];
+    if (!hasValue(executionEnv[server.capabilityEnvVar]) || !isAbsoluteFilePath(capabilityFile)) {
+      continue;
+    }
+    if (!isLoopbackProxy(server)) {
+      entries.push({
+        name: server.serverName,
+        command: path.join(input.runtimeRoot, 'node_modules', '.bin', server.binary),
+        args: [...server.args],
+        env: { ...server.env, [server.capabilityFileEnvVar]: capabilityFile },
+        codexToolsApprovalMode: 'approve',
+      });
+      continue;
+    }
+    const endpoint = loopbackHttpEndpoint(input.bridgeEnv[server.endpointEnvVar]);
+    if (!endpoint) continue;
     entries.push({
-      name: 'metabot-worker',
+      name: server.serverName,
       command: process.execPath,
-      args: [path.join(input.runtimeRoot, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js')],
+      args: [path.join(input.runtimeRoot, ...server.proxyScript)],
       env: {
-        METABOT_WORKER_PROXY_URL: workerEndpoint,
-        METABOT_WORKER_PROXY_CAPABILITY_FILE: input.capabilityFiles.worker,
-      },
-      codexToolsApprovalMode: 'approve',
-    });
-  }
-
-  const arcEndpoint = loopbackHttpEndpoint(input.bridgeEnv.METABOT_ARC_DAEMON_URL);
-  if (
-    hasValue(executionEnv.METABOT_ARC_CAPABILITY) &&
-    arcEndpoint &&
-    isAbsoluteFilePath(input.capabilityFiles.arc)
-  ) {
-    entries.push({
-      name: 'metabot-arc',
-      command: process.execPath,
-      args: [path.join(input.runtimeRoot, 'packages', 'arc-mcp', 'dist', 'proxy-cli.js')],
-      env: {
-        METABOT_ARC_PROXY_URL: arcEndpoint,
-        METABOT_ARC_PROXY_CAPABILITY_FILE: input.capabilityFiles.arc,
+        [server.proxyUrlEnvVar]: endpoint,
+        [server.capabilityFileEnvVar]: capabilityFile,
       },
       codexToolsApprovalMode: 'approve',
     });

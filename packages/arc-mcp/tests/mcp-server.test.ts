@@ -1,11 +1,14 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeFileSync } from 'node:fs';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { projectDirectory, removeDirectory, temporaryDirectory } from './helpers.js';
+import { ArcProductService } from '../src/product-service.js';
+import { createArcRuntime } from '../src/runtime.js';
 
 const cleanup: string[] = [];
 
@@ -20,43 +23,65 @@ function runFrom(result: { structuredContent?: Record<string, unknown> }): Recor
 }
 
 describe('ARC stdio MCP server', () => {
-  it('lists lifecycle and official HITL tools over a spawned stdio transport', async () => {
+  it('lists lifecycle, official HITL, and provenance tools over a spawned stdio transport', async () => {
     const temporary = temporaryDirectory('arc-mcp-stdio-');
     cleanup.push(temporary);
     const projectRoot = projectDirectory(temporary);
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
     const repositoryRoot = path.resolve(packageRoot, '../..');
     const runnerModule = path.join(packageRoot, 'tests', 'fixtures', 'stdio-runner.mjs');
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: ['--import', 'tsx', 'packages/arc-mcp/src/bin.ts'],
-      cwd: repositoryRoot,
+    const dataDir = path.join(temporary, 'state');
+    const runtime = await createArcRuntime({
       env: {
-        ...getDefaultEnvironment(),
-        METABOT_ARC_DATA_DIR: path.join(temporary, 'state'),
-        METABOT_ARC_PROJECT_ID: 'stdio-project',
-        METABOT_ARC_PROJECT_ROOTS: JSON.stringify([projectRoot]),
-        METABOT_ARC_RUNNER_MODULE: runnerModule,
+        ARC_MCP_DATA_DIR: dataDir,
+        ARC_MCP_PROJECT_ID: 'stdio-project',
+        ARC_MCP_PROJECT_ROOTS: JSON.stringify([projectRoot]),
+        ARC_MCP_RUNNER_MODULE: runnerModule,
       },
-      stderr: 'pipe',
     });
+    const bearer = 'arc-product-test-bearer-0000000000000001';
+    const service = new ArcProductService(runtime.coordinator, {
+      endpoint: 'http://127.0.0.1:0/mcp',
+      bearer,
+    });
+    await service.start();
+    const bearerFile = path.join(temporary, 'bearer');
+    const configFile = path.join(temporary, 'config.json');
+    writeFileSync(bearerFile, `${bearer}\n`, { mode: 0o600 });
+    writeFileSync(configFile, JSON.stringify({
+      version: 1,
+      service_url: service.url.toString(),
+      bearer_file: bearerFile,
+      data_dir: dataDir,
+      allowed_project_roots: [projectRoot],
+      fixed_project_id: 'stdio-project',
+      runner_module: runnerModule,
+    }), { mode: 0o600 });
+    const createTransport = (): StdioClientTransport => new StdioClientTransport({
+        command: process.execPath,
+        args: ['--import', 'tsx', 'packages/arc-mcp/src/bin.ts'],
+        cwd: repositoryRoot,
+        env: {
+          ...getDefaultEnvironment(),
+          ARC_MCP_CONFIG_FILE: configFile,
+        },
+        stderr: 'pipe',
+      });
+    const transport = createTransport();
     const client = new Client({ name: 'arc-mcp-test', version: '0.1.0' });
 
     try {
       await client.connect(transport);
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+        'arc_hitl_submit',
         'arc_run_cancel',
         'arc_run_get',
         'arc_run_list',
+        'arc_run_manifest',
         'arc_run_pause',
         'arc_run_resume',
         'arc_run_start',
-        'hitl_approve_stage',
-        'hitl_get_status',
-        'hitl_inject_guidance',
-        'hitl_reject_stage',
-        'hitl_view_output',
       ]);
 
       const denied = await client.callTool({
@@ -85,33 +110,6 @@ describe('ARC stdio MCP server', () => {
       });
       expect(runFrom(started).status).toBe('running');
 
-      const hitlStatus = await client.callTool({
-        name: 'hitl_get_status',
-        arguments: { run_id: 'stdio-run-1' },
-      });
-      expect(hitlStatus.structuredContent?.hitl).toMatchObject({ success: true, needs_input: true, stage: 5 });
-
-      const hitlOutput = await client.callTool({
-        name: 'hitl_view_output',
-        arguments: { run_id: 'stdio-run-1', stage: 5, filename: 'review.md' },
-      });
-      expect(hitlOutput.structuredContent?.hitl).toMatchObject({ success: true, stage: 5, filename: 'review.md' });
-
-      const guided = await client.callTool({
-        name: 'hitl_inject_guidance',
-        arguments: { run_id: 'stdio-run-1', stage: 5, guidance: 'Add the requested baseline.' },
-      });
-      expect(guided.structuredContent?.hitl).toMatchObject({ success: true, stage: 5 });
-
-      const approved = await client.callTool({
-        name: 'hitl_approve_stage',
-        arguments: { run_id: 'stdio-run-1', message: 'Continue.' },
-      });
-      expect(approved.structuredContent).toMatchObject({
-        run: { run_id: 'stdio-run-1', status: 'running' },
-        hitl: { success: true, action: 'approve', message: 'Continue.' },
-      });
-
       const fetched = await client.callTool({
         name: 'arc_run_get',
         arguments: { run_id: 'stdio-run-1' },
@@ -123,6 +121,15 @@ describe('ARC stdio MCP server', () => {
         arguments: { run_id: 'stdio-run-1' },
       });
       expect(runFrom(paused).status).toBe('paused');
+
+      const observer = new Client({ name: 'arc-mcp-observer', version: '0.1.0' });
+      try {
+        await observer.connect(createTransport());
+        const observed = await observer.callTool({ name: 'arc_run_get', arguments: { run_id: 'stdio-run-1' } });
+        expect(runFrom(observed)).toMatchObject({ run_id: 'stdio-run-1', status: 'paused' });
+      } finally {
+        await observer.close();
+      }
 
       const resumed = await client.callTool({
         name: 'arc_run_resume',
@@ -161,14 +168,6 @@ describe('ARC stdio MCP server', () => {
           run_id: 'stdio-run-2',
         },
       });
-      const rejected = await client.callTool({
-        name: 'hitl_reject_stage',
-        arguments: { run_id: 'stdio-run-2', reason: 'Revise the experimental design.' },
-      });
-      expect(rejected.structuredContent).toMatchObject({
-        run: { run_id: 'stdio-run-2', status: 'running' },
-        hitl: { success: true, action: 'reject', reason: 'Revise the experimental design.' },
-      });
       const cancelled = await client.callTool({
         name: 'arc_run_cancel',
         arguments: { run_id: 'stdio-run-2' },
@@ -176,6 +175,9 @@ describe('ARC stdio MCP server', () => {
       expect(runFrom(cancelled).status).toBe('cancelled');
     } finally {
       await client.close();
+      await service.close();
+      runtime.coordinator.dispose();
+      runtime.store.close();
     }
   });
 });

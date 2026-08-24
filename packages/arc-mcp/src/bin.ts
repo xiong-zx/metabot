@@ -1,37 +1,12 @@
 #!/usr/bin/env node
-import { createArcRuntime } from './runtime.js';
-import { connectArcStdioServer } from './server.js';
+import { loadArcProductConfig, readArcProductBearer } from './product-config.js';
+import { runArcProductProxy } from './product-proxy.js';
 
-async function main(): Promise<void> {
-  const runtime = await createArcRuntime();
-  for (const stale of runtime.store.lock.staleLocks) {
-    process.stderr.write(
-      `metabot-arc-mcp: reclaimed stale data lock from pid ${stale.owner.pid}; diagnostic ${stale.archivePath}\n`,
-    );
-  }
-  let server;
-  try {
-    server = await connectArcStdioServer(runtime.coordinator);
-    runtime.notifications?.start();
-  } catch (error) {
-    runtime.coordinator.dispose();
-    runtime.store.close();
-    throw error;
-  }
-  let closed = false;
-  const close = async (): Promise<void> => {
-    if (closed) return;
-    closed = true;
-    runtime.notifications?.dispose();
-    runtime.coordinator.dispose();
-    await server.close();
-    runtime.store.close();
-  };
-  process.once('SIGINT', () => void close());
-  process.once('SIGTERM', () => void close());
-}
-
-main().catch((error: unknown) => {
-  process.stderr.write(`metabot-arc-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+const config = loadArcProductConfig();
+const close = await runArcProductProxy({
+  endpoint: config.service_url,
+  bearer: readArcProductBearer(config),
 });
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => void close().finally(() => process.exit(0)));
+}

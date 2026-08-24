@@ -86,8 +86,8 @@ describe('pack-metabot.sh', () => {
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
     expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
-    expect(installSh).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
-    expect(installSh).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(installSh).not.toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
+    expect(installSh).not.toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(installSh).not.toContain('npm run build --workspaces');
   });
@@ -106,7 +106,7 @@ describe('pack-metabot.sh', () => {
     expect(ecosystem).toContain("name: 'metabot-arcd'");
     expect(ecosystem).toContain('packages/worker-runner-mcp/dist/daemon-cli.js');
     expect(ecosystem).toContain('packages/arc-mcp/dist/daemon-cli.js');
-    expect(ecosystem).toContain("'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'");
+    expect(ecosystem).toContain('METABOT_ARC_RELEASE_ROOT');
     for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
       expect(ecosystem).toContain(proxyName);
     }
@@ -122,8 +122,8 @@ describe('pack-metabot.sh', () => {
     expect(metabot).toContain('npm run build -w @metabot/rulespack');
     expect(metabot).toContain('npm run build -w @metabot/rulespack-adapter');
     expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
-    expect(metabot).toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
-    expect(metabot).toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
+    expect(metabot).not.toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
+    expect(metabot).not.toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(daemonHealth).toContain('StreamableHTTPClientTransport');
     expect(daemonHealth).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
     expect(daemonHealth).not.toMatch(/packages\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
@@ -143,8 +143,6 @@ describe('pack-metabot.sh', () => {
       'packages/rulespack',
       'packages/rulespack-adapter',
       'packages/arc-mcp',
-      'packages/arc-researchclaw-adapter',
-      'packages/arc-worker-runner-adapter',
       'packages/worker-runner-mcp',
     ]);
 
@@ -189,14 +187,13 @@ describe('pack-metabot.sh', () => {
     expect(packageJson.devDependencies?.tsx).toBeUndefined();
   });
 
-  it('tarball includes the seven bot-host workspaces', () => {
+  it('tarball includes the five bot-host workspaces', () => {
     for (const ws of [
       'cli',
       'cli-core',
       'metamemory',
       'skill-hub',
       'arc-mcp',
-      'arc-worker-runner-adapter',
       'worker-runner-mcp',
     ]) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);

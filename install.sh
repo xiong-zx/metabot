@@ -551,7 +551,7 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-#   - independent ARC MCP, Worker Runner MCP, and official ResearchClaw adapter
+#   - independent ARC MCP and Worker Runner MCP
 #     (built but not automatically started)
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
@@ -568,8 +568,6 @@ else
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
     --workspace=@xvirobotics/arc-mcp \
-    --workspace=@xvirobotics/arc-researchclaw-adapter \
-    --workspace=@xvirobotics/arc-worker-runner-adapter \
     --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
@@ -1606,14 +1604,6 @@ else
   exit 1
 fi
 
-info "Building official AutoResearchClaw adapter..."
-if npm run build -w @xvirobotics/arc-researchclaw-adapter; then
-  success "Official AutoResearchClaw adapter build complete"
-else
-  error "Official AutoResearchClaw adapter build failed. MetaBot was not started."
-  exit 1
-fi
-
 # Worker Runner ships both an independent stdio binary and the authenticated
 # PM2 daemon. The daemon receives principal scope per signed MCP connection;
 # its state directory and completion callback remain trusted process config.
@@ -1622,17 +1612,6 @@ if npm run build -w @xvirobotics/worker-runner-mcp; then
   success "Worker Runner MCP build complete"
 else
   error "Worker Runner MCP build failed. MetaBot was not started."
-  exit 1
-fi
-
-# This adapter connects the two independent services over the Worker Runner
-# MCP wire. This phase supervises the daemons; per-engine MCP materialization
-# remains a separate, opt-in integration.
-info "Building independent ARC Worker Runner adapter..."
-if npm run build -w @xvirobotics/arc-worker-runner-adapter; then
-  success "ARC Worker Runner adapter build complete"
-else
-  error "ARC Worker Runner adapter build failed. MetaBot was not started."
   exit 1
 fi
 

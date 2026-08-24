@@ -187,6 +187,7 @@ async function makeDaemon() {
       issueArcCapability(CAPABILITY_KEYS.privateKey, {
         v: 1,
         purpose: 'arc',
+        aud: 'arc',
         role: principal.role,
         botName: principal.botName,
         chatId: principal.chatId,
@@ -209,6 +210,7 @@ function issueUnchecked(principal: ArcTrustedPrincipal): string {
   const claims = {
     v: 1,
     purpose: 'arc',
+    aud: 'arc',
     role: principal.role,
     botName: principal.botName,
     chatId: principal.chatId,

@@ -1,4 +1,5 @@
 import {
+  createPublicKey,
   generateKeyPairSync,
   sign as cryptoSign,
   verify as cryptoVerify,
@@ -17,8 +18,9 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { capabilityServers, loopbackProxyServers } from './mcp-registry.js';
 
-export type ExecutionCapabilityPurpose = 'worker' | 'arc';
+export type ExecutionCapabilityPurpose = string;
 export type TerminalCallbackPurpose = 'worker.terminal' | 'arc.terminal';
 export type ExecutionCapabilityRole = 'pm' | 'user';
 
@@ -27,17 +29,32 @@ export const TERMINAL_CALLBACK_MAX_SKEW_MS = 5 * 60 * 1000;
 export const EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH = 200;
 export const EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH = 500;
 
-const KEY_PREFIXES = [
-  'worker-capability',
-  'arc-capability',
-  'worker-callback',
-  'arc-callback',
-] as const;
-type KeyPrefix = typeof KEY_PREFIXES[number];
+/**
+ * One capability keypair and one callback keypair per registered server, so no
+ * server holds a key that could verify another server's token. Derived from the
+ * registry rather than listed here, so registering a server cannot silently
+ * skip its own keys or reuse an existing audience's.
+ */
+const KEY_PREFIXES: readonly string[] = [
+  ...capabilityServers().map((server) => `${server.id}-capability`),
+  ...loopbackProxyServers().map((server) => `${server.id}-callback`),
+];
+type KeyPrefix = string;
 
+/**
+ * Signed audience claim.
+ *
+ * Key separation alone cannot express audience: a verifier that trusts a key
+ * has no way to tell what the issuer minted the token for. The claim states it,
+ * and a `v3-audience` server refuses a token that omits it — a capability
+ * minted before audiences existed would otherwise stay replayable for its whole
+ * lifetime. Servers still on the v2.1 contract get no `aud`, because their
+ * shipped verifiers reject any claim outside the original set.
+ */
 export interface ExecutionCapabilityClaims {
   v: 1;
   purpose: ExecutionCapabilityPurpose;
+  aud?: string;
   role: ExecutionCapabilityRole;
   botName: string;
   chatId: string;
@@ -46,6 +63,13 @@ export interface ExecutionCapabilityClaims {
 
 interface LocalLifecycleCapabilityClaims extends Omit<ExecutionCapabilityClaims, 'role'> {
   role: 'admin';
+}
+
+/** Audience a server's tokens must carry, or undefined for the v2.1 contract. */
+export function requiredCapabilityAudience(purpose: ExecutionCapabilityPurpose): string | undefined {
+  const server = capabilityServers().find((entry) => entry.id === purpose);
+  if (!server) throw new ExecutionCapabilityError(`Unknown execution capability purpose: ${purpose}`, 'UNKNOWN_PURPOSE');
+  return server.capabilityContract === 'v3-audience' ? server.audience : undefined;
 }
 
 export interface KeyFileDiagnostic {
@@ -141,7 +165,39 @@ export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()):
     assertTrustedPath(publicPath, 0o600, `${name} public key`, 'regular-file');
     assertPairMatches(privatePath, publicPath, name);
   }
+  assertDistinctKeyMaterial(keysDir);
   return inspectExecutionKeyDirectory(keysDir);
+}
+
+/**
+ * Startup guard against cross-audience key reuse.
+ *
+ * If two audiences share a verification key, each one's verifier accepts the
+ * other's signatures, and the audience claim is the only thing left separating
+ * them. Independent rotation also becomes impossible. Refuse at startup rather
+ * than discovering it when a token crosses.
+ */
+export function assertDistinctKeyMaterial(keysDir = resolveExecutionKeysDir()): void {
+  const owners = new Map<string, string>();
+  for (const name of KEY_PREFIXES) {
+    const publicPath = join(keysDir, `${name}.pub`);
+    const previousPath = join(keysDir, `${name}.pub.prev`);
+    for (const candidate of [publicPath, previousPath]) {
+      if (!lstatIfPresent(candidate, `${name} verification key`)) continue;
+      const material = canonicalPublicKeyFingerprint(
+        readTrustedKeyFile(candidate, `${name} verification key`),
+        `${name} verification key`,
+      );
+      const existing = owners.get(material);
+      if (existing !== undefined && existing !== name) {
+        throw new ExecutionCapabilityError(
+          `Execution keys ${existing} and ${name} share verification material`,
+          'CROSS_AUDIENCE_KEY_REUSE',
+        );
+      }
+      owners.set(material, name);
+    }
+  }
 }
 
 export function inspectExecutionKeyDirectory(keysDir = resolveExecutionKeysDir()): ExecutionKeyDirectoryDiagnostic {
@@ -210,9 +266,11 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
       throw new ExecutionCapabilityError('Capability ttlMs must be a positive integer', 'INVALID_TTL');
     }
+    const audience = requiredCapabilityAudience(input.purpose);
     return this.signCapability({
       v: 1,
       purpose: input.purpose,
+      ...(audience ? { aud: audience } : {}),
       role: input.role,
       botName: requireClaim(input.botName, 'botName', EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH),
       chatId: requireClaim(input.chatId, 'chatId', EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH),
@@ -233,9 +291,11 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isSafeInteger(now + ttlMs)) {
       throw new ExecutionCapabilityError('Lifecycle capability ttlMs is invalid', 'INVALID_TTL');
     }
+    const audience = requiredCapabilityAudience(purpose);
     return this.signCapability({
       v: 1,
       purpose,
+      ...(audience ? { aud: audience } : {}),
       role: 'admin',
       botName: 'metabot-local-lifecycle',
       chatId: 'local:daemon-lifecycle',
@@ -291,6 +351,17 @@ export class ExecutionCapabilityService {
       || !isCanonicalBoundedClaim(claims.chatId, EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH)
     ) {
       throw new ExecutionCapabilityError('Invalid execution capability claims', 'INVALID_CLAIMS');
+    }
+    // Checked before role and scope, so a token minted for another server is
+    // refused on identity alone even though the same issuer signed it.
+    const audience = requiredCapabilityAudience(expected.purpose);
+    if (claims.aud !== audience) {
+      throw new ExecutionCapabilityError(
+        audience === undefined
+          ? 'Execution capability carries an unexpected audience'
+          : `Execution capability was not minted for audience ${audience}`,
+        'CAPABILITY_AUDIENCE_MISMATCH',
+      );
     }
     if (
       claims.v !== 1
@@ -355,11 +426,24 @@ export class ExecutionCapabilityService {
 }
 
 function capabilityPrefix(purpose: ExecutionCapabilityPurpose): KeyPrefix {
-  return purpose === 'worker' ? 'worker-capability' : 'arc-capability';
+  const server = capabilityServers().find((entry) => entry.id === purpose);
+  if (!server) throw new ExecutionCapabilityError(`Unknown execution capability purpose: ${purpose}`, 'UNKNOWN_PURPOSE');
+  return `${server.id}-capability`;
 }
 
 function callbackPrefix(purpose: TerminalCallbackPurpose): KeyPrefix {
   return purpose === 'worker.terminal' ? 'worker-callback' : 'arc-callback';
+}
+
+function canonicalPublicKeyFingerprint(value: string, label: string): string {
+  try {
+    return createPublicKey(value).export({ type: 'spki', format: 'der' }).toString('base64');
+  } catch (cause) {
+    throw new ExecutionCapabilityError(
+      `Invalid ${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      'INVALID_PUBLIC_KEY',
+    );
+  }
 }
 
 function requireClaim(value: string, name: string, maxLength: number): string {

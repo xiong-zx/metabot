@@ -115,16 +115,12 @@ module.exports = {
           'METABOT_ARC_PROJECT_ROOTS',
           JSON.stringify([path.join(stateRoot, 'arc-projects')]),
         ),
-        METABOT_ARC_RUNNER_MODULE: configured(
-          'METABOT_ARC_RUNNER_MODULE',
-          path.join(__dirname, 'packages', 'arc-researchclaw-adapter', 'dist', 'factory.js'),
+        METABOT_ARC_RELEASE_ROOT: configured(
+          'METABOT_ARC_RELEASE_ROOT',
+          path.join(os.homedir(), '.local', 'opt', 'research-stack', 'autoresearchclaw'),
         ),
-        METABOT_ARC_RESEARCHCLAW_PYTHON: configured(
-          'METABOT_ARC_RESEARCHCLAW_PYTHON',
-          path.join(stateRoot, 'arc-official', 'venv', 'bin', 'python3'),
-        ),
-        METABOT_ARC_DEFAULT_HITL_MODE: configured('METABOT_ARC_DEFAULT_HITL_MODE', 'gate-only'),
-        METABOT_ARC_ACP_AGENT: configured('METABOT_ARC_ACP_AGENT', 'codex'),
+        METABOT_ARC_OFFICIAL_HITL_MODE: configured('METABOT_ARC_OFFICIAL_HITL_MODE', 'gate-only'),
+        METABOT_ARC_OFFICIAL_ACP_AGENT: configured('METABOT_ARC_OFFICIAL_ACP_AGENT', 'codex'),
         METABOT_ARC_LISTEN: arcEndpoint,
         METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE: configured(
           'METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE',

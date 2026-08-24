@@ -1,15 +1,22 @@
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  utimesSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { materializeExecutionMcp } from '../src/engines/mcp-materialize.js';
+import {
+  materializeExecutionMcp,
+  sweepExpiredCapabilityFiles,
+} from '../src/engines/mcp-materialize.js';
 
 const roots: string[] = [];
 const logger = { warn: vi.fn(), debug: vi.fn() };
@@ -20,9 +27,22 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function runtimeRoot(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'metabot-mcp-runtime-'));
+/**
+ * A materialized entry must name a proxy that really exists inside the runtime
+ * root, so the fixture installs the same executables an install would.
+ */
+function runtimeRoot(proxies = ['metabot-worker-runner-proxy', 'metabot-arc-proxy']): string {
+  // Canonical, because materialization canonicalizes the runtime root and macOS
+  // reaches the temp directory through the /var -> /private/var symlink.
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'metabot-mcp-runtime-')));
   roots.push(root);
+  for (const proxy of proxies) {
+    const script = proxy === 'metabot-worker-runner-proxy'
+      ? path.join(root, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js')
+      : path.join(root, 'packages', 'arc-mcp', 'dist', 'proxy-cli.js');
+    mkdirSync(path.dirname(script), { recursive: true });
+    writeFileSync(script, '#!/usr/bin/env node\n', { encoding: 'utf8', mode: 0o755 });
+  }
   return root;
 }
 
@@ -68,33 +88,84 @@ describe('materializeExecutionMcp', () => {
     expect(tokenPaths.every((file) => !existsSync(file))).toBe(true);
   });
 
-  it('atomically rewrites stable file paths on capability rotation without a release race', () => {
+  it('gives concurrent turns in one chat separate capability files that clean up independently', () => {
     const root = runtimeRoot();
-    const first = materializeExecutionMcp(input(root, {
-      executionEnv: {
-        METABOT_BOT_NAME: 'pm-codex',
-        METABOT_CHAT_ID: 'oc-user',
-        METABOT_WORKER_CAPABILITY: 'worker-token-one',
-      },
-      bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
-    }))!;
+    const turn = (capability: string) =>
+      materializeExecutionMcp(input(root, {
+        executionEnv: {
+          METABOT_BOT_NAME: 'pm-codex',
+          METABOT_CHAT_ID: 'oc-user',
+          METABOT_WORKER_CAPABILITY: capability,
+        },
+        bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
+      }))!;
+
+    const first = turn('worker-token-one');
+    const second = turn('worker-token-two');
     const firstPath = first.entries[0].env.METABOT_WORKER_PROXY_CAPABILITY_FILE;
-    const second = materializeExecutionMcp(input(root, {
-      executionEnv: {
-        METABOT_BOT_NAME: 'pm-codex',
-        METABOT_CHAT_ID: 'oc-user',
-        METABOT_WORKER_CAPABILITY: 'worker-token-two',
-      },
-      bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
-    }))!;
     const secondPath = second.entries[0].env.METABOT_WORKER_PROXY_CAPABILITY_FILE;
 
-    expect(secondPath).toBe(firstPath);
+    // The second turn must not overwrite the credential the first turn's
+    // already-running proxy is reading, and the first cleanup must not delete
+    // the second turn's credential.
+    expect(secondPath).not.toBe(firstPath);
+    expect(readFileSync(firstPath, 'utf8')).toBe('worker-token-one');
     expect(readFileSync(secondPath, 'utf8')).toBe('worker-token-two');
+
     first.cleanup();
+    expect(existsSync(firstPath)).toBe(false);
     expect(readFileSync(secondPath, 'utf8')).toBe('worker-token-two');
     second.cleanup();
     expect(existsSync(secondPath)).toBe(false);
+  });
+
+  it('refuses to reuse a capability path instead of overwriting a live credential', () => {
+    const root = runtimeRoot();
+    const collide = () =>
+      materializeExecutionMcp(input(root, {
+        executionEnv: {
+          METABOT_BOT_NAME: 'pm-codex',
+          METABOT_CHAT_ID: 'oc-user',
+          METABOT_WORKER_CAPABILITY: 'worker-token',
+        },
+        bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
+        nonce: () => 'fixed-nonce',
+      }));
+
+    const first = collide()!;
+    expect(collide()).toBeUndefined();
+    expect(readFileSync(first.entries[0].env.METABOT_WORKER_PROXY_CAPABILITY_FILE, 'utf8')).toBe('worker-token');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'metabot-worker', reason: expect.stringMatching(/already leased/i) }),
+      expect.stringContaining('other external tools stay available'),
+    );
+    first.cleanup();
+  });
+
+  it('sweeps crash leftovers at startup while keeping material a live turn still needs', () => {
+    const root = runtimeRoot();
+    const live = materializeExecutionMcp(input(root))!;
+    const scratchDir = path.join(root, 'data', 'mcp-capabilities');
+    const leftover = path.join(scratchDir, 'crashed-turn-arc.token');
+    writeFileSync(leftover, 'orphaned-token', { encoding: 'utf8', mode: 0o600 });
+    const old = Date.now() - 3 * 60 * 60 * 1000;
+    utimesSync(leftover, old / 1000, old / 1000);
+
+    const swept = sweepExpiredCapabilityFiles(root, logger);
+
+    expect(swept.removed).toEqual([leftover]);
+    expect(existsSync(leftover)).toBe(false);
+    for (const entry of live.entries) {
+      const file = Object.values(entry.env).find((value) => value.endsWith('.token'))!;
+      expect(existsSync(file)).toBe(true);
+    }
+    live.cleanup();
+  });
+
+  it('sweeps nothing when there is no scratch directory or no runtime root', () => {
+    const root = runtimeRoot();
+    expect(sweepExpiredCapabilityFiles(root, logger)).toEqual({ removed: [], kept: 0 });
+    expect(sweepExpiredCapabilityFiles(path.join(root, 'missing'), logger)).toEqual({ removed: [], kept: 0 });
   });
 
   it('renders additive Claude config containing file paths but no token material or strict flag', () => {
