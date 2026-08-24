@@ -83,12 +83,20 @@
     {
       "name": "alice",
       "url": "http://localhost:9200",
-      "secret": "alice-api-secret"
+      "auth": {
+        "keyId": "local-alice-v1",
+        "secret": "<peer-scoped-secret-at-least-32-characters>",
+        "allowedSourceBots": ["alice-bot", "bridge:alice"],
+        "allowedTargetBots": ["local-bot"]
+      }
     },
     {
       "name": "remote-team",
       "url": "http://remote-server:9100",
-      "secret": "remote-api-secret"
+      "auth": {
+        "keyId": "local-remote-team-v1",
+        "secret": "<peer-scoped-secret-at-least-32-characters>"
+      }
     }
   ]
 }

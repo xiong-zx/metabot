@@ -8,6 +8,57 @@ import { NullSender } from '../../web/null-sender.js';
 import { MessageBridge } from '../../bridge/message-bridge.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import { MIN_PEER_SECRET_LENGTH } from '../peer-auth.js';
+import type { PeerAuthConfig, PeerAuthKeyConfig } from '../../config.js';
+
+export function parsePeerAuthConfig(value: unknown): PeerAuthConfig | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const auth = value as Record<string, unknown>;
+  if (typeof auth.keyId !== 'string' || !auth.keyId.trim()) return undefined;
+  if (typeof auth.secret !== 'string' || auth.secret.length < MIN_PEER_SECRET_LENGTH) return undefined;
+  let acceptKeys: PeerAuthKeyConfig[] | undefined;
+  if (auth.acceptKeys !== undefined) {
+    if (!Array.isArray(auth.acceptKeys)) return undefined;
+    acceptKeys = [];
+    for (const candidate of auth.acceptKeys) {
+      if (!candidate || typeof candidate !== 'object') return undefined;
+      const key = candidate as Record<string, unknown>;
+      if (typeof key.keyId !== 'string' || !key.keyId.trim()
+        || typeof key.secret !== 'string' || key.secret.length < MIN_PEER_SECRET_LENGTH
+        || typeof key.acceptUntil !== 'string' || !Number.isFinite(Date.parse(key.acceptUntil))) {
+        return undefined;
+      }
+      acceptKeys.push({
+        keyId: key.keyId.trim(),
+        secret: key.secret,
+        acceptUntil: key.acceptUntil,
+      });
+    }
+  }
+  const stringArray = (candidate: unknown): string[] | undefined => {
+    if (candidate === undefined) return undefined;
+    if (!Array.isArray(candidate) || !candidate.every((item) => typeof item === 'string' && item.trim())) {
+      return undefined;
+    }
+    return candidate.map((item) => item.trim());
+  };
+  const revokedKeyIds = stringArray(auth.revokedKeyIds);
+  const allowedSourceBots = stringArray(auth.allowedSourceBots);
+  const allowedTargetBots = stringArray(auth.allowedTargetBots);
+  if ((auth.revokedKeyIds !== undefined && !revokedKeyIds)
+    || (auth.allowedSourceBots !== undefined && !allowedSourceBots)
+    || (auth.allowedTargetBots !== undefined && !allowedTargetBots)) {
+    return undefined;
+  }
+  return {
+    keyId: auth.keyId.trim(),
+    secret: auth.secret,
+    ...(acceptKeys ? { acceptKeys } : {}),
+    ...(revokedKeyIds ? { revokedKeyIds } : {}),
+    ...(allowedSourceBots ? { allowedSourceBots } : {}),
+    ...(allowedTargetBots ? { allowedTargetBots } : {}),
+  };
+}
 
 export async function handleBotRoutes(
   ctx: RouteContext,
@@ -67,7 +118,8 @@ export async function handleBotRoutes(
     const body = await parseJsonBody(req);
     const name = (body.name as string)?.trim();
     const peerUrl = (body.url as string)?.trim();
-    const secret = (body.secret as string) || undefined;
+    const legacySecret = (body.secret as string) || undefined;
+    const auth = parsePeerAuthConfig(body.auth);
     if (!name || !peerUrl) {
       jsonResponse(res, 400, { error: 'Missing required fields: name, url' });
       return true;
@@ -76,14 +128,28 @@ export async function handleBotRoutes(
       jsonResponse(res, 400, { error: 'url must start with http:// or https://' });
       return true;
     }
+    if (legacySecret) {
+      jsonResponse(res, 400, {
+        error: 'peer.secret is deprecated and cannot be added; use scoped peer auth',
+        code: 'legacy_peer_secret_rejected',
+      });
+      return true;
+    }
+    if (body.auth !== undefined && !auth) {
+      jsonResponse(res, 400, {
+        error: `auth requires keyId and a secret of at least ${MIN_PEER_SECRET_LENGTH} characters`,
+        code: 'invalid_peer_auth',
+      });
+      return true;
+    }
 
-    peerManager.addPeer({ name, url: peerUrl, ...(secret ? { secret } : {}) });
+    peerManager.addPeer({ name, url: peerUrl, ...(auth ? { auth } : {}) });
 
     // Persist to bots.json so the peer survives a restart (best-effort).
     let persisted = false;
     if (botsConfigPath) {
       try {
-        addPeer(botsConfigPath, { name, url: peerUrl, ...(secret ? { secret } : {}) });
+        addPeer(botsConfigPath, { name, url: peerUrl, ...(auth ? { auth } : {}) });
         persisted = true;
       } catch (err: any) {
         logger.warn({ name, err: err?.message }, 'peer added in-memory but persisting to bots.json failed');

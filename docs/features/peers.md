@@ -29,14 +29,22 @@ For peers on remote servers, prefer HTTPS URLs fronted by Caddy or another TLS r
     The simplest way — just add to your `.env` file. Works with both single-bot and multi-bot mode.
 
     ```bash
+    METABOT_PEER_ID=imac
     METABOT_PEERS=http://localhost:9200,http://192.168.1.50:9100
-    METABOT_PEER_SECRETS=alice-secret,bob-secret
     METABOT_PEER_NAMES=alice,bob
+    METABOT_PEER_KEY_IDS=imac-alice-v1,imac-bob-v1
+    METABOT_PEER_AUTH_SECRETS=<alice-peer-secret>,<bob-peer-secret>
     ```
 
+    - `METABOT_PEER_ID` — stable identity of this Bridge (required for scoped peer auth)
     - `METABOT_PEERS` — comma-separated peer URLs (required)
-    - `METABOT_PEER_SECRETS` — comma-separated Bridge API secrets, positional match with URLs (required for non-health peer API calls)
     - `METABOT_PEER_NAMES` — comma-separated display names (optional, auto-derived from URL if omitted, e.g. `localhost-9200`)
+    - `METABOT_PEER_KEY_IDS` — comma-separated peer key IDs
+    - `METABOT_PEER_AUTH_SECRETS` — comma-separated peer-scoped secrets, positional match with URLs
+
+    Store peer secrets only in the local secret channel used for `.env`; never
+    commit or print them. `METABOT_PEER_SECRETS` is a deprecated legacy setting.
+    Its values are detected but are never sent as Bridge administrator auth.
 
 === "bots.json"
 
@@ -49,12 +57,12 @@ For peers on remote servers, prefer HTTPS URLs fronted by Caddy or another TLS r
         {
           "name": "alice",
           "url": "http://localhost:9200",
-          "secret": "alice-api-secret"
-        },
-        {
-          "name": "bob",
-          "url": "http://192.168.1.50:9100",
-          "secret": "bob-api-secret"
+          "auth": {
+            "keyId": "imac-alice-v1",
+            "secret": "<peer-scoped-secret>",
+            "allowedSourceBots": ["alice-bot", "bridge:alice"],
+            "allowedTargetBots": ["imac-bot"]
+          }
         }
       ]
     }
@@ -62,10 +70,57 @@ For peers on remote servers, prefer HTTPS URLs fronted by Caddy or another TLS r
 
     - `name` — display name for the peer (required)
     - `url` — peer's API URL (required)
-    - `secret` — the peer's `API_SECRET` (required for non-health peer API calls)
+    - `auth.keyId` — non-secret identifier for the active peer key
+    - `auth.secret` — peer-scoped secret of at least 32 characters; it is not a Bridge `API_SECRET`
+    - `allowedSourceBots` / `allowedTargetBots` — optional inbound Bot scopes
+
+    Set `METABOT_PEER_ID` for this Bridge. On the other Bridge, use that value
+    as the peer `name`; use the other Bridge's identity as this entry's `name`.
+    Keep `bots.json` mode `0600` and outside model workspaces when it contains
+    local credentials.
 
 Expose peer URLs only over loopback, a private network, or your own authenticated
 HTTPS reverse proxy.
+
+## Authentication and permissions
+
+Static Bridge peers use a short-lived HMAC capability in the
+`Authorization: MetaBotPeer ...` header. Each request binds the issuer, target
+Bridge and HTTP Host, method and path, source and target Bot, chat ID, request
+ID, body SHA-256 digest, issue/expiry times, and a one-use nonce. The default
+lifetime is 30 seconds. Replays, altered bodies, wrong routes, expired tokens,
+unknown issuers, and revoked keys fail closed with stable error codes.
+
+Peer capabilities can access only:
+
+- read-only Bot, Skill, and peer discovery;
+- `POST /api/talk` (or its deprecated `/api/tasks` alias); and
+- `GET /api/talk/:requestId` for the same peer-scoped asynchronous request.
+
+They cannot access Bot or peer CRUD, schedules, runtime restart/deploy,
+Agent Teams management, sessions, files, databases, or other administrator
+routes. Same-Core registry relay may continue to use its Core bearer. Static
+peers never fall back to a Core bearer or `API_SECRET`.
+
+Peer sends use one request ID from acceptance through terminal status. A lost
+POST response can be retried with a new nonce and the same request ID; the
+receiver returns the existing task instead of executing it twice.
+
+## Rotation, revocation, and legacy migration
+
+For rotation, first stage the new key under `auth.acceptKeys` on both receivers
+with a bounded `acceptUntil`. Then promote it to `auth.keyId`/`auth.secret` on
+both sides and keep the old key under `acceptKeys` only for the overlap. Finally
+remove it or add its key ID to `revokedKeyIds`. Removing a peer also revokes its
+inbound trust immediately.
+
+Legacy `peer.secret` / `METABOT_PEER_SECRETS` configurations appear as
+`legacy_secret_rejected` in peer status and are not transmitted. Migrate both
+Bridges by assigning stable peer IDs and a unique peer-scoped key, confirm
+bidirectional discovery and talk in staging, then remove the legacy field.
+Back up the local configuration before migration. Code rollback restores the
+previous release and configuration, but it also restores administrator-secret
+peer auth and should be treated as a temporary security rollback.
 
 !!! tip "You don't need bots.json"
     If you're running a single bot, just add `METABOT_PEERS` to your `.env` — no `bots.json` needed. The `bots.json` peers field is only a convenience for multi-bot setups.
@@ -110,7 +165,8 @@ Each peer is polled every 30 seconds. The `GET /api/peers` endpoint returns heal
     "healthy": true,
     "lastChecked": 1710000000000,
     "lastHealthy": 1710000000000,
-    "botCount": 3
+    "botCount": 3,
+    "authMode": "peer_capability"
   }
 ]
 ```

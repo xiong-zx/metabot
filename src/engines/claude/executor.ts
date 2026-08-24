@@ -11,6 +11,7 @@ import { AsyncQueue } from '../../utils/async-queue.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import type { ApiContext } from '../prompt-context.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { removeMetaBotRuntimeSecrets } from '../execution-env.js';
 
 export type { ApiContext } from '../prompt-context.js';
 
@@ -126,6 +127,7 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
       if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
       env[key] = value;
     }
+    removeMetaBotRuntimeSecrets(env);
 
     // Inject explicit API key from bots.json (after filtering, so it takes effect)
     if (explicitApiKey) {

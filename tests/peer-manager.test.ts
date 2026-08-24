@@ -227,7 +227,7 @@ describe('PeerManager', () => {
     expect(manager.findBotOnPeer('bob', 'bot-a')).toBeUndefined();
   });
 
-  it('forwardTask sends POST with X-MetaBot-Origin header', async () => {
+  it('rejects forwarding with a legacy peer secret instead of reusing it as administrator auth', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ success: true, responseText: 'done' }),
@@ -238,25 +238,15 @@ describe('PeerManager', () => {
       { name: 'alice', url: 'http://localhost:9200', secret: 'sec' },
     ], [], createLogger());
 
-    const result = await manager.forwardTask(
+    await expect(manager.forwardTask(
       { name: 'alice', url: 'http://localhost:9200', secret: 'sec' },
       { botName: 'bot-a', chatId: 'chat1', prompt: 'hello' },
-    );
-
-    expect(result).toEqual({ success: true, responseText: 'done' });
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:9200/api/talk',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          'X-MetaBot-Origin': 'peer',
-          'Authorization': 'Bearer sec',
-        }),
-      }),
-    );
+    )).rejects.toThrow('legacy_peer_secret_rejected');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(manager.getPeerStatuses()[0].authMode).toBe('legacy_secret_rejected');
   });
 
-  it('sends auth header when peer has secret', async () => {
+  it('does not send the deprecated peer.secret during discovery', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ bots: [] }),
@@ -272,9 +262,11 @@ describe('PeerManager', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       'http://remote:9100/api/bots',
       expect.objectContaining({
-        headers: expect.objectContaining({ 'Authorization': 'Bearer my-secret', 'X-MetaBot-Origin': 'peer' }),
+        headers: expect.objectContaining({ 'X-MetaBot-Origin': 'peer' }),
       }),
     );
+    const botCall = fetchMock.mock.calls.find((call) => call[0] === 'http://remote:9100/api/bots');
+    expect((botCall?.[1].headers as Record<string, string>).Authorization).toBeUndefined();
   });
 
   it('does not send auth header when peer has no secret', async () => {
@@ -562,7 +554,10 @@ describe('PeerManager', () => {
       expect(result).toEqual({ success: true, responseText: 'local done' });
       expect(fetchMock).toHaveBeenCalledWith(
         'http://10.0.0.5:9200/api/talk',
-        expect.objectContaining({ method: 'POST' }),
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ Authorization: 'Bearer core-bearer' }),
+        }),
       );
       expect(fetchMock).not.toHaveBeenCalledWith(
         'https://metabot.example.com/core/api/inbox/local-worker',

@@ -1,10 +1,22 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import type { Logger } from '../utils/logger.js';
 import { proxyFetch } from '../utils/http.js';
 import type { PeerConfig } from '../config.js';
 import type { BotInfo } from './bot-registry.js';
+import {
+  PEER_CAPABILITY_TTL_SECONDS,
+  createPeerAuthorization,
+  createPeerNonce,
+  parsePeerAuthorization,
+  peerAuthFailure,
+  sha256Base64Url,
+  verifyPeerAuthorizationSignature,
+  type PeerAuthResult,
+  type PeerCapabilityClaims,
+} from './peer-auth.js';
 
 export interface PeerBotInfo extends BotInfo {
   peerUrl: string;
@@ -28,7 +40,14 @@ export interface PeerStatus {
   lastChecked: number;
   lastHealthy: number;
   botCount: number;
+  authMode: 'peer_capability' | 'core_bearer' | 'legacy_secret_rejected' | 'none';
   error?: string;
+}
+
+export interface PeerManagerOptions {
+  peerIdentity?: string;
+  now?: () => number;
+  nonce?: () => string;
 }
 
 /** Minimal shape PeerManager needs to register a local bot. */
@@ -78,6 +97,7 @@ interface PeerState {
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const FETCH_TIMEOUT_MS = 5_000;
 const TASK_FORWARD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const PEER_STATUS_POLL_MS = 250;
 
 /**
  * Parse METABOT_ALLOWED_PEER_CIDRS (comma/space-separated CIDRs). When set, a
@@ -254,15 +274,27 @@ export class PeerManager {
   private relayHandler?: RelayInboxHandler;
   private relayPollers: Map<string, AbortController> = new Map();
   private agentBusFailureCount = 0;
+  private peerIdentity?: string;
+  private now: () => number;
+  private nonce: () => string;
+  private replayNonces = new Map<string, number>();
   /**
    * Optional CIDR allowlist for forward targets (METABOT_ALLOWED_PEER_CIDRS).
    * Empty = no CIDR constraint; the known-peer allowlist is always enforced.
    */
   private allowedPeerCidrs: string[];
 
-  constructor(configs: PeerConfig[], localBots: LocalBotEntry[], logger: Logger) {
+  constructor(
+    configs: PeerConfig[],
+    localBots: LocalBotEntry[],
+    logger: Logger,
+    options: PeerManagerOptions = {},
+  ) {
     this.logger = logger.child({ module: 'peers' });
     this.localBots = localBots;
+    this.peerIdentity = options.peerIdentity?.trim() || process.env.METABOT_PEER_ID?.trim() || undefined;
+    this.now = options.now ?? Date.now;
+    this.nonce = options.nonce ?? createPeerNonce;
     this.allowedPeerCidrs = parseAllowedPeerCidrs(process.env.METABOT_ALLOWED_PEER_CIDRS);
     if (this.allowedPeerCidrs.length > 0) {
       this.logger.info(
@@ -282,6 +314,12 @@ export class PeerManager {
         skills: [],
         static: true,
       });
+      if (config.secret) {
+        this.logger.warn(
+          { peerName: config.name, peerUrl: normalizedUrl, code: 'legacy_peer_secret_rejected' },
+          'peer.secret is deprecated and will not be sent; configure scoped peer auth instead',
+        );
+      }
     }
 
     // Precedence: explicit METABOT_CORE_AGENT_BUS_URL > METABOT_CORE_URL.
@@ -597,14 +635,202 @@ export class PeerManager {
     return removed;
   }
 
-  /**
-   * Pick the outbound Authorization for a cross-bridge call. Explicit static
-   * peer secrets take precedence because older/private bridges may not verify
-   * metabot-core bearer tokens. Registry-discovered peers fall back to the
-   * caller's metabot-core token.
-   */
-  private resolveOutboundAuth(peer: PeerConfig): string | undefined {
-    return peer.secret || this.agentBusToken;
+  private findPeerState(peer: PeerConfig): PeerState | undefined {
+    const normalized = peer.url.replace(/\/+$/, '');
+    const byName = this.peers.get(peer.name);
+    if (byName?.config.url === normalized) return byName;
+    return Array.from(this.peers.values()).find((state) => state.config.url === normalized);
+  }
+
+  private resolveSourceBot(requested: unknown): string {
+    if (typeof requested === 'string' && this.localBots.some((bot) => bot.name === requested)) {
+      return requested;
+    }
+    if (!this.peerIdentity) throw new Error('peer_auth_identity_required');
+    return `bridge:${this.peerIdentity}`;
+  }
+
+  private capabilityAuthorization(
+    peer: PeerConfig,
+    method: string,
+    requestPath: string,
+    rawBody: string,
+    binding: {
+      sourceBot: string;
+      targetBot?: string;
+      chatId?: string;
+      taskId?: string;
+    },
+  ): string {
+    if (!peer.auth) throw new Error('peer_auth_required');
+    if (!this.peerIdentity) throw new Error('peer_auth_identity_required');
+    let host: string;
+    try {
+      host = new URL(peer.url).host.toLowerCase();
+    } catch {
+      throw new Error('peer_auth_target_url_invalid');
+    }
+    const nowSeconds = Math.floor(this.now() / 1000);
+    const claims: PeerCapabilityClaims = {
+      v: 1,
+      iss: this.peerIdentity,
+      aud: peer.name,
+      kid: peer.auth.keyId,
+      host,
+      method: method.toUpperCase(),
+      path: requestPath,
+      sourceBot: binding.sourceBot,
+      ...(binding.targetBot ? { targetBot: binding.targetBot } : {}),
+      ...(binding.chatId ? { chatId: binding.chatId } : {}),
+      ...(binding.taskId ? { taskId: binding.taskId } : {}),
+      bodySha256: sha256Base64Url(rawBody),
+      iat: nowSeconds,
+      exp: nowSeconds + PEER_CAPABILITY_TTL_SECONDS,
+      nonce: this.nonce(),
+    };
+    return createPeerAuthorization(claims, peer.auth.secret);
+  }
+
+  private authorizationHeaders(
+    state: PeerState,
+    method: string,
+    requestPath: string,
+    rawBody: string,
+    binding: {
+      sourceBot: string;
+      targetBot?: string;
+      chatId?: string;
+      taskId?: string;
+    },
+  ): Record<string, string> {
+    if (state.config.auth) {
+      return {
+        Authorization: this.capabilityAuthorization(
+          state.config,
+          method,
+          requestPath,
+          rawBody,
+          binding,
+        ),
+      };
+    }
+    // Registry-discovered same-Core peers may use the ordinary Core bearer.
+    // Static peers never receive it, and legacy peer.secret is never used.
+    if (!state.static && this.agentBusToken) {
+      return { Authorization: `Bearer ${this.agentBusToken}` };
+    }
+    return {};
+  }
+
+  private isAllowedCapabilityRoute(method: string, requestPath: string): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(requestPath, 'http://peer.invalid');
+    } catch {
+      return false;
+    }
+    const pathName = parsed.pathname;
+    const upperMethod = method.toUpperCase();
+    if (upperMethod === 'POST' && (pathName === '/api/talk' || pathName === '/api/tasks')) return true;
+    if (upperMethod !== 'GET') return false;
+    if (pathName === '/api/bots' || pathName === '/api/skills' || pathName === '/api/peers') return true;
+    if (/^\/api\/skills\/[^/]+$/.test(pathName)) return true;
+    return /^\/api\/talk\/[^/]+$/.test(pathName);
+  }
+
+  /** Verify a short-lived peer capability without exposing its credential. */
+  verifyInboundPeerRequest(input: {
+    authorization: string | string[] | undefined;
+    method: string;
+    path: string;
+    host: string | string[] | undefined;
+    origin: string | string[] | undefined;
+    rawBody: string;
+  }): PeerAuthResult {
+    const parsed = parsePeerAuthorization(input.authorization);
+    if ('ok' in parsed) return parsed;
+    const { claims } = parsed;
+    const state = this.peers.get(claims.iss);
+    if (!state?.config.auth) return peerAuthFailure('peer_auth_unknown_issuer');
+    const auth = state.config.auth;
+    if (auth.revokedKeyIds?.includes(claims.kid)) return peerAuthFailure('peer_auth_revoked');
+
+    const nowMs = this.now();
+    const key = auth.keyId === claims.kid
+      ? auth
+      : (auth.acceptKeys ?? []).find((candidate) => {
+          if (candidate.keyId !== claims.kid || !candidate.acceptUntil) return false;
+          const cutoff = Date.parse(candidate.acceptUntil);
+          return Number.isFinite(cutoff) && cutoff >= nowMs;
+        });
+    if (!key) return peerAuthFailure('peer_auth_unknown_key');
+    if (!verifyPeerAuthorizationSignature(parsed, key.secret)) {
+      return peerAuthFailure('peer_auth_bad_signature');
+    }
+
+    const nowSeconds = Math.floor(nowMs / 1000);
+    if (claims.exp <= nowSeconds || claims.exp <= claims.iat) return peerAuthFailure('peer_auth_expired');
+    if (claims.iat > nowSeconds + 5) return peerAuthFailure('peer_auth_not_yet_valid');
+    if (claims.exp - claims.iat > PEER_CAPABILITY_TTL_SECONDS + 5) return peerAuthFailure('peer_auth_expired');
+    if (!this.peerIdentity || claims.aud !== this.peerIdentity) {
+      return peerAuthFailure('peer_auth_audience', 403);
+    }
+    const host = Array.isArray(input.host) ? undefined : input.host?.trim().toLowerCase();
+    if (!host || claims.host.toLowerCase() !== host) return peerAuthFailure('peer_auth_host', 403);
+    const origin = Array.isArray(input.origin) ? undefined : input.origin;
+    if (origin !== 'peer'
+      || !this.isAllowedCapabilityRoute(input.method, input.path)
+      || claims.method !== input.method.toUpperCase()
+      || claims.path !== input.path) {
+      return peerAuthFailure('peer_auth_route', 403);
+    }
+    if (claims.bodySha256 !== sha256Base64Url(input.rawBody)) {
+      return peerAuthFailure('peer_auth_body', 403);
+    }
+
+    if (auth.allowedSourceBots?.length && !auth.allowedSourceBots.includes(claims.sourceBot)) {
+      return peerAuthFailure('peer_auth_source_scope', 403);
+    }
+    if (claims.targetBot && auth.allowedTargetBots?.length
+      && !auth.allowedTargetBots.includes(claims.targetBot)) {
+      return peerAuthFailure('peer_auth_target_scope', 403);
+    }
+
+    const route = new URL(input.path, 'http://peer.invalid').pathname;
+    if (claims.method === 'POST') {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(input.rawBody) as Record<string, unknown>;
+      } catch {
+        return peerAuthFailure('peer_auth_body', 403);
+      }
+      if (typeof body.botName !== 'string' || !body.botName || body.botName.includes('/')
+        || body.botName !== claims.targetBot
+        || typeof body.chatId !== 'string' || !body.chatId || body.chatId !== claims.chatId
+        || typeof body.requestId !== 'string'
+        || !/^[A-Za-z0-9._:-]{1,128}$/.test(body.requestId)
+        || body.requestId !== claims.taskId
+        || body.sourceBot !== claims.sourceBot
+        || body.async !== true
+        || body.callbackBotName !== undefined
+        || body.callbackChatId !== undefined
+        || !this.localBots.some((bot) => bot.name === body.botName)) {
+        return peerAuthFailure('peer_auth_body', 403);
+      }
+    } else if (/^\/api\/talk\//.test(route)) {
+      const taskId = decodeURIComponent(route.slice('/api/talk/'.length));
+      if (!taskId || claims.taskId !== taskId) return peerAuthFailure('peer_auth_route', 403);
+    } else if (claims.targetBot || claims.chatId || claims.taskId) {
+      return peerAuthFailure('peer_auth_route', 403);
+    }
+
+    for (const [keyId, expiresAt] of this.replayNonces) {
+      if (expiresAt <= nowSeconds) this.replayNonces.delete(keyId);
+    }
+    const replayKey = `${claims.iss}:${claims.kid}:${claims.nonce}`;
+    if (this.replayNonces.has(replayKey)) return peerAuthFailure('peer_auth_replay');
+    this.replayNonces.set(replayKey, claims.exp);
+    return { ok: true, claims };
   }
 
   async refreshAll(): Promise<void> {
@@ -633,15 +859,27 @@ export class PeerManager {
       }
       return;
     }
-    const headers: Record<string, string> = {
-      'X-MetaBot-Origin': 'peer',
-    };
-    const auth = this.resolveOutboundAuth(config);
-    if (auth) {
-      headers['Authorization'] = `Bearer ${auth}`;
-    }
-
     try {
+      const headers: Record<string, string> = {
+        'X-MetaBot-Origin': 'peer',
+      };
+      Object.assign(headers, this.authorizationHeaders(
+        state,
+        'GET',
+        '/api/bots',
+        '',
+        { sourceBot: this.peerIdentity ? `bridge:${this.peerIdentity}` : 'bridge:registry' },
+      ));
+
+      const skillsHeaders: Record<string, string> = { 'X-MetaBot-Origin': 'peer' };
+      Object.assign(skillsHeaders, this.authorizationHeaders(
+        state,
+        'GET',
+        '/api/skills',
+        '',
+        { sourceBot: this.peerIdentity ? `bridge:${this.peerIdentity}` : 'bridge:registry' },
+      ));
+
       // Fetch bots and skills in parallel
       const [botsResp, skillsResp] = await Promise.all([
         proxyFetch(`${config.url}/api/bots`, {
@@ -649,7 +887,7 @@ export class PeerManager {
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         }),
         proxyFetch(`${config.url}/api/skills`, {
-          headers,
+          headers: skillsHeaders,
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         }).catch(() => null), // Skills endpoint may not exist on older peers
       ]);
@@ -833,24 +1071,136 @@ export class PeerManager {
       throw new Error(`Refusing to forward to peer "${peer.name}": ${rejection}`);
     }
 
-    const url = `${peer.url}/api/talk`;
+    const state = this.findPeerState(peer);
+    if (!state) throw new Error(`Peer "${peer.name}" is not configured`);
+    const effectivePeer = state.config;
+    const url = `${effectivePeer.url}/api/talk`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-MetaBot-Origin': 'peer',
     };
-    const auth = this.resolveOutboundAuth(peer);
-    if (auth) {
-      headers['Authorization'] = `Bearer ${auth}`;
+    if (!effectivePeer.auth) {
+      if (effectivePeer.secret) throw new Error('legacy_peer_secret_rejected');
+      // Registry-discovered same-Core peers keep their scoped Core bearer.
+      // Static peers receive no credential and never fall back to API_SECRET.
+      Object.assign(headers, this.authorizationHeaders(
+        state,
+        'POST',
+        '/api/talk',
+        JSON.stringify(body),
+        { sourceBot: this.peerIdentity ? `bridge:${this.peerIdentity}` : 'bridge:registry' },
+      ));
+      const response = await proxyFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(TASK_FORWARD_TIMEOUT_MS),
+      });
+      const result = (await response.json().catch(() => ({}))) as object;
+      if (!response.ok) throw new Error(`peer_auth_required_http_${response.status}`);
+      return result;
     }
 
-    const response = await proxyFetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TASK_FORWARD_TIMEOUT_MS),
-    });
+    const input = body as Record<string, unknown>;
+    const requestedId = typeof input.requestId === 'string' ? input.requestId : '';
+    const requestId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedId)
+      ? requestedId
+      : crypto.randomUUID();
+    const sourceBot = this.resolveSourceBot(input.sourceBot);
+    const targetBot = typeof input.botName === 'string' ? input.botName : '';
+    const chatId = typeof input.chatId === 'string' ? input.chatId : '';
+    if (!targetBot || targetBot.includes('/') || !chatId) throw new Error('peer task requires botName and chatId');
+    const outboundBody: Record<string, unknown> = {
+      ...input,
+      botName: targetBot,
+      chatId,
+      sourceBot,
+      requestId,
+      async: true,
+    };
+    delete outboundBody.callbackBotName;
+    delete outboundBody.callbackChatId;
+    const rawBody = JSON.stringify(outboundBody);
 
-    return (await response.json()) as object;
+    let response: Response | undefined;
+    let lastNetworkError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const attemptHeaders = {
+        ...headers,
+        ...this.authorizationHeaders(state, 'POST', '/api/talk', rawBody, {
+          sourceBot,
+          targetBot,
+          chatId,
+          taskId: requestId,
+        }),
+      };
+      try {
+        response = await proxyFetch(url, {
+          method: 'POST',
+          headers: attemptHeaders,
+          body: rawBody,
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (response.status < 500) break;
+      } catch (error) {
+        lastNetworkError = error;
+      }
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!response) {
+      throw lastNetworkError instanceof Error ? lastNetworkError : new Error('peer task request failed');
+    }
+    const accepted = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      const code = typeof accepted.code === 'string' ? accepted.code : `http_${response.status}`;
+      throw new Error(`peer task rejected: ${code}`);
+    }
+    if (response.status !== 202) return accepted;
+    this.logger.info(
+      { peerName: effectivePeer.name, requestId, sourceBot, targetBot, chatId },
+      'peer task accepted',
+    );
+
+    const deadline = this.now() + TASK_FORWARD_TIMEOUT_MS;
+    const statusPath = `/api/talk/${encodeURIComponent(requestId)}`;
+    while (this.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, PEER_STATUS_POLL_MS));
+      const statusHeaders: Record<string, string> = {
+        'X-MetaBot-Origin': 'peer',
+        ...this.authorizationHeaders(state, 'GET', statusPath, '', {
+          sourceBot,
+          targetBot,
+          chatId,
+          taskId: requestId,
+        }),
+      };
+      let statusResponse: Response;
+      try {
+        statusResponse = await proxyFetch(`${effectivePeer.url}${statusPath}`, {
+          headers: statusHeaders,
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+      } catch {
+        continue;
+      }
+      const statusBody = (await statusResponse.json().catch(() => ({}))) as Record<string, unknown>;
+      if (statusResponse.status >= 500) continue;
+      if (!statusResponse.ok) {
+        const code = typeof statusBody.code === 'string' ? statusBody.code : `http_${statusResponse.status}`;
+        throw new Error(`peer task status rejected: ${code}`);
+      }
+      if (statusBody.status === 'completed' || statusBody.status === 'failed') {
+        const result = statusBody.result && typeof statusBody.result === 'object'
+          ? statusBody.result as object
+          : { success: statusBody.status === 'completed' };
+        this.logger.info(
+          { peerName: effectivePeer.name, requestId, status: statusBody.status, sourceBot, targetBot, chatId },
+          'peer task reached terminal status',
+        );
+        return { requestId, ...result };
+      }
+    }
+    throw new Error(`peer task timed out: ${requestId}`);
   }
 
   private isRelayPeer(peer: PeerConfig): boolean {
@@ -968,16 +1318,20 @@ export class PeerManager {
     if (!state || !state.healthy) return null;
 
     const { config } = state;
-    const headers: Record<string, string> = {
-      'X-MetaBot-Origin': 'peer',
-    };
-    const auth = this.resolveOutboundAuth(config);
-    if (auth) {
-      headers['Authorization'] = `Bearer ${auth}`;
-    }
+    const requestPath = `/api/skills/${encodeURIComponent(skillName)}`;
 
     try {
-      const response = await proxyFetch(`${config.url}/api/skills/${encodeURIComponent(skillName)}`, {
+      const headers: Record<string, string> = {
+        'X-MetaBot-Origin': 'peer',
+      };
+      Object.assign(headers, this.authorizationHeaders(
+        state,
+        'GET',
+        requestPath,
+        '',
+        { sourceBot: this.peerIdentity ? `bridge:${this.peerIdentity}` : 'bridge:registry' },
+      ));
+      const response = await proxyFetch(`${config.url}${requestPath}`, {
         headers,
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
@@ -1001,6 +1355,13 @@ export class PeerManager {
       lastChecked: state.lastChecked,
       lastHealthy: state.lastHealthy,
       botCount: state.bots.length,
+      authMode: state.config.auth
+        ? 'peer_capability'
+        : state.config.secret
+          ? 'legacy_secret_rejected'
+          : !state.static && this.agentBusToken
+            ? 'core_bearer'
+            : 'none',
       ...(state.error ? { error: state.error } : {}),
     }));
   }

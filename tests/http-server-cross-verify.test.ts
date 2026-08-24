@@ -26,6 +26,7 @@ describe('isCrossVerifyRoute', () => {
     expect(isCrossVerifyRoute('GET', '/api/bots')).toBe(true);
     expect(isCrossVerifyRoute('GET', '/api/bots?foo=1')).toBe(true);
     expect(isCrossVerifyRoute('GET', '/api/skills')).toBe(true);
+    expect(isCrossVerifyRoute('GET', '/api/skills/research')).toBe(true);
     expect(isCrossVerifyRoute('GET', '/api/peers')).toBe(true);
   });
 
