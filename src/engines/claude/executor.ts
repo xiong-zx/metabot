@@ -9,6 +9,10 @@ import type { CodexReasoningEffort } from '../../config.js';
 import { stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import {
+  toClaudeMcpServers,
+  type ResolvedExternalMcpServer,
+} from '../../mcp/external-server.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import type { ApiContext } from '../prompt-context.js';
 import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
@@ -263,6 +267,8 @@ export interface ExecutorOptions {
   reasoningEffort?: CodexReasoningEffort;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
+  /** Independently installed MCP products resolved by the thin adapter. */
+  mcpServers?: ResolvedExternalMcpServer[];
   /** Called whenever Claude Code fires a team coordination hook. */
   onTeamEvent?: (event: TeamEvent) => void;
   /** Short-lived bridge-issued environment values scoped to this engine session. */
@@ -346,6 +352,7 @@ export class ClaudeExecutor {
     apiContext?: ApiContext,
     env?: Record<string, string>,
     mcpEntries?: readonly McpEntry[],
+    mcpServers?: readonly ResolvedExternalMcpServer[],
   ): Record<string, unknown> {
     const isRoot = process.getuid?.() === 0;
     const queryOptions: Record<string, unknown> = {
@@ -373,7 +380,14 @@ export class ClaudeExecutor {
       // this immediately makes subagent cards richer (Agent View parity).
       agentProgressSummaries: true,
       ...(env ? { env } : {}),
-      ...(mcpEntries?.length ? { mcpServers: toSdkMcpServers(mcpEntries) } : {}),
+      ...(mcpEntries?.length || mcpServers?.length
+        ? {
+            mcpServers: {
+              ...toSdkMcpServers(mcpEntries ?? []),
+              ...toClaudeMcpServers(mcpServers ?? []),
+            },
+          }
+        : {}),
     };
 
     // Build system prompt appendix from sections
@@ -475,6 +489,7 @@ export class ClaudeExecutor {
       apiContext,
       options.env,
       options.mcpEntries,
+      options.mcpServers,
     );
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
@@ -696,6 +711,8 @@ export class ClaudeExecutor {
       outputsDir,
       options.apiContext,
       options.env,
+      options.mcpEntries,
+      options.mcpServers,
     );
 
     const stream = query({

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
 import type { RulesPackConfig } from '@metabot/rulespack-adapter';
 import { parseFeishuDomain, type FeishuDomain } from './feishu/domain.js';
+import type { ExternalMcpServerDescriptor } from './mcp/external-server.js';
 
 export { DEFAULT_FEISHU_DOMAIN, parseFeishuDomain } from './feishu/domain.js';
 export type { FeishuDomain } from './feishu/domain.js';
@@ -141,6 +142,8 @@ export interface BotConfigBase {
   codex?: CodexBotConfig;
   /** Downstream Codex-only deterministic RulesPack integration. Default mode is off. */
   rulesPack?: RulesPackConfig;
+  /** Independently installed stdio MCP products explicitly enabled for this bot. */
+  mcpServers?: ExternalMcpServerDescriptor[];
   /**
    * Stage 4 — opt-in to the persistent Claude process pool. When enabled,
    * each chatId is backed by a long-lived Claude Code process (managed by
@@ -331,6 +334,8 @@ interface EngineJsonFields {
   /** Security-relevant opt-ins; omitted/false means no capability is minted. */
   workerTools?: boolean;
   arcTools?: boolean;
+  /** Product-neutral descriptors for independently installed stdio MCP servers. */
+  mcpServers?: ExternalMcpServerDescriptor[];
   /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
   backend?: 'sdk' | 'pty';
 }
@@ -381,6 +386,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(entry.mcpServers ? { mcpServers: entry.mcpServers } : {}),
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,
@@ -432,6 +438,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(entry.mcpServers ? { mcpServers: entry.mcpServers } : {}),
     telegram: {
       botToken: entry.telegramBotToken,
     },
@@ -479,6 +486,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(entry.mcpServers ? { mcpServers: entry.mcpServers } : {}),
     claude: buildClaudeConfig(entry),
   };
 }
@@ -514,6 +522,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(entry.mcpServers ? { mcpServers: entry.mcpServers } : {}),
     wechat: {
       ilinkBaseUrl: entry.ilinkBaseUrl,
       botToken: entry.wechatBotToken,
@@ -569,6 +578,7 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(entry.mcpServers ? { mcpServers: entry.mcpServers } : {}),
     slack: {
       botToken: entry.slackBotToken,
       signingSecret: entry.slackSigningSecret,

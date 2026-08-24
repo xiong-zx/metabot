@@ -202,6 +202,7 @@ export const ptyQuery = (args: {
       appendSystemPrompt,
       settingsPath,
       mcpConfigPath: options.mcpConfigPath,
+      additionalMcpConfigPaths: options.additionalMcpConfigPaths,
       env: options.env,
       pathToClaudeExecutable: options.pathToClaudeExecutable,
       cols: options.cols,

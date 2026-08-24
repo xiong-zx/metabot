@@ -78,7 +78,8 @@ describe('Claude additive MCP configuration', () => {
       new URL('../src/engines/claude/persistent-executor.ts', import.meta.url),
       'utf8',
     );
-    expect(persistentSource).toContain('mcpServers: toSdkMcpServers(this.options.mcpEntries)');
+    expect(persistentSource).toContain('...toSdkMcpServers(this.options.mcpEntries ?? [])');
+    expect(persistentSource).toContain('...toClaudeMcpServers(this.options.mcpServers ?? [])');
     expect(persistentSource).toContain('mcpConfigPath: this.options.mcpConfigPath');
     expect(persistentSource).not.toContain('strictMcpConfig');
     expect(persistentSource).not.toContain('--strict-mcp-config');

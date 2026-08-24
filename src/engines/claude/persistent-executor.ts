@@ -34,6 +34,12 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import {
+  leaseClaudeMcpConfig,
+  toClaudeMcpServers,
+  type ClaudeMcpConfigLease,
+  type ResolvedExternalMcpServer,
+} from '../../mcp/external-server.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
@@ -182,6 +188,8 @@ export interface PersistentExecutorOptions {
    * query()). 'pty' keeps Claude Code subscription billing post-June-2026.
    */
   backend?: 'sdk' | 'pty';
+  /** Independently installed MCP products enabled for this bot. */
+  mcpServers?: ResolvedExternalMcpServer[];
 }
 
 export type ExecutorState =
@@ -397,6 +405,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
   /** Resolved when consumeLoop exits (cleanly or due to crash). */
   private consumePromise?: Promise<void>;
   private mcpCleaned = false;
+  private mcpConfigLease?: ClaudeMcpConfigLease;
 
   constructor(private options: PersistentExecutorOptions) {
     super();
@@ -435,7 +444,14 @@ export class PersistentClaudeExecutor extends EventEmitter {
       settings: { teammateMode: 'in-process' },
       agentProgressSummaries: true,
       ...(this.options.env ? { env: this.options.env } : {}),
-      ...(this.options.mcpEntries?.length ? { mcpServers: toSdkMcpServers(this.options.mcpEntries) } : {}),
+      ...(this.options.mcpEntries?.length || this.options.mcpServers?.length
+        ? {
+            mcpServers: {
+              ...toSdkMcpServers(this.options.mcpEntries ?? []),
+              ...toClaudeMcpServers(this.options.mcpServers ?? []),
+            },
+          }
+        : {}),
     };
     if (this.options.model) queryOptions.model = this.options.model;
     // resume: prefer the most-recent observed sessionId; fall back to the
@@ -506,6 +522,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
 
     const backend = this.options.backend ?? 'pty';
     if (backend === 'pty') {
+      this.mcpConfigLease ??= leaseClaudeMcpConfig(this.options.mcpServers ?? []);
       // PTY backend: drive a real interactive `claude` over a PTY and
       // reconstruct SDKMessages from the session jsonl. Keeps Claude Code
       // subscription billing (via TeamClaude) past the June-2026 SDK cutoff.
@@ -523,6 +540,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
         env: this.options.env,
         mcpConfigPath: this.options.mcpConfigPath,
+        additionalMcpConfigPaths: this.mcpConfigLease ? [this.mcpConfigLease.path] : undefined,
       };
       const stream = ptyQuery({
         prompt: this.inputQueue as unknown as PtyPromptSource,
@@ -760,10 +778,12 @@ export class PersistentClaudeExecutor extends EventEmitter {
     this.state = next;
     this.options.logger.debug({ from: prev, to: next }, 'PersistentExecutor: state');
     this.emit('state-changed', prev, next);
-    if (next === 'closed') this.emit('closed');
     if (next === 'closed' && !this.mcpCleaned) {
       this.mcpCleaned = true;
       this.options.mcpCleanup?.();
+      this.mcpConfigLease?.cleanup();
+      this.mcpConfigLease = undefined;
+      this.emit('closed');
     }
     if (next === 'ready' && prev === 'restarting') this.emit('restarted', this.sessionId);
   }
