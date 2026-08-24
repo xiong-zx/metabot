@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
+import { removeMetaBotRuntimeSecrets } from '../execution-env.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type {
   ApiContext,
@@ -246,6 +247,7 @@ export function buildCodexEnv(
   for (const [key, value] of Object.entries(codexConfig.env ?? {})) {
     if (value !== undefined) env[key] = value;
   }
+  removeMetaBotRuntimeSecrets(env);
 
   const explicitApiKey = codexConfig.apiKey?.trim();
   if (explicitApiKey) {

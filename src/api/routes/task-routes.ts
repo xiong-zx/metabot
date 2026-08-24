@@ -1,4 +1,5 @@
 import type * as http from 'node:http';
+import { getPeerRequestClaims } from '../peer-auth.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
 
@@ -13,7 +14,13 @@ export async function handleTaskRoutes(
 
   // GET /api/talk/:taskId — async task status
   if (method === 'GET' && url.startsWith('/api/talk/')) {
-    const taskId = url.slice('/api/talk/'.length).split('?')[0];
+    let taskId: string;
+    try {
+      taskId = decodeURIComponent(url.slice('/api/talk/'.length).split('?')[0]);
+    } catch {
+      jsonResponse(res, 400, { error: 'Invalid taskId' });
+      return true;
+    }
     if (!taskId) {
       jsonResponse(res, 400, { error: 'Missing taskId' });
       return true;
@@ -21,6 +28,17 @@ export async function handleTaskRoutes(
     const task = asyncTaskStore.get(taskId);
     if (!task) {
       jsonResponse(res, 404, { error: 'Task not found' });
+      return true;
+    }
+    const peerClaims = getPeerRequestClaims(req);
+    if (peerClaims
+      && (!task.requestIssuer
+        || task.requestIssuer !== peerClaims.iss
+        || task.requestSourceBot !== peerClaims.sourceBot
+        || task.botName !== peerClaims.targetBot
+        || task.chatId !== peerClaims.chatId
+        || task.id !== peerClaims.taskId)) {
+      jsonResponse(res, 403, { error: 'Forbidden', code: 'peer_task_scope_mismatch' });
       return true;
     }
     jsonResponse(res, 200, {
@@ -47,6 +65,8 @@ export async function handleTaskRoutes(
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
+    const requestId = body.requestId as string | undefined;
+    const peerClaims = getPeerRequestClaims(req);
 
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
@@ -90,6 +110,29 @@ export async function handleTaskRoutes(
     // Try local registry first
     const bot = registry.get(botName);
     if (bot) {
+      if (peerClaims && requestId) {
+        const existing = asyncTaskStore.get(requestId);
+        if (existing) {
+          const sameRequest = existing.botName === botName
+            && existing.chatId === chatId
+            && existing.prompt === prompt
+            && existing.requestIssuer === peerClaims.iss
+            && existing.requestSourceBot === peerClaims.sourceBot
+            && existing.requestBodySha256 === peerClaims.bodySha256;
+          if (!sameRequest) {
+            jsonResponse(res, 409, { error: 'Request ID already used', code: 'peer_request_conflict' });
+            return true;
+          }
+          jsonResponse(res, 202, {
+            taskId: existing.id,
+            requestId: existing.id,
+            status: existing.status,
+            deduplicated: true,
+          });
+          return true;
+        }
+      }
+
       // Circuit breaker check
       if (!circuitBreaker.isAvailable(botName)) {
         jsonResponse(res, 503, { error: `Bot "${botName}" is temporarily unavailable (circuit open)` });
@@ -103,19 +146,35 @@ export async function handleTaskRoutes(
         return true;
       }
 
-      logger.info({ botName, chatId, promptLength: prompt.length, asyncMode }, 'API talk request');
+      logger.info({
+        botName,
+        chatId,
+        promptLength: prompt.length,
+        asyncMode,
+        ...(requestId ? { requestId } : {}),
+        ...(peerClaims ? { peerIssuer: peerClaims.iss, sourceBot: peerClaims.sourceBot } : {}),
+      }, 'API talk request');
 
       // Async mode: accept immediately, execute in background
       if (asyncMode) {
         const asyncTask = asyncTaskStore.create({
+          ...(peerClaims && requestId ? { id: requestId } : {}),
           botName, chatId, prompt, callbackChatId, callbackBotName,
+          ...(peerClaims ? {
+            requestIssuer: peerClaims.iss,
+            requestSourceBot: peerClaims.sourceBot,
+            requestBodySha256: peerClaims.bodySha256,
+          } : {}),
         });
 
         (async () => {
           asyncTaskStore.update(asyncTask.id, { status: 'running' });
           try {
             const result = await bot.bridge.executeApiTask({
-              prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              prompt,
+              chatId,
+              userId: peerClaims ? `peer:${peerClaims.iss}/${peerClaims.sourceBot}` : 'api',
+              sendCards: sendCards ?? true,
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -164,6 +223,7 @@ export async function handleTaskRoutes(
 
         jsonResponse(res, 202, {
           taskId: asyncTask.id,
+          requestId: asyncTask.id,
           status: 'accepted',
           message: 'Task accepted for async execution',
         });

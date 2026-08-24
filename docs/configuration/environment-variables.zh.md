@@ -68,9 +68,13 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 | 变量                         | 默认值         | 作用                             |
 | ---------------------------- | -------------- | -------------------------------- |
 | `SCHEDULE_TIMEZONE`          | 系统时区       | Cron 任务使用的 IANA 时区        |
+| `METABOT_PEER_ID`            | —              | 当前 Bridge 的稳定身份            |
 | `METABOT_PEERS`              | —              | 逗号分隔的 Peer URL              |
-| `METABOT_PEER_SECRETS`       | —              | 与 Peer URL 对应的 Secret        |
 | `METABOT_PEER_NAMES`         | 自动           | Peer 显示名称                    |
+| `METABOT_PEER_KEY_IDS`       | —              | 与 Peer 对应的 key ID            |
+| `METABOT_PEER_AUTH_SECRETS`  | —              | 与 Peer 对应的专用 Secret        |
+| `METABOT_PEER_SOURCE_BOTS`   | —              | 与 Peer 对应的本机出站 Bot 名称   |
+| `METABOT_PEER_SECRETS`       | —              | 已弃用；只检测、不发送            |
 | `METABOT_ALLOWED_PEER_CIDRS` | —              | 可选 IPv4 CIDR 转发白名单        |
 | `FEISHU_SERVICE_APP_ID`      | 第一个飞书 Bot | 可选 Wiki/文档读取 Service App   |
 | `FEISHU_SERVICE_APP_SECRET`  | 第一个飞书 Bot | Service App Secret               |

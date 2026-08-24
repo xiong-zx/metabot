@@ -8,6 +8,8 @@ import type { BotChannelStatus, BotRegistry } from './bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type { PeerManager } from './peer-manager.js';
+import { isPeerAuthorization, setPeerRequestClaims } from './peer-auth.js';
+import { readBody } from './routes/helpers.js';
 
 import { AsyncTaskStore } from './async-task-store.js';
 import {
@@ -115,6 +117,7 @@ export function isCrossVerifyRoute(method: string, url: string): boolean {
   if (method === 'GET' && url.startsWith('/api/talk/')) return true;
   if (method === 'GET' && (url === '/api/bots' || url.startsWith('/api/bots?'))) return true;
   if (method === 'GET' && (url === '/api/skills' || url.startsWith('/api/skills?'))) return true;
+  if (method === 'GET' && /^\/api\/skills\/[^/?]+(?:\?.*)?$/.test(url)) return true;
   if (method === 'GET' && (url === '/api/peers' || url.startsWith('/api/peers?'))) return true;
   return false;
 }
@@ -359,11 +362,9 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
     // Auth check (output-file routes remain publicly fetchable by opaque URL).
     //
-    // /api/talk and /api/tasks routes accept dual auth: the local secret
-    // (metabot CLI shortcut, local cross-bot dispatch) OR any Bearer that
-    // metabot-core `GET /api/whoami` validates (cross-bridge peer calls,
-    // `metabot talk` from any user with a metabot-core token). Every other
-    // API stays single-secret.
+    // Cross-bridge routes accept either a scoped MetaBotPeer capability or,
+    // for same-Core registry peers, a Bearer that metabot-core validates.
+    // Neither path grants access to administrator routes.
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
@@ -372,23 +373,54 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       // Timing-safe comparison so the secret can't be recovered byte-by-byte.
       const localOk = isLocalSecretAuthorized(secret, auth);
 
-      const rejectUnauthorized = () => {
+      const rejectUnauthorized = (status: 401 | 403 = 401, code?: string) => {
         // Count this as a failed auth attempt; trips the per-IP lockout once the
         // threshold is crossed. The next request from this IP will see 429.
         rateLimiter.recordAuthFailure(clientIp);
-        jsonResponse(res, 401, { error: 'Unauthorized' });
+        jsonResponse(res, status, { error: 'Unauthorized', ...(code ? { code } : {}) });
       };
 
       if (!localOk) {
-        const canCrossVerify = isCrossVerifyRoute(method, url) && bearerTokenFromAuthorization(auth) !== undefined;
-        if (!canCrossVerify) {
-          rejectUnauthorized();
-          return;
-        }
-        const verified = await verifyBearerViaMetabotCore(auth!, logger);
-        if (!verified) {
-          rejectUnauthorized();
-          return;
+        if (isPeerAuthorization(auth)) {
+          if (!peerManager) {
+            rejectUnauthorized(401, 'peer_auth_unavailable');
+            return;
+          }
+          let rawBody: string;
+          try {
+            rawBody = method === 'GET' || method === 'HEAD' ? '' : await readBody(req);
+          } catch (error: any) {
+            jsonResponse(res, error?.statusCode || 400, { error: error?.message || 'Invalid request body' });
+            return;
+          }
+          const verified = peerManager.verifyInboundPeerRequest({
+            authorization: auth,
+            method,
+            path: url,
+            host: req.headers.host,
+            origin: req.headers['x-metabot-origin'],
+            rawBody,
+          });
+          if (!verified.ok) {
+            logger.warn(
+              { code: verified.code, method, url, clientIp },
+              'peer capability rejected',
+            );
+            rejectUnauthorized(verified.status, verified.code);
+            return;
+          }
+          setPeerRequestClaims(req, verified.claims);
+        } else {
+          const canCrossVerify = isCrossVerifyRoute(method, url) && bearerTokenFromAuthorization(auth) !== undefined;
+          if (!canCrossVerify) {
+            rejectUnauthorized();
+            return;
+          }
+          const verified = await verifyBearerViaMetabotCore(auth!, logger);
+          if (!verified) {
+            rejectUnauthorized();
+            return;
+          }
         }
       }
       // Successful auth — clear any accumulated failed-auth counter so a
@@ -488,6 +520,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   server.on('close', () => {
     agentTeamsConfigWatcher?.close();
     agentTeamSupervisor.destroy();
+    asyncTaskStore.destroy();
     rateLimiter.stopSweep();
   });
 
