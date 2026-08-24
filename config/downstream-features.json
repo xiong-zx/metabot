@@ -149,6 +149,26 @@
       ]
     },
     {
+      "id": "zotero-mcp-product-descriptor",
+      "status": "required",
+      "roots": [
+        "config/mcp-products/zotero-mcp.json",
+        "docs/configuration/zotero-mcp.md",
+        "tests/zotero-external-mcp.test.ts"
+      ],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/metaclaw-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Use the independently installed upstream zotero-mcp command unchanged. MetaBot supplies only per-Bot enablement, local product configuration, native tool approval, and single-product failure isolation; Zotero MCP owns its APIs and credentials.",
+      "validationSurface": [
+        "tests/zotero-external-mcp.test.ts",
+        "tests/external-mcp.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
       "id": "metaclaw-mcp",
       "status": "required",
       "roots": ["packages/metaclaw-mcp"],
