@@ -11,6 +11,8 @@
     "packages/rulespack-adapter",
     "packages/cli",
     "packages/cli-core",
+    "packages/mcp-connector",
+    "packages/metaclaw-mcp",
     "packages/metamemory",
     "packages/skill-hub",
     "packages/worker-runner-mcp",

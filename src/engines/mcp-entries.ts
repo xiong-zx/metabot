@@ -20,6 +20,7 @@ export interface McpEntryInput {
   runtimeRoot: string;
   /** Capability file leased for each server, keyed by registry id. */
   capabilityFiles: Readonly<Record<string, string | undefined>>;
+  verificationKeyFiles?: Readonly<Record<string, { current: string; previous?: string } | undefined>>;
   /** Defaults to the full registry; overridden by fixtures. */
   servers?: readonly AnyMcpServerDescriptor[];
 }
@@ -51,11 +52,20 @@ export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
       continue;
     }
     if (!isLoopbackProxy(server)) {
+      const verificationKeys = input.verificationKeyFiles?.[server.id];
+      if (!verificationKeys || !isAbsoluteFilePath(verificationKeys.current)) continue;
       entries.push({
         name: server.serverName,
         command: path.join(input.runtimeRoot, 'node_modules', '.bin', server.binary),
         args: [...server.args],
-        env: { ...server.env, [server.capabilityFileEnvVar]: capabilityFile },
+        env: {
+          ...server.env,
+          [server.capabilityFileEnvVar]: capabilityFile,
+          [server.publicKeyEnvVar]: verificationKeys.current,
+          ...(verificationKeys.previous
+            ? { [server.previousPublicKeyEnvVar]: verificationKeys.previous }
+            : {}),
+        },
         codexToolsApprovalMode: 'approve',
       });
       continue;

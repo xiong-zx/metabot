@@ -20,9 +20,11 @@ import {
   EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
   EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   inspectExecutionKeyDirectory,
+  EXECUTION_PUBLIC_KEY_MODES,
   provisionExecutionKeyPairs,
   type ExecutionCapabilityClaims,
 } from '../src/services/execution-capabilities.js';
+import { capabilityServers, loopbackProxyServers } from '../src/services/mcp-registry.js';
 
 const dirs: string[] = [];
 
@@ -59,7 +61,12 @@ describe('execution capability Ed25519 keys', () => {
     expect(second.ok).toBe(true);
     expect(second.trustModel).toBe('tofu-same-uid-scope-hygiene');
     expect(second.directory.mode).toBe(0o700);
-    expect(second.pairs).toHaveLength(4);
+    // Derived from the audience table rather than a fixed count, so registering
+    // a server adds its keypair here instead of failing this assertion.
+    expect(second.pairs.map((pair) => pair.name)).toEqual([
+      ...capabilityServers().map((server) => `${server.id}-capability`),
+      ...loopbackProxyServers().map((server) => `${server.id}-callback`),
+    ]);
     expect(second.pairs.every((pair) => pair.ok && pair.pairMatches)).toBe(true);
   });
 
@@ -90,6 +97,22 @@ describe('execution capability Ed25519 keys', () => {
     chmodSync(join(permissive, 'worker-capability.key'), 0o644);
     expect(() => new ExecutionCapabilityService(permissive).issue({
       purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1',
+    })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
+  });
+
+  it('accepts read-only public-key modes while keeping private keys at 0600', () => {
+    for (const mode of EXECUTION_PUBLIC_KEY_MODES) {
+      const dir = keyDir();
+      chmodSync(join(dir, 'metaclaw-capability.pub'), mode);
+      const service = new ExecutionCapabilityService(dir);
+      expect(() => service.issue({
+        purpose: 'metaclaw', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
+      })).not.toThrow();
+    }
+    const dir = keyDir();
+    chmodSync(join(dir, 'metaclaw-capability.pub'), 0o666);
+    expect(() => new ExecutionCapabilityService(dir).issue({
+      purpose: 'metaclaw', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
     })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
   });
 

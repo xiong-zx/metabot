@@ -81,16 +81,23 @@ describe('worker/ARC execution environment', () => {
     const pmEnv = mintOptedInExecutionCapabilities({
       service,
       principal: pm,
-      config: { workerTools: true, arcTools: true },
+      config: { workerTools: true, arcTools: true, metaclawTools: true },
       now: 10_000,
     });
-    expect(Object.keys(pmEnv).sort()).toEqual(['METABOT_ARC_CAPABILITY', 'METABOT_WORKER_CAPABILITY']);
+    expect(Object.keys(pmEnv).sort()).toEqual([
+      'METABOT_ARC_CAPABILITY',
+      'METABOT_METACLAW_CAPABILITY',
+      'METABOT_WORKER_CAPABILITY',
+    ]);
     expect(service.verify(pmEnv.METABOT_WORKER_CAPABILITY, {
       purpose: 'worker', botName: 'pm-codex', chatId: 'chat-pm', now: 10_001,
     })).toMatchObject({ role: 'pm' });
     expect(service.verify(pmEnv.METABOT_ARC_CAPABILITY, {
       purpose: 'arc', botName: 'pm-codex', chatId: 'chat-pm', now: 10_001,
     })).toMatchObject({ role: 'pm' });
+    expect(service.verify(pmEnv.METABOT_METACLAW_CAPABILITY, {
+      purpose: 'metaclaw', botName: 'pm-codex', chatId: 'chat-pm', now: 10_001,
+    })).toMatchObject({ role: 'pm', aud: 'metaclaw' });
 
     expect(mintOptedInExecutionCapabilities({
       service,
@@ -128,17 +135,19 @@ describe('worker/ARC execution environment', () => {
     expect(stripped).not.toHaveProperty('METABOT_AUTH');
   });
 
-  it('parses workerTools/arcTools as explicit per-bot security opt-ins', () => {
+  it('parses workerTools/arcTools/metaclawTools as explicit per-bot security opt-ins', () => {
     const enabled = webBotFromJson({
       name: 'enabled',
       defaultWorkingDirectory: '/tmp',
       workerTools: true,
       arcTools: false,
+      metaclawTools: true,
     });
     const defaultOff = webBotFromJson({ name: 'default-off', defaultWorkingDirectory: '/tmp' });
-    expect(enabled).toMatchObject({ workerTools: true, arcTools: false });
+    expect(enabled).toMatchObject({ workerTools: true, arcTools: false, metaclawTools: true });
     expect(defaultOff.workerTools).toBeUndefined();
     expect(defaultOff.arcTools).toBeUndefined();
+    expect(defaultOff.metaclawTools).toBeUndefined();
   });
 
   it('composes the mint and materialization gates without re-authorizing Team sessions', () => {

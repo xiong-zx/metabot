@@ -47,6 +47,7 @@ const ALPHA: AnyMcpServerDescriptor = {
   transport: 'loopback-proxy',
   audience: 'alpha',
   capabilityContract: 'v3-audience',
+  standaloneEligible: false,
   optIn: 'workerTools',
   capabilityEnvVar: 'FIXTURE_ALPHA_CAPABILITY',
   capabilityFileEnvVar: 'FIXTURE_ALPHA_CAPABILITY_FILE',
@@ -61,6 +62,7 @@ const BETA: AnyMcpServerDescriptor = {
   transport: 'loopback-proxy',
   audience: 'beta',
   capabilityContract: 'v3-audience',
+  standaloneEligible: false,
   optIn: 'arcTools',
   capabilityEnvVar: 'FIXTURE_BETA_CAPABILITY',
   capabilityFileEnvVar: 'FIXTURE_BETA_CAPABILITY_FILE',
@@ -76,9 +78,12 @@ const NATIVE: AnyMcpServerDescriptor = {
   transport: 'native-stdio',
   audience: 'native',
   capabilityContract: 'v3-audience',
+  standaloneEligible: true,
   optIn: 'workerTools',
   capabilityEnvVar: 'FIXTURE_NATIVE_CAPABILITY',
   capabilityFileEnvVar: 'FIXTURE_NATIVE_CAPABILITY_FILE',
+  publicKeyEnvVar: 'FIXTURE_NATIVE_PUBLIC_KEY_FILE',
+  previousPublicKeyEnvVar: 'FIXTURE_NATIVE_PREVIOUS_PUBLIC_KEY_FILE',
   binary: 'fixture-native-server',
   args: ['--stdio'],
   env: { FIXTURE_NATIVE_MODE: 'read-only' },
@@ -98,6 +103,9 @@ function runtimeRoot(binaries = ['fixture-alpha-proxy', 'fixture-beta-proxy', 'f
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
   }
+  const keys = path.join(root, 'keys');
+  mkdirSync(keys, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(keys, 'native-capability.pub'), 'fixture-public-key', { mode: 0o600 });
   return root;
 }
 
@@ -111,6 +119,7 @@ function input(root: string, patch: Record<string, unknown> = {}) {
       FIXTURE_NATIVE_CAPABILITY: 'NATIVE_TOKEN',
     },
     bridgeEnv: {
+      METABOT_KEYS_DIR: path.join(root, 'keys'),
       FIXTURE_ALPHA_DAEMON_URL: 'http://127.0.0.1:9401/mcp',
       FIXTURE_BETA_DAEMON_URL: 'http://127.0.0.1:9402/mcp',
     },
@@ -125,6 +134,44 @@ function input(root: string, patch: Record<string, unknown> = {}) {
 }
 
 describe('data-driven MCP server registry', () => {
+  it('materializes the real MetaClaw native stdio row with its own audience keys and no daemon hop', () => {
+    const root = runtimeRoot();
+    const binary = path.join(root, 'node_modules', '.bin', 'metabot-metaclaw-mcp');
+    writeFileSync(binary, '#!/bin/sh\n', { encoding: 'utf8', mode: 0o755 });
+    const keys = path.join(root, 'keys');
+    writeFileSync(path.join(keys, 'metaclaw-capability.pub'), 'metaclaw-public-key', { mode: 0o600 });
+    const metaclaw = EXECUTION_MCP_SERVERS.find((server) => server.id === 'metaclaw')!;
+    const materialized = materializeExecutionMcp({
+      executionEnv: {
+        METABOT_BOT_NAME: 'pm',
+        METABOT_CHAT_ID: 'oc-user',
+        METABOT_METACLAW_CAPABILITY: 'METACLAW_TOKEN',
+      },
+      bridgeEnv: { METABOT_KEYS_DIR: keys },
+      runtimeRoot: root,
+      engineName: 'codex',
+      botName: 'pm',
+      chatId: 'oc-user',
+      logger,
+      servers: [metaclaw],
+    })!;
+    try {
+      expect(materialized.entries).toHaveLength(1);
+      expect(materialized.entries[0]).toMatchObject({
+        name: 'metabot-metaclaw',
+        command: binary,
+        args: [],
+        env: {
+          METACLAW_MCP_CAPABILITY_PUBLIC_KEY_FILE: path.join(keys, 'metaclaw-capability.pub'),
+        },
+      });
+      expect(readFileSync(materialized.entries[0].env.METACLAW_MCP_CAPABILITY_FILE, 'utf8')).toBe('METACLAW_TOKEN');
+      expect(JSON.stringify(materialized.entries[0])).not.toContain('CALLBACK');
+    } finally {
+      materialized.cleanup();
+    }
+  });
+
   it('materializes every registered server for MetaBot, Codex, and Claude without editing core code', () => {
     const root = runtimeRoot();
     for (const engineName of ['codex', 'claude'] as const) {
@@ -149,6 +196,7 @@ describe('data-driven MCP server registry', () => {
       expect(native.command).toBe(path.join(root, 'node_modules', '.bin', 'fixture-native-server'));
       expect(native.args).toEqual(['--stdio']);
       expect(native.env).toMatchObject({ FIXTURE_NATIVE_MODE: 'read-only' });
+      expect(native.env.FIXTURE_NATIVE_PUBLIC_KEY_FILE).toBe(path.join(root, 'keys', 'native-capability.pub'));
       expect(readFileSync(native.env.FIXTURE_NATIVE_CAPABILITY_FILE, 'utf8')).toBe('NATIVE_TOKEN');
       expect(JSON.stringify(native.args)).not.toMatch(/capability|token/i);
     } finally {
@@ -189,14 +237,14 @@ describe('data-driven MCP server registry', () => {
 
   it('keeps every other server when one capability lease fails', () => {
     const root = runtimeRoot();
-    const first = materializeExecutionMcp(input(root, { nonce: () => 'collide', servers: [ALPHA] }))!;
+    const first = materializeExecutionMcp(input(root, { nonce: () => 'collide', now: () => 1_000, servers: [ALPHA] }))!;
     // Alpha collides, while beta and native own different per-server paths and
     // remain available.
-    const second = materializeExecutionMcp(input(root, { nonce: () => 'collide' }))!;
+    const second = materializeExecutionMcp(input(root, { nonce: () => 'collide', now: () => 1_000 }))!;
     try {
       expect(second.entries.map((entry) => entry.name)).toEqual(['fixture-beta', 'fixture-native']);
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({ server: 'fixture-alpha', reason: expect.stringMatching(/already leased/i) }),
+        expect.objectContaining({ server: 'fixture-alpha', reason: expect.stringMatching(/already exists|EEXIST/i) }),
         expect.any(String),
       );
     } finally {

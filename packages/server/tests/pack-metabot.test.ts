@@ -144,6 +144,8 @@ describe('pack-metabot.sh', () => {
       'packages/rulespack-adapter',
       'packages/arc-mcp',
       'packages/worker-runner-mcp',
+      'packages/mcp-connector',
+      'packages/metaclaw-mcp',
     ]);
 
     const tsconfigJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} tsconfig.json`, { encoding: 'utf-8' });
@@ -187,7 +189,7 @@ describe('pack-metabot.sh', () => {
     expect(packageJson.devDependencies?.tsx).toBeUndefined();
   });
 
-  it('tarball includes the five bot-host workspaces', () => {
+  it('tarball includes the eight bot-host workspaces', () => {
     for (const ws of [
       'cli',
       'cli-core',
@@ -195,6 +197,8 @@ describe('pack-metabot.sh', () => {
       'skill-hub',
       'arc-mcp',
       'worker-runner-mcp',
+      'mcp-connector',
+      'metaclaw-mcp',
     ]) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);
     }

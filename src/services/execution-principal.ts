@@ -57,14 +57,14 @@ export function deriveExecutionPrincipal(
 export function mintOptedInExecutionCapabilities(input: {
   service: ExecutionCapabilityService;
   principal: DerivedExecutionPrincipal;
-  config: Pick<BotConfigBase, 'workerTools' | 'arcTools'>;
+  config: Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'metaclawTools'>;
   ttlMs?: number;
   now?: number;
-  onError?: (purpose: 'worker' | 'arc', error: unknown) => void;
+  onError?: (purpose: 'worker' | 'arc' | 'metaclaw', error: unknown) => void;
 }): Record<string, string> {
   if (input.principal.role !== 'pm' && input.principal.role !== 'user') return {};
   const env: Record<string, string> = {};
-  const issue = (purpose: 'worker' | 'arc', envName: string, optedIn: boolean | undefined) => {
+  const issue = (purpose: 'worker' | 'arc' | 'metaclaw', envName: string, optedIn: boolean | undefined) => {
     if (optedIn !== true) return;
     try {
       env[envName] = input.service.issue({
@@ -80,6 +80,7 @@ export function mintOptedInExecutionCapabilities(input: {
   };
   issue('worker', 'METABOT_WORKER_CAPABILITY', input.config.workerTools);
   issue('arc', 'METABOT_ARC_CAPABILITY', input.config.arcTools);
+  issue('metaclaw', 'METABOT_METACLAW_CAPABILITY', input.config.metaclawTools);
   return env;
 }
 

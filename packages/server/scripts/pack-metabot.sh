@@ -10,8 +10,8 @@
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
 #   - packages/cli, cli-core, metamemory, skill-hub, rulespack,
-#     rulespack-adapter, arc-mcp, and worker-runner-mcp
-#     (8 bot-host workspaces)
+#     rulespack-adapter, arc-mcp, worker-runner-mcp, mcp-connector and
+#     metaclaw-mcp (10 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -105,6 +105,8 @@ INCLUDES=(
   'packages/rulespack-adapter'
   'packages/arc-mcp'
   'packages/worker-runner-mcp'
+  'packages/mcp-connector'
+  'packages/metaclaw-mcp'
   'packages/skills'
   'LICENSE'
   'README.md'
@@ -141,7 +143,9 @@ for required in \
   'packages/rulespack/package.json' \
   'packages/rulespack-adapter/package.json' \
   'packages/arc-mcp/package.json' \
-  'packages/worker-runner-mcp/package.json'; do
+  'packages/worker-runner-mcp/package.json' \
+  'packages/mcp-connector/package.json' \
+  'packages/metaclaw-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
@@ -194,6 +198,8 @@ if (flavor === 'bridge') {
     'packages/rulespack-adapter',
     'packages/arc-mcp',
     'packages/worker-runner-mcp',
+    'packages/mcp-connector',
+    'packages/metaclaw-mcp',
   ];
   pkg.scripts = {
     ...pkg.scripts,

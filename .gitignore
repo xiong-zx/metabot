@@ -19,6 +19,8 @@ data/
 site/
 coverage/
 .vitest/
+__pycache__/
+*.pyc
 .idea/
 .vscode/
 ios/MetaBot/.build/

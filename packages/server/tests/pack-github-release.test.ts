@@ -55,6 +55,11 @@ describe('GitHub release package', () => {
     expect(listing).not.toContain('packages/arc-researchclaw-adapter/');
     expect(listing).not.toContain('packages/arc-worker-runner-adapter/');
     expect(listing).toContain('packages/worker-runner-mcp/package.json');
+    // MetaClaw ships inactive: its inference tool refuses on its dependency
+    // gates. It still has to be installable, and it cannot install without the
+    // shared connector it depends on.
+    expect(listing).toContain('packages/mcp-connector/package.json');
+    expect(listing).toContain('packages/metaclaw-mcp/package.json');
     expect(listing).toContain('scripts/pm2-protected-runtime-switch.cjs');
     expect(listing).toContain('src/runtime/restart-state-cli.ts');
     expect(listing).not.toContain('packages/server/static/');
@@ -79,6 +84,8 @@ describe('GitHub release package', () => {
     expect(packageJson.workspaces).not.toContain('packages/arc-researchclaw-adapter');
     expect(packageJson.workspaces).not.toContain('packages/arc-worker-runner-adapter');
     expect(packageJson.workspaces).toContain('packages/worker-runner-mcp');
+    expect(packageJson.workspaces).toContain('packages/mcp-connector');
+    expect(packageJson.workspaces).toContain('packages/metaclaw-mcp');
     expect(packageJson.metabotEdition).toBe('personal');
   });
 

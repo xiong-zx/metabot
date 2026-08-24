@@ -116,6 +116,34 @@ describe('downstream feature boundary gate', () => {
     ]);
   });
 
+  it('enforces node builtins and static mock or resolve loaders', () => {
+    const root = fixture({
+      schemaVersion: 1,
+      forbiddenPaths: [],
+      features: [
+        {
+          id: 'no-process-control',
+          status: 'required',
+          roots: ['packages/isolated'],
+          forbiddenImports: ['node:child_process'],
+        },
+      ],
+    });
+    fs.mkdirSync(path.join(root, 'packages/isolated'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'packages/isolated/index.ts'),
+      [
+        "import('node:child_process');",
+        "require.resolve('node:child_process');",
+        "vi.mock('node:child_process');",
+        "jest.unstable_mockModule('node:child_process');",
+      ].join('\n'),
+    );
+    const failures = checkDownstreamBoundaries(root).failures;
+    expect(failures).toHaveLength(4);
+    expect(failures.every((failure) => failure.includes("imports forbidden 'node:child_process'"))).toBe(true);
+  });
+
   it('recursively scans source files anywhere under an owned directory root', () => {
     const root = fixture({
       schemaVersion: 1,
@@ -367,13 +395,60 @@ describe('downstream feature boundary gate', () => {
       features: Array<{ id: string; reason?: string; validationSurface?: string[] }>;
     };
 
-    for (const id of ['arc-mcp', 'worker-runner-mcp']) {
+    for (const id of [
+      'arc-mcp',
+      'worker-runner-mcp',
+      'mcp-connector',
+      'metaclaw-mcp',
+    ]) {
       const feature = manifest.features.find((candidate) => candidate.id === id);
       expect(feature).toMatchObject({
         reason: expect.any(String),
         validationSurface: expect.arrayContaining([expect.stringMatching(/\.test\.ts$/)]),
       });
     }
+  });
+
+  it('keeps MetaClaw and the shared connector isolated from ARC and Worker Runner', () => {
+    const repositoryRoot = path.resolve(import.meta.dirname, '..');
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(repositoryRoot, 'config/downstream-features.json'), 'utf8'),
+    ) as {
+      features: Array<{ id: string; roots?: string[]; forbiddenImports?: string[] }>;
+      reverseBoundaries: Array<{ id: string; forbiddenImports?: string[] }>;
+    };
+
+    const metaclaw = manifest.features.find((feature) => feature.id === 'metaclaw-mcp');
+    expect(metaclaw).toMatchObject({
+      roots: ['packages/metaclaw-mcp'],
+      // A MetaClaw failure must remove only MetaClaw, which is only true while
+      // it cannot import either shipped daemon.
+      forbiddenImports: expect.arrayContaining([
+        '@xvirobotics/arc-mcp',
+        '@xvirobotics/worker-runner-mcp',
+        'better-sqlite3',
+      ]),
+    });
+
+    const connector = manifest.features.find((feature) => feature.id === 'mcp-connector');
+    expect(connector).toMatchObject({
+      roots: ['packages/mcp-connector'],
+      // The connector stays a primitive: no product package, no MCP framework.
+      forbiddenImports: expect.arrayContaining([
+        '@modelcontextprotocol/sdk',
+        '@xvirobotics/metaclaw-mcp',
+        'zod',
+      ]),
+    });
+
+    // Core spawns connectors; it never imports one.
+    expect(manifest.reverseBoundaries.find((boundary) => boundary.id === 'upstream-runtime-isolation'))
+      .toMatchObject({
+        forbiddenImports: expect.arrayContaining([
+          '@xvirobotics/mcp-connector',
+          '@xvirobotics/metaclaw-mcp',
+        ]),
+      });
   });
 
   it('passes against the repository manifest', () => {

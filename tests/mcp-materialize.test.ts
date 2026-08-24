@@ -130,13 +130,14 @@ describe('materializeExecutionMcp', () => {
         },
         bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
         nonce: () => 'fixed-nonce',
+        now: () => 1_000,
       }));
 
     const first = collide()!;
     expect(collide()).toBeUndefined();
     expect(readFileSync(first.entries[0].env.METABOT_WORKER_PROXY_CAPABILITY_FILE, 'utf8')).toBe('worker-token');
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ server: 'metabot-worker', reason: expect.stringMatching(/already leased/i) }),
+      expect.objectContaining({ server: 'metabot-worker', reason: expect.stringMatching(/already exists|EEXIST/i) }),
       expect.stringContaining('other external tools stay available'),
     );
     first.cleanup();
@@ -181,7 +182,7 @@ describe('materializeExecutionMcp', () => {
     expect(configText.toLowerCase()).not.toContain('strict');
     expect(config.mcpServers['metabot-worker'].env).toHaveProperty(
       'METABOT_WORKER_PROXY_CAPABILITY_FILE',
-      expect.stringMatching(/worker\.token$/),
+      expect.stringMatching(/worker-.*\.token$/),
     );
     materialized.cleanup();
     expect(existsSync(configPath)).toBe(false);

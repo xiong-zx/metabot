@@ -165,7 +165,9 @@ function matchesForbiddenImport(root, importingFile, specifier, forbiddenImport)
 }
 
 function isPackageBoundary(forbiddenImport) {
-  return forbiddenImport.startsWith('@') || !forbiddenImport.includes('/');
+  return forbiddenImport.startsWith('@')
+    || forbiddenImport.startsWith('node:')
+    || !forbiddenImport.includes('/');
 }
 
 function isBareSpecifier(specifier) {
@@ -222,7 +224,16 @@ function collectModuleSpecifiers(file) {
     if (
       ts.isCallExpression(node) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require')) &&
+        (ts.isIdentifier(node.expression) && node.expression.text === 'require') ||
+        (ts.isPropertyAccessExpression(node.expression)
+          && (
+            (ts.isIdentifier(node.expression.expression)
+              && ['require', 'vi', 'vitest', 'jest'].includes(node.expression.expression.text))
+            || (ts.isPropertyAccessExpression(node.expression.expression)
+              && ts.isIdentifier(node.expression.expression.expression)
+              && node.expression.expression.expression.text === 'jest')
+          )
+          && ['resolve', 'mock', 'doMock', 'unstable_mockModule'].includes(node.expression.name.text))) &&
       node.arguments.length === 1 &&
       ts.isStringLiteralLike(node.arguments[0])
     ) {

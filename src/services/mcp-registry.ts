@@ -52,10 +52,12 @@ export interface McpServerDescriptor {
   readonly serverName: string;
   readonly transport: McpServerTransport;
   /** Bot configuration flag that opts a bot into this server. */
-  readonly optIn: keyof Pick<BotConfigBase, 'workerTools' | 'arcTools'>;
+  readonly optIn: keyof Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'metaclawTools'>;
   /** Signed audience and claim shape enforced by this product server. */
   readonly audience: string;
   readonly capabilityContract: CapabilityContract;
+  /** Whether the future authenticated standalone issuer may mint this audience. */
+  readonly standaloneEligible: boolean;
   /** Execution environment token and entry-facing private file variables. */
   readonly capabilityEnvVar: string;
   readonly capabilityFileEnvVar: string;
@@ -76,6 +78,8 @@ export interface NativeStdioDescriptor extends McpServerDescriptor {
   readonly binary: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly publicKeyEnvVar: string;
+  readonly previousPublicKeyEnvVar: string;
 }
 
 export type AnyMcpServerDescriptor = LoopbackProxyDescriptor | NativeStdioDescriptor;
@@ -96,6 +100,7 @@ const WORKER_RUNNER: LoopbackProxyDescriptor = {
   transport: 'loopback-proxy',
   audience: 'worker',
   capabilityContract: 'v2.1-purpose',
+  standaloneEligible: false,
   optIn: 'workerTools',
   capabilityEnvVar: 'METABOT_WORKER_CAPABILITY',
   capabilityFileEnvVar: 'METABOT_WORKER_PROXY_CAPABILITY_FILE',
@@ -114,6 +119,7 @@ const ARC: LoopbackProxyDescriptor = {
   transport: 'loopback-proxy',
   audience: 'arc',
   capabilityContract: 'v3-audience',
+  standaloneEligible: false,
   optIn: 'arcTools',
   capabilityEnvVar: 'METABOT_ARC_CAPABILITY',
   capabilityFileEnvVar: 'METABOT_ARC_PROXY_CAPABILITY_FILE',
@@ -122,7 +128,24 @@ const ARC: LoopbackProxyDescriptor = {
   proxyUrlEnvVar: 'METABOT_ARC_PROXY_URL',
 };
 
-export const EXECUTION_MCP_SERVERS: readonly AnyMcpServerDescriptor[] = Object.freeze([WORKER_RUNNER, ARC]);
+const METACLAW: NativeStdioDescriptor = {
+  id: 'metaclaw',
+  serverName: 'metabot-metaclaw',
+  transport: 'native-stdio',
+  audience: 'metaclaw',
+  capabilityContract: 'v3-audience',
+  standaloneEligible: true,
+  optIn: 'metaclawTools',
+  capabilityEnvVar: 'METABOT_METACLAW_CAPABILITY',
+  capabilityFileEnvVar: 'METACLAW_MCP_CAPABILITY_FILE',
+  publicKeyEnvVar: 'METACLAW_MCP_CAPABILITY_PUBLIC_KEY_FILE',
+  previousPublicKeyEnvVar: 'METACLAW_MCP_CAPABILITY_PREVIOUS_PUBLIC_KEY_FILE',
+  binary: 'metabot-metaclaw-mcp',
+  args: [],
+  env: {},
+};
+
+export const EXECUTION_MCP_SERVERS: readonly AnyMcpServerDescriptor[] = Object.freeze([WORKER_RUNNER, ARC, METACLAW]);
 
 /**
  * Startup guard. Two servers sharing an id, name, audience, environment
@@ -141,12 +164,17 @@ export function assertDistinctMcpServers(servers: readonly AnyMcpServerDescripto
     claimed.set(key, owner);
   };
   for (const server of servers) {
+    if (!server.id.trim() || !server.serverName.trim() || !server.audience.trim()) {
+      throw new Error('MCP registry entries require a non-empty id, server name, and audience');
+    }
     claim('id', server.id, server.id);
     claim('server name', server.serverName, server.id);
     if (!isLoopbackProxy(server)) {
       claim('executable', server.binary, server.id);
       claim('capability variable', server.capabilityEnvVar, server.id);
       claim('capability file variable', server.capabilityFileEnvVar, server.id);
+      claim('public key variable', server.publicKeyEnvVar, server.id);
+      claim('previous public key variable', server.previousPublicKeyEnvVar, server.id);
       claim('audience', server.audience, server.id);
       continue;
     }
