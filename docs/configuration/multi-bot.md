@@ -63,7 +63,7 @@ Set `BOTS_CONFIG=./bots.json` in `.env`:
 | `visible`                   | No       | `true`                   | Register the bot for Agent Bus discovery                    |
 | `memoryPublic`              | No       | sticky/default policy    | Pin the bot's default memory visibility when explicitly set |
 | `workerTools`               | No       | `false`                  | Opt in to Worker Runner capabilities for non-Team `pm`/`user` chats |
-| `arcTools`                  | No       | `false`                  | Opt in to ARC capabilities for non-Team `pm`/`user` chats   |
+| `mcpServers`                | No       | `[]`                     | Independently installed external MCP products for this Bot  |
 | `maxTurns` / `maxBudgetUsd` | No       | unlimited                | Claude compatibility limits                                 |
 | `outputsBaseDir`            | No       | temporary user directory | Files automatically returned to chat                        |
 
@@ -155,16 +155,11 @@ personal-edition bots default to Codex when `engine` is omitted.
 - Feishu reply modes persist per bot and group.
 - Agent Teams and the Agent Bus can coordinate bots running different engines.
 - Environment variables provide defaults; explicit `bots.json` fields win.
-- `workerTools` and `arcTools` are authorization settings, not convenience
-  switches. Non-Team chats fall back to the `user` role, so the per-bot flag is
-  the effective dispatch boundary. Agent Team `manager`/`agent` chats never
-  receive these capabilities. Engine-side materialization independently
-  requires the already-minted per-turn capability and a configured loopback
-  `METABOT_WORKER_DAEMON_URL` / `METABOT_ARC_DAEMON_URL`; a missing or unsafe
-  endpoint means the tool is omitted. Codex uses invocation-local config and
-  Claude uses additive session config, so shared user MCP settings are not
-  overwritten. Kimi has no isolated per-session MCP surface and therefore
-  receives neither tool even when a flag is enabled.
+- `workerTools` retains Worker Runner's Bridge-scoped authorization contract.
+  ARC, MetaClaw, Zotero, and other products use per-Bot `mcpServers`
+  descriptors with independently installed commands and product-owned config.
+  Codex uses invocation-local config and Claude uses additive session config,
+  so shared user MCP settings are not overwritten.
 
 When `BOTS_CONFIG` is set, single-bot channel environment variables are ignored.
 

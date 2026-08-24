@@ -96,10 +96,6 @@ export interface BotConfigBase {
   memoryPublic?: boolean;
   /** Security-relevant opt-in for Worker Runner tools in pm/user chats. Default off. */
   workerTools?: boolean;
-  /** Security-relevant opt-in for ARC tools in pm/user chats. Default off. */
-  arcTools?: boolean;
-  /** Security-relevant opt-in for MetaClaw tools in pm/user chats. Default off. */
-  metaclawTools?: boolean;
   /** Agent engine. Defaults to 'codex' unless METABOT_ENGINE or bots.json overrides it. */
   engine?: EngineName;
   claude: {
@@ -335,10 +331,8 @@ interface EngineJsonFields {
   rulesPack?: RulesPackConfig;
   /** Security-relevant opt-ins; omitted/false means no capability is minted. */
   workerTools?: boolean;
-  arcTools?: boolean;
   /** Product-neutral descriptors for independently installed stdio MCP servers. */
   mcpServers?: ExternalMcpServerDescriptor[];
-  metaclawTools?: boolean;
   /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
   backend?: 'sdk' | 'pty';
 }
@@ -593,12 +587,10 @@ function slackBotFromJson(entry: SlackBotJsonEntry): SlackBotConfig {
 
 function executionToolOptIns(
   entry: EngineJsonFields,
-): Pick<BotConfigBase, 'workerTools' | 'arcTools' | 'rulesPack' | 'metaclawTools'> {
+): Pick<BotConfigBase, 'workerTools' | 'rulesPack'> {
   return {
     ...(entry.workerTools !== undefined ? { workerTools: entry.workerTools } : {}),
-    ...(entry.arcTools !== undefined ? { arcTools: entry.arcTools } : {}),
     ...(entry.rulesPack !== undefined ? { rulesPack: entry.rulesPack } : {}),
-    ...(entry.metaclawTools !== undefined ? { metaclawTools: entry.metaclawTools } : {}),
   };
 }
 

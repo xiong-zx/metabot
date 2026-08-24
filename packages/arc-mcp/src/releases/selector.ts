@@ -18,7 +18,7 @@ import { assertReleaseSpecEligible, type ExternalReleaseRole, type ExternalRelea
  *
  * The selector is a plain POSIX script that `exec`s the release's own console
  * entry point. It contains no Node, no MetaBot path, no daemon URL, and no
- * capability: `researchclaw` therefore keeps working with every MetaBot and MCP
+ * client credential: `researchclaw` therefore keeps working with every MCP
  * process stopped, and running it never starts, configures, or activates
  * anything. Selecting a release is an operator action, separate from ARC-008
  * MCP activation.
@@ -99,7 +99,7 @@ export function renderCliSelector(release: ResolvedSelectorRelease): string {
     `#   exact_tag:  ${manifest.describe === manifest.base_tag ? 'yes' : 'no'}`,
     '#',
     '# This selector is deliberately independent of MetaBot: it starts no daemon,',
-    '# activates no MCP server, reads no capability, and writes no configuration.',
+    '# activates no MCP server, reads no client credential, and writes no configuration.',
     '# Replace it to roll back to another sealed release.',
     'set -eu',
     `exec ${shellQuote(release.executable)} "$@"`,

@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
-const ALLOWED_APPS = new Set(['metabot', 'metabot-worker-runnerd', 'metabot-arcd', 'metabot-core']);
+const ALLOWED_APPS = new Set(['metabot', 'metabot-worker-runnerd', 'metabot-core']);
 const PROXY_KEYS = new Set([
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
 ]);
@@ -26,14 +26,7 @@ const SHARED_KEYS = new Set([
 const SHARED_PREFIXES = [
   'FEISHU_', 'TELEGRAM_', 'WECHAT_', 'MEMORY_', 'META_MEMORY_', 'WIKI_', 'METABOT_',
 ];
-const EXCLUDED_SHARED_KEYS = new Set([
-  'METABOT_HOME',
-  'METABOT_REEXEC',
-  // This path is owned by the selected checkout. Carrying it across a
-  // protected switch silently loads the runner adapter from the old runtime.
-  // A user override remains supported through the target runtime's .env.
-  'METABOT_ARC_RUNNER_MODULE',
-]);
+const EXCLUDED_SHARED_KEYS = new Set(['METABOT_HOME', 'METABOT_REEXEC']);
 const DEPLOYMENT_KEYS = [
   'METABOT_RESTART_REQUEST_ID',
   'METABOT_RESTART_REASON',
@@ -218,7 +211,7 @@ async function main() {
     throw new Error('Usage: pm2-protected-runtime-switch.cjs --runtime DIR --apps app[,app]');
   }
   if (apps.some((app) => !ALLOWED_APPS.has(app)) || new Set(apps).size !== apps.length) {
-    throw new Error('Apps must be a unique subset of metabot, metabot-worker-runnerd, metabot-arcd, metabot-core');
+    throw new Error('Apps must be a unique subset of metabot, metabot-worker-runnerd, metabot-core');
   }
 
   const pm2Root = resolvePm2Root();

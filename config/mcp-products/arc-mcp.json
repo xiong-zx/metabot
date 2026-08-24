@@ -1,0 +1,7 @@
+{
+  "name": "arc",
+  "enabled": true,
+  "command": "arc-mcp",
+  "args": [],
+  "approvalMode": "writes"
+}

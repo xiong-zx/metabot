@@ -1,5 +1,5 @@
 /**
- * Stands in for a second `metabot-arcd` launched against a data directory that
+ * Stands in for a second `arc-mcp-service` launched against a data directory that
  * a live daemon already owns. It prints one JSON line so the test can assert on
  * the real refusal instead of on an in-process simulation of it.
  */

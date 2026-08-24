@@ -159,7 +159,7 @@ if (command === 'doctor') {
 } else {
   const names = Object.keys(EXTERNAL_RELEASE_SPECS).join('|');
   process.stderr.write(
-    `metabot-arc-release: unsupported command '${command}'; use ` +
+    `arc-mcp-release: unsupported command '${command}'; use ` +
       `'doctor', 'install <${names}> [--patch-source <repo>]', 'verify <${names}>', ` +
       `'selector-plan [path]', or 'selector-apply [path] --expect <target|none>'\n`,
   );
@@ -170,7 +170,7 @@ function requireSpec(value: string | undefined): ExternalReleaseSpec {
   const spec = value ? releaseSpecByName(value) : undefined;
   if (spec) return spec;
   process.stderr.write(
-    `metabot-arc-release: expected one of ${Object.keys(EXTERNAL_RELEASE_SPECS).join(', ')}, got '${value ?? ''}'\n`,
+    `arc-mcp-release: expected one of ${Object.keys(EXTERNAL_RELEASE_SPECS).join(', ')}, got '${value ?? ''}'\n`,
   );
   process.exit(2);
 }
@@ -190,7 +190,7 @@ function patchSourceArgument(argv: readonly string[], spec: ExternalReleaseSpec)
   if (!spec.patch) {
     if (value !== undefined) {
       process.stderr.write(
-        'metabot-arc-release: --patch-source is only valid for a downstream-patched candidate; an official ' +
+        'arc-mcp-release: --patch-source is only valid for a downstream-patched candidate; an official ' +
           'release is cloned from the origin it pins\n',
       );
       process.exit(2);
@@ -199,7 +199,7 @@ function patchSourceArgument(argv: readonly string[], spec: ExternalReleaseSpec)
   }
   if (!value || value.startsWith('--')) {
     process.stderr.write(
-      `metabot-arc-release: '${spec.releaseIdSuffix ?? 'candidate'}' is a ${specProvenanceClass(spec)} release; ` +
+      `arc-mcp-release: '${spec.releaseIdSuffix ?? 'candidate'}' is a ${specProvenanceClass(spec)} release; ` +
         'pass --patch-source <local-repository> naming the checkout that holds its patch commits\n',
     );
     process.exit(2);
@@ -211,7 +211,7 @@ function expectedSelectorTarget(argv: readonly string[]): string | null {
   const index = argv.indexOf('--expect');
   if (index < 0 || argv[index + 1] === undefined) {
     process.stderr.write(
-      "metabot-arc-release: selector-apply requires --expect <target|none> naming the selector it replaces\n",
+      "arc-mcp-release: selector-apply requires --expect <target|none> naming the selector it replaces\n",
     );
     process.exit(2);
   }

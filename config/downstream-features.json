@@ -238,8 +238,8 @@
     {
       "id": "execution-mcp-registry",
       "status": "required",
-      "reason": "Downstream-only MCP registry, capability issuance, and per-turn materialization for the independent product servers. These files are absent from upstream/main, so they are declared here instead of staying undeclared roots under src/. Servers are described by data in src/services/mcp-registry.ts: each carries its own audience, signing keys, opt-in flag, and failure boundary, so registering one never widens a union in core and never edits a product package. This root builds configuration and leases credentials only: no product package is imported and no unified product gateway is introduced.",
-      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-mcp-registry.test.ts tests/arc-mcp-client-registration.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts",
+      "reason": "Retain only Worker Runner's existing Bridge-scoped v2.1 capability and per-turn proxy materialization. ARC, MetaClaw, and Zotero use independently installed external MCP product descriptors and never receive MetaBot authority.",
+      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts tests/product-mcp-descriptors.test.ts",
       "roots": [
         "src/engines/mcp-entries.ts",
         "src/engines/mcp-materialize.ts",
@@ -247,7 +247,9 @@
         "src/services/execution-capabilities.ts",
         "src/services/execution-principal.ts",
         "src/services/capability-lease.ts",
-        "src/services/standalone-capability-issuer.ts"
+        "config/mcp-products/arc-mcp.json",
+        "config/mcp-products/metaclaw-mcp.json",
+        "tests/product-mcp-descriptors.test.ts"
       ],
       "forbiddenImports": [
         "@xvirobotics/arc-mcp",
@@ -259,10 +261,8 @@
       "validationSurface": [
         "tests/mcp-entries.test.ts",
         "tests/mcp-materialize.test.ts",
-        "tests/execution-mcp-registry.test.ts",
         "tests/execution-capabilities.test.ts",
-        "tests/execution-capability-audiences.test.ts",
-        "tests/arc-mcp-client-registration.test.ts"
+        "tests/product-mcp-descriptors.test.ts"
       ]
     },
     {

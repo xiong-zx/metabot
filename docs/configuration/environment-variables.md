@@ -31,19 +31,15 @@ Personal Edition.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `METABOT_STATE_DIR` | `~/.metabot` | Parent for daemon SQLite state and the default ARC project root |
-| `METABOT_KEYS_DIR` | `~/.metabot/keys` | Out-of-runtime Ed25519 key and ARC service-capability directory |
+| `METABOT_STATE_DIR` | `~/.metabot` | Parent for MetaBot and Worker Runner state |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | Out-of-runtime Worker Runner Ed25519 keys |
 | `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner loopback MCP endpoint |
 | `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite state and exclusive lock |
 | `METABOT_WORKER_ENV_ALLOWLIST` | ordinary proxy names | Extra non-secret child environment names |
-| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC loopback MCP endpoint |
-| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite state and exclusive lock |
-| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | JSON array of canonical project roots trusted by ARC |
-| `METABOT_ARC_WORKER_ENGINE` | `codex` | One-shot engine used by the ARC runner adapter |
 
 The lifecycle probes make authenticated, read-only MCP calls; there is no
 unauthenticated daemon health endpoint. Daemon callbacks use the Bridge port
-and distinct callback signing keys. Capability private keys remain outside the
+and a distinct callback signing key. The private key remains outside the
 replaceable runtime checkout.
 
 ## Workspace and engines

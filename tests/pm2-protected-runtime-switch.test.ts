@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const HELPER = join(REPO_ROOT, 'scripts', 'pm2-protected-runtime-switch.cjs');
-const APPS = ['metabot-worker-runnerd', 'metabot-arcd', 'metabot'];
+const APPS = ['metabot-worker-runnerd', 'metabot'];
 const CORE_APP = 'metabot-core';
 
 function makeHarness(pm2Version = '7.0.3') {
@@ -85,9 +85,6 @@ function makeRuntime(root: string, label: string): void {
     interpreter_args: label === 'source' ? '--no-warnings' : '--trace-warnings',
     env: {
       RUNTIME_LABEL: label,
-      ...(app === 'metabot-arcd' ? {
-        METABOT_ARC_RELEASE_ROOT: join(root, 'official', 'autoresearchclaw'),
-      } : {}),
       ...(label === 'source' ? {
         HTTP_PROXY: 'http://source-proxy.invalid:8080',
         http_proxy: 'http://source-proxy.invalid:8080',
@@ -125,9 +122,6 @@ function writeState(file: string, runtime: string): void {
       no_proxy: 'source.internal',
       SESSION_STORE_DIR: '/var/lib/metabot-state',
       API_SECRET: 'must-not-be-printed',
-      ...(app === 'metabot-arcd' ? {
-        METABOT_ARC_RELEASE_ROOT: join(runtime, 'official', 'autoresearchclaw'),
-      } : {}),
     },
   }))));
 }
@@ -150,7 +144,7 @@ describe('protected PM2 runtime switch helper', () => {
     expect(result.expectations.metabot.envHashes.API_SECRET).toMatch(/^[a-f0-9]{64}$/);
 
     const rows = JSON.parse(readFileSync(kit.stateFile, 'utf8'));
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(APPS.length);
     for (const [index, row] of rows.entries()) {
       expect(row).toMatchObject({ name: APPS[index], pm_id: index });
       expect(row.pm2_env).toMatchObject({
@@ -169,10 +163,6 @@ describe('protected PM2 runtime switch helper', () => {
         node_args: ['--trace-warnings'],
       });
     }
-    const arc = rows.find((row: { name: string }) => row.name === 'metabot-arcd');
-    expect(arc.pm2_env.METABOT_ARC_RELEASE_ROOT).toBe(
-      join(kit.source, 'official', 'autoresearchclaw'),
-    );
   });
 
   it('plans secret-safe expectations without changing PM2 state', () => {
@@ -201,7 +191,7 @@ describe('protected PM2 runtime switch helper', () => {
     expect(failed.stderr).toContain('switched apps rolled back');
     expect(failed.stderr).not.toContain('must-not-be-printed');
     const rows = JSON.parse(readFileSync(kit.stateFile, 'utf8'));
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(APPS.length);
     for (const row of rows) {
       expect(row.pm2_env.status).toBe('online');
       expect(row.pm2_env.pm_cwd).toBe(kit.source);

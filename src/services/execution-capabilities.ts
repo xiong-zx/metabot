@@ -25,7 +25,7 @@ import {
 } from './mcp-registry.js';
 
 export type ExecutionCapabilityPurpose = string;
-export type TerminalCallbackPurpose = 'worker.terminal' | 'arc.terminal';
+export type TerminalCallbackPurpose = 'worker.terminal';
 export type ExecutionCapabilityRole = 'pm' | 'user';
 
 export const EXECUTION_CAPABILITY_TTL_MS = 60 * 60 * 1000;
@@ -61,12 +61,6 @@ const DIRECTORY_MODES = [0o700] as const;
 export interface ExecutionCapabilityClaims {
   v: 1;
   purpose: ExecutionCapabilityPurpose;
-  /**
-   * Signed audience, present only for audiences on the `v3-audience` contract.
-   * Servers still on `v2.1-purpose` get no `aud`, because their shipped
-   * verifiers reject any claim outside the original set.
-   */
-  aud?: string;
   role: ExecutionCapabilityRole;
   botName: string;
   chatId: string;
@@ -81,7 +75,7 @@ interface LocalLifecycleCapabilityClaims extends Omit<ExecutionCapabilityClaims,
 export function requiredCapabilityAudience(purpose: ExecutionCapabilityPurpose): string | undefined {
   const server = capabilityServers().find((entry) => entry.id === purpose);
   if (!server) throw new ExecutionCapabilityError(`Unknown execution capability purpose: ${purpose}`, 'UNKNOWN_PURPOSE');
-  return server.capabilityContract === 'v3-audience' ? server.audience : undefined;
+  return undefined;
 }
 
 export interface KeyFileDiagnostic {
@@ -282,11 +276,10 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
       throw new ExecutionCapabilityError('Capability ttlMs must be a positive integer', 'INVALID_TTL');
     }
-    const audience = requiredCapabilityAudience(input.purpose);
+    requiredCapabilityAudience(input.purpose);
     return this.signCapability({
       v: 1,
       purpose: input.purpose,
-      ...(audience ? { aud: audience } : {}),
       role: input.role,
       botName: requireClaim(input.botName, 'botName', EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH),
       chatId: requireClaim(input.chatId, 'chatId', EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH),
@@ -307,11 +300,10 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isSafeInteger(now + ttlMs)) {
       throw new ExecutionCapabilityError('Lifecycle capability ttlMs is invalid', 'INVALID_TTL');
     }
-    const audience = requiredCapabilityAudience(purpose);
+    requiredCapabilityAudience(purpose);
     return this.signCapability({
       v: 1,
       purpose,
-      ...(audience ? { aud: audience } : {}),
       role: 'admin',
       botName: 'metabot-local-lifecycle',
       chatId: 'local:daemon-lifecycle',
@@ -370,15 +362,6 @@ export class ExecutionCapabilityService {
     }
     // Checked before role and scope, so a token minted for another server is
     // refused on identity alone even though the same issuer signed it.
-    const audience = requiredCapabilityAudience(expected.purpose);
-    if (claims.aud !== audience) {
-      throw new ExecutionCapabilityError(
-        audience === undefined
-          ? 'Execution capability carries an unexpected audience'
-          : `Execution capability was not minted for audience ${audience}`,
-        'CAPABILITY_AUDIENCE_MISMATCH',
-      );
-    }
     if (
       claims.v !== 1
       || claims.purpose !== expected.purpose

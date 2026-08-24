@@ -13,7 +13,7 @@ from release_lib import ReleaseError, doctor_release, install_release
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="metabot-metaclaw-release")
+    parser = argparse.ArgumentParser(prog="metaclaw-release")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     install = subcommands.add_parser("install", help="build and seal the pinned official=false candidate")

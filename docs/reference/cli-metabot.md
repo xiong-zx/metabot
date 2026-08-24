@@ -32,7 +32,6 @@ metabot restart --wait --json       # protected Bridge-only restart
 metabot restart --request-id ID     # caller-stable idempotency key
 metabot restart --force             # emergency override if chat preparation fails
 metabot restart --daemon worker     # guarded Worker Runner restart
-metabot restart --daemon arc        # guarded ARC restart
 metabot deploy-runtime --runtime /absolute/checkout --wait  # protected external runtime switch
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status

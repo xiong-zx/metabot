@@ -1,15 +1,14 @@
 # Production Deployment
 
 The signed GitHub Release installer is the supported Personal Edition
-deployment path. It installs four local services. The execution daemons are
-PM2 siblings of Bridge, not Bridge children:
+deployment path. It installs three local services. Worker Runner is a PM2
+sibling of Bridge, not a Bridge child:
 
 | Service | Default port | Purpose |
 |---|---:|---|
 | Core Console | `9200` | Web UI, Chat, Agents, Memory, Skills, T5T, Teams, CLI APIs |
 | Bridge | `9100` | IM channels, engine execution, scheduling, voice, peer routing |
 | Worker Runner | `9311` | Durable one-shot Codex, Claude, and Kimi MCP work |
-| ARC | `9312` | Durable AutoResearchClaw lifecycle over Worker Runner |
 
 MetaMemory is part of Core. There is no standalone service on port `8100`.
 
@@ -100,21 +99,20 @@ metabot update --package --version 1.3.0        # known immutable release
 metabot doctor
 ```
 
-`metabot start` and `metabot stop` operate on Bridge and both execution
-daemons. Ordinary `metabot restart` is intentionally Bridge-only, so detached
+`metabot start` and `metabot stop` operate on Bridge and Worker Runner.
+Ordinary `metabot restart` is intentionally Bridge-only, so detached
 work survives it. A daemon restart is explicit and guarded:
 
 ```bash
 metabot restart --request-id <stable-id> --wait --json
 metabot restart --daemon worker
-metabot restart --daemon arc
 metabot restart --daemon worker --force
 ```
 
 The guarded form refuses while durable work is active. `--force` is an
 operator acknowledgement: ambiguous in-flight work can become
 `recovery_required` and is never blindly relaunched. Updates perform the same
-busy check, drain idle daemon connections, then restart both daemons so old
+busy check, drain idle Worker connections, then restart it so old
 code never continues against a migrated database.
 
 The protected Bridge restart never deletes its PM2 registration. It claims
@@ -152,7 +150,7 @@ When rolling back to a release from before the execution daemons existed,
 remove their saved PM2 entries as well as installing the old package:
 
 ```bash
-pm2 delete metabot-worker-runnerd metabot-arcd
+pm2 delete metabot-worker-runnerd
 pm2 save
 ```
 

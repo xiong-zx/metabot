@@ -4,8 +4,6 @@ import { pathToFileURL } from 'node:url';
 import { ArcArtifactStore } from './artifact-store.js';
 import { ArcCoordinator } from './coordinator.js';
 import { ArcError } from './errors.js';
-import { readArcPrivateKeyFile } from './local-auth.js';
-import { ArcTerminalNotifierService, HttpArcTerminalNotifier } from './notifier.js';
 import { OfficialArcDriver, selectBoundedRuntime } from './official-driver.js';
 import { OfficialArcProcessSupervisor } from './official-supervisor.js';
 import type { ArcRunner } from './runner.js';
@@ -17,7 +15,6 @@ type RunnerModule = { createArcRunner?: () => ArcRunner | Promise<ArcRunner> };
 export interface ArcRuntime {
   artifacts: ArcArtifactStore;
   coordinator: ArcCoordinator;
-  notifications?: ArcTerminalNotifierService;
   runner: ArcRunner;
   scope: ArcProjectScope;
   store: ArcRunStore;
@@ -91,26 +88,7 @@ export async function createArcRuntime(options: CreateArcRuntimeOptions = {}): P
     const runner = options.runner ?? (await resolveConfiguredRunner(env, options.bounded));
     assertRunner(runner);
     const coordinator = new ArcCoordinator(store, artifacts, runner, { scope });
-    const callbackUrl = env.METABOT_ARC_CALLBACK_URL?.trim();
-    const notifications = callbackUrl
-      ? new ArcTerminalNotifierService(
-          store,
-          new HttpArcTerminalNotifier({
-            url: callbackUrl,
-            signingKey: readArcPrivateKeyFile(
-              requiredEnv(env, 'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE'),
-              'ARC callback private key',
-            ),
-            timeoutMs: integerEnv(env, 'METABOT_ARC_CALLBACK_TIMEOUT_MS', 30_000),
-          }),
-          {
-            pollIntervalMs: integerEnv(env, 'METABOT_ARC_NOTIFY_POLL_MS', 250),
-            retryInitialMs: integerEnv(env, 'METABOT_ARC_NOTIFY_RETRY_INITIAL_MS', 1_000),
-            retryMaxMs: integerEnv(env, 'METABOT_ARC_NOTIFY_RETRY_MAX_MS', 60_000),
-          },
-        )
-      : undefined;
-    return { artifacts, coordinator, ...(notifications ? { notifications } : {}), runner, scope, store };
+    return { artifacts, coordinator, runner, scope, store };
   } catch (error) {
     store.close();
     throw error;

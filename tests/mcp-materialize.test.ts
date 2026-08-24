@@ -31,15 +31,13 @@ afterEach(() => {
  * A materialized entry must name a proxy that really exists inside the runtime
  * root, so the fixture installs the same executables an install would.
  */
-function runtimeRoot(proxies = ['metabot-worker-runner-proxy', 'metabot-arc-proxy']): string {
+function runtimeRoot(proxies = ['metabot-worker-runner-proxy']): string {
   // Canonical, because materialization canonicalizes the runtime root and macOS
   // reaches the temp directory through the /var -> /private/var symlink.
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'metabot-mcp-runtime-')));
   roots.push(root);
-  for (const proxy of proxies) {
-    const script = proxy === 'metabot-worker-runner-proxy'
-      ? path.join(root, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js')
-      : path.join(root, 'packages', 'arc-mcp', 'dist', 'proxy-cli.js');
+  for (const _proxy of proxies) {
+    const script = path.join(root, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js');
     mkdirSync(path.dirname(script), { recursive: true });
     writeFileSync(script, '#!/usr/bin/env node\n', { encoding: 'utf8', mode: 0o755 });
   }
@@ -52,11 +50,9 @@ function input(root: string, patch: Record<string, unknown> = {}) {
       METABOT_BOT_NAME: 'pm-codex',
       METABOT_CHAT_ID: 'oc-user',
       METABOT_WORKER_CAPABILITY: 'WORKER_TOKEN_SENTINEL',
-      METABOT_ARC_CAPABILITY: 'ARC_TOKEN_SENTINEL',
     },
     bridgeEnv: {
       METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp',
-      METABOT_ARC_DAEMON_URL: 'http://127.0.0.1:9312/mcp',
     },
     runtimeRoot: root,
     engineName: 'codex' as const,
@@ -71,16 +67,13 @@ describe('materializeExecutionMcp', () => {
   it('writes only 0600 token files under a 0700 runtime scratch directory and cleans them', () => {
     const root = runtimeRoot();
     const materialized = materializeExecutionMcp(input(root));
-    expect(materialized?.entries.map((entry) => entry.name)).toEqual(['metabot-worker', 'metabot-arc']);
+    expect(materialized?.entries.map((entry) => entry.name)).toEqual(['metabot-worker']);
 
     const tokenPaths = materialized!.entries.map((entry) => Object.values(entry.env).find((value) => value.endsWith('.token'))!);
     const scratchDir = path.dirname(tokenPaths[0]);
     expect(lstatSync(scratchDir).mode & 0o777).toBe(0o700);
-    expect(tokenPaths.map((file) => lstatSync(file).mode & 0o777)).toEqual([0o600, 0o600]);
-    expect(tokenPaths.map((file) => readFileSync(file, 'utf8'))).toEqual([
-      'WORKER_TOKEN_SENTINEL',
-      'ARC_TOKEN_SENTINEL',
-    ]);
+    expect(tokenPaths.map((file) => lstatSync(file).mode & 0o777)).toEqual([0o600]);
+    expect(tokenPaths.map((file) => readFileSync(file, 'utf8'))).toEqual(['WORKER_TOKEN_SENTINEL']);
     expect(JSON.stringify(materialized!.entries)).not.toContain('TOKEN_SENTINEL');
 
     materialized!.cleanup();
@@ -147,7 +140,7 @@ describe('materializeExecutionMcp', () => {
     const root = runtimeRoot();
     const live = materializeExecutionMcp(input(root))!;
     const scratchDir = path.join(root, 'data', 'mcp-capabilities');
-    const leftover = path.join(scratchDir, 'crashed-turn-arc.token');
+    const leftover = path.join(scratchDir, 'crashed-turn-worker.token');
     writeFileSync(leftover, 'orphaned-token', { encoding: 'utf8', mode: 0o600 });
     const old = Date.now() - 3 * 60 * 60 * 1000;
     utimesSync(leftover, old / 1000, old / 1000);
@@ -177,7 +170,7 @@ describe('materializeExecutionMcp', () => {
     const config = JSON.parse(configText);
 
     expect(lstatSync(configPath).mode & 0o777).toBe(0o600);
-    expect(Object.keys(config.mcpServers)).toEqual(['metabot-worker', 'metabot-arc']);
+    expect(Object.keys(config.mcpServers)).toEqual(['metabot-worker']);
     expect(configText).not.toContain('TOKEN_SENTINEL');
     expect(configText.toLowerCase()).not.toContain('strict');
     expect(config.mcpServers['metabot-worker'].env).toHaveProperty(

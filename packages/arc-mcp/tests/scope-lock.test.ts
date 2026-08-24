@@ -117,34 +117,6 @@ describe('ARC project scope and data-directory ownership', () => {
     cleanupStores.push(replacement);
   });
 
-  it('persists callback authorization privately across store restart', () => {
-    const temporary = temporaryDirectory();
-    cleanupDirectories.push(temporary);
-    const projectRoot = projectDirectory(temporary);
-    const dataDir = path.join(temporary, 'state');
-    const first = new ArcRunStore(dataDir);
-    first.createRun({
-      runId: 'run-private-capability',
-      projectId: 'project-1',
-      projectRoot,
-      objective: 'Keep callback authority outside the public run contract.',
-      idempotencyKey: 'private-capability',
-      requestFingerprint: 'private-capability-fingerprint',
-      artifactPath: '.metabot-arc/runs/run-private-capability/output.json',
-      executionInput: executionInput('project-1', projectRoot, 'run-private-capability'),
-      originator: { bot_name: 'research-pm', chat_id: 'chat-a' },
-      authorizingCapability: 'signed-arc-capability',
-      now: new Date().toISOString(),
-    });
-    expect(first.requireRun('run-private-capability')).not.toHaveProperty('authorizingCapability');
-    first.close();
-
-    const reopened = new ArcRunStore(dataDir);
-    cleanupStores.push(reopened);
-    expect(reopened.getAuthorizingCapability('run-private-capability')).toBe('signed-arc-capability');
-    expect(reopened.requireRun('run-private-capability')).not.toHaveProperty('authorizingCapability');
-  });
-
   it('archives a verifiably stale local owner with diagnostics', () => {
     const temporary = temporaryDirectory();
     cleanupDirectories.push(temporary);

@@ -29,14 +29,10 @@ MetaMemory 变量和 `8100` 端口不属于当前个人版。
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `METABOT_STATE_DIR` | `~/.metabot` | 守护进程 SQLite 状态与默认 ARC 项目根目录的上级目录 |
-| `METABOT_KEYS_DIR` | `~/.metabot/keys` | 运行目录之外的 Ed25519 密钥与 ARC 服务凭证目录 |
+| `METABOT_STATE_DIR` | `~/.metabot` | MetaBot 与 Worker Runner 状态目录 |
+| `METABOT_KEYS_DIR` | `~/.metabot/keys` | 运行目录之外的 Worker Runner Ed25519 密钥目录 |
 | `METABOT_WORKER_DAEMON_URL` | `http://127.0.0.1:9311/mcp` | Worker Runner 本机 MCP 地址 |
 | `METABOT_WORKER_DATA_DIR` | `~/.metabot/worker-runner` | Worker Runner SQLite 状态与独占锁 |
-| `METABOT_ARC_DAEMON_URL` | `http://127.0.0.1:9312/mcp` | ARC 本机 MCP 地址 |
-| `METABOT_ARC_DATA_DIR` | `~/.metabot/arc` | ARC SQLite 状态与独占锁 |
-| `METABOT_ARC_PROJECT_ROOTS` | `["~/.metabot/arc-projects"]` | ARC 信任的规范项目根目录 JSON 数组 |
-| `METABOT_ARC_WORKER_ENGINE` | `codex` | ARC 适配器调用的一次性工作引擎 |
 
 健康检查通过短期签名凭证执行只读 MCP 调用；守护进程不提供未鉴权健康接口。
 

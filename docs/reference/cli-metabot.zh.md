@@ -31,7 +31,6 @@ metabot restart --wait --json       # 受保护的 Bridge 单独重启
 metabot restart --request-id ID     # 调用方提供的稳定去重键
 metabot restart --force             # 会话准备失败时的紧急显式覆盖
 metabot restart --daemon worker     # 有忙碌检查的 Worker Runner 重启
-metabot restart --daemon arc        # 有忙碌检查的 ARC 重启
 metabot deploy-runtime --runtime /absolute/checkout --wait  # 从外部安全切换整套运行目录
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态

@@ -25,7 +25,7 @@ import { ARC_OUTPUT_CONTRACT_VERSION } from './contract.js';
  * It is the durable owner of one official run: it launches the pinned CLI in
  * its own process group, bridges the official file-based HITL transport to the
  * MetaBot gate contract, and publishes exactly one terminal artifact. It holds
- * no capability, opens no socket, and never talks to the MCP daemon — the
+ * opens no socket and never talks to the MCP service — the
  * coordinator re-attaches purely through the atomic state file.
  */
 

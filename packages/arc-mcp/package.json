@@ -16,9 +16,7 @@
     "arc-mcp-service": "dist/service-cli.js",
     "arc-mcp-doctor": "dist/doctor-cli.js",
     "arc-mcp-supervisor": "dist/official-supervisor-cli.js",
-    "arc-mcp-release": "dist/release-cli.js",
-    "metabot-arcd": "dist/daemon-cli.js",
-    "metabot-arc-proxy": "dist/proxy-cli.js"
+    "arc-mcp-release": "dist/release-cli.js"
   },
   "files": [
     "dist",
@@ -26,7 +24,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -b --force",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

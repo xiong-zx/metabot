@@ -6,7 +6,6 @@ import { dirname, join, resolve } from 'node:path';
 export const RESTART_APP_NAMES = [
   'metabot',
   'metabot-worker-runnerd',
-  'metabot-arcd',
 ] as const;
 
 export type RestartKind = 'restart' | 'deploy';
@@ -354,7 +353,6 @@ export function defaultTargetScripts(targetRoot: string, apps: string[]): Record
   const scripts: Record<string, string> = {
     metabot: join(targetRoot, 'src', 'index.ts'),
     'metabot-worker-runnerd': join(targetRoot, 'packages', 'worker-runner-mcp', 'dist', 'daemon-cli.js'),
-    'metabot-arcd': join(targetRoot, 'packages', 'arc-mcp', 'dist', 'daemon-cli.js'),
     'metabot-core': join(targetRoot, 'packages', 'server', 'dist', 'index.js'),
   };
   return Object.fromEntries(apps.map((app) => [app, scripts[app] ?? '']));

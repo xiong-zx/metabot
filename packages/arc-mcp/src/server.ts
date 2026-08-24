@@ -15,25 +15,6 @@ import { arcHitlRequestRecordSchema, arcHitlResponseRecordSchema, arcHitlSubmitR
 import { ARC_MCP_VERSION } from './releases/spec.js';
 import { ArcSessionFacade } from './session-facade.js';
 
-export const ARC_TRUSTED_ROLES = ['admin', 'user', 'pm', 'manager', 'agent', 'worker'] as const;
-export type ArcTrustedRole = (typeof ARC_TRUSTED_ROLES)[number];
-export interface ArcTrustedPrincipal {
-  role: ArcTrustedRole;
-  botName: string;
-  chatId: string;
-}
-
-export const LOCAL_LIFECYCLE_ADMIN_PRINCIPAL = {
-  role: 'admin',
-  botName: 'metabot-local-lifecycle',
-  chatId: 'local:daemon-lifecycle',
-} as const satisfies ArcTrustedPrincipal;
-
-export interface ArcMcpServerOptions {
-  principal?: ArcTrustedPrincipal;
-  authorizingCapability?: string;
-}
-
 const runOutputSchema = z.object({ run: arcRunRecordSchema }).strict();
 const listOutputSchema = z.object({ runs: z.array(arcRunRecordSchema) }).strict();
 const hitlSubmitOutputSchema = z.object({ run: arcRunRecordSchema, response: arcHitlResponseRecordSchema }).strict();
@@ -71,9 +52,8 @@ async function invoke(operation: () => unknown | Promise<unknown>): Promise<Call
   }
 }
 
-export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpServerOptions = {}): McpServer {
-  const principal = options.principal ? normalizeArcPrincipal(options.principal) : undefined;
-  const session = new ArcSessionFacade(coordinator, coordinator.artifacts, coordinator.scope, principal);
+export function createArcMcpServer(coordinator: ArcCoordinator): McpServer {
+  const session = new ArcSessionFacade(coordinator, coordinator.artifacts, coordinator.scope);
   const server = new McpServer({ name: 'arc-mcp', version: ARC_MCP_VERSION }, { capabilities: { tools: {} } });
 
   server.registerTool(
@@ -84,17 +64,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
       outputSchema: runOutputSchema,
       annotations: { idempotentHint: true },
     },
-    (request) =>
-      invoke(async () => {
-        authorizeArcMutation(principal);
-        return {
-          run: await coordinator.start(
-            request,
-            principal ? { bot_name: principal.botName, chat_id: principal.chatId } : undefined,
-            options.authorizingCapability,
-          ),
-        };
-      }),
+    (request) => invoke(async () => ({ run: await coordinator.start(request) })),
   );
 
   server.registerTool(
@@ -128,10 +98,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
       annotations: { idempotentHint: true },
     },
     (request) =>
-      invoke(async () => {
-        authorizeArcMutation(principal);
-        return { run: await coordinator.pause(request) };
-      }),
+      invoke(async () => ({ run: await coordinator.pause(request) })),
   );
 
   server.registerTool(
@@ -143,10 +110,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
       annotations: { idempotentHint: true },
     },
     (request) =>
-      invoke(async () => {
-        authorizeArcMutation(principal);
-        return { run: await coordinator.resume(request) };
-      }),
+      invoke(async () => ({ run: await coordinator.resume(request) })),
   );
 
   server.registerTool(
@@ -158,10 +122,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
       annotations: { idempotentHint: true, destructiveHint: true },
     },
     (request) =>
-      invoke(async () => {
-        authorizeArcMutation(principal);
-        return { run: await coordinator.cancel(request) };
-      }),
+      invoke(async () => ({ run: await coordinator.cancel(request) })),
   );
 
   server.registerTool(
@@ -173,10 +134,7 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
       annotations: { idempotentHint: false },
     },
     (request) =>
-      invoke(() => {
-        authorizeArcMutation(principal);
-        return session.submitHitl(request);
-      }),
+      invoke(() => session.submitHitl(request)),
   );
 
   server.registerTool(
@@ -192,39 +150,6 @@ export function createArcMcpServer(coordinator: ArcCoordinator, options: ArcMcpS
   );
 
   return server;
-}
-
-export function normalizeArcPrincipal(principal: ArcTrustedPrincipal): ArcTrustedPrincipal {
-  if (!ARC_TRUSTED_ROLES.includes(principal.role)) {
-    throw new ArcError('scope_denied', 'ARC connection role is not recognized');
-  }
-  const botName = principal.botName.trim();
-  const chatId = principal.chatId.trim();
-  if (!botName || botName.length > 200 || !chatId || chatId.length > 500) {
-    throw new ArcError('scope_denied', 'ARC connection principal is invalid');
-  }
-  if (chatId.toLowerCase().startsWith('team:')) {
-    throw new ArcError('scope_denied', 'Agent Team chats cannot be trusted ARC principals');
-  }
-  const normalized = { role: principal.role, botName, chatId };
-  if (normalized.role === 'admin' && !isLocalLifecycleAdmin(normalized)) {
-    throw new ArcError('scope_denied', 'Only the fixed local lifecycle identity may use the ARC admin role');
-  }
-  return normalized;
-}
-
-function authorizeArcMutation(principal: ArcTrustedPrincipal | undefined): void {
-  // No principal means the existing operator-pinned standalone stdio mode.
-  if (!principal || ['user', 'pm'].includes(principal.role)) return;
-  throw new ArcError('scope_denied', `Role ${principal.role} is read-only for ARC`);
-}
-
-function isLocalLifecycleAdmin(principal: ArcTrustedPrincipal): boolean {
-  return (
-    principal.role === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.role &&
-    principal.botName === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.botName &&
-    principal.chatId === LOCAL_LIFECYCLE_ADMIN_PRINCIPAL.chatId
-  );
 }
 
 export async function connectArcStdioServer(coordinator: ArcCoordinator): Promise<McpServer> {

@@ -10,8 +10,7 @@
 #   - package.json + package-lock.json (runtime-only workspace manifest)
 #   - src/                              (engine + workspace skill sources)
 #   - packages/cli, cli-core, metamemory, skill-hub, rulespack,
-#     rulespack-adapter, arc-mcp, worker-runner-mcp, mcp-connector and
-#     metaclaw-mcp (10 bot-host workspaces)
+#     rulespack-adapter, and worker-runner-mcp (7 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
 #   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
@@ -103,10 +102,7 @@ INCLUDES=(
   'packages/skill-hub'
   'packages/rulespack'
   'packages/rulespack-adapter'
-  'packages/arc-mcp'
   'packages/worker-runner-mcp'
-  'packages/mcp-connector'
-  'packages/metaclaw-mcp'
   'packages/skills'
   'LICENSE'
   'README.md'
@@ -142,10 +138,7 @@ for required in \
   'packages/skills/metabot-team/SKILL.md' \
   'packages/rulespack/package.json' \
   'packages/rulespack-adapter/package.json' \
-  'packages/arc-mcp/package.json' \
-  'packages/worker-runner-mcp/package.json' \
-  'packages/mcp-connector/package.json' \
-  'packages/metaclaw-mcp/package.json'; do
+  'packages/worker-runner-mcp/package.json'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
@@ -187,6 +180,11 @@ const fs = require('node:fs');
 const [src, dest, releaseVersion, flavor] = process.argv.slice(2);
 const pkg = JSON.parse(fs.readFileSync(src, 'utf8'));
 pkg.version = releaseVersion;
+pkg.workspaces = (pkg.workspaces || []).filter((workspace) => ![
+  'packages/arc-mcp',
+  'packages/mcp-connector',
+  'packages/metaclaw-mcp',
+].includes(workspace));
 if (flavor === 'bridge') {
   delete pkg.metabotEdition;
   pkg.workspaces = [
@@ -196,10 +194,7 @@ if (flavor === 'bridge') {
     'packages/skill-hub',
     'packages/rulespack',
     'packages/rulespack-adapter',
-    'packages/arc-mcp',
     'packages/worker-runner-mcp',
-    'packages/mcp-connector',
-    'packages/metaclaw-mcp',
   ];
   pkg.scripts = {
     ...pkg.scripts,
@@ -216,6 +211,11 @@ node - "$REPO_ROOT/tsconfig.json" "$TMP_EXTRA_DIR/tsconfig.json" "$PACKAGE_FLAVO
 const fs = require('node:fs');
 const [src, dest, flavor] = process.argv.slice(2);
 const tsconfig = JSON.parse(fs.readFileSync(src, 'utf8'));
+tsconfig.references = (tsconfig.references || []).filter((ref) => ![
+  './packages/arc-mcp',
+  './packages/mcp-connector',
+  './packages/metaclaw-mcp',
+].includes(ref.path));
 if (flavor === 'bridge') {
   tsconfig.references = (tsconfig.references || []).filter((ref) =>
     !['./packages/server', './packages/web-ui'].includes(ref.path),

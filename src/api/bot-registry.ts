@@ -126,7 +126,6 @@ export class BotRegistry {
       ...(resolveEngineName(b.config) === 'codex'
         ? { rulesPackTools: [
             ...(b.config.workerTools === true ? ['metabot-worker'] : []),
-            ...(b.config.arcTools === true ? ['metabot-arc'] : []),
           ] }
         : {}),
       ...(b.config.ttsVoice ? { ttsVoice: b.config.ttsVoice } : {}),

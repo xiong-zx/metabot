@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 const PM2_ROOT = process.env.METABOT_PM2_TEST_MODULE_ROOT;
 const suite = PM2_ROOT ? describe : describe.skip;
 const PM2_TEST_ROOT = PM2_ROOT || '/nonexistent-pm2-test-root';
-const APPS = ['metabot-worker-runnerd', 'metabot-arcd', 'metabot'];
+const APPS = ['metabot-worker-runnerd', 'metabot'];
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
 suite('protected PM2 runtime switch with an isolated PM2 daemon', () => {

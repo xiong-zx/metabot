@@ -103,7 +103,7 @@ fi
 step "Phase 1: Stopping MetaBot services"
 
 if command -v pm2 &>/dev/null; then
-  for app in metabot metabot-worker-runnerd metabot-arcd; do
+  for app in metabot metabot-worker-runnerd; do
     if pm2 describe "$app" &>/dev/null 2>&1; then
       info "Stopping $app PM2 process..."
       pm2 delete "$app" 2>/dev/null || true

@@ -79,13 +79,13 @@ describe('pack-metabot.sh', () => {
     expect(codeOnly).not.toContain('--keep-newer-files');
   });
 
-  it('packaged install builds the bridge runtime, delegated CLI, and independent MCP packages', () => {
+  it('packaged install builds the bridge runtime, delegated CLI, and Worker Runner', () => {
     const installSh = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} install.sh`, { encoding: 'utf-8' });
     expect(installSh).toContain('npm run build -w @metabot/rulespack');
     expect(installSh).toContain('npm run build -w @metabot/rulespack-adapter');
     expect(installSh).toContain('npm run build:bridge');
     expect(installSh).toContain('npm run build -w @xvirobotics/cli');
-    expect(installSh).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(installSh).not.toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(installSh).not.toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
     expect(installSh).not.toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(installSh).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
@@ -103,10 +103,10 @@ describe('pack-metabot.sh', () => {
     );
 
     expect(ecosystem).toContain("name: 'metabot-worker-runnerd'");
-    expect(ecosystem).toContain("name: 'metabot-arcd'");
+    expect(ecosystem).not.toContain("name: 'metabot-arcd'");
     expect(ecosystem).toContain('packages/worker-runner-mcp/dist/daemon-cli.js');
-    expect(ecosystem).toContain('packages/arc-mcp/dist/daemon-cli.js');
-    expect(ecosystem).toContain('METABOT_ARC_RELEASE_ROOT');
+    expect(ecosystem).not.toContain('packages/arc-mcp/dist/daemon-cli.js');
+    expect(ecosystem).not.toContain('METABOT_ARC_RELEASE_ROOT');
     for (const proxyName of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy']) {
       expect(ecosystem).toContain(proxyName);
     }
@@ -115,13 +115,13 @@ describe('pack-metabot.sh', () => {
     expect(installSh).not.toContain('pm2 delete "$app"');
     expect(installSh).toContain('package replacement may leave it recovery_required');
     expect(installSh).toContain('METABOT_HOME="$METABOT_HOME" "$METABOT_HOME/bin/metabot" start');
-    expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstallSh).toContain('for app in metabot metabot-worker-runnerd');
     expect(uninstallSh).toContain('pm2_app_owned_by_runtime metabot-core');
     expect(uninstallSh).toContain('Leaving metabot-core untouched');
     expect(metabot).toContain('npm run build -w @xvirobotics/worker-runner-mcp');
     expect(metabot).toContain('npm run build -w @metabot/rulespack');
     expect(metabot).toContain('npm run build -w @metabot/rulespack-adapter');
-    expect(metabot).toContain('npm run build -w @xvirobotics/arc-mcp');
+    expect(metabot).not.toContain('npm run build -w @xvirobotics/arc-mcp');
     expect(metabot).not.toContain('npm run build -w @xvirobotics/arc-researchclaw-adapter');
     expect(metabot).not.toContain('npm run build -w @xvirobotics/arc-worker-runner-adapter');
     expect(daemonHealth).toContain('StreamableHTTPClientTransport');
@@ -142,10 +142,7 @@ describe('pack-metabot.sh', () => {
       'packages/skill-hub',
       'packages/rulespack',
       'packages/rulespack-adapter',
-      'packages/arc-mcp',
       'packages/worker-runner-mcp',
-      'packages/mcp-connector',
-      'packages/metaclaw-mcp',
     ]);
 
     const tsconfigJson = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} tsconfig.json`, { encoding: 'utf-8' });
@@ -189,16 +186,13 @@ describe('pack-metabot.sh', () => {
     expect(packageJson.devDependencies?.tsx).toBeUndefined();
   });
 
-  it('tarball includes the eight bot-host workspaces', () => {
+  it('tarball includes the seven bot-host workspaces', () => {
     for (const ws of [
       'cli',
       'cli-core',
       'metamemory',
       'skill-hub',
-      'arc-mcp',
       'worker-runner-mcp',
-      'mcp-connector',
-      'metaclaw-mcp',
     ]) {
       expect(tarListing).toContain(`packages/${ws}/package.json`);
     }

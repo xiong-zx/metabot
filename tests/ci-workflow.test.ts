@@ -39,8 +39,7 @@ describe('CI runtime prerequisites', () => {
 
     expect(rulesPackBuildStep).toContain('-w @metabot/rulespack');
     expect(rulesPackBuildStep).toContain('-w @metabot/rulespack-adapter');
-    expect(restartCli).toContain('packages/arc-mcp/dist/daemon-cli.js');
-    expect(buildStep).toContain('-w @xvirobotics/arc-mcp');
+    expect(restartCli).not.toContain('packages/arc-mcp/dist/daemon-cli.js');
     expect(buildStep).toContain('-w @xvirobotics/worker-runner-mcp');
     expect(buildStep).not.toContain('arc-researchclaw-adapter');
     expect(buildStep).not.toContain('arc-worker-runner-adapter');

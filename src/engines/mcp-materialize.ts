@@ -16,11 +16,8 @@ import type { EngineName } from './types.js';
 import { buildExecutionMcpEntries, type McpEntry } from './mcp-entries.js';
 import {
   EXECUTION_MCP_SERVERS,
-  isLoopbackProxy,
   type AnyMcpServerDescriptor,
-  type LoopbackProxyDescriptor,
 } from '../services/mcp-registry.js';
-import { resolveExecutionKeysDir } from '../services/execution-capabilities.js';
 import { EXECUTION_CAPABILITY_TTL_MS } from '../services/execution-capabilities.js';
 import {
   leaseCapabilityFile,
@@ -133,8 +130,6 @@ function materializeAuthorizedExecutionMcp(
   // crash leftovers can never collide.
   const scopeName = `${safePrefix(input.botName)}-${scopeHash(input.botName, input.chatId)}-${(input.nonce ?? randomUUID)()}`;
   const capabilityFiles: Record<string, string> = {};
-  const verificationKeyFiles: Record<string, { current: string; previous?: string }> = {};
-  const keysDir = resolveExecutionKeysDir(input.bridgeEnv);
   const entries: McpEntry[] = [];
   const leases: CapabilityLease[] = [];
   const leasedPaths: string[] = [];
@@ -147,27 +142,18 @@ function materializeAuthorizedExecutionMcp(
       try {
         lease = leaseCapabilityFile({
           runtimeRoot,
-          audience: server.audience,
+          audience: server.leaseNamespace,
           scope: `${input.botName}\0${input.chatId}\0${scopeName}`,
           token: executionEnv[server.capabilityEnvVar]!,
           expiresAt: (input.now ?? Date.now)() + EXECUTION_CAPABILITY_TTL_MS,
           nonce: input.nonce,
         });
         capabilityFiles[server.id] = lease.path;
-        if (!isLoopbackProxy(server)) {
-          const current = path.join(keysDir, `${server.id}-capability.pub`);
-          const previous = path.join(keysDir, `${server.id}-capability.pub.prev`);
-          verificationKeyFiles[server.id] = {
-            current,
-            ...(existsSync(previous) ? { previous } : {}),
-          };
-        }
         const [entry] = buildExecutionMcpEntries({
           executionEnv,
           bridgeEnv: input.bridgeEnv,
           runtimeRoot,
           capabilityFiles,
-          verificationKeyFiles,
           servers: [server],
         });
         if (!entry) throw new Error('MCP entry configuration is incomplete');
@@ -314,8 +300,7 @@ function logEndpointRefusals(
   servers: readonly AnyMcpServerDescriptor[],
 ): void {
   for (const server of servers) {
-    if (!isLoopbackProxy(server)) continue;
-    const endpoint = input.bridgeEnv[(server as LoopbackProxyDescriptor).endpointEnvVar];
+    const endpoint = input.bridgeEnv[server.endpointEnvVar];
     if (!hasValue(endpoint)) {
       input.logger.warn(
         { engine: input.engineName, purpose: server.id, reason: 'daemon endpoint is not configured' },

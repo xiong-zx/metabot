@@ -80,7 +80,7 @@ describe('execution capability Ed25519 keys', () => {
     })).toThrowError(expect.objectContaining({ code: 'KEYS_UNAVAILABLE' }));
 
     const partial = keyDir();
-    unlinkSync(join(partial, 'arc-capability.pub'));
+    unlinkSync(join(partial, 'worker-callback.pub'));
     expect(() => provisionExecutionKeyPairs(partial)).toThrowError(
       expect.objectContaining({ code: 'INCOMPLETE_KEY_PAIR' }),
     );
@@ -103,16 +103,16 @@ describe('execution capability Ed25519 keys', () => {
   it('accepts read-only public-key modes while keeping private keys at 0600', () => {
     for (const mode of EXECUTION_PUBLIC_KEY_MODES) {
       const dir = keyDir();
-      chmodSync(join(dir, 'metaclaw-capability.pub'), mode);
+      chmodSync(join(dir, 'worker-capability.pub'), mode);
       const service = new ExecutionCapabilityService(dir);
       expect(() => service.issue({
-        purpose: 'metaclaw', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
+        purpose: 'worker', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
       })).not.toThrow();
     }
     const dir = keyDir();
-    chmodSync(join(dir, 'metaclaw-capability.pub'), 0o666);
+    chmodSync(join(dir, 'worker-capability.pub'), 0o666);
     expect(() => new ExecutionCapabilityService(dir).issue({
-      purpose: 'metaclaw', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
+      purpose: 'worker', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
     })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
   });
 
@@ -165,7 +165,7 @@ describe('execution capability Ed25519 keys', () => {
     });
 
     const nonRegular = keyDir();
-    const publicPath = join(nonRegular, 'arc-capability.pub');
+    const publicPath = join(nonRegular, 'worker-callback.pub');
     unlinkSync(publicPath);
     mkdirSync(publicPath, { mode: 0o700 });
     expect(() => provisionExecutionKeyPairs(nonRegular)).toThrowError(
@@ -192,7 +192,7 @@ describe('execution capability Ed25519 keys', () => {
     );
   });
 
-  it('keeps worker, ARC, callback, and W01-HMAC formats purpose-separated and enforces expiry', () => {
+  it('keeps Worker, callback, and W01-HMAC formats purpose-separated and enforces expiry', () => {
     const dir = keyDir();
     const service = new ExecutionCapabilityService(dir);
     const worker = service.issue({
@@ -224,7 +224,6 @@ describe('execution capability Ed25519 keys', () => {
       readFileSync(join(dir, 'worker-callback.key'), 'utf8'),
     ).toString('base64')}`;
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'worker.terminal')).not.toThrow();
-    expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'arc.terminal')).toThrow();
   });
 
   it('enforces the 200/500 execution-principal wire limits before mint and during verification', () => {

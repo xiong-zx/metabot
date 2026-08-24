@@ -327,8 +327,8 @@ describe('installer execution-key provisioning', () => {
 
       const keysDir = path.join(tmp, 'keys');
       provisionExecutionKeyPairs(keysDir);
-      const keyPath = path.join(keysDir, 'arc-capability.pub');
-      const realPath = path.join(keysDir, 'arc-capability.pub.real');
+      const keyPath = path.join(keysDir, 'worker-callback.pub');
+      const realPath = path.join(keysDir, 'worker-callback.pub.real');
       fs.renameSync(keyPath, realPath);
       fs.symlinkSync(realPath, keyPath);
       expect(() => runInstallerKeyProvisioner(keysDir)).toThrow();
