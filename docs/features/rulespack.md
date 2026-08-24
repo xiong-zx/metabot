@@ -338,12 +338,15 @@ Core-bearer transports bind the envelope issuer to authenticated `/api/whoami`
 `botName`; local peer-secret transport is administrator-equivalent and binds
 the explicitly forwarded issuer. A generic bearer does not authenticate a
 caller-selected chat/project/role/task/worker and skips RulesPack for that API
-turn. Normal verified resident-Bridge peer and Agent Bus forwarding attaches
-an exact envelope automatically. The CLI-only `metabot agents talk` path has
-no sender RulesPack runtime and cannot manufacture one. Core therefore rejects
-an envelope-free relay to a target that advertises required, shadow, or enforce
-RulesPack state; use `metabot talk <peer>/<bot> ...` through a resident Bridge
-for that target. Unconfigured, opted-out, unsupported, and optional-off CLI
+turn. Normal verified resident-Bridge peer forwarding attaches an exact
+envelope automatically. A signed engine session may also use
+`metabot agents talk` for the same Bot in another chat on its resident Bridge:
+the short-lived source capability authorizes only the talk/status routes, the
+receiver constructs an exact target Bot/Chat principal, and the command returns
+an asynchronous task/card receipt. CLI-only and remote inbox senders still
+cannot manufacture an exact dispatch; Core therefore rejects their
+envelope-free relay to a target that advertises required, shadow, or enforce
+RulesPack state. Unconfigured, opted-out, unsupported, and optional-off CLI
 agents retain the plain inbox contract.
 
 Peer delivery is successful only when the receiver reports a consumed

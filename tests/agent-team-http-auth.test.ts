@@ -183,7 +183,6 @@ describe('Agent Team HTTP capability gate', () => {
         ['GET', '/api/bots/pm-codex'],
         ['GET', '/api/bots/pm-codex/profile'],
         ['GET', '/api/status'],
-        ['POST', '/api/talk'],
         ['POST', '/api/tasks'],
         ['POST', '/api/peers'],
         ['POST', '/api/bots'],
@@ -199,6 +198,14 @@ describe('Agent Team HTTP capability gate', () => {
         expect(response.status, `${method} ${path}`).toBe(401);
       }
 
+      const deniedTalk = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST',
+        headers: { ...validHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ botName: 'pm-codex', chatId: 'target-chat', prompt: 'work' }),
+      });
+      expect(deniedTalk.status).toBe(403);
+      await expect(deniedTalk.json()).resolves.toMatchObject({ code: 'AGENT_BUS_TALK_ROLE_DENIED' });
+
       const promotion = await fetch(`${baseUrl}/api/agent-team-governance/templates`, {
         method: 'POST',
         headers: { ...validHeaders, 'content-type': 'application/json' },
@@ -210,6 +217,153 @@ describe('Agent Team HTTP capability gate', () => {
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
       governance.close();
       store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows a signed user session to create and inspect an async target-chat card receipt', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-bus-talk-auth-'));
+    vi.stubEnv('SESSION_STORE_DIR', dir);
+    vi.stubEnv('METABOT_RATE_LIMIT_DISABLED', '1');
+    vi.stubEnv('API_HOST', 'localhost');
+    vi.stubEnv('METABOT_AGENT_SELF_URL', 'http://10.0.0.5:19110');
+    const capabilities = new AgentTeamExecutionCapabilityService('talk-capability-test-key');
+    const registry = new BotRegistry();
+    let executionEnvProvider: ((scope: { botName: string; chatId: string }) => Record<string, string>) | undefined;
+    const executeApiTask = vi.fn(async (options: any) => {
+      options.onAccepted?.({ cardMessageId: 'card-1', deliveryState: 'running' });
+      options.onUpdate?.({ status: 'complete' }, 'card-1', true);
+      return { success: true, responseText: 'done', durationMs: 10 };
+    });
+    registry.register({
+      name: 'admin', platform: 'feishu',
+      bridge: {
+        executeApiTask, getPersistentRegistry: vi.fn(), setAgentTeamStore: vi.fn(),
+        setExecutionEnvProvider: vi.fn((provider: typeof executionEnvProvider) => { executionEnvProvider = provider; }),
+      },
+      sender: {}, config: {},
+    } as any);
+    const server = startApiServer({
+      port: 0, secret: 'bridge-admin-secret', registry,
+      scheduler: {
+        setWebSocketHandle: () => {}, taskCount: () => 0, recurringTaskCount: () => 0,
+      } as any,
+      logger, agentTeamCapabilityService: capabilities,
+    });
+    if (!server.listening) await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+    const listenerHost = address.address.includes(':') ? `[${address.address}]` : address.address;
+    const baseUrl = `http://${listenerHost}:${address.port}`;
+    expect(executionEnvProvider?.({ botName: 'admin', chatId: 'source-chat' })).toMatchObject({
+      METABOT_ENGINE_BRIDGE_URL: baseUrl,
+      METABOT_BOT_NAME: 'admin',
+      METABOT_CHAT_ID: 'source-chat',
+    });
+    const capability = capabilities.issue({
+      role: 'user', botName: 'admin', chatId: 'source-chat', ttlMs: 60_000,
+    });
+    const headers = {
+      'x-metabot-team-capability': capability,
+      'x-metabot-bot-name': 'admin',
+      'x-metabot-chat-id': 'source-chat',
+      'content-type': 'application/json',
+    };
+
+    try {
+      const elevatedTarget = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ botName: 'pm', chatId: 'target-chat', prompt: 'work' }),
+      });
+      expect(elevatedTarget.status).toBe(403);
+      await expect(elevatedTarget.json()).resolves.toMatchObject({ code: 'AGENT_BUS_TALK_ROLE_DENIED' });
+
+      const remoteTarget = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ botName: 'peer/admin', chatId: 'target-chat', prompt: 'work' }),
+      });
+      expect(remoteTarget.status).toBe(403);
+      await expect(remoteTarget.json()).resolves.toMatchObject({ code: 'AGENT_BUS_REMOTE_TARGET_DENIED' });
+
+      const declaredIdentity = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          botName: 'admin', chatId: 'target-chat', prompt: 'work', roles: ['api-admin'],
+        }),
+      });
+      expect(declaredIdentity.status).toBe(400);
+      await expect(declaredIdentity.json()).resolves.toMatchObject({
+        code: 'AGENT_BUS_TALK_DECLARATION_DENIED',
+      });
+
+      const accepted = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          botName: 'admin', chatId: 'target-chat', prompt: 'implement fix', async: false, sendCards: false,
+        }),
+      });
+      expect(accepted.status).toBe(202);
+      const receipt = await accepted.json() as any;
+      expect(receipt).toMatchObject({
+        status: 'accepted', targetBot: 'admin', targetChatId: 'target-chat',
+        cardMessageId: 'card-1', deliveryState: 'running',
+      });
+      expect(receipt.taskId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      );
+
+      await vi.waitFor(() => expect(executeApiTask).toHaveBeenCalledTimes(1));
+      expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
+        chatId: 'target-chat', userId: 'admin:source-chat', sendCards: true,
+        rulesPack: { principal: expect.objectContaining({
+          kind: 'scoped', source: 'agent-bus', botName: 'admin', chatId: 'target-chat',
+          roles: ['agent-bus', 'user'],
+        }) },
+      }));
+
+      const status = await fetch(`${baseUrl}/api/talk/${receipt.taskId}`, { headers });
+      expect(status.status).toBe(200);
+      await expect(status.json()).resolves.toMatchObject({
+        taskId: receipt.taskId, botName: 'admin', chatId: 'target-chat',
+        sourceBot: 'admin', sourceChatId: 'source-chat',
+        targetBot: 'admin', targetChatId: 'target-chat',
+        cardMessageId: 'card-1', deliveryState: 'complete',
+      });
+
+      const otherCapability = capabilities.issue({
+        role: 'user', botName: 'admin', chatId: 'other-source-chat', ttlMs: 60_000,
+      });
+      const wrongSource = await fetch(`${baseUrl}/api/talk/${receipt.taskId}`, {
+        headers: {
+          ...headers,
+          'x-metabot-team-capability': otherCapability,
+          'x-metabot-chat-id': 'other-source-chat',
+        },
+      });
+      expect(wrongSource.status).toBe(404);
+
+      const localAdministrator = await fetch(`${baseUrl}/api/talk/${receipt.taskId}`, {
+        headers: { authorization: 'Bearer bridge-admin-secret' },
+      });
+      expect(localAdministrator.status).toBe(404);
+
+      executeApiTask.mockImplementationOnce(async (options: any) => {
+        options.onAccepted?.({ deliveryState: 'error' });
+        options.onUpdate?.({ status: 'error' }, 'api-card-failure', true);
+        return { success: false, responseText: '', error: 'Target card creation failed' };
+      });
+      const cardFailure = await fetch(`${baseUrl}/api/talk`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          botName: 'admin', chatId: 'card-failure-chat', prompt: 'work', async: true, sendCards: true,
+        }),
+      });
+      expect(cardFailure.status).toBe(202);
+      await expect(cardFailure.json()).resolves.toMatchObject({
+        targetBot: 'admin', targetChatId: 'card-failure-chat', deliveryState: 'error',
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
       rmSync(dir, { recursive: true, force: true });
     }
   });

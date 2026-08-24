@@ -144,9 +144,12 @@ Human or local management mutations require `API_SECRET`, including on
 loopback; the Bridge does not restore unauthenticated local mutation access.
 An Agent Team engine session instead forwards its short-lived scoped
 credential for only `metabot bots`, `metabot peers`, `metabot stats`, and
-`metabot metrics` outside the Team coordination API. It never forwards
+`metabot metrics`, plus same-Bot `metabot agents talk` and `talk-status`,
+outside the Team coordination API. It never forwards
 `API_SECRET` or `METABOT_API_SECRET`, and the scoped credential cannot read bot
-details/profiles or call other Bridge routes.
+details/profiles or call other Bridge routes. The Bridge derives and injects
+`METABOT_ENGINE_BRIDGE_URL` from its actual loopback listener; the peer
+advertisement URL is not trusted for capability delivery.
 
 ### Bot management
 
@@ -160,14 +163,23 @@ metabot bot <name>                  # get bot details
 ```bash
 metabot talk <bot> <chatId> <prompt>      # talk to a bot (bridge /api/talk)
 metabot talk alice/bot <chatId> <prompt>  # talk to a specific peer's bot
+metabot agents talk <sameBot> <chatId> <prompt> --async --cards
+metabot agents talk-status <taskId>
 ```
 
 The bot name supports [qualified names](../features/peers.md#qualified-names)
-(`peerName/botName`) for cross-instance routing. This is the bridge-local talk
-path; `metabot agents talk` is the separate central-registry P2P variant.
-The CLI-only variant has no sender RulesPack runtime and refuses protected
-targets. Use the Bridge-local `metabot talk` form when the target advertises a
-required, shadow, or enforce RulesPack state.
+(`peerName/botName`) for cross-instance routing. This is the operator-facing
+bridge-local talk path. `metabot agents talk` is the normal Agent Bus command:
+a signed engine session sends the same Bot to another chat asynchronously,
+forces a target-chat card, and receives a task/card receipt without using the
+Bridge administrator secret. Delegated task receipts use full UUID task IDs,
+and `talk-status` requires the exact signed source Bot/Chat fields and rejects
+malformed IDs, inconsistent target fields, time order, or result lifecycles.
+If that Bot is not local, the signed path returns not-found instead of looking
+for a same-named peer.
+CLI-only and remote targets retain the central
+inbox relay. Protected remote targets remain fail-closed until their sender
+Bridge can attach an authenticated dispatch and explicit target grant.
 
 ### Peers
 

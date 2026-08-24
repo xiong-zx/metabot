@@ -745,6 +745,54 @@ describe('MessageBridge between-turn questions', () => {
     bridge.destroy();
   });
 
+  it('reports the real target-card receipt before an API task completes', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'done' };
+      })(),
+      finish: vi.fn(),
+      resolveQuestion: vi.fn(),
+    }));
+    const onAccepted = vi.fn();
+
+    const result = await bridge.executeApiTask({
+      prompt: 'delegated work', chatId: 'target-chat', sendCards: true, onAccepted,
+    });
+
+    expect(result.success).toBe(true);
+    expect(onAccepted).toHaveBeenCalledTimes(1);
+    expect(onAccepted).toHaveBeenCalledWith({ cardMessageId: 'msg-1', deliveryState: 'running' });
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.updated.at(-1)?.messageId).toBe('msg-1');
+    bridge.destroy();
+  });
+
+  it('fails before engine execution when target-card creation fails', async () => {
+    const sender = makeSender();
+    sender.sendCard = vi.fn(async () => undefined);
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'done' };
+      })(),
+      finish: vi.fn(),
+      resolveQuestion: vi.fn(),
+    }));
+    const onAccepted = vi.fn();
+
+    const result = await bridge.executeApiTask({
+      prompt: 'delegated work', chatId: 'target-chat', sendCards: true, onAccepted,
+    });
+
+    expect(result).toMatchObject({ success: false, error: 'Target card creation failed' });
+    expect(onAccepted).toHaveBeenCalledWith({ deliveryState: 'error' });
+    expect(bridge.runOneTurn).not.toHaveBeenCalled();
+    expect(sender.updated).toHaveLength(0);
+    bridge.destroy();
+  });
+
   it('advances multi-question cards and resolves only after the last answer', async () => {
     vi.useFakeTimers();
     const sender = makeSender();

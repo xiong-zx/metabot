@@ -119,6 +119,10 @@ Bot 不会收到无目的消息。
 
 这些命令 curl 本地 bridge 守护进程（`localhost:9100`），从 bridge `.env` 读取
 `API_PORT` / `API_SECRET`（以及可选的 `METABOT_URL`）。
+受签名保护的引擎会话还可调用同 Bot 的 `metabot agents talk` 与
+`talk-status`；Bridge 从实际 loopback listener 派生并注入
+`METABOT_ENGINE_BRIDGE_URL`，不会把 peer 广告地址当成 capability 目标，也不会向
+子进程提供 Bridge 管理员密钥。
 
 ### Bot 管理
 
@@ -132,13 +136,18 @@ metabot bot <name>                  # 获取 Bot 详情
 ```bash
 metabot talk <bot> <chatId> <prompt>      # 与 Bot 对话（bridge /api/talk）
 metabot talk alice/bot <chatId> <prompt>  # 指定 peer 的 Bot 对话
+metabot agents talk <sameBot> <chatId> <prompt> --async --cards
+metabot agents talk-status <taskId>
 ```
 
 Bot 名称支持[限定名](../features/peers.md#qualified-names)（`peerName/botName`）实现跨实例
-路由。这是 bridge 本地的对话路径；`metabot agents talk` 是基于中心注册表的 P2P
-变体。CLI-only 变体没有发送端 RulesPack runtime，因此会拒绝 required、shadow 或
-enforce 的受保护目标；这类目标必须使用 Bridge 本地的 `metabot talk`，由 Bridge
-先编译并绑定精确 envelope。
+路由。这是面向 operator 的 Bridge 本地入口。普通 Bot 间通信使用
+`metabot agents talk`：受签名保护的引擎会话让同一 Bot 跨群聊做异步
+派发，强制在目标群聊创建卡片，并返回 task/card 回执；整个过程不使用 Bridge
+管理员密钥。委派任务回执使用完整 UUID；`talk-status` 会拒绝不合法的 ID 或相互
+矛盾的来源、目标、时间、结果和生命周期回执。如果该 Bot 不在本机，受签名路径直接
+返回未找到，不会查找同名 peer。CLI-only 与远端目标仍走中心 inbox relay；受保护远端目标在发送方
+Bridge 能附带经认证的 dispatch 和显式目标授权前保持 fail closed。
 
 ### Peers
 

@@ -31,6 +31,45 @@ interface BusConfig {
   token: string;
 }
 
+interface EngineTalkConfig {
+  url: string;
+  capability: string;
+  botName: string;
+  chatId: string;
+}
+
+interface AgentTalkReceipt {
+  taskId: string;
+  requestId: string;
+  status: 'accepted';
+  targetBot: string;
+  targetChatId: string;
+  cardMessageId?: string;
+  deliveryState: 'pending' | 'running' | 'error';
+  message: string;
+}
+
+interface AgentTalkStatusReceipt {
+  taskId: string;
+  status: 'accepted' | 'running' | 'completed' | 'failed';
+  botName: string;
+  chatId: string;
+  sourceBot: string;
+  sourceChatId: string;
+  targetBot: string;
+  targetChatId: string;
+  cardMessageId?: string;
+  deliveryState: 'accepted' | 'pending' | 'running' | 'complete' | 'error';
+  createdAt: string;
+  completedAt?: string;
+  result?: { success: boolean; [key: string]: unknown };
+}
+
+const TEAM_CAPABILITY_HEADER = 'x-metabot-team-capability';
+const TEAM_BOT_HEADER = 'x-metabot-bot-name';
+const TEAM_CHAT_HEADER = 'x-metabot-chat-id';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function readTokenFile(): string {
   try {
     const raw = fs.readFileSync(path.join(os.homedir(), '.metabot-core', 'token'), 'utf8');
@@ -91,6 +130,210 @@ async function busRequest<T = unknown>(
   return parsed as T;
 }
 
+function loadEngineTalkConfig(env: NodeJS.ProcessEnv = process.env): EngineTalkConfig | undefined {
+  const values = {
+    url: (env.METABOT_ENGINE_BRIDGE_URL || '').trim(),
+    capability: (env.METABOT_TEAM_CAPABILITY || '').trim(),
+    botName: (env.METABOT_BOT_NAME || '').trim(),
+    chatId: (env.METABOT_CHAT_ID || env.METABOT_CHAT || '').trim(),
+  };
+  if (!Object.values(values).some(Boolean)) return undefined;
+  if (!Object.values(values).every(Boolean)) {
+    throw new Error('metabot agents talk: incomplete signed engine-session routing context');
+  }
+  const parsed = new URL(values.url);
+  if (parsed.protocol !== 'http:' || !isLoopbackHost(parsed.hostname)) {
+    throw new Error('metabot agents talk: METABOT_ENGINE_BRIDGE_URL must be loopback HTTP');
+  }
+  return values;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  const milliseconds = Date.parse(value);
+  return !Number.isNaN(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isOptionalNonNegativeNumber(value: unknown): boolean {
+  return value === undefined
+    || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
+function isRulesPackDelivery(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const allowed = new Set(['status', 'envelopeId', 'replayId', 'packDigest', 'effectivePackDigest']);
+  return Object.keys(value).every((key) => allowed.has(key))
+    && (value.status === 'shadowed' || value.status === 'consumed')
+    && isNonEmptyString(value.envelopeId)
+    && isNonEmptyString(value.replayId)
+    && isNonEmptyString(value.packDigest)
+    && isNonEmptyString(value.effectivePackDigest);
+}
+
+function isTerminalResult(value: unknown, status: 'completed' | 'failed'): boolean {
+  if (!isRecord(value)) return false;
+  const allowed = new Set(['success', 'responseText', 'costUsd', 'durationMs', 'error', 'rulesPackDelivery']);
+  const success = status === 'completed';
+  return Object.keys(value).every((key) => allowed.has(key))
+    && value.success === success
+    && typeof value.responseText === 'string'
+    && isOptionalNonNegativeNumber(value.costUsd)
+    && isOptionalNonNegativeNumber(value.durationMs)
+    && isRulesPackDelivery(value.rulesPackDelivery)
+    && (success ? value.error === undefined : isNonEmptyString(value.error));
+}
+
+async function parseBridgeResponse(response: Response, operation: string): Promise<unknown> {
+  const text = await response.text();
+  let parsed: unknown = text;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // leave raw
+    }
+  }
+  if (!response.ok) {
+    const message = typeof parsed === 'object' && parsed && 'error' in parsed
+      ? String((parsed as { error: unknown }).error)
+      : String(parsed);
+    throw new Error(`resident Bridge ${operation} → ${response.status}: ${message}`);
+  }
+  return parsed;
+}
+
+function engineTalkHeaders(config: EngineTalkConfig): Record<string, string> {
+  return {
+    Authorization: 'Bearer execution-capability',
+    Accept: 'application/json',
+    [TEAM_CAPABILITY_HEADER]: config.capability,
+    [TEAM_BOT_HEADER]: config.botName,
+    [TEAM_CHAT_HEADER]: config.chatId,
+  };
+}
+
+async function bridgeTalkRequest(
+  config: EngineTalkConfig,
+  body: { botName: string; chatId: string; prompt: string },
+): Promise<AgentTalkReceipt> {
+  const response = await fetch(`${config.url.replace(/\/+$/, '')}/api/talk`, {
+    method: 'POST',
+    headers: { ...engineTalkHeaders(config), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, async: true, sendCards: true }),
+  });
+  const parsed = await parseBridgeResponse(response, 'POST /api/talk');
+  if (!isRecord(parsed)) {
+    throw new Error('resident Bridge returned an invalid Agent Bus talk receipt');
+  }
+  const receipt = parsed as Partial<AgentTalkReceipt>;
+  const allowed = new Set([
+    'taskId', 'requestId', 'status', 'targetBot', 'targetChatId',
+    'cardMessageId', 'deliveryState', 'message',
+  ]);
+  const deliveryStates = new Set(['pending', 'running', 'error']);
+  const cardMessageId = (receipt as { cardMessageId?: unknown }).cardMessageId;
+  if (!Object.keys(parsed).every((key) => allowed.has(key))
+    || !isUuid(receipt.taskId)
+    || receipt.requestId !== receipt.taskId
+    || receipt.status !== 'accepted'
+    || receipt.targetBot !== body.botName
+    || receipt.targetChatId !== body.chatId
+    || typeof receipt.deliveryState !== 'string'
+    || !deliveryStates.has(receipt.deliveryState)
+    || !isNonEmptyString(receipt.message)
+    || (cardMessageId !== undefined && (typeof cardMessageId !== 'string' || !cardMessageId.trim()))
+    || (receipt.deliveryState === 'running' && typeof cardMessageId !== 'string')
+    || (receipt.deliveryState !== 'running' && cardMessageId !== undefined)) {
+    throw new Error('resident Bridge returned an invalid Agent Bus talk receipt');
+  }
+  return receipt as AgentTalkReceipt;
+}
+
+function validateTalkStatusReceipt(
+  value: unknown,
+  config: EngineTalkConfig,
+  taskId: string,
+): AgentTalkStatusReceipt {
+  if (!isRecord(value)) {
+    throw new Error('resident Bridge returned an invalid Agent Bus talk-status receipt');
+  }
+  const allowed = new Set([
+    'taskId', 'status', 'botName', 'chatId', 'sourceBot', 'sourceChatId',
+    'targetBot', 'targetChatId', 'cardMessageId', 'deliveryState',
+    'createdAt', 'completedAt', 'result',
+  ]);
+  const status = value.status;
+  const deliveryState = value.deliveryState;
+  const cardMessageId = value.cardMessageId;
+  const result = value.result;
+  const terminal = status === 'completed' || status === 'failed';
+  const validStatus = status === 'accepted' || status === 'running' || terminal;
+  const validCard = cardMessageId === undefined || isNonEmptyString(cardMessageId);
+  const validLifecycle = (
+    (status === 'accepted' && deliveryState === 'accepted' && cardMessageId === undefined)
+    || (status === 'running' && deliveryState === 'pending' && cardMessageId === undefined)
+    || (status === 'running' && deliveryState === 'running' && isNonEmptyString(cardMessageId))
+    || (status === 'running' && deliveryState === 'error' && cardMessageId === undefined)
+    || (status === 'completed' && deliveryState === 'complete' && isNonEmptyString(cardMessageId))
+    || (status === 'failed' && deliveryState === 'error')
+  );
+  const validResult = terminal
+    ? isTerminalResult(result, status)
+    : result === undefined;
+  const createdAtMs = isIsoTimestamp(value.createdAt) ? Date.parse(value.createdAt) : Number.NaN;
+  const completedAtMs = isIsoTimestamp(value.completedAt) ? Date.parse(value.completedAt) : Number.NaN;
+  const validCompletion = terminal
+    ? Number.isFinite(completedAtMs) && completedAtMs >= createdAtMs
+    : value.completedAt === undefined;
+  if (!Object.keys(value).every((key) => allowed.has(key))
+    || !isUuid(value.taskId)
+    || value.taskId !== taskId
+    || !validStatus
+    || value.sourceBot !== config.botName
+    || value.sourceChatId !== config.chatId
+    || value.targetBot !== config.botName
+    || !isNonEmptyString(value.targetChatId)
+    || value.botName !== value.targetBot
+    || value.chatId !== value.targetChatId
+    || !validCard
+    || !validLifecycle
+    || !Number.isFinite(createdAtMs)
+    || !validCompletion
+    || !validResult) {
+    throw new Error('resident Bridge returned an invalid Agent Bus talk-status receipt');
+  }
+  return value as unknown as AgentTalkStatusReceipt;
+}
+
+async function bridgeTalkStatusRequest(config: EngineTalkConfig, taskId: string): Promise<AgentTalkStatusReceipt> {
+  if (!isUuid(taskId)) {
+    throw new Error('metabot agents talk-status: invalid taskId');
+  }
+  const response = await fetch(`${config.url.replace(/\/+$/, '')}/api/talk/${taskId}`, {
+    headers: engineTalkHeaders(config),
+  });
+  const receipt = await parseBridgeResponse(response, `GET /api/talk/${taskId}`);
+  return validateTalkStatusReceipt(receipt, config, taskId);
+}
+
 interface AgentRow {
   botName: string;
   url: string;
@@ -127,19 +370,22 @@ Subcommands:
                                         Only takes effect when the bot is hidden.
   unshare <botName> <ownerName>         Remove <ownerName> from the allowlist.
   shared  <botName>                     Print <botName>'s current allowlist.
-  talk <peer>[/<bot>] [<chatId>] "<msg>"
+  talk <peer>[/<bot>] [<chatId>] "<msg>" [--async] [--cards]
                                         Send a message to a peer's bot. When <chatId>
                                         is omitted, defaults to the cwd-derived
                                         project chatId.
-                                        Routes through metabot-core's central inbox
-                                        relay; resident bridges poll and execute
-                                        their own local bots, while CLI agents use
-                                        \`metabot inbox poll\` on the receiving end.
+                                        A signed engine session dispatches a same-
+                                        Bridge target asynchronously and receives a
+                                        task/card receipt. Other CLI agents route
+                                        through metabot-core's central inbox relay.
+  talk-status <taskId>                  Read one same-Bridge delegated task using
+                                        the exact signed source Bot/Chat scope.
 
 Env:
   METABOT_CORE_URL              memory + agents URL (default ${DEFAULT_BUS_URL})
   METABOT_CORE_AGENT_BUS_URL    override agents-only base URL (falls back to METABOT_CORE_URL)
   METABOT_CORE_TOKEN            bearer token (or ~/.metabot-core/token)
+  METABOT_ENGINE_BRIDGE_URL     Bridge-injected capability-only loopback origin; do not configure manually
 `;
 }
 
@@ -281,6 +527,21 @@ async function cmdTalk(args: string[]): Promise<void> {
   if (!peerName) throw new Error('metabot agents talk: <peer> empty');
   if (!botName) throw new Error('metabot agents talk: <bot> empty after slash');
 
+  const engineTalk = loadEngineTalkConfig();
+  if (engineTalk) {
+    if (slash >= 0 || botName !== engineTalk.botName) {
+      throw new Error(
+        'metabot agents talk: a signed engine session may delegate only the same Bot through its resident Bridge',
+      );
+    }
+    if (chatIdSource === 'project') {
+      process.stderr.write(`→ using project-derived chatId: ${chatId}\n`);
+    }
+    const receipt = await bridgeTalkRequest(engineTalk, { botName, chatId, prompt: content });
+    print({ route: 'resident-bridge', ...receipt });
+    return;
+  }
+
   const cfg = loadBusConfig();
   const list = await busRequest<ListResponse>(cfg, 'GET', '/api/agents');
   const peer = (list.agents || []).find((a) => a.botName === peerName);
@@ -300,7 +561,7 @@ async function cmdTalk(args: string[]): Promise<void> {
   ) {
     throw new Error(
       `metabot agents talk: target '${botName}' requires a sender-compiled RulesPack envelope; ` +
-        `use \`metabot talk ${target} ${chatId} "<message>"\` through a resident Bridge`,
+        'a signed same-Bridge engine session is required until cross-host FIX-014 is complete',
     );
   }
 
@@ -317,6 +578,17 @@ async function cmdTalk(args: string[]): Promise<void> {
     const id = (resp as { message?: { id?: unknown } }).message?.id;
     if (typeof id === 'string') process.stderr.write(`  id=${id}\n`);
   }
+}
+
+async function cmdTalkStatus(args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const taskId = positional[0];
+  if (!taskId) throw new Error('metabot agents talk-status: <taskId> required');
+  const engineTalk = loadEngineTalkConfig();
+  if (!engineTalk) {
+    throw new Error('metabot agents talk-status: a signed engine session is required');
+  }
+  print(await bridgeTalkStatusRequest(engineTalk, taskId));
 }
 
 export async function run(args: string[]): Promise<void> {
@@ -348,6 +620,8 @@ export async function run(args: string[]): Promise<void> {
       return cmdShared(rest);
     case 'talk':
       return cmdTalk(rest);
+    case 'talk-status':
+      return cmdTalkStatus(rest);
     default:
       process.stderr.write(`metabot agents: unknown subcommand '${sub}'\n\n`);
       process.stdout.write(usage());

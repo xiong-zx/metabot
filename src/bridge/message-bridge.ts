@@ -213,6 +213,11 @@ export interface ApiTaskOptions {
   allowedTools?: string[];
   /** Called on every card state update (streaming). `final` is true on the last update. */
   onUpdate?: (state: CardState, messageId: string, final: boolean) => void;
+  /** Called once the target-chat card creation attempt has completed. */
+  onAccepted?: (receipt: {
+    cardMessageId?: string;
+    deliveryState: 'running' | 'error';
+  }) => void;
   /** Called when Claude asks a question. Return the answer JSON string. */
   onQuestion?: (question: PendingQuestion) => Promise<string>;
   /** Called with output files after execution completes (before cleanup). */
@@ -3160,9 +3165,25 @@ export class MessageBridge {
       messageId = await this.sender.sendCard(chatId, initialState);
     }
 
+    options.onAccepted?.({
+      ...(messageId ? { cardMessageId: messageId } : {}),
+      deliveryState: messageId ? 'running' : 'error',
+    });
+
     // Generate a messageId for onUpdate even if sendCards is false
     const effectiveMessageId = messageId || `api-${chatId}-${Date.now()}`;
     options.onUpdate?.(initialState, effectiveMessageId, false);
+
+    if (sendCards && !messageId) {
+      const errorState: CardState = {
+        ...initialState,
+        status: 'error',
+        errorMessage: 'Target card creation failed',
+      };
+      options.onUpdate?.(errorState, effectiveMessageId, true);
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      return { success: false, responseText: '', error: errorState.errorMessage };
+    }
 
     if (!this.isTaskStartActive(chatId, startingTask)) {
       return this.finalizeCancelledApiStart(options, messageId, effectiveMessageId, outputsDir);

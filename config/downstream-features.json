@@ -48,15 +48,30 @@
       "roots": [
         "src/agent-teams/governance-extension.ts",
         "src/agent-teams/governance-capability.ts",
-        "src/agent-teams/schedule-capability.ts"
+        "src/agent-teams/schedule-capability.ts",
+        "src/agent-teams/talk-capability.ts"
+      ],
+      "thinHooks": [
+        "packages/cli/src/agents.ts",
+        "src/api/async-task-store.ts",
+        "src/api/http-server.ts",
+        "src/api/routes/task-routes.ts",
+        "src/api/routes/types.ts",
+        "src/bridge/message-bridge.ts"
       ],
       "forbiddenImports": ["src/memory-core", "src/workers", "@xvirobotics/arc-mcp", "@xvirobotics/worker-runner-mcp"],
-      "reason": "Keep signed engine capabilities and least-privilege Agent Team governance as an isolated downstream extension.",
+      "reason": "Keep signed engine capabilities, least-privilege Agent Team governance, and same-Bridge cross-chat delegation as an isolated downstream extension.",
       "validationSurface": [
         "tests/agent-team-governance-capability.test.ts",
         "tests/agent-team-schedule-capability.test.ts",
+        "tests/agent-team-talk-capability.test.ts",
         "tests/agent-team-http-auth.test.ts",
         "tests/agent-team-cli-capability.test.ts",
+        "packages/cli/tests/agents.test.ts",
+        "tests/http-server-cross-verify.test.ts",
+        "tests/message-bridge.test.ts",
+        "tests/peer-task-idempotency.test.ts",
+        "tests/rulespack-operator-routes.test.ts",
         "tests/downstream-boundaries.test.ts"
       ]
     },

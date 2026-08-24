@@ -32,6 +32,7 @@ import { AgentTeamStore } from '../agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
 import { AgentTeamGovernanceExtension, createAgentTeamGovernanceHost } from '../agent-teams/governance-extension.js';
 import { isAgentTeamCapabilityScheduleRoute } from '../agent-teams/schedule-capability.js';
+import { isAgentTeamCapabilityTalkRoute } from '../agent-teams/talk-capability.js';
 import {
   AGENT_TEAM_BOT_HEADER,
   AGENT_TEAM_CAPABILITY_ENV,
@@ -119,6 +120,17 @@ const AGENT_TEAM_CAPABILITY_RETIRE_SKEW_MS = 5 * 60 * 1000;
 
 export function resolveApiHost(env: NodeJS.ProcessEnv = process.env): string {
   return (env.API_HOST || env.METABOT_API_HOST || '127.0.0.1').trim() || '127.0.0.1';
+}
+
+/** Derive the capability-only loopback origin from server.address(). */
+export function resolveEngineBridgeLoopbackUrl(listenerAddress: string, apiPort: number): string | undefined {
+  if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65_535) return undefined;
+  const host = listenerAddress.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === '127.0.0.1' || host === '0.0.0.0') {
+    return `http://127.0.0.1:${apiPort}`;
+  }
+  if (host === '::1' || host === '::') return `http://[::1]:${apiPort}`;
+  return undefined;
 }
 
 export function isLocalSecretAuthorized(
@@ -308,6 +320,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const locallyAuthenticatedRequests = new WeakSet<http.IncomingMessage>();
   const rulesPackTransportIssuers = new WeakMap<http.IncomingMessage, string>();
   const coreBearerPrincipals = new WeakMap<http.IncomingMessage, { botName?: string }>();
+  const executionCapabilityPrincipals = new WeakMap<
+    http.IncomingMessage,
+    import('../agent-teams/governance-capability.js').AgentTeamExecutionPrincipal
+  >();
   const capabilityRetirementTimers = new Set<ReturnType<typeof setTimeout>>();
   let closing = false;
 
@@ -346,16 +362,20 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     terminalEventDispatcher,
     terminalEventRateLimiter,
     resolveAgentTeamPrincipal: (req) =>
-      agentTeamCapabilityService.resolve({
+      executionCapabilityPrincipals.get(req) ?? agentTeamCapabilityService.resolve({
         capability: headerValue(req.headers[AGENT_TEAM_CAPABILITY_HEADER]),
         botName: headerValue(req.headers[AGENT_TEAM_BOT_HEADER]),
         chatId: headerValue(req.headers[AGENT_TEAM_CHAT_HEADER]),
         localApiSecretAuthenticated: locallyAuthenticatedRequests.has(req),
       }),
+    resolveAgentTeamCapabilityPrincipal: (req) => executionCapabilityPrincipals.get(req),
     resolveRulesPackTransportIssuer: (req) => rulesPackTransportIssuers.get(req),
     resolveRulesPackApiPrincipal: (req, target) => resolveRulesPackApiPrincipal({
       localAdministrator: locallyAuthenticatedRequests.has(req),
       ...(coreBearerPrincipals.get(req)?.botName ? { coreBearerBotName: coreBearerPrincipals.get(req)!.botName } : {}),
+      ...(executionCapabilityPrincipals.get(req)
+        ? { executionPrincipal: executionCapabilityPrincipals.get(req)! }
+        : {}),
     }, target),
   };
 
@@ -485,6 +505,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         capabilityRetirementTimers.delete(cached.timer);
       }
       const principal = executionPrincipalFor({ botName, chatId });
+      const address = server.address();
+      const listenerPort = address && typeof address !== 'string' ? address.port : port;
+      const listenerAddress = address && typeof address !== 'string' ? address.address : host;
+      const engineBridgeUrl = resolveEngineBridgeLoopbackUrl(listenerAddress, listenerPort);
       const env = {
         [AGENT_TEAM_CAPABILITY_ENV]: agentTeamCapabilityService.issue({
           ...principal,
@@ -492,6 +516,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
         }, now),
         METABOT_BOT_NAME: botName,
         METABOT_CHAT_ID: chatId,
+        ...(engineBridgeUrl ? { METABOT_ENGINE_BRIDGE_URL: engineBridgeUrl } : {}),
         ...mintOptedInExecutionCapabilities({
           service: executionCapabilityService,
           principal,
@@ -623,17 +648,19 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const acceptsExecutionCapability = url.startsWith('/api/agent-team')
         || isAgentTeamCapabilityReadRoute(method, url)
         || isAgentTeamCapabilityScheduleRoute(method, url)
+        || isAgentTeamCapabilityTalkRoute(method, url)
         || isAgentTeamCapabilityRestartRoute(method, url);
       let executionCapabilityOk = false;
       let executionCapabilityError: AgentTeamCapabilityError | undefined;
       if (acceptsExecutionCapability && hasExecutionCapabilityHeaders) {
         try {
-          agentTeamCapabilityService.resolve({
+          const principal = agentTeamCapabilityService.resolve({
             capability,
             botName: capabilityBotName,
             chatId: capabilityChatId,
             localApiSecretAuthenticated: false,
           });
+          executionCapabilityPrincipals.set(req, principal);
           executionCapabilityOk = true;
         } catch (error) {
           if (error instanceof AgentTeamCapabilityError) executionCapabilityError = error;

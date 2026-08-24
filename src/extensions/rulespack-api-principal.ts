@@ -4,6 +4,14 @@ import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
 export interface RulesPackTransportPrincipal {
   localAdministrator: boolean;
   coreBearerBotName?: string;
+  /** Verified short-lived engine identity; never inferred from body declarations. */
+  executionPrincipal?: {
+    role: string;
+    id?: string;
+    botName?: string;
+    chatId?: string;
+    agentName?: string;
+  };
 }
 
 /** Translate the existing API authentication result into an immutable RulesPack principal. */
@@ -56,6 +64,22 @@ export function resolveRulesPackApiPrincipal(
       tools: envelopeTarget.tools,
       dataClasses: envelopeTarget.dataClasses,
       outputTypes: envelopeTarget.outputTypes,
+    };
+  }
+  if (auth.executionPrincipal) {
+    if (declarations && Object.values(declarations).some((value) => value !== undefined)) {
+      throw new Error('Agent Bus execution principals do not accept caller identity declarations');
+    }
+    return {
+      kind: 'scoped',
+      source: 'agent-bus',
+      botName: target.botName,
+      chatId: target.chatId,
+      roles: ['agent-bus', auth.executionPrincipal.role],
+      ...(auth.executionPrincipal.id ? { userId: auth.executionPrincipal.id } : {}),
+      ...(auth.executionPrincipal.agentName ? { agentName: auth.executionPrincipal.agentName } : {}),
+      dataClasses: ['agent-bus'],
+      outputTypes: ['text'],
     };
   }
   if (auth.localAdministrator) {

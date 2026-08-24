@@ -4,6 +4,7 @@ import {
   isCrossVerifyRoute,
   isLocalSecretAuthorized,
   resolveApiHost,
+  resolveEngineBridgeLoopbackUrl,
   summarizeChannelStatuses,
 } from '../src/api/http-server.js';
 
@@ -57,6 +58,16 @@ describe('bridge API auth helpers', () => {
     expect(resolveApiHost({ API_HOST: '0.0.0.0' })).toBe('0.0.0.0');
     expect(resolveApiHost({ METABOT_API_HOST: '::1' })).toBe('::1');
     expect(resolveApiHost({ API_HOST: '   ' })).toBe('127.0.0.1');
+  });
+
+  it('derives a capability-only loopback origin from safe listener hosts', () => {
+    expect(resolveEngineBridgeLoopbackUrl('127.0.0.1', 9100)).toBe('http://127.0.0.1:9100');
+    expect(resolveEngineBridgeLoopbackUrl('0.0.0.0', 9100)).toBe('http://127.0.0.1:9100');
+    expect(resolveEngineBridgeLoopbackUrl('::1', 9100)).toBe('http://[::1]:9100');
+    expect(resolveEngineBridgeLoopbackUrl('::', 9100)).toBe('http://[::1]:9100');
+    expect(resolveEngineBridgeLoopbackUrl('localhost', 9100)).toBeUndefined();
+    expect(resolveEngineBridgeLoopbackUrl('10.0.0.5', 9100)).toBeUndefined();
+    expect(resolveEngineBridgeLoopbackUrl('127.0.0.1', 0)).toBeUndefined();
   });
 
   it('extracts only Authorization Bearer credentials', () => {

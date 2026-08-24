@@ -50,6 +50,8 @@ export interface RouteContext {
   agentTeamSupervisor?: AgentTeamSupervisor;
   agentTeamGovernance?: AgentTeamGovernanceExtension;
   resolveAgentTeamPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal;
+  /** Verified engine identity only; undefined for local-admin and generic Core bearer requests. */
+  resolveAgentTeamCapabilityPrincipal?: (req: http.IncomingMessage) => AgentTeamExecutionPrincipal | undefined;
   resolveRulesPackTransportIssuer?: (req: http.IncomingMessage) => string | undefined;
   resolveRulesPackApiPrincipal?: (
     req: http.IncomingMessage,

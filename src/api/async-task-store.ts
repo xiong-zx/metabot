@@ -15,6 +15,12 @@ export interface AsyncTask {
   chatId: string;
   prompt: string;
   status: 'accepted' | 'running' | 'completed' | 'failed';
+  /** Signed engine session that created this task, when delegated over Agent Bus talk. */
+  sourceBotName?: string;
+  sourceChatId?: string;
+  /** Target-chat delivery receipt. The message id exists only after a real card was created. */
+  cardMessageId?: string;
+  deliveryState?: 'accepted' | 'pending' | 'running' | 'complete' | 'error';
   createdAt: number;
   completedAt?: number;
   result?: Pick<
@@ -49,13 +55,15 @@ export class AsyncTaskStore {
     botName: string;
     chatId: string;
     prompt: string;
+    sourceBotName?: string;
+    sourceChatId?: string;
     callbackChatId?: string;
     callbackBotName?: string;
     requestIssuer?: string;
     requestSourceBot?: string;
     requestBodySha256?: string;
   }): AsyncTask {
-    const id = opts.id ?? crypto.randomUUID().slice(0, 8);
+    const id = opts.id ?? crypto.randomUUID();
     if (this.tasks.has(id)) throw new Error(`Async task already exists: ${id}`);
     const task: AsyncTask = {
       id,
@@ -63,6 +71,9 @@ export class AsyncTaskStore {
       chatId: opts.chatId,
       prompt: opts.prompt,
       status: 'accepted',
+      ...(opts.sourceBotName ? { sourceBotName: opts.sourceBotName } : {}),
+      ...(opts.sourceChatId ? { sourceChatId: opts.sourceChatId } : {}),
+      deliveryState: 'accepted',
       createdAt: Date.now(),
       callbackChatId: opts.callbackChatId,
       callbackBotName: opts.callbackBotName,

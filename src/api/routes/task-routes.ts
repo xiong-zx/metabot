@@ -7,11 +7,31 @@ import {
   matchesScheduleScope,
   mayManageOwnSchedule,
 } from '../../agent-teams/schedule-capability.js';
+import {
+  matchesAgentBusTalkSource,
+  mayDelegateAgentBusTalk,
+} from '../../agent-teams/talk-capability.js';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
 import type { RulesPackDispatchEnvelopeV1 } from '@metabot/rulespack';
 import type { RulesPackExecutionPrincipal } from '@metabot/rulespack-adapter';
 import { forwardAuthenticatedPeerTask } from '../../extensions/rulespack-peer-dispatch.js';
+
+const AGENT_BUS_CARD_RECEIPT_TIMEOUT_MS = 5_000;
+
+async function waitForAgentBusReceipt<T>(receipt: Promise<T>): Promise<T | { deliveryState: 'pending' }> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      receipt,
+      new Promise<{ deliveryState: 'pending' }>((resolve) => {
+        timeoutId = setTimeout(() => resolve({ deliveryState: 'pending' }), AGENT_BUS_CARD_RECEIPT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 export async function handleTaskRoutes(
   ctx: RouteContext,
@@ -27,6 +47,7 @@ export async function handleTaskRoutes(
       : { rejected: false };
   if (scheduleAuthorization.rejected) return true;
   const schedulePrincipal = scheduleAuthorization.principal;
+  const talkPrincipal = ctx.resolveAgentTeamCapabilityPrincipal?.(req);
 
   // GET /api/talk/:taskId — async task status
   if (method === 'GET' && url.startsWith('/api/talk/')) {
@@ -47,7 +68,13 @@ export async function handleTaskRoutes(
       return true;
     }
     const peerClaims = getPeerRequestClaims(req);
-    if (peerClaims
+    const delegatedTask = !!task.sourceBotName || !!task.sourceChatId;
+    if ((talkPrincipal && (!delegatedTask || !matchesAgentBusTalkSource(talkPrincipal, task)))
+      || (!talkPrincipal && delegatedTask)) {
+      jsonResponse(res, 404, { error: 'Task not found' });
+      return true;
+    }
+    if (!delegatedTask && peerClaims
       && (!task.requestIssuer
         || task.requestIssuer !== peerClaims.iss
         || task.requestSourceBot !== peerClaims.sourceBot
@@ -62,6 +89,14 @@ export async function handleTaskRoutes(
       status: task.status,
       botName: task.botName,
       chatId: task.chatId,
+      ...(delegatedTask ? {
+        sourceBot: task.sourceBotName,
+        sourceChatId: task.sourceChatId,
+        targetBot: task.botName,
+        targetChatId: task.chatId,
+      } : {}),
+      cardMessageId: task.cardMessageId,
+      deliveryState: task.deliveryState,
       createdAt: new Date(task.createdAt).toISOString(),
       completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : undefined,
       result: task.result,
@@ -77,8 +112,8 @@ export async function handleTaskRoutes(
     const prompt = (typeof body.prompt === 'string' && body.prompt.trim())
       ? body.prompt as string
       : (body.content as string);
-    const sendCards = body.sendCards as boolean | undefined;
-    const asyncMode = body.async === true;
+    const sendCards = talkPrincipal ? true : body.sendCards as boolean | undefined;
+    const asyncMode = talkPrincipal ? true : body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
     const requestId = body.requestId as string | undefined;
@@ -87,6 +122,43 @@ export async function handleTaskRoutes(
     const dispatchIssuerHeader = singleHeader(req.headers['x-metabot-rulespack-issuer']);
     const dispatchOrigin = singleHeader(req.headers['x-metabot-origin']);
     const authenticatedDispatchIssuer = ctx.resolveRulesPackTransportIssuer?.(req);
+
+    if (talkPrincipal) {
+      if (rawBotName?.includes('/')) {
+        jsonResponse(res, 403, {
+          error: 'Engine-scoped Agent Bus talk is limited to bots on the same resident Bridge',
+          code: 'AGENT_BUS_REMOTE_TARGET_DENIED',
+        });
+        return true;
+      }
+      if (!mayDelegateAgentBusTalk(talkPrincipal, rawBotName)) {
+        jsonResponse(res, 403, {
+          error: 'This engine session may delegate only to the same Bot in another chat',
+          code: 'AGENT_BUS_TALK_ROLE_DENIED',
+        });
+        return true;
+      }
+      const forbiddenDeclarations = [
+        dispatchEnvelope,
+        body.projectId,
+        body.agentName,
+        body.workerId,
+        body.taskId,
+        body.roles,
+        body.tools,
+        body.dataClasses,
+        body.outputTypes,
+        callbackChatId,
+        callbackBotName,
+      ];
+      if (forbiddenDeclarations.some((value) => value !== undefined)) {
+        jsonResponse(res, 400, {
+          error: 'Engine-scoped Agent Bus talk does not accept identity declarations, dispatch envelopes, or callbacks',
+          code: 'AGENT_BUS_TALK_DECLARATION_DENIED',
+        });
+        return true;
+      }
+    }
 
     if (
       dispatchEnvelope &&
@@ -231,7 +303,20 @@ export async function handleTaskRoutes(
             requestSourceBot: peerClaims.sourceBot,
             requestBodySha256: peerClaims.bodySha256,
           } : {}),
+          ...(talkPrincipal?.botName ? { sourceBotName: talkPrincipal.botName } : {}),
+          ...(talkPrincipal?.chatId ? { sourceChatId: talkPrincipal.chatId } : {}),
         });
+
+        let receiptResolved = false;
+        let resolveReceipt!: (receipt: { cardMessageId?: string; deliveryState: 'pending' | 'running' | 'error' }) => void;
+        const receiptPromise = new Promise<{ cardMessageId?: string; deliveryState: 'pending' | 'running' | 'error' }>(
+          (resolve) => { resolveReceipt = resolve; },
+        );
+        const settleReceipt = (receipt: { cardMessageId?: string; deliveryState: 'pending' | 'running' | 'error' }) => {
+          if (receiptResolved) return;
+          receiptResolved = true;
+          resolveReceipt(receipt);
+        };
 
         (async () => {
           asyncTaskStore.update(asyncTask.id, { status: 'running' });
@@ -239,13 +324,44 @@ export async function handleTaskRoutes(
             const result = await bot.bridge.executeApiTask({
               prompt,
               chatId,
-              userId: peerClaims ? `peer:${peerClaims.iss}/${peerClaims.sourceBot}` : 'api',
+              userId: talkPrincipal
+                ? talkPrincipal.id
+                : peerClaims
+                  ? `peer:${peerClaims.iss}/${peerClaims.sourceBot}`
+                  : 'api',
               sendCards: sendCards ?? true,
               ...(rulesPack ? { rulesPack } : {}),
+              ...(talkPrincipal ? {
+                onAccepted: (receipt) => {
+                  const update = {
+                    ...(receipt.cardMessageId ? { cardMessageId: receipt.cardMessageId } : {}),
+                    deliveryState: receipt.deliveryState,
+                  } as const;
+                  asyncTaskStore.update(asyncTask.id, update);
+                  settleReceipt(update);
+                },
+                onUpdate: (_state, cardMessageId, _final) => {
+                  const existingCard = asyncTaskStore.get(asyncTask.id)?.cardMessageId;
+                  const realCardMessageId = existingCard
+                    ?? (cardMessageId.startsWith('api-') ? undefined : cardMessageId);
+                  // MessageBridge may emit its final card update before output delivery and
+                  // executeApiTask cleanup finish. Keep the externally visible task state
+                  // non-terminal until the result update below can publish status,
+                  // deliveryState, completedAt, and result together.
+                  const deliveryState = realCardMessageId ? 'running' : 'pending';
+                  asyncTaskStore.update(asyncTask.id, {
+                    ...(realCardMessageId ? { cardMessageId: realCardMessageId } : {}),
+                    deliveryState,
+                  });
+                },
+              } : {}),
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
               completedAt: Date.now(),
+              deliveryState: asyncTaskStore.get(asyncTask.id)?.cardMessageId
+                ? (result.success ? 'complete' : 'error')
+                : 'error',
               result: {
                 success: result.success,
                 responseText: result.responseText,
@@ -255,6 +371,7 @@ export async function handleTaskRoutes(
                 ...(result.rulesPackDelivery ? { rulesPackDelivery: result.rulesPackDelivery } : {}),
               },
             });
+            if (!receiptResolved) settleReceipt({ deliveryState: result.success ? 'pending' : 'error' });
 
             if (result.success) {
               circuitBreaker.recordSuccess(botName);
@@ -284,15 +401,29 @@ export async function handleTaskRoutes(
             asyncTaskStore.update(asyncTask.id, {
               status: 'failed',
               completedAt: Date.now(),
+              deliveryState: 'error',
               result: { success: false, responseText: '', error: err.message },
             });
+            settleReceipt({ deliveryState: 'error' });
           }
         })();
+
+        const receipt = talkPrincipal
+          ? await waitForAgentBusReceipt(receiptPromise)
+          : { deliveryState: 'accepted' as const };
+        if (talkPrincipal
+          && receipt.deliveryState === 'pending'
+          && asyncTaskStore.get(asyncTask.id)?.deliveryState === 'accepted') {
+          asyncTaskStore.update(asyncTask.id, { deliveryState: 'pending' });
+        }
 
         jsonResponse(res, 202, {
           taskId: asyncTask.id,
           requestId: asyncTask.id,
           status: 'accepted',
+          targetBot: botName,
+          targetChatId: chatId,
+          ...receipt,
           message: 'Task accepted for async execution',
         });
         return true;
@@ -337,6 +468,14 @@ export async function handleTaskRoutes(
       }
 
       jsonResponse(res, result.success ? 200 : 500, result);
+      return true;
+    }
+
+    if (talkPrincipal) {
+      jsonResponse(res, 404, {
+        error: `Local Bot not found: ${botName}`,
+        code: 'AGENT_BUS_LOCAL_TARGET_NOT_FOUND',
+      });
       return true;
     }
 

@@ -138,6 +138,25 @@ describe('RulesPack operator and transport routes', () => {
         { botName: 'admin', chatId: 'caller-selected-chat' },
       ),
     ).toEqual({ kind: 'generic', source: 'core-bearer', botName: 'caller-bot' });
+    const executionPrincipal = {
+      role: 'user', id: 'admin:source-chat', botName: 'admin', chatId: 'source-chat',
+    };
+    expect(
+      resolveRulesPackApiPrincipal(
+        { localAdministrator: false, executionPrincipal },
+        { botName: 'admin', chatId: 'target-chat' },
+      ),
+    ).toEqual({
+      kind: 'scoped', source: 'agent-bus', botName: 'admin', chatId: 'target-chat',
+      roles: ['agent-bus', 'user'], userId: 'admin:source-chat',
+      dataClasses: ['agent-bus'], outputTypes: ['text'],
+    });
+    expect(() =>
+      resolveRulesPackApiPrincipal(
+        { localAdministrator: false, executionPrincipal },
+        { botName: 'admin', chatId: 'target-chat', declarations: { roles: ['admin'] } },
+      ),
+    ).toThrow(/do not accept caller identity declarations/u);
 
     const dispatch = {
       target: {
