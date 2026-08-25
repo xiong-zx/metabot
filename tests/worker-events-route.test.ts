@@ -228,23 +228,12 @@ describe('signed terminal callback route', () => {
       });
       expect(mutatedResponse.status).toBe(401);
 
-      const wrongPurpose = await postEnvelope(
-        baseUrl,
-        keysDir,
-        makeEnvelope(capabilities, { event_id: 'wrong-purpose-key' }),
-        { signingPurpose: 'arc.terminal' },
-      );
-      expect(wrongPurpose.status).toBe(401);
-
       const mismatchedCapabilities = [
         capabilities.issue({
           purpose: 'worker', role: 'user', botName: 'pm-codex', chatId: 'other-chat', ttlMs: 60_000,
         }),
         capabilities.issue({
           purpose: 'worker', role: 'user', botName: 'other-bot', chatId: 'chat-1', ttlMs: 60_000,
-        }),
-        capabilities.issue({
-          purpose: 'arc', role: 'user', botName: 'pm-codex', chatId: 'chat-1', ttlMs: 60_000,
         }),
       ];
       for (const [index, authorizingCapability] of mismatchedCapabilities.entries()) {
@@ -373,15 +362,15 @@ describe('signed terminal callback route', () => {
     terminalStore.close();
   });
 
-  it('builds an ARC metadata-only wake with the fixed status-tool instruction', () => {
+  it('builds a Worker metadata-only wake with the fixed status-tool instruction', () => {
     const dir = tempDir('worker-events-prompt');
     provisionExecutionKeyPairs(join(dir, 'keys'));
     const capabilities = new ExecutionCapabilityService(join(dir, 'keys'));
     const prompt = buildTerminalWakePrompt(makeEnvelope(capabilities, {
-      purpose: 'arc.terminal',
-      payload: { run: { id: 'arc-1', stdout: 'DO_NOT_INCLUDE' } },
+      purpose: 'worker.terminal',
+      payload: { worker: { id: 'worker-1', stdout: 'DO_NOT_INCLUDE' } },
     }));
-    expect(prompt).toContain('arc_status');
+    expect(prompt).toContain('worker_status');
     expect(prompt).not.toContain('DO_NOT_INCLUDE');
   });
 });

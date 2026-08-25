@@ -22,9 +22,11 @@ import {
   EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH,
   EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH,
   inspectExecutionKeyDirectory,
+  EXECUTION_PUBLIC_KEY_MODES,
   provisionExecutionKeyPairs,
   type ExecutionCapabilityClaims,
 } from '../src/services/execution-capabilities.js';
+import { capabilityServers, loopbackProxyServers } from '../src/services/mcp-registry.js';
 
 const dirs: string[] = [];
 
@@ -114,7 +116,12 @@ describe('execution capability Ed25519 keys', () => {
     expect(second.ok).toBe(true);
     expect(second.trustModel).toBe('tofu-same-uid-scope-hygiene');
     expect(second.directory.mode).toBe(0o700);
-    expect(second.pairs).toHaveLength(4);
+    // Derived from the audience table rather than a fixed count, so registering
+    // a server adds its keypair here instead of failing this assertion.
+    expect(second.pairs.map((pair) => pair.name)).toEqual([
+      ...capabilityServers().map((server) => `${server.id}-capability`),
+      ...loopbackProxyServers().map((server) => `${server.id}-callback`),
+    ]);
     expect(second.pairs.every((pair) => pair.ok && pair.pairMatches)).toBe(true);
   });
 
@@ -128,7 +135,7 @@ describe('execution capability Ed25519 keys', () => {
     })).toThrowError(expect.objectContaining({ code: 'KEYS_UNAVAILABLE' }));
 
     const partial = keyDir();
-    unlinkSync(join(partial, 'arc-capability.pub'));
+    unlinkSync(join(partial, 'worker-callback.pub'));
     expect(() => provisionExecutionKeyPairs(partial)).toThrowError(
       expect.objectContaining({ code: 'INCOMPLETE_KEY_PAIR' }),
     );
@@ -145,6 +152,22 @@ describe('execution capability Ed25519 keys', () => {
     chmodSync(join(permissive, 'worker-capability.key'), 0o644);
     expect(() => new ExecutionCapabilityService(permissive).issue({
       purpose: 'worker', role: 'pm', botName: 'pm-codex', chatId: 'chat-1',
+    })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
+  });
+
+  it('accepts read-only public-key modes while keeping private keys at 0600', () => {
+    for (const mode of EXECUTION_PUBLIC_KEY_MODES) {
+      const dir = keyDir();
+      chmodSync(join(dir, 'worker-capability.pub'), mode);
+      const service = new ExecutionCapabilityService(dir);
+      expect(() => service.issue({
+        purpose: 'worker', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
+      })).not.toThrow();
+    }
+    const dir = keyDir();
+    chmodSync(join(dir, 'worker-capability.pub'), 0o666);
+    expect(() => new ExecutionCapabilityService(dir).issue({
+      purpose: 'worker', role: 'user', botName: 'pm-codex', chatId: 'chat-1',
     })).toThrowError(expect.objectContaining({ code: 'UNSAFE_KEY_PERMISSIONS' }));
   });
 
@@ -197,7 +220,7 @@ describe('execution capability Ed25519 keys', () => {
     });
 
     const nonRegular = keyDir();
-    const publicPath = join(nonRegular, 'arc-capability.pub');
+    const publicPath = join(nonRegular, 'worker-callback.pub');
     unlinkSync(publicPath);
     mkdirSync(publicPath, { mode: 0o700 });
     expect(() => provisionExecutionKeyPairs(nonRegular)).toThrowError(
@@ -224,7 +247,7 @@ describe('execution capability Ed25519 keys', () => {
     );
   });
 
-  it('keeps worker, ARC, callback, and W01-HMAC formats purpose-separated and enforces expiry', () => {
+  it('keeps Worker, callback, and W01-HMAC formats purpose-separated and enforces expiry', () => {
     const dir = keyDir();
     const service = new ExecutionCapabilityService(dir);
     const worker = service.issue({
@@ -256,7 +279,6 @@ describe('execution capability Ed25519 keys', () => {
       readFileSync(join(dir, 'worker-callback.key'), 'utf8'),
     ).toString('base64')}`;
     expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'worker.terminal')).not.toThrow();
-    expect(() => service.verifyTerminalCallbackSignature(raw, callbackSignature, 'arc.terminal')).toThrow();
   });
 
   it('enforces the 200/500 execution-principal wire limits before mint and during verification', () => {

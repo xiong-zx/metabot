@@ -37,7 +37,6 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     'packages/server/dist/index.js',
     'src/services/local-daemon-health.ts',
     'packages/worker-runner-mcp/dist/daemon-cli.js',
-    'packages/arc-mcp/dist/daemon-cli.js',
     'ecosystem.config.cjs',
     'ecosystem.core.config.cjs',
   ]) writeFileSync(join(runtime, path), '// fixture\n');
@@ -53,7 +52,7 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     "fs.appendFileSync(process.env.PM2_LOG, `${planOnly ? 'protected-plan' : 'protected-switch'} ${args.join(' ')} ${context}\\n`);",
     "if (planOnly) {",
     "  const root = value('--runtime');",
-    "  const scripts = { metabot: 'src/index.ts', 'metabot-worker-runnerd': 'packages/worker-runner-mcp/dist/daemon-cli.js', 'metabot-arcd': 'packages/arc-mcp/dist/daemon-cli.js', 'metabot-core': 'packages/server/dist/index.js' };",
+    "  const scripts = { metabot: 'src/index.ts', 'metabot-worker-runnerd': 'packages/worker-runner-mcp/dist/daemon-cli.js', 'metabot-core': 'packages/server/dist/index.js' };",
     "  const plan = Object.fromEntries(value('--apps').split(',').map((app) => [app, { cwd: root, script: require('node:path').join(root, scripts[app]), interpreter: 'node', interpreterArgs: [], envHashes: {} }]));",
     "  process.stdout.write(JSON.stringify(plan) + '\\n');",
     "} else if (process.env.FAKE_SWITCH_FAIL === 'true') process.exit(1);",
@@ -66,7 +65,7 @@ function fixture(): { runtime: string; bin: string; log: string; env: NodeJS.Pro
     '  if [[ "${FAKE_PM2_JLIST_FAIL:-}" == "true" ]]; then exit 1; fi',
     '  core=""',
     '  if [[ -n "${FAKE_CORE_RUNTIME:-}" ]]; then core=",{\\"name\\":\\"metabot-core\\",\\"pid\\":104,\\"pm2_env\\":{\\"status\\":\\"online\\",\\"pm_cwd\\":\\"$FAKE_CORE_RUNTIME\\",\\"pm_exec_path\\":\\"$FAKE_CORE_RUNTIME/packages/server/dist/index.js\\"}}"; fi',
-    '  printf \'[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}},{"name":"metabot-worker-runnerd","pid":102,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/worker-runner-mcp/dist/daemon-cli.js"}},{"name":"metabot-arcd","pid":103,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/arc-mcp/dist/daemon-cli.js"}}%s]\\n\' "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$core"',
+    '  printf \'[{"name":"metabot","pid":101,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/src/index.ts"}},{"name":"metabot-worker-runnerd","pid":102,"pm2_env":{"status":"online","pm_cwd":"%s","pm_exec_path":"%s/packages/worker-runner-mcp/dist/daemon-cli.js"}}%s]\\n\' "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$FAKE_RUNTIME" "$core"',
     'fi',
   ]);
   writeExecutable(join(fakeBin, 'node'), [
@@ -253,7 +252,6 @@ describe('metabot execution-daemon lifecycle', () => {
     expect(log).toContain('save --force');
     expect(log).toContain('stop metabot\n');
     expect(log).toContain('stop metabot-worker-runnerd\n');
-    expect(log).toContain('stop metabot-arcd\n');
   });
 
   it('deploy-runtime switches all sibling apps without delete/start/save in the old process', () => {
@@ -261,7 +259,7 @@ describe('metabot execution-daemon lifecycle', () => {
     const target = fixture();
     run(current, ['deploy-runtime', '--runtime', target.runtime, '--no-wait']);
     const log = readFileSync(current.log, 'utf8');
-    expect(log).toContain(`protected-switch --runtime ${realpathSync(target.runtime)} --apps metabot-worker-runnerd,metabot-arcd,metabot`);
+    expect(log).toContain(`protected-switch --runtime ${realpathSync(target.runtime)} --apps metabot-worker-runnerd,metabot`);
     expect(log).not.toContain('delete ');
     expect(log).not.toContain('start ');
     expect(log).not.toContain('save --force');
@@ -313,7 +311,7 @@ describe('metabot execution-daemon lifecycle', () => {
       FAKE_CORE_RUNTIME: owned.runtime,
     });
     expect(readFileSync(owned.log, 'utf8')).toContain(
-      `--apps metabot-worker-runnerd,metabot-arcd,metabot-core,metabot`,
+      `--apps metabot-worker-runnerd,metabot-core,metabot`,
     );
 
     const external = fixture();
@@ -322,7 +320,7 @@ describe('metabot execution-daemon lifecycle', () => {
       FAKE_CORE_RUNTIME: '/srv/external-core',
     });
     expect(readFileSync(external.log, 'utf8')).toContain(
-      `--apps metabot-worker-runnerd,metabot-arcd,metabot`,
+      `--apps metabot-worker-runnerd,metabot`,
     );
     expect(readFileSync(external.log, 'utf8')).not.toContain(',metabot-core,');
   }, 15_000);
@@ -334,14 +332,14 @@ describe('metabot execution-daemon lifecycle', () => {
     const production = readFileSync(join(REPO_ROOT, 'docs/deployment/production.md'), 'utf8');
     expect(health).toContain('StreamableHTTPClientTransport');
     expect(health).toContain("name: 'worker_list'");
-    expect(health).toContain("name: 'arc_run_list'");
+    expect(health).not.toContain("name: 'arc_run_list'");
     expect(health).not.toMatch(/@xvirobotics\/(?:worker-runner-mcp|arc-mcp|arc-worker-runner-adapter|arc-researchclaw-adapter)/);
-    for (const workspace of ['worker-runner-mcp', 'arc-mcp']) {
+    for (const workspace of ['worker-runner-mcp']) {
       expect(cli).toContain(`npm run build -w @xvirobotics/${workspace}`);
     }
-    expect(uninstall).toContain('for app in metabot metabot-worker-runnerd metabot-arcd');
+    expect(uninstall).toContain('for app in metabot metabot-worker-runnerd');
     expect(uninstall).toContain('pm2_app_owned_by_runtime metabot-core');
     expect(uninstall).toContain('Leaving metabot-core untouched');
-    expect(production).toContain('pm2 delete metabot-worker-runnerd metabot-arcd');
+    expect(production).toContain('pm2 delete metabot-worker-runnerd');
   });
 });

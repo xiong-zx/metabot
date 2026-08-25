@@ -368,7 +368,7 @@ describe('bounded selection is explicit on the command line', () => {
 
 describe('runtime refuses a bound it cannot honour', () => {
   const env = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
-    METABOT_ARC_RELEASE_ROOT: '/opt/research-stack/autoresearchclaw',
+    ARC_MCP_RELEASE_ROOT: '/opt/research-stack/autoresearchclaw',
     ...overrides,
   });
 
@@ -385,10 +385,10 @@ describe('runtime refuses a bound it cannot honour', () => {
   it('refuses to satisfy a bounded request with a fixture runner module', async () => {
     await expect(
       resolveConfiguredRunner(
-        { METABOT_ARC_RUNNER_MODULE: '/tmp/fixture-runner.mjs' },
+        { ARC_MCP_RUNNER_MODULE: '/tmp/fixture-runner.mjs' },
         { specName: 'hard-budget-candidate', policyId: POLICY },
       ),
-    ).rejects.toThrow(/METABOT_ARC_RUNNER_MODULE cannot be bounded/i);
+    ).rejects.toThrow(/ARC_MCP_RUNNER_MODULE cannot be bounded/i);
   });
 
   it('leaves the ordinary unbounded daemon exactly as it was', async () => {

@@ -69,6 +69,10 @@ import {
   executionFailureMetadata,
   type ExecutionFailureMetadata,
 } from '../services/execution-failure.js';
+import {
+  resolveExternalMcpServers,
+  type ResolvedExternalMcpServer,
+} from '../mcp/external-server.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -314,6 +318,8 @@ export class MessageBridge {
    * the PERSISTENT_EXECUTOR env feature flag is on. One pool per bot.
    */
   private persistentRegistry: ExecutorRegistry | null = null;
+  /** Product-neutral, independently resolved MCP entries for this bot. */
+  private readonly externalMcpServers: ResolvedExternalMcpServer[];
   /**
    * Stage 3 — track which persistent executors already have a spontaneous-
    * activity subscription, so we don't double-subscribe across acquisitions.
@@ -411,6 +417,14 @@ export class MessageBridge {
     this.executor = this.engine.createExecutor();
     const defaultEngineName = resolveEngineName(config);
     this.engineCache.set(defaultEngineName, { engine: this.engine, executor: this.executor });
+    const externalMcp = resolveExternalMcpServers(config.mcpServers);
+    this.externalMcpServers = externalMcp.servers;
+    for (const failure of externalMcp.failures) {
+      this.logger.warn(
+        { server: failure.server, reason: failure.reason },
+        'External MCP server omitted; other MCP products remain available',
+      );
+    }
     this.sessionManager = new SessionManager(config.claude.defaultWorkingDirectory, logger, config.name);
     this.outputsManager = new OutputsManager(config.claude.outputsBaseDir, logger);
     if (config.rulesPack) {
@@ -944,6 +958,7 @@ export class MessageBridge {
         defaultMaxTurns: this.config.claude.maxTurns,
         defaultMaxBudgetUsd: this.config.claude.maxBudgetUsd,
         backend: this.config.claude.backend,
+        mcpServers: this.externalMcpServers,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -1718,7 +1733,6 @@ export class MessageBridge {
       botName: this.config.name,
       chatId,
       logger: this.logger,
-      ...(suppliedRulesPack?.dispatch ? { excludedServerIds: ['arc'] } : {}),
     });
     let preparedRulesPack: Awaited<ReturnType<MetaBotRulesPackRuntime['prepareTurn']>> | undefined;
     try {
@@ -1913,6 +1927,7 @@ export class MessageBridge {
         allowedTools: opts.allowedTools,
         env: executionEnv,
         mcpEntries: executionMcp?.entries,
+        mcpServers: this.externalMcpServers,
         ...(preparedRulesPack ? {
           rulesPack: {
             packDigest: preparedRulesPack.packDigest,

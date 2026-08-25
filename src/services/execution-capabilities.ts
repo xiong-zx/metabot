@@ -27,10 +27,14 @@ import {
   type RulesPackChildGrantV1,
   type RulesPackDispatchEnvelopeV1,
 } from '@metabot/rulespack';
-import { capabilityServers, loopbackProxyServers } from './mcp-registry.js';
+import {
+  assertDistinctMcpServers,
+  capabilityServers,
+  loopbackProxyServers,
+} from './mcp-registry.js';
 
 export type ExecutionCapabilityPurpose = string;
-export type TerminalCallbackPurpose = 'worker.terminal' | 'arc.terminal';
+export type TerminalCallbackPurpose = 'worker.terminal';
 export type ExecutionCapabilityRole = 'pm' | 'user';
 
 export const EXECUTION_CAPABILITY_TTL_MS = 60 * 60 * 1000;
@@ -49,6 +53,9 @@ const KEY_PREFIXES: readonly string[] = [
   ...loopbackProxyServers().map((server) => `${server.id}-callback`),
 ];
 type KeyPrefix = string;
+const PRIVATE_KEY_MODES = [0o600] as const;
+export const EXECUTION_PUBLIC_KEY_MODES = [0o400, 0o440, 0o444, 0o600, 0o640, 0o644] as const;
+const DIRECTORY_MODES = [0o700] as const;
 
 /**
  * Signed audience claim.
@@ -63,7 +70,6 @@ type KeyPrefix = string;
 export interface ExecutionCapabilityClaims {
   v: 1;
   purpose: ExecutionCapabilityPurpose;
-  aud?: string;
   role: ExecutionCapabilityRole;
   botName: string;
   chatId: string;
@@ -78,7 +84,7 @@ interface LocalLifecycleCapabilityClaims extends Omit<ExecutionCapabilityClaims,
 export function requiredCapabilityAudience(purpose: ExecutionCapabilityPurpose): string | undefined {
   const server = capabilityServers().find((entry) => entry.id === purpose);
   if (!server) throw new ExecutionCapabilityError(`Unknown execution capability purpose: ${purpose}`, 'UNKNOWN_PURPOSE');
-  return server.capabilityContract === 'v3-audience' ? server.audience : undefined;
+  return undefined;
 }
 
 export interface KeyFileDiagnostic {
@@ -132,13 +138,14 @@ export function resolveExecutionKeysDir(env: NodeJS.ProcessEnv = process.env): s
 
 /** Create all missing keypairs without ever replacing existing key material. */
 export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()): ExecutionKeyDirectoryDiagnostic {
+  assertDistinctMcpServers();
   const existingDirectory = lstatIfPresent(keysDir, 'key directory');
   if (existingDirectory) {
-    assertTrustedStat(existingDirectory, 0o700, 'key directory', 'directory');
+    assertTrustedStat(existingDirectory, DIRECTORY_MODES, 'key directory', 'directory');
   } else {
     mkdirSync(keysDir, { recursive: true, mode: 0o700 });
     chmodSync(keysDir, 0o700);
-    assertTrustedPath(keysDir, 0o700, 'key directory', 'directory');
+    assertTrustedPath(keysDir, DIRECTORY_MODES, 'key directory', 'directory');
   }
 
   for (const name of KEY_PREFIXES) {
@@ -148,9 +155,9 @@ export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()):
     const privateStat = lstatIfPresent(privatePath, `${name} private key`);
     const publicStat = lstatIfPresent(publicPath, `${name} public key`);
     const previousStat = lstatIfPresent(previousPath, `${name} previous public key`);
-    if (privateStat) assertTrustedStat(privateStat, 0o600, `${name} private key`, 'regular-file');
-    if (publicStat) assertTrustedStat(publicStat, 0o600, `${name} public key`, 'regular-file');
-    if (previousStat) assertTrustedStat(previousStat, 0o600, `${name} previous public key`, 'regular-file');
+    if (privateStat) assertTrustedStat(privateStat, PRIVATE_KEY_MODES, `${name} private key`, 'regular-file');
+    if (publicStat) assertTrustedStat(publicStat, EXECUTION_PUBLIC_KEY_MODES, `${name} public key`, 'regular-file');
+    if (previousStat) assertTrustedStat(previousStat, EXECUTION_PUBLIC_KEY_MODES, `${name} previous public key`, 'regular-file');
     const privateExists = !!privateStat;
     const publicExists = !!publicStat;
     if (privateExists !== publicExists) {
@@ -170,8 +177,8 @@ export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()):
         mode: 0o600,
       });
     }
-    assertTrustedPath(privatePath, 0o600, `${name} private key`, 'regular-file');
-    assertTrustedPath(publicPath, 0o600, `${name} public key`, 'regular-file');
+    assertTrustedPath(privatePath, PRIVATE_KEY_MODES, `${name} private key`, 'regular-file');
+    assertTrustedPath(publicPath, EXECUTION_PUBLIC_KEY_MODES, `${name} public key`, 'regular-file');
     assertPairMatches(privatePath, publicPath, name);
   }
   assertDistinctKeyMaterial(keysDir);
@@ -181,43 +188,46 @@ export function provisionExecutionKeyPairs(keysDir = resolveExecutionKeysDir()):
 /**
  * Startup guard against cross-audience key reuse.
  *
- * If two audiences share a verification key, each one's verifier accepts the
- * other's signatures, and the audience claim is the only thing left separating
- * them. Independent rotation also becomes impossible. Refuse at startup rather
- * than discovering it when a token crosses.
+ * If two audiences share verification material, each one's verifier accepts the
+ * other's signatures and the audience claim becomes the only thing separating
+ * them — and one of the two may not even check it. Independent rotation also
+ * stops being possible: retiring one audience's key would silently retire the
+ * other's. Refuse at provisioning time rather than discovering it when a token
+ * crosses.
+ *
+ * Comparison is on the canonical SPKI DER encoding, so the same key stored with
+ * different PEM whitespace or line endings still collides.
  */
 export function assertDistinctKeyMaterial(keysDir = resolveExecutionKeysDir()): void {
   const owners = new Map<string, string>();
   for (const name of KEY_PREFIXES) {
-    const publicPath = join(keysDir, `${name}.pub`);
-    const previousPath = join(keysDir, `${name}.pub.prev`);
-    for (const candidate of [publicPath, previousPath]) {
+    for (const candidate of [join(keysDir, `${name}.pub`), join(keysDir, `${name}.pub.prev`)]) {
       if (!lstatIfPresent(candidate, `${name} verification key`)) continue;
-      const material = canonicalPublicKeyFingerprint(
-        readTrustedKeyFile(candidate, `${name} verification key`),
+      const fingerprint = canonicalPublicKeyFingerprint(
+        readTrustedKeyFile(candidate, `${name} verification key`, EXECUTION_PUBLIC_KEY_MODES),
         `${name} verification key`,
       );
-      const existing = owners.get(material);
+      const existing = owners.get(fingerprint);
       if (existing !== undefined && existing !== name) {
         throw new ExecutionCapabilityError(
           `Execution keys ${existing} and ${name} share verification material`,
           'CROSS_AUDIENCE_KEY_REUSE',
         );
       }
-      owners.set(material, name);
+      owners.set(fingerprint, name);
     }
   }
 }
 
 export function inspectExecutionKeyDirectory(keysDir = resolveExecutionKeysDir()): ExecutionKeyDirectoryDiagnostic {
-  const directory = inspectPath(keysDir, 0o700, 'directory');
+  const directory = inspectPath(keysDir, DIRECTORY_MODES, 'directory');
   const pairs = KEY_PREFIXES.map((name): KeyPairDiagnostic => {
     const privatePath = join(keysDir, `${name}.key`);
     const publicPath = join(keysDir, `${name}.pub`);
     const previousPath = join(keysDir, `${name}.pub.prev`);
-    const privateKey = inspectPath(privatePath, 0o600, 'regular-file');
-    const publicKey = inspectPath(publicPath, 0o600, 'regular-file');
-    const previousPublicKey = inspectPath(previousPath, 0o600, 'regular-file');
+    const privateKey = inspectPath(privatePath, PRIVATE_KEY_MODES, 'regular-file');
+    const publicKey = inspectPath(publicPath, EXECUTION_PUBLIC_KEY_MODES, 'regular-file');
+    const previousPublicKey = inspectPath(previousPath, EXECUTION_PUBLIC_KEY_MODES, 'regular-file');
     let pairMatches = false;
     let error: string | undefined;
     if (isSafeDiagnostic(directory) && isSafeDiagnostic(privateKey) && isSafeDiagnostic(publicKey)) {
@@ -275,11 +285,10 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
       throw new ExecutionCapabilityError('Capability ttlMs must be a positive integer', 'INVALID_TTL');
     }
-    const audience = requiredCapabilityAudience(input.purpose);
+    requiredCapabilityAudience(input.purpose);
     return this.signCapability({
       v: 1,
       purpose: input.purpose,
-      ...(audience ? { aud: audience } : {}),
       role: input.role,
       botName: requireClaim(input.botName, 'botName', EXECUTION_PRINCIPAL_BOT_NAME_MAX_LENGTH),
       chatId: requireClaim(input.chatId, 'chatId', EXECUTION_PRINCIPAL_CHAT_ID_MAX_LENGTH),
@@ -300,11 +309,10 @@ export class ExecutionCapabilityService {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || !Number.isSafeInteger(now + ttlMs)) {
       throw new ExecutionCapabilityError('Lifecycle capability ttlMs is invalid', 'INVALID_TTL');
     }
-    const audience = requiredCapabilityAudience(purpose);
+    requiredCapabilityAudience(purpose);
     return this.signCapability({
       v: 1,
       purpose,
-      ...(audience ? { aud: audience } : {}),
       role: 'admin',
       botName: 'metabot-local-lifecycle',
       chatId: 'local:daemon-lifecycle',
@@ -414,15 +422,6 @@ export class ExecutionCapabilityService {
     }
     // Checked before role and scope, so a token minted for another server is
     // refused on identity alone even though the same issuer signed it.
-    const audience = requiredCapabilityAudience(expected.purpose);
-    if (claims.aud !== audience) {
-      throw new ExecutionCapabilityError(
-        audience === undefined
-          ? 'Execution capability carries an unexpected audience'
-          : `Execution capability was not minted for audience ${audience}`,
-        'CAPABILITY_AUDIENCE_MISMATCH',
-      );
-    }
     if (
       claims.v !== 1
       || claims.purpose !== expected.purpose
@@ -461,25 +460,25 @@ export class ExecutionCapabilityService {
   private loadPrivateKey(prefix: KeyPrefix): string {
     const privatePath = join(this.keysDir, `${prefix}.key`);
     const publicPath = join(this.keysDir, `${prefix}.pub`);
-    assertTrustedPath(this.keysDir, 0o700, 'key directory', 'directory');
-    const privateKey = readTrustedKeyFile(privatePath, `${prefix} private key`);
-    const publicKey = readTrustedKeyFile(publicPath, `${prefix} public key`);
+    assertTrustedPath(this.keysDir, DIRECTORY_MODES, 'key directory', 'directory');
+    const privateKey = readTrustedKeyFile(privatePath, `${prefix} private key`, PRIVATE_KEY_MODES);
+    const publicKey = readTrustedKeyFile(publicPath, `${prefix} public key`, EXECUTION_PUBLIC_KEY_MODES);
     assertPairContents(privateKey, publicKey, prefix);
     return privateKey;
   }
 
   private loadPublicKeys(prefix: KeyPrefix): string[] {
-    assertTrustedPath(this.keysDir, 0o700, 'key directory', 'directory');
+    assertTrustedPath(this.keysDir, DIRECTORY_MODES, 'key directory', 'directory');
     const currentPath = join(this.keysDir, `${prefix}.pub`);
     const previousPath = join(this.keysDir, `${prefix}.pub.prev`);
     const previousStat = lstatIfPresent(previousPath, `${prefix} previous verification key`);
     if (previousStat) {
-      assertTrustedStat(previousStat, 0o600, `${prefix} previous verification key`, 'regular-file');
+      assertTrustedStat(previousStat, EXECUTION_PUBLIC_KEY_MODES, `${prefix} previous verification key`, 'regular-file');
     }
     return [
-      readTrustedKeyFile(currentPath, `${prefix} verification key`),
+      readTrustedKeyFile(currentPath, `${prefix} verification key`, EXECUTION_PUBLIC_KEY_MODES),
       ...(previousStat
-        ? [readTrustedKeyFile(previousPath, `${prefix} previous verification key`)]
+        ? [readTrustedKeyFile(previousPath, `${prefix} previous verification key`, EXECUTION_PUBLIC_KEY_MODES)]
         : []),
     ];
   }
@@ -496,7 +495,12 @@ function capabilityPrefix(purpose: ExecutionCapabilityPurpose): KeyPrefix {
 }
 
 function callbackPrefix(purpose: TerminalCallbackPurpose): KeyPrefix {
-  return purpose === 'worker.terminal' ? 'worker-callback' : 'arc-callback';
+  const id = purpose.slice(0, purpose.indexOf('.'));
+  const descriptor = loopbackProxyServers().find((entry) => entry.id === id);
+  if (!descriptor) {
+    throw new ExecutionCapabilityError(`Unknown terminal callback purpose: ${purpose}`, 'UNKNOWN_PURPOSE');
+  }
+  return `${descriptor.id}-callback`;
 }
 
 function canonicalPublicKeyFingerprint(value: string, label: string): string {
@@ -544,8 +548,8 @@ function isBase64Url(value: string): boolean {
 function assertPairMatches(privatePath: string, publicPath: string, name: string): void {
   try {
     assertPairContents(
-      readTrustedKeyFile(privatePath, `${name} private key`),
-      readTrustedKeyFile(publicPath, `${name} public key`),
+      readTrustedKeyFile(privatePath, `${name} private key`, PRIVATE_KEY_MODES),
+      readTrustedKeyFile(publicPath, `${name} public key`, EXECUTION_PUBLIC_KEY_MODES),
       name,
     );
   } catch (cause) {
@@ -576,7 +580,7 @@ type ExpectedNodeType = 'directory' | 'regular-file';
 
 function assertTrustedPath(
   path: string,
-  expectedMode: number,
+  allowedModes: readonly number[],
   label: string,
   expectedType: ExpectedNodeType,
 ): Stats {
@@ -589,13 +593,13 @@ function assertTrustedPath(
       'KEYS_UNAVAILABLE',
     );
   }
-  assertTrustedStat(stat, expectedMode, label, expectedType);
+  assertTrustedStat(stat, allowedModes, label, expectedType);
   return stat;
 }
 
 function assertTrustedStat(
   stat: Stats,
-  expectedMode: number,
+  allowedModes: readonly number[],
   label: string,
   expectedType: ExpectedNodeType,
 ): void {
@@ -607,9 +611,9 @@ function assertTrustedStat(
     );
   }
   const actualMode = stat.mode & 0o777;
-  if (actualMode !== expectedMode) {
+  if (!allowedModes.includes(actualMode)) {
     throw new ExecutionCapabilityError(
-      `Unsafe ${label} permissions: expected ${expectedMode.toString(8)}, got ${actualMode.toString(8)}`,
+      `Unsafe ${label} permissions: expected ${allowedModes.map((mode) => mode.toString(8)).join(' or ')}, got ${actualMode.toString(8)}`,
       'UNSAFE_KEY_PERMISSIONS',
     );
   }
@@ -624,7 +628,7 @@ function assertTrustedStat(
 
 function inspectPath(
   path: string,
-  expectedMode: number,
+  allowedModes: readonly number[],
   expectedType: ExpectedNodeType,
 ): KeyFileDiagnostic {
   try {
@@ -644,7 +648,7 @@ function inspectPath(
       mode,
       ownerUid: stat.uid,
       ownerMatches: currentUid === undefined || stat.uid === currentUid,
-      permissionsOk: mode === expectedMode,
+      permissionsOk: allowedModes.includes(mode),
     };
   } catch (cause) {
     if (isMissingPathError(cause)) return { path, exists: false };
@@ -659,15 +663,15 @@ function inspectPath(
   }
 }
 
-function readTrustedKeyFile(path: string, label: string): string {
-  const before = assertTrustedPath(path, 0o600, label, 'regular-file');
+function readTrustedKeyFile(path: string, label: string, allowedModes: readonly number[]): string {
+  const before = assertTrustedPath(path, allowedModes, label, 'regular-file');
   const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
   const nonBlock = typeof constants.O_NONBLOCK === 'number' ? constants.O_NONBLOCK : 0;
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
     const opened = fstatSync(descriptor);
-    assertTrustedStat(opened, 0o600, label, 'regular-file');
+    assertTrustedStat(opened, allowedModes, label, 'regular-file');
     if (before.dev !== opened.dev || before.ino !== opened.ino) {
       throw new ExecutionCapabilityError(
         `Unsafe ${label} path changed while opening`,

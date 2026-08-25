@@ -25,10 +25,10 @@ function trackedRoot(): string {
 function environment(dataDir: string, projectRoot: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    METABOT_ARC_DATA_DIR: dataDir,
-    METABOT_ARC_PROJECT_ROOTS: JSON.stringify([projectRoot]),
-    METABOT_ARC_RUNNER_MODULE: fakeRunnerModule,
-    METABOT_ARC_RELEASE_ROOT: '',
+    ARC_MCP_DATA_DIR: dataDir,
+    ARC_MCP_PROJECT_ROOTS: JSON.stringify([projectRoot]),
+    ARC_MCP_RUNNER_MODULE: fakeRunnerModule,
+    ARC_MCP_RELEASE_ROOT: '',
   };
 }
 

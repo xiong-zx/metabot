@@ -1,0 +1,49 @@
+{
+  "name": "@xvirobotics/metaclaw-mcp",
+  "version": "0.1.0",
+  "description": "Independent stdio MCP server for an official MetaClaw service: health, status, bounded inference, and read-only skills",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "metaclaw-mcp": "dist/bin.js",
+    "metaclaw-mcp-doctor": "dist/doctor-cli.js",
+    "metaclaw-release": "release-tools/metaclaw_release.py"
+  },
+  "files": [
+    "dist",
+    "release-tools/metaclaw_release.py",
+    "release-tools/profile_lib.py",
+    "release-tools/release_lib.py",
+    "release-tools/security-series.json",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -b --force",
+    "test": "vitest run && python3 -m unittest discover -s release-tools/tests -v",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ tests/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xvirobotics/mcp-connector": "0.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

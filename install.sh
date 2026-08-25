@@ -447,7 +447,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const keysDir = process.env.METABOT_KEYS_DIR;
-const names = ['worker-capability', 'arc-capability', 'worker-callback', 'arc-callback'];
+const names = ['worker-capability', 'worker-callback'];
 const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
 
 function nodeType(value) {
@@ -551,8 +551,7 @@ cd "$METABOT_HOME"
 #   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
 #   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
 #     workspaces — @xvirobotics/cli depends on the other three)
-#   - independent ARC MCP and Worker Runner MCP
-#     (built but not automatically started)
+#   - Worker Runner MCP
 # The Core workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
 # @xvirobotics/metabot-core-web-ui (React/Vite) — are included for the public
 # personal edition and excluded only from the legacy/private bridge flavor.
@@ -567,7 +566,6 @@ else
     --workspace=@xvirobotics/cli-core \
     --workspace=@xvirobotics/metamemory \
     --workspace=@xvirobotics/skill-hub \
-    --workspace=@xvirobotics/arc-mcp \
     --workspace=@xvirobotics/worker-runner-mcp \
     --include-workspace-root
   success "npm dependencies installed (CLI workspaces, no server/web-ui)"
@@ -1593,17 +1591,6 @@ else
   exit 1
 fi
 
-# ARC ships both an independent stdio binary and the authenticated daemon used
-# by the PM2 lifecycle below. The daemon receives its scope and runner adapter
-# only through trusted process configuration.
-info "Building independent ARC MCP..."
-if npm run build -w @xvirobotics/arc-mcp; then
-  success "ARC MCP build complete"
-else
-  error "ARC MCP build failed. MetaBot was not started."
-  exit 1
-fi
-
 # Worker Runner ships both an independent stdio binary and the authenticated
 # PM2 daemon. The daemon receives principal scope per signed MCP connection;
 # its state directory and completion callback remain trusted process config.
@@ -1618,10 +1605,9 @@ fi
 # Package refreshes never delete live PM2 registrations. Daemons are never
 # Bridge children, so an externally controlled protected deployment can update
 # them before replacing Bridge while preserving registration IDs.
-for daemon in worker arc; do
+for daemon in worker; do
   app="metabot-${daemon}"
   [[ "$daemon" == "worker" ]] && app="metabot-worker-runnerd"
-  [[ "$daemon" == "arc" ]] && app="metabot-arcd"
   if pm2 describe "$app" &>/dev/null 2>&1; then
     set +e
     METABOT_HOME="$METABOT_HOME" node --import tsx \
@@ -1708,7 +1694,6 @@ if [[ "$HAS_WECHAT_BOT" == "true" ]]; then
     warn "QR URL not yet available. Check logs to get it:"
     echo "    pm2 logs metabot --lines 30"
     echo "    pm2 logs metabot-worker-runnerd --lines 30"
-    echo "    pm2 logs metabot-arcd --lines 30"
   fi
 fi
 
@@ -1739,7 +1724,6 @@ echo ""
 echo -e "  ${BOLD}Commands:${NC}"
 echo "    pm2 logs metabot          # View MetaBot logs"
 echo "    pm2 logs metabot-worker-runnerd  # View Worker Runner daemon logs"
-echo "    pm2 logs metabot-arcd      # View ARC daemon logs"
 if [[ "$PERSONAL_LOCAL_CORE" == "true" ]]; then
   echo "    pm2 logs metabot-core     # View local Core logs"
   echo "    open http://localhost:9200 # Personal Web UI (or use your browser)"

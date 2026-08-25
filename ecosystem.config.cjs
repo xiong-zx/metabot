@@ -28,10 +28,6 @@ const workerEndpoint = configured(
   'METABOT_WORKER_DAEMON_URL',
   configured('METABOT_WORKER_LISTEN', 'http://127.0.0.1:9311/mcp'),
 );
-const arcEndpoint = configured(
-  'METABOT_ARC_DAEMON_URL',
-  configured('METABOT_ARC_LISTEN', 'http://127.0.0.1:9312/mcp'),
-);
 const callbackUrl = configured(
   'METABOT_TERMINAL_CALLBACK_URL',
   `http://127.0.0.1:${configured('API_PORT', '9100')}/api/worker-events`,
@@ -98,39 +94,6 @@ module.exports = {
           path.join(keysDir, 'worker-callback.key'),
         ),
         METABOT_WORKER_ENV_ALLOWLIST: workerAllowlist,
-        ...proxyEnv,
-      },
-    },
-    {
-      ...common,
-      name: 'metabot-arcd',
-      script: 'packages/arc-mcp/dist/daemon-cli.js',
-      error_file: path.join(__dirname, 'logs', 'arc-error.log'),
-      out_file: path.join(__dirname, 'logs', 'arc-out.log'),
-      env: {
-        NODE_ENV: 'production',
-        METABOT_HOME: __dirname,
-        METABOT_ARC_DATA_DIR: configured('METABOT_ARC_DATA_DIR', path.join(stateRoot, 'arc')),
-        METABOT_ARC_PROJECT_ROOTS: configured(
-          'METABOT_ARC_PROJECT_ROOTS',
-          JSON.stringify([path.join(stateRoot, 'arc-projects')]),
-        ),
-        METABOT_ARC_RELEASE_ROOT: configured(
-          'METABOT_ARC_RELEASE_ROOT',
-          path.join(os.homedir(), '.local', 'opt', 'research-stack', 'autoresearchclaw'),
-        ),
-        METABOT_ARC_OFFICIAL_HITL_MODE: configured('METABOT_ARC_OFFICIAL_HITL_MODE', 'gate-only'),
-        METABOT_ARC_OFFICIAL_ACP_AGENT: configured('METABOT_ARC_OFFICIAL_ACP_AGENT', 'codex'),
-        METABOT_ARC_LISTEN: arcEndpoint,
-        METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE: configured(
-          'METABOT_ARC_CAPABILITY_PUBLIC_KEY_FILE',
-          path.join(keysDir, 'arc-capability.pub'),
-        ),
-        METABOT_ARC_CALLBACK_URL: configured('METABOT_ARC_CALLBACK_URL', callbackUrl),
-        METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE: configured(
-          'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE',
-          path.join(keysDir, 'arc-callback.key'),
-        ),
         ...proxyEnv,
       },
     },

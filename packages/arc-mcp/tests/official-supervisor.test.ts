@@ -363,9 +363,9 @@ describe('production runtime wiring', () => {
     const projectRoot = projectDirectory(root);
     const runtime = await createArcRuntime({
       env: {
-        METABOT_ARC_DATA_DIR: path.join(root, 'data'),
-        METABOT_ARC_PROJECT_ROOTS: JSON.stringify([projectRoot]),
-        METABOT_ARC_RELEASE_ROOT: path.join(root, 'release'),
+        ARC_MCP_DATA_DIR: path.join(root, 'data'),
+        ARC_MCP_PROJECT_ROOTS: JSON.stringify([projectRoot]),
+        ARC_MCP_RELEASE_ROOT: path.join(root, 'release'),
       },
     });
     try {

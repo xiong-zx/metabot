@@ -16,10 +16,14 @@ import type { EngineName } from './types.js';
 import { buildExecutionMcpEntries, type McpEntry } from './mcp-entries.js';
 import {
   EXECUTION_MCP_SERVERS,
-  isLoopbackProxy,
   type AnyMcpServerDescriptor,
-  type LoopbackProxyDescriptor,
 } from '../services/mcp-registry.js';
+import { EXECUTION_CAPABILITY_TTL_MS } from '../services/execution-capabilities.js';
+import {
+  leaseCapabilityFile,
+  sweepExpiredCapabilityLeases,
+  type CapabilityLease,
+} from '../services/capability-lease.js';
 
 interface McpMaterializeLogger {
   warn(fields: Record<string, unknown>, message: string): void;
@@ -40,6 +44,8 @@ export interface MaterializeExecutionMcpInput {
   excludedServerIds?: readonly string[];
   /** Injectable only so tests can force a filename collision. */
   nonce?: () => string;
+  /** Injectable only so lease expiry and collision tests are deterministic. */
+  now?: () => number;
 }
 
 export interface MaterializedExecutionMcp {
@@ -128,42 +134,46 @@ function materializeAuthorizedExecutionMcp(
   // crash leftovers can never collide.
   const scopeName = `${safePrefix(input.botName)}-${scopeHash(input.botName, input.chatId)}-${(input.nonce ?? randomUUID)()}`;
   const capabilityFiles: Record<string, string> = {};
-  for (const server of servers) {
-    capabilityFiles[server.id] = path.join(scratchDir, `${scopeName}-${server.id}.token`);
-  }
-  const candidates = buildExecutionMcpEntries({
-    executionEnv,
-    bridgeEnv: input.bridgeEnv,
-    runtimeRoot,
-    capabilityFiles,
-    servers,
-  });
-  if (candidates.length === 0) return undefined;
-
-  const byName = new Map(servers.map((server) => [server.serverName, server]));
   const entries: McpEntry[] = [];
+  const leases: CapabilityLease[] = [];
   const leasedPaths: string[] = [];
   try {
-    // Each product server is independent, so one unusable entry must remove
-    // only itself. A missing ARC proxy can never disable Worker Runner, and a
-    // failed Worker lease can never disable ARC.
-    for (const entry of candidates) {
-      const server = byName.get(entry.name)!;
+    // Each registered server is independent, so one unusable entry removes
+    // only itself without disabling the engine session.
+    for (const server of servers) {
+      let lease: CapabilityLease | undefined;
       try {
+        lease = leaseCapabilityFile({
+          runtimeRoot,
+          audience: server.leaseNamespace,
+          scope: `${input.botName}\0${input.chatId}\0${scopeName}`,
+          token: executionEnv[server.capabilityEnvVar]!,
+          expiresAt: (input.now ?? Date.now)() + EXECUTION_CAPABILITY_TTL_MS,
+          nonce: input.nonce,
+        });
+        capabilityFiles[server.id] = lease.path;
+        const [entry] = buildExecutionMcpEntries({
+          executionEnv,
+          bridgeEnv: input.bridgeEnv,
+          runtimeRoot,
+          capabilityFiles,
+          servers: [server],
+        });
+        if (!entry) throw new Error('MCP entry configuration is incomplete');
         assertConfinedExecutionEntry(entry, runtimeRoot);
-        leasePrivateFile(capabilityFiles[server.id]!, executionEnv[server.capabilityEnvVar]!);
-        leasedPaths.push(capabilityFiles[server.id]!);
+        leases.push(lease);
+        entries.push(entry);
       } catch (error) {
+        lease?.release();
         input.logger.warn(
-          { engine: input.engineName, server: entry.name, reason: errorMessage(error) },
+          { engine: input.engineName, server: server.serverName, reason: errorMessage(error) },
           'Execution MCP entry omitted; other external tools stay available',
         );
         continue;
       }
-      entries.push(entry);
     }
     if (entries.length === 0) {
-      for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+      for (const lease of leases) lease.release();
       return undefined;
     }
 
@@ -209,10 +219,12 @@ function materializeAuthorizedExecutionMcp(
         if (cleaned) return;
         cleaned = true;
         for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+        for (const lease of leases) lease.release();
       },
     };
   } catch (error) {
     for (const filePath of leasedPaths) releasePrivateFile(filePath, input.logger);
+    for (const lease of leases) lease.release();
     throw error;
   }
 }
@@ -235,11 +247,12 @@ export function sweepExpiredCapabilityFiles(
   let kept = 0;
   let scratchDir: string;
   try {
-    scratchDir = path.join(canonicalRuntimeRoot(runtimeRoot), ...CAPABILITY_SCRATCH_SEGMENTS);
+    const canonical = sweepExpiredCapabilityLeases(runtimeRoot, { now: options.now });
+    scratchDir = canonical.directory;
+    removed.push(...canonical.removed.map((name) => path.join(scratchDir, name)));
   } catch {
     return { removed, kept };
   }
-  if (!existsSync(scratchDir)) return { removed, kept };
   const cutoff = (options.now ?? Date.now()) - (options.maxAgeMs ?? CAPABILITY_SWEEP_MAX_AGE_MS);
   let names: string[];
   try {
@@ -249,6 +262,10 @@ export function sweepExpiredCapabilityFiles(
     return { removed, kept };
   }
   for (const name of names) {
+    if (/^scope-[0-9a-f]{24}-[A-Za-z0-9_]{1,64}-[1-9][0-9]*-[0-9a-f-]{36}\.token$/.test(name)) {
+      kept += 1;
+      continue;
+    }
     const candidate = path.join(scratchDir, name);
     try {
       const info = lstatSync(candidate);
@@ -304,8 +321,7 @@ function logEndpointRefusals(
   servers: readonly AnyMcpServerDescriptor[],
 ): void {
   for (const server of servers) {
-    if (!isLoopbackProxy(server)) continue;
-    const endpoint = input.bridgeEnv[(server as LoopbackProxyDescriptor).endpointEnvVar];
+    const endpoint = input.bridgeEnv[server.endpointEnvVar];
     if (!hasValue(endpoint)) {
       input.logger.warn(
         { engine: input.engineName, purpose: server.id, reason: 'daemon endpoint is not configured' },

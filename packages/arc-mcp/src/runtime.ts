@@ -4,8 +4,6 @@ import { pathToFileURL } from 'node:url';
 import { ArcArtifactStore } from './artifact-store.js';
 import { ArcCoordinator } from './coordinator.js';
 import { ArcError } from './errors.js';
-import { readArcPrivateKeyFile } from './local-auth.js';
-import { ArcTerminalNotifierService, HttpArcTerminalNotifier } from './notifier.js';
 import { OfficialArcDriver, selectBoundedRuntime } from './official-driver.js';
 import { OfficialArcProcessSupervisor } from './official-supervisor.js';
 import type { ArcRunner } from './runner.js';
@@ -17,7 +15,6 @@ type RunnerModule = { createArcRunner?: () => ArcRunner | Promise<ArcRunner> };
 export interface ArcRuntime {
   artifacts: ArcArtifactStore;
   coordinator: ArcCoordinator;
-  notifications?: ArcTerminalNotifierService;
   runner: ArcRunner;
   scope: ArcProjectScope;
   store: ArcRunStore;
@@ -84,33 +81,14 @@ export async function createArcRuntime(options: CreateArcRuntimeOptions = {}): P
   const artifacts = new ArcArtifactStore();
   const scope = new ArcProjectScope(artifacts, {
     allowedProjectRoots: configuredProjectRoots(env),
-    ...(env.METABOT_ARC_PROJECT_ID?.trim() ? { fixedProjectId: env.METABOT_ARC_PROJECT_ID.trim() } : {}),
+    ...(env.ARC_MCP_PROJECT_ID?.trim() ? { fixedProjectId: env.ARC_MCP_PROJECT_ID.trim() } : {}),
   });
-  const store = new ArcRunStore(requiredEnv(env, 'METABOT_ARC_DATA_DIR'));
+  const store = new ArcRunStore(requiredEnv(env, 'ARC_MCP_DATA_DIR'));
   try {
     const runner = options.runner ?? (await resolveConfiguredRunner(env, options.bounded));
     assertRunner(runner);
     const coordinator = new ArcCoordinator(store, artifacts, runner, { scope });
-    const callbackUrl = env.METABOT_ARC_CALLBACK_URL?.trim();
-    const notifications = callbackUrl
-      ? new ArcTerminalNotifierService(
-          store,
-          new HttpArcTerminalNotifier({
-            url: callbackUrl,
-            signingKey: readArcPrivateKeyFile(
-              requiredEnv(env, 'METABOT_ARC_CALLBACK_PRIVATE_KEY_FILE'),
-              'ARC callback private key',
-            ),
-            timeoutMs: integerEnv(env, 'METABOT_ARC_CALLBACK_TIMEOUT_MS', 30_000),
-          }),
-          {
-            pollIntervalMs: integerEnv(env, 'METABOT_ARC_NOTIFY_POLL_MS', 250),
-            retryInitialMs: integerEnv(env, 'METABOT_ARC_NOTIFY_RETRY_INITIAL_MS', 1_000),
-            retryMaxMs: integerEnv(env, 'METABOT_ARC_NOTIFY_RETRY_MAX_MS', 60_000),
-          },
-        )
-      : undefined;
-    return { artifacts, coordinator, ...(notifications ? { notifications } : {}), runner, scope, store };
+    return { artifacts, coordinator, runner, scope, store };
   } catch (error) {
     store.close();
     throw error;
@@ -118,18 +96,18 @@ export async function createArcRuntime(options: CreateArcRuntimeOptions = {}): P
 }
 
 export function configuredProjectRoots(env: NodeJS.ProcessEnv): string[] {
-  const raw = env.METABOT_ARC_PROJECT_ROOTS?.trim();
+  const raw = env.ARC_MCP_PROJECT_ROOTS?.trim();
   if (!raw) {
-    throw new ArcError('scope_not_configured', 'METABOT_ARC_PROJECT_ROOTS must be a JSON array of trusted project roots');
+    throw new ArcError('scope_not_configured', 'ARC_MCP_PROJECT_ROOTS must be a JSON array of trusted project roots');
   }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch (error) {
-    throw new ArcError('scope_not_configured', 'METABOT_ARC_PROJECT_ROOTS is not valid JSON', { cause: error });
+    throw new ArcError('scope_not_configured', 'ARC_MCP_PROJECT_ROOTS is not valid JSON', { cause: error });
   }
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new ArcError('scope_not_configured', 'METABOT_ARC_PROJECT_ROOTS must contain only paths');
+    throw new ArcError('scope_not_configured', 'ARC_MCP_PROJECT_ROOTS must contain only paths');
   }
   return value;
 }
@@ -175,12 +153,12 @@ export async function resolveConfiguredRunner(
   env: NodeJS.ProcessEnv,
   bounded?: BoundedRuntimeRequest,
 ): Promise<ArcRunner> {
-  const releaseRoot = env.METABOT_ARC_RELEASE_ROOT?.trim();
-  const runnerModule = env.METABOT_ARC_RUNNER_MODULE?.trim();
+  const releaseRoot = env.ARC_MCP_RELEASE_ROOT?.trim();
+  const runnerModule = env.ARC_MCP_RUNNER_MODULE?.trim();
   if (releaseRoot && runnerModule) {
     throw new ArcError(
       'runner_unconfigured',
-      'Set either METABOT_ARC_RELEASE_ROOT or METABOT_ARC_RUNNER_MODULE, not both',
+      'Set either ARC_MCP_RELEASE_ROOT or ARC_MCP_RUNNER_MODULE, not both',
     );
   }
   if (releaseRoot) {
@@ -192,19 +170,19 @@ export async function resolveConfiguredRunner(
       releaseRoot: path.resolve(releaseRoot),
       ...(selection ? { spec: selection.spec, bounded: selection.bounded } : {}),
       supervisor: new OfficialArcProcessSupervisor({
-        ...(env.METABOT_ARC_OFFICIAL_CONFIG_FILE?.trim()
-          ? { defaultConfigPath: env.METABOT_ARC_OFFICIAL_CONFIG_FILE.trim() }
+        ...(env.ARC_MCP_OFFICIAL_CONFIG_FILE?.trim()
+          ? { defaultConfigPath: env.ARC_MCP_OFFICIAL_CONFIG_FILE.trim() }
           : {}),
-        ...(env.METABOT_ARC_OFFICIAL_HITL_MODE?.trim()
-          ? { defaultHitlMode: env.METABOT_ARC_OFFICIAL_HITL_MODE.trim() }
+        ...(env.ARC_MCP_OFFICIAL_HITL_MODE?.trim()
+          ? { defaultHitlMode: env.ARC_MCP_OFFICIAL_HITL_MODE.trim() }
           : {}),
-        ...(env.METABOT_ARC_OFFICIAL_ACP_AGENT?.trim()
-          ? { acpAgent: env.METABOT_ARC_OFFICIAL_ACP_AGENT.trim() }
+        ...(env.ARC_MCP_OFFICIAL_ACP_AGENT?.trim()
+          ? { acpAgent: env.ARC_MCP_OFFICIAL_ACP_AGENT.trim() }
           : {}),
-        ...(env.METABOT_ARC_OFFICIAL_ACPX_COMMAND?.trim()
-          ? { acpxCommand: env.METABOT_ARC_OFFICIAL_ACPX_COMMAND.trim() }
+        ...(env.ARC_MCP_OFFICIAL_ACPX_COMMAND?.trim()
+          ? { acpxCommand: env.ARC_MCP_OFFICIAL_ACPX_COMMAND.trim() }
           : {}),
-        pollIntervalMs: integerEnv(env, 'METABOT_ARC_OFFICIAL_POLL_MS', 1_000),
+        pollIntervalMs: integerEnv(env, 'ARC_MCP_OFFICIAL_POLL_MS', 1_000),
       }),
     });
   }
@@ -214,14 +192,14 @@ export async function resolveConfiguredRunner(
     if (bounded) {
       throw new ArcError(
         'runner_unconfigured',
-        'A bounded run must execute a sealed official release; METABOT_ARC_RUNNER_MODULE cannot be bounded',
+        'A bounded run must execute a sealed official release; ARC_MCP_RUNNER_MODULE cannot be bounded',
       );
     }
     return loadRunner(runnerModule);
   }
   throw new ArcError(
     'runner_unconfigured',
-    'METABOT_ARC_RELEASE_ROOT is required (or METABOT_ARC_RUNNER_MODULE for a pinned fixture runner)',
+    'ARC_MCP_RELEASE_ROOT is required (or ARC_MCP_RUNNER_MODULE for a pinned fixture runner)',
   );
 }
 

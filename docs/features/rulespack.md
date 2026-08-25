@@ -248,11 +248,10 @@ Worker/task ID in the independent worker-surface database. Codex injects the
 policy through stdin; Claude uses its system-prompt channel. Kimi jobs carrying
 a grant are rejected.
 
-Native `metabot-arcd`/official AutoResearchClaw execution does not yet have a
-verified Codex stdin boundary for received exact dispatch Rules. The native ARC
-MCP tool is therefore omitted from a turn carrying a received dispatch. Only
-ARC work explicitly executed through Worker Runner's `executionKind: arc` uses
-this descendant contract.
+The independently installed ARC MCP is an external product and never receives
+a MetaBot capability or RulesPack child grant. The calling Codex or Claude turn
+still receives its compiled RulesPack normally. Only detached ARC work routed
+through Worker Runner's `executionKind: arc` uses the signed descendant grant.
 Savio must use Savio-local files/Memory plus authenticated received Rules; it
 never opens iMac MetaMemory.
 

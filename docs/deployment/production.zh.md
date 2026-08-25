@@ -101,7 +101,6 @@ metabot doctor
 ```bash
 metabot restart --request-id <稳定ID> --wait --json
 metabot restart --daemon worker
-metabot restart --daemon arc
 metabot restart --daemon worker --force
 ```
 
@@ -135,7 +134,7 @@ Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 回退到尚未包含执行守护进程的版本时，还要删除已保存的 PM2 条目：
 
 ```bash
-pm2 delete metabot-worker-runnerd metabot-arcd
+pm2 delete metabot-worker-runnerd
 pm2 save
 ```
 

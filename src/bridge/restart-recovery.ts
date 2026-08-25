@@ -301,10 +301,7 @@ async function checkRestartStartupHealth(record: RestartRequestRecord): Promise<
     });
     if (!response.ok) throw new Error(`Bridge health returned HTTP ${response.status}`);
 
-    await Promise.all([
-      withTimeout(probeLocalDaemon('worker'), PROCESS_TIMEOUT_MS, 'Worker Runner health timed out'),
-      withTimeout(probeLocalDaemon('arc'), PROCESS_TIMEOUT_MS, 'ARC health timed out'),
-    ]);
+    await withTimeout(probeLocalDaemon('worker'), PROCESS_TIMEOUT_MS, 'Worker Runner health timed out');
 
     if (record.targetApps.includes('metabot-core')) {
       const corePort = positiveInteger(process.env.METABOT_CORE_PORT, 9200);

@@ -1,0 +1,10 @@
+{
+  "name": "zotero",
+  "enabled": true,
+  "command": "zotero-mcp",
+  "args": [],
+  "env": {
+    "ZOTERO_LOCAL": "true"
+  },
+  "approvalMode": "writes"
+}

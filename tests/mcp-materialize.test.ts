@@ -31,15 +31,13 @@ afterEach(() => {
  * A materialized entry must name a proxy that really exists inside the runtime
  * root, so the fixture installs the same executables an install would.
  */
-function runtimeRoot(proxies = ['metabot-worker-runner-proxy', 'metabot-arc-proxy']): string {
+function runtimeRoot(proxies = ['metabot-worker-runner-proxy']): string {
   // Canonical, because materialization canonicalizes the runtime root and macOS
   // reaches the temp directory through the /var -> /private/var symlink.
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'metabot-mcp-runtime-')));
   roots.push(root);
-  for (const proxy of proxies) {
-    const script = proxy === 'metabot-worker-runner-proxy'
-      ? path.join(root, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js')
-      : path.join(root, 'packages', 'arc-mcp', 'dist', 'proxy-cli.js');
+  for (const _proxy of proxies) {
+    const script = path.join(root, 'packages', 'worker-runner-mcp', 'dist', 'proxy-cli.js');
     mkdirSync(path.dirname(script), { recursive: true });
     writeFileSync(script, '#!/usr/bin/env node\n', { encoding: 'utf8', mode: 0o755 });
   }
@@ -52,11 +50,9 @@ function input(root: string, patch: Record<string, unknown> = {}) {
       METABOT_BOT_NAME: 'pm-codex',
       METABOT_CHAT_ID: 'oc-user',
       METABOT_WORKER_CAPABILITY: 'WORKER_TOKEN_SENTINEL',
-      METABOT_ARC_CAPABILITY: 'ARC_TOKEN_SENTINEL',
     },
     bridgeEnv: {
       METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp',
-      METABOT_ARC_DAEMON_URL: 'http://127.0.0.1:9312/mcp',
     },
     runtimeRoot: root,
     engineName: 'codex' as const,
@@ -71,16 +67,13 @@ describe('materializeExecutionMcp', () => {
   it('writes only 0600 token files under a 0700 runtime scratch directory and cleans them', () => {
     const root = runtimeRoot();
     const materialized = materializeExecutionMcp(input(root));
-    expect(materialized?.entries.map((entry) => entry.name)).toEqual(['metabot-worker', 'metabot-arc']);
+    expect(materialized?.entries.map((entry) => entry.name)).toEqual(['metabot-worker']);
 
     const tokenPaths = materialized!.entries.map((entry) => Object.values(entry.env).find((value) => value.endsWith('.token'))!);
     const scratchDir = path.dirname(tokenPaths[0]);
     expect(lstatSync(scratchDir).mode & 0o777).toBe(0o700);
-    expect(tokenPaths.map((file) => lstatSync(file).mode & 0o777)).toEqual([0o600, 0o600]);
-    expect(tokenPaths.map((file) => readFileSync(file, 'utf8'))).toEqual([
-      'WORKER_TOKEN_SENTINEL',
-      'ARC_TOKEN_SENTINEL',
-    ]);
+    expect(tokenPaths.map((file) => lstatSync(file).mode & 0o777)).toEqual([0o600]);
+    expect(tokenPaths.map((file) => readFileSync(file, 'utf8'))).toEqual(['WORKER_TOKEN_SENTINEL']);
     expect(JSON.stringify(materialized!.entries)).not.toContain('TOKEN_SENTINEL');
 
     materialized!.cleanup();
@@ -88,17 +81,15 @@ describe('materializeExecutionMcp', () => {
     expect(tokenPaths.every((file) => !existsSync(file))).toBe(true);
   });
 
-  it('leases a hidden 0600 Worker grant companion and can omit native ARC for a dispatched turn', () => {
+  it('leases a hidden 0600 Worker RulesPack grant companion', () => {
     const root = runtimeRoot();
-    const materialized = materializeExecutionMcp(input(root, { excludedServerIds: ['arc'] }))!;
-    expect(materialized.entries.map((entry) => entry.name)).toEqual(['metabot-worker']);
+    const materialized = materializeExecutionMcp(input(root))!;
     materialized.attachRulesPackChildGrant('{"schemaVersion":1,"grantId":"grant-sentinel"}');
     const entry = materialized.entries[0];
     const grantPath = entry.env.METABOT_WORKER_PROXY_RULESPACK_GRANT_FILE;
     expect(grantPath).toMatch(/worker-rulespack-grant\.json$/u);
     expect(lstatSync(grantPath).mode & 0o777).toBe(0o600);
     expect(readFileSync(grantPath, 'utf8')).toContain('grant-sentinel');
-    expect(entry.env).not.toHaveProperty('METABOT_ARC_PROXY_CAPABILITY_FILE');
     materialized.cleanup();
     expect(existsSync(grantPath)).toBe(false);
   });
@@ -145,13 +136,14 @@ describe('materializeExecutionMcp', () => {
         },
         bridgeEnv: { METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp' },
         nonce: () => 'fixed-nonce',
+        now: () => 1_000,
       }));
 
     const first = collide()!;
     expect(collide()).toBeUndefined();
     expect(readFileSync(first.entries[0].env.METABOT_WORKER_PROXY_CAPABILITY_FILE, 'utf8')).toBe('worker-token');
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ server: 'metabot-worker', reason: expect.stringMatching(/already leased/i) }),
+      expect.objectContaining({ server: 'metabot-worker', reason: expect.stringMatching(/already exists|EEXIST/i) }),
       expect.stringContaining('other external tools stay available'),
     );
     first.cleanup();
@@ -161,7 +153,7 @@ describe('materializeExecutionMcp', () => {
     const root = runtimeRoot();
     const live = materializeExecutionMcp(input(root))!;
     const scratchDir = path.join(root, 'data', 'mcp-capabilities');
-    const leftover = path.join(scratchDir, 'crashed-turn-arc.token');
+    const leftover = path.join(scratchDir, 'crashed-turn-worker.token');
     writeFileSync(leftover, 'orphaned-token', { encoding: 'utf8', mode: 0o600 });
     const old = Date.now() - 3 * 60 * 60 * 1000;
     utimesSync(leftover, old / 1000, old / 1000);
@@ -191,12 +183,12 @@ describe('materializeExecutionMcp', () => {
     const config = JSON.parse(configText);
 
     expect(lstatSync(configPath).mode & 0o777).toBe(0o600);
-    expect(Object.keys(config.mcpServers)).toEqual(['metabot-worker', 'metabot-arc']);
+    expect(Object.keys(config.mcpServers)).toEqual(['metabot-worker']);
     expect(configText).not.toContain('TOKEN_SENTINEL');
     expect(configText.toLowerCase()).not.toContain('strict');
     expect(config.mcpServers['metabot-worker'].env).toHaveProperty(
       'METABOT_WORKER_PROXY_CAPABILITY_FILE',
-      expect.stringMatching(/worker\.token$/),
+      expect.stringMatching(/worker-.*\.token$/),
     );
     materialized.cleanup();
     expect(existsSync(configPath)).toBe(false);

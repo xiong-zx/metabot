@@ -27,7 +27,7 @@ let paths: SealedTreePaths;
 const SYSTEM_PYTHON = probeSystemPython();
 
 function probeSystemPython(): string | null {
-  const candidate = process.env.METABOT_ARC_TEST_PYTHON ?? 'python3';
+  const candidate = process.env.ARC_MCP_TEST_PYTHON ?? 'python3';
   const found = spawnSync('command', ['-v', candidate], { encoding: 'utf8', shell: true });
   const resolved = (found.stdout ?? '').trim().split('\n')[0]?.trim();
   if (found.status !== 0 || !resolved) return null;

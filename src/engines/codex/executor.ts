@@ -6,6 +6,11 @@ import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../
 import { removeMetaBotRuntimeSecrets, stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import {
+  buildCodexMcpConfigArgs,
+  externalMcpEnvironment,
+  type ResolvedExternalMcpServer,
+} from '../../mcp/external-server.js';
 import type {
   ApiContext,
   ExecutionHandle,
@@ -275,6 +280,7 @@ export function buildCodexArgs(
   model: string | undefined,
   reasoningEffort?: CodexReasoningEffort,
   mcpEntries: readonly McpEntry[] = [],
+  mcpServers: readonly ResolvedExternalMcpServer[] = [],
 ): string[] {
   const args: string[] = [];
 
@@ -302,6 +308,7 @@ export function buildCodexArgs(
       args.push('-c', `mcp_servers.${entry.name}.env.${key}=${tomlString(value)}`);
     }
   }
+  args.push(...buildCodexMcpConfigArgs(mcpServers));
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -330,6 +337,7 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
+    const mcpServers = options.mcpServers ?? [];
     const args = buildCodexArgs(
       codexConfig,
       cwd,
@@ -337,6 +345,7 @@ export class CodexExecutor {
       model,
       options.reasoningEffort,
       options.mcpEntries,
+      mcpServers,
     );
     const startTime = Date.now();
     let child: ChildProcess | undefined;
@@ -432,7 +441,11 @@ export class CodexExecutor {
     try {
       child = spawn(executable, args, {
         cwd,
-        env: buildCodexEnv(codexConfig, { ...process.env, ...(options.env ?? {}) }),
+        env: buildCodexEnv(codexConfig, {
+          ...process.env,
+          ...(options.env ?? {}),
+          ...externalMcpEnvironment(mcpServers),
+        }),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (err: any) {

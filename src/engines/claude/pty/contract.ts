@@ -105,6 +105,8 @@ export interface PtyQueryOptions {
   env?: NodeJS.ProcessEnv;
   /** Private additive MCP config passed as `--mcp-config`; never strict. */
   mcpConfigPath?: string;
+  /** Additional additive MCP configs passed under the same CLI flag. */
+  additionalMcpConfigPaths?: string[];
   /** Path to the claude executable (defaults to resolveClaudePath()). */
   pathToClaudeExecutable?: string;
   /** PTY geometry. Defaults: 120x40. */
@@ -235,6 +237,8 @@ export interface PtyClaudeSessionOptions {
   settingsPath: string;
   /** Private additive MCP config passed as `--mcp-config`; never strict. */
   mcpConfigPath?: string;
+  /** Additional additive MCP configs passed under the same CLI flag. */
+  additionalMcpConfigPaths?: string[];
   env?: NodeJS.ProcessEnv;
   pathToClaudeExecutable?: string;
   cols?: number;

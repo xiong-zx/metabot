@@ -1,7 +1,7 @@
 {
   "name": "@xvirobotics/arc-mcp",
   "version": "0.3.0",
-  "description": "Independent AutoResearchClaw lifecycle, official execution supervisor, HITL, and stdio MCP server",
+  "description": "Independent ARC service, persistent supervisor, HITL, recovery, and stdio MCP client",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,11 +12,11 @@
     }
   },
   "bin": {
-    "metabot-arc-mcp": "dist/bin.js",
-    "metabot-arcd": "dist/daemon-cli.js",
-    "metabot-arc-proxy": "dist/proxy-cli.js",
-    "metabot-arc-supervisor": "dist/official-supervisor-cli.js",
-    "metabot-arc-release": "dist/release-cli.js"
+    "arc-mcp": "dist/bin.js",
+    "arc-mcp-service": "dist/service-cli.js",
+    "arc-mcp-doctor": "dist/doctor-cli.js",
+    "arc-mcp-supervisor": "dist/official-supervisor-cli.js",
+    "arc-mcp-release": "dist/release-cli.js"
   },
   "files": [
     "dist",
@@ -24,7 +24,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -b --force",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

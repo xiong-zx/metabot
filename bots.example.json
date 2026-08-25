@@ -93,7 +93,17 @@
         "baseUrl": "https://api.openai.com/v1",
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
-      }
+      },
+      "mcpServers": [
+        {
+          "name": "zotero",
+          "enabled": true,
+          "command": "zotero-mcp",
+          "args": [],
+          "env": { "ZOTERO_LOCAL": "true" },
+          "approvalMode": "writes"
+        }
+      ]
     }
   ],
   "telegramBots": [

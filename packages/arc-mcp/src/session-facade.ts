@@ -13,7 +13,6 @@ import { OfficialArcDriver } from './official-driver.js';
 import { readSupervisorRequest } from './official-state.js';
 import { buildArcResultManifest, type ArcResultManifest } from './provenance.js';
 import type { ArcProjectScope } from './scope-policy.js';
-import type { ArcTrustedPrincipal } from './server.js';
 
 /**
  * Narrows the single server-wide coordinator to one authenticated connection
@@ -29,7 +28,6 @@ export class ArcSessionFacade {
     private readonly coordinator: ArcCoordinator,
     private readonly artifacts: ArcArtifactStore,
     private readonly scope: ArcProjectScope,
-    private readonly principal: ArcTrustedPrincipal | undefined,
     private readonly now: () => string = () => new Date().toISOString(),
   ) {}
 
@@ -98,9 +96,7 @@ export class ArcSessionFacade {
   private responder(): { bot_name: string; chat_id: string } {
     // The operator-pinned standalone stdio mode has no per-connection identity;
     // recording it explicitly keeps the decision attributable either way.
-    return this.principal
-      ? { bot_name: this.principal.botName, chat_id: this.principal.chatId }
-      : { bot_name: 'metabot-arc-stdio', chat_id: 'local:stdio' };
+    return { bot_name: 'arc-mcp-operator', chat_id: 'local:product-service' };
   }
 }
 

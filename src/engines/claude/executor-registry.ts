@@ -26,6 +26,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { Logger } from '../../utils/logger.js';
+import type { ResolvedExternalMcpServer } from '../../mcp/external-server.js';
 import type { TeamEvent, ApiContext } from './executor.js';
 import type { McpEntry } from '../mcp-entries.js';
 import {
@@ -62,6 +63,8 @@ export interface RegistryOptions {
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
   backend?: 'sdk' | 'pty';
+  /** Independently installed MCP products enabled for this bot. */
+  mcpServers?: ResolvedExternalMcpServer[];
   /**
    * Max registry-level respawns of a crashed executor before its pool slot is
    * truly removed. Distinct from the executor's own in-process restart cap.
@@ -312,6 +315,7 @@ export class ExecutorRegistry extends EventEmitter {
       mcpCleanup: opts.mcpCleanup,
       rulesPack: opts.rulesPack,
       backend: this.opts.backend,
+      mcpServers: this.opts.mcpServers,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Remember the last live sessionId so a crash-respawn can resume it even

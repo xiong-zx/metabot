@@ -1,7 +1,6 @@
 import path from 'node:path';
 import {
   EXECUTION_MCP_SERVERS,
-  isLoopbackProxy,
   type AnyMcpServerDescriptor,
 } from '../services/mcp-registry.js';
 
@@ -48,16 +47,6 @@ export function buildExecutionMcpEntries(input: McpEntryInput): McpEntry[] {
   for (const server of input.servers ?? EXECUTION_MCP_SERVERS) {
     const capabilityFile = input.capabilityFiles[server.id];
     if (!hasValue(executionEnv[server.capabilityEnvVar]) || !isAbsoluteFilePath(capabilityFile)) {
-      continue;
-    }
-    if (!isLoopbackProxy(server)) {
-      entries.push({
-        name: server.serverName,
-        command: path.join(input.runtimeRoot, 'node_modules', '.bin', server.binary),
-        args: [...server.args],
-        env: { ...server.env, [server.capabilityFileEnvVar]: capabilityFile },
-        codexToolsApprovalMode: 'approve',
-      });
       continue;
     }
     const endpoint = loopbackHttpEndpoint(input.bridgeEnv[server.endpointEnvVar]);

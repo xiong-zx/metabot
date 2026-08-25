@@ -162,9 +162,95 @@
       ]
     },
     {
+      "id": "mcp-connector",
+      "status": "required",
+      "roots": ["packages/mcp-connector"],
+      "importRoots": ["packages/mcp-connector/src"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "src/services",
+        "better-sqlite3",
+        "zod",
+        "@modelcontextprotocol/sdk",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter",
+        "@xvirobotics/metaclaw-mcp"
+      ],
+      "reason": "Own only the spawned-connector primitives every independent MCP server needs — loopback endpoint validation, protected credential files, redaction, and bounded non-streaming transport — so shared behavior stops being duplicated without becoming a product gateway.",
+      "validationSurface": [
+        "packages/mcp-connector/tests/endpoint.test.ts",
+        "packages/mcp-connector/tests/protected-file.test.ts",
+        "packages/mcp-connector/tests/redact.test.ts",
+        "packages/mcp-connector/tests/transport.test.ts",
+        "packages/mcp-connector/tests/target.test.ts"
+      ]
+    },
+    {
+      "id": "zotero-mcp-product-descriptor",
+      "status": "required",
+      "roots": [
+        "config/mcp-products/zotero-mcp.json",
+        "docs/configuration/zotero-mcp.md",
+        "tests/zotero-external-mcp.test.ts"
+      ],
+      "forbiddenImports": [
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/metaclaw-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Use the independently installed upstream zotero-mcp command unchanged. MetaBot supplies only per-Bot enablement, local product configuration, native tool approval, and single-product failure isolation; Zotero MCP owns its APIs and credentials.",
+      "validationSurface": [
+        "tests/zotero-external-mcp.test.ts",
+        "tests/external-mcp.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "metaclaw-mcp",
+      "status": "required",
+      "roots": ["packages/metaclaw-mcp"],
+      "importRoots": ["packages/metaclaw-mcp"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "src/agent-teams",
+        "src/bridge",
+        "src/engines",
+        "better-sqlite3",
+        "node:child_process",
+        "child_process",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp",
+        "@xvirobotics/arc-worker-runner-adapter",
+        "@xvirobotics/arc-researchclaw-adapter",
+        "@xvirobotics/metabot-core-server",
+        "@xvirobotics/metamemory",
+        "@xvirobotics/skill-hub"
+      ],
+      "reason": "Independent MetaClaw MCP product: every client uses the same metaclaw-mcp command with no MetaBot-issued inbound credential. Five fixed read-or-infer tools enforce the product-owned service bearer, loopback endpoint, exact model/provider, immutable release, isolated profile, and atomic worst-case cost ledger without lifecycle control or coupling to ARC, Worker Runner, or MetaBot.",
+      "validationSurface": [
+        "packages/metaclaw-mcp/tests/server.test.ts",
+        "packages/metaclaw-mcp/tests/profile.test.ts",
+        "packages/metaclaw-mcp/tests/integrity.test.ts",
+        "packages/metaclaw-mcp/tests/live-server.test.ts",
+        "packages/metaclaw-mcp/tests/skills.test.ts",
+        "packages/metaclaw-mcp/tests/infer.test.ts",
+        "packages/metaclaw-mcp/tests/cost-ledger.test.ts",
+        "packages/metaclaw-mcp/tests/boundary.test.ts",
+        "packages/metaclaw-mcp/release-tools/tests/test_release.py",
+        "packages/metaclaw-mcp/release-tools/tests/test_profile.py"
+      ]
+    },
+    {
       "id": "arc-mcp",
       "status": "required",
-      "reason": "Independent AutoResearchClaw MCP server: sole ARC lifecycle database writer, official external release verifier, detached execution supervisor, HITL gate bridge, and provenance manifest. It is a standalone product server rather than a MetaBot subsystem, and must stay usable without any other research product.",
+      "reason": "Independent ARC MCP product: every client uses the same arc-mcp command against the product-owned loopback service, protected product bearer, sole SQLite writer, exact project-root scope, sealed release verifier, detached supervisor, HITL bridge, recovery, and provenance manifest. MetaBot is only an optional external MCP client.",
       "validation": "npm run test -w @xvirobotics/arc-mcp; npm run typecheck -w @xvirobotics/arc-mcp; npm run lint -w @xvirobotics/arc-mcp",
       "roots": ["packages/arc-mcp"],
       "importRoots": ["packages/arc-mcp/src"],
@@ -183,7 +269,9 @@
       "validationSurface": [
         "packages/arc-mcp/tests/contract.test.ts",
         "packages/arc-mcp/tests/lifecycle.test.ts",
-        "packages/arc-mcp/tests/daemon-auth.test.ts",
+        "packages/arc-mcp/tests/product-config.test.ts",
+        "packages/arc-mcp/tests/mcp-server.test.ts",
+        "packages/arc-mcp/tests/second-daemon.test.ts",
         "packages/arc-mcp/tests/recovery-races.test.ts",
         "packages/arc-mcp/tests/official-supervisor.test.ts",
         "packages/arc-mcp/tests/releases.test.ts",
@@ -193,14 +281,18 @@
     {
       "id": "execution-mcp-registry",
       "status": "required",
-      "reason": "Downstream-only MCP registry, capability issuance, and per-turn materialization for the independent product servers. These files are absent from upstream/main, so they are declared here instead of staying undeclared roots under src/. Servers are described by data in src/services/mcp-registry.ts: each carries its own audience, signing keys, opt-in flag, and failure boundary, so registering one never widens a union in core and never edits a product package. This root builds configuration and leases credentials only: no product package is imported and no unified product gateway is introduced.",
-      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-mcp-registry.test.ts tests/arc-mcp-client-registration.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts",
+      "reason": "Retain only Worker Runner's existing Bridge-scoped v2.1 capability and per-turn proxy materialization. ARC, MetaClaw, and Zotero use independently installed external MCP product descriptors and never receive MetaBot authority.",
+      "validation": "npx vitest run tests/mcp-entries.test.ts tests/mcp-materialize.test.ts tests/execution-capabilities.test.ts tests/claude-mcp-config.test.ts tests/product-mcp-descriptors.test.ts",
       "roots": [
         "src/engines/mcp-entries.ts",
         "src/engines/mcp-materialize.ts",
         "src/services/mcp-registry.ts",
         "src/services/execution-capabilities.ts",
-        "src/services/execution-principal.ts"
+        "src/services/execution-principal.ts",
+        "src/services/capability-lease.ts",
+        "config/mcp-products/arc-mcp.json",
+        "config/mcp-products/metaclaw-mcp.json",
+        "tests/product-mcp-descriptors.test.ts"
       ],
       "forbiddenImports": [
         "@xvirobotics/arc-mcp",
@@ -208,6 +300,12 @@
         "@xvirobotics/arc-worker-runner-adapter",
         "@xvirobotics/research-stack-mcp",
         "@xvirobotics/metaclaw-mcp"
+      ],
+      "validationSurface": [
+        "tests/mcp-entries.test.ts",
+        "tests/mcp-materialize.test.ts",
+        "tests/execution-capabilities.test.ts",
+        "tests/product-mcp-descriptors.test.ts"
       ]
     },
     {
@@ -546,7 +644,9 @@
         "@xvirobotics/arc-worker-runner-adapter",
         "@xvirobotics/arc-researchclaw-adapter",
         "@metabot/rulespack",
-        "@metabot/rulespack-adapter"
+        "@metabot/rulespack-adapter",
+        "@xvirobotics/mcp-connector",
+        "@xvirobotics/metaclaw-mcp"
       ]
     }
   ],

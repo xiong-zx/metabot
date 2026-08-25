@@ -1,0 +1,11 @@
+{
+  "name": "metaclaw",
+  "enabled": true,
+  "command": "metaclaw-mcp",
+  "args": [],
+  "envFrom": {
+    "METACLAW_MCP_PROFILE_FILE": "METACLAW_MCP_PROFILE_FILE",
+    "METACLAW_MCP_RELEASE_MANIFEST": "METACLAW_MCP_RELEASE_MANIFEST"
+  },
+  "approvalMode": "writes"
+}

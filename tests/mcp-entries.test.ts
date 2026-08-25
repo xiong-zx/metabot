@@ -6,16 +6,13 @@ import { buildExecutionMcpEntries } from '../src/engines/mcp-entries.js';
 const runtimeRoot = '/opt/metabot';
 const capabilityFiles = {
   worker: '/opt/metabot/data/mcp-capabilities/bot-chat-worker.token',
-  arc: '/opt/metabot/data/mcp-capabilities/bot-chat-arc.token',
 };
 const capabilities = {
   METABOT_WORKER_CAPABILITY: 'worker-token',
-  METABOT_ARC_CAPABILITY: 'arc-token',
   METABOT_CHAT_ID: 'oc-user',
 };
 const endpoints = {
   METABOT_WORKER_DAEMON_URL: 'http://127.0.0.1:9311/mcp',
-  METABOT_ARC_DAEMON_URL: 'http://[::1]:9312/mcp',
 };
 
 describe('buildExecutionMcpEntries', () => {
@@ -39,7 +36,7 @@ describe('buildExecutionMcpEntries', () => {
       executionEnv: capabilities,
       bridgeEnv: endpoints,
       runtimeRoot,
-      capabilityFiles: { worker: 'relative.token', arc: 'relative.token' },
+      capabilityFiles: { worker: 'relative.token' },
     })).toEqual([]);
   });
 
@@ -67,7 +64,6 @@ describe('buildExecutionMcpEntries', () => {
         executionEnv: capabilities,
         bridgeEnv: {
           ...(endpoint ? { METABOT_WORKER_DAEMON_URL: endpoint } : {}),
-          METABOT_ARC_DAEMON_URL: 'http://10.0.0.3:9312/mcp',
         },
         runtimeRoot,
         capabilityFiles,
@@ -75,7 +71,7 @@ describe('buildExecutionMcpEntries', () => {
     }
   });
 
-  it('builds exactly the two package-owned proxy entries for loopback endpoints', () => {
+  it('builds only the retained Worker Runner proxy entry', () => {
     expect(buildExecutionMcpEntries({
       executionEnv: capabilities,
       bridgeEnv: endpoints,
@@ -89,16 +85,6 @@ describe('buildExecutionMcpEntries', () => {
         env: {
           METABOT_WORKER_PROXY_URL: 'http://127.0.0.1:9311/mcp',
           METABOT_WORKER_PROXY_CAPABILITY_FILE: capabilityFiles.worker,
-        },
-        codexToolsApprovalMode: 'approve',
-      },
-      {
-        name: 'metabot-arc',
-        command: process.execPath,
-        args: [path.join(runtimeRoot, 'packages/arc-mcp/dist/proxy-cli.js')],
-        env: {
-          METABOT_ARC_PROXY_URL: 'http://[::1]:9312/mcp',
-          METABOT_ARC_PROXY_CAPABILITY_FILE: capabilityFiles.arc,
         },
         codexToolsApprovalMode: 'approve',
       },
