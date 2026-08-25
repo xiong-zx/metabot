@@ -117,7 +117,7 @@ describe('metaclaw_health', () => {
     });
     expect(result.release).toMatchObject({ official: false, tag: 'v0.4.1' });
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ method: 'GET', url: 'http://127.0.0.1:9412/health' });
+    expect(requests[0]).toMatchObject({ method: 'GET', url: 'http://127.0.0.1:9412/healthz' });
   });
 
   it('reports an unreachable service as structured, not as an exception', async () => {
