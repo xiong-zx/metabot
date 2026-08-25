@@ -40,17 +40,25 @@ export interface CardV2BuildOptions {
   nativeTableBudget?: number;
 }
 
-function tableToMarkdown(block: Extract<Block, { type: 'table' }>): string {
+/**
+ * Preserve an overflow table without letting Lark count it as another table
+ * component. Lark parses pipe-table syntax inside a normal markdown element
+ * when validating the card, so merely changing `tag: table` to
+ * `tag: markdown` still returns ErrCode 11310. A fenced block keeps the exact
+ * rows readable while preventing that second interpretation.
+ */
+function tableToFencedText(block: Extract<Block, { type: 'table' }>): string {
   const alignment = block.align.map((value) => {
     if (value === 'center') return ':---:';
     if (value === 'right') return '---:';
     return '---';
   });
-  return [
+  const table = [
     `| ${block.headers.join(' | ')} |`,
     `| ${alignment.join(' | ')} |`,
     ...block.rows.map((row) => `| ${row.join(' | ')} |`),
   ].join('\n');
+  return `\`\`\`\n${table}\n\`\`\``;
 }
 
 function blockToElement(block: Block): unknown {
@@ -126,7 +134,7 @@ function responseToElements(text: string, nativeTableBudget: number): unknown[] 
       if (nativeTables >= nativeTableBudget) {
         return {
           tag: 'markdown',
-          content: tableToMarkdown(block),
+          content: tableToFencedText(block),
           text_align: 'left',
         };
       }

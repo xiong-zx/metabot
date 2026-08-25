@@ -402,6 +402,14 @@ describe('buildCardV2', () => {
     const json = JSON.parse(buildCardV2(state));
     const elements = findElements(json);
     expect(elements.filter((element) => element.tag === 'table')).toHaveLength(DEFAULT_NATIVE_TABLE_BUDGET);
+    const overflowTables = elements.filter(
+      (element) => element.tag === 'markdown' && element.content.includes('| ToDo | Status |'),
+    );
+    expect(overflowTables).toHaveLength(7 - DEFAULT_NATIVE_TABLE_BUDGET);
+    for (const overflow of overflowTables) {
+      expect(overflow.content).toMatch(/^```\n\| ToDo \| Status \|/);
+      expect(overflow.content).toMatch(/```$/);
+    }
     const serialized = JSON.stringify(json);
     for (let index = 1; index <= 7; index++) {
       expect(serialized).toContain(`FIX-${String(index).padStart(3, '0')}`);
@@ -409,7 +417,7 @@ describe('buildCardV2', () => {
     }
   });
 
-  it('safe terminal rendering preserves tables as Markdown without native table elements', () => {
+  it('safe terminal rendering preserves tables as fenced text without native table elements', () => {
     const state: CardState = {
       status: 'complete',
       userPrompt: 'show table',
@@ -425,8 +433,13 @@ describe('buildCardV2', () => {
     const elements = findElements(json);
     expect(elements.some((element) => element.tag === 'table')).toBe(false);
     const markdown = elements.find((element) => element.tag === 'markdown' && element.content.includes('final-row'));
-    expect(markdown?.content).toContain('| Item | Result |');
-    expect(markdown?.content).toContain('| final-row | delivered |');
+    expect(markdown?.content).toBe([
+      '```',
+      '| Item | Result |',
+      '| --- | --- |',
+      '| final-row | delivered |',
+      '```',
+    ].join('\n'));
   });
 });
 
