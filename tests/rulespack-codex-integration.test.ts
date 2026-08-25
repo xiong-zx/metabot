@@ -67,7 +67,7 @@ describe('RulesPack Codex integration hooks', () => {
     sessions.destroy();
   });
 
-  it('uses the same truthful pre-user order for detached Codex workers only', () => {
+  it('uses truthful engine-specific policy channels for detached Codex and Claude workers', () => {
     const runner = new NodeCliProcessRunner({
       executables: { codex: '/bin/codex', claude: '/bin/claude', kimi: '/bin/kimi' },
     });
@@ -88,9 +88,12 @@ describe('RulesPack Codex integration hooks', () => {
       engine: 'claude',
       workdir: '/tmp',
       prompt: 'child prompt',
-      rulesPack: { injectionText: 'MUST NOT APPLY', packDigest: 'digest', markInjected, markRejected },
+      rulesPack: { injectionText: 'CLAUDE SYSTEM POLICY', packDigest: 'digest', markInjected, markRejected },
     });
     expect(claude.stdin).toBe('child prompt');
+    expect(claude.args).toContain('--append-system-prompt-file');
+    expect(claude.args).not.toContain('CLAUDE SYSTEM POLICY');
+    claude.cleanup?.();
   });
 
   it.each([

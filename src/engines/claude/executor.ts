@@ -30,6 +30,44 @@ function resolveClaudePath(): string {
 }
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
+export const DEFAULT_CLAUDE_MAX_TURNS = 50;
+export const DEFAULT_CLAUDE_MAX_BUDGET_USD = 3;
+
+export function composeClaudeSystemAppend(rulesPackText: string | undefined, existingAppend = ''): string {
+  return rulesPackText ? `\n\n${rulesPackText}${existingAppend}` : existingAppend;
+}
+
+function appendRulesPackSystemPrompt(
+  queryOptions: Record<string, any>,
+  rulesPack: ExecutorOptions['rulesPack'],
+): void {
+  if (!rulesPack?.injectionText) return;
+  const current = queryOptions.systemPrompt;
+  const existingAppend = current && typeof current === 'object' && typeof current.append === 'string'
+    ? current.append
+    : '';
+  queryOptions.systemPrompt = {
+    type: 'preset',
+    preset: 'claude_code',
+    append: composeClaudeSystemAppend(rulesPack.injectionText, existingAppend),
+  };
+}
+
+function rulesPackAcceptance(rulesPack: ExecutorOptions['rulesPack']) {
+  let state: 'pending' | 'injected' | 'rejected' = 'pending';
+  return {
+    accept(): void {
+      if (!rulesPack || state !== 'pending') return;
+      state = 'injected';
+      rulesPack.markInjected();
+    },
+    reject(reason: unknown): void {
+      if (!rulesPack || state !== 'pending') return;
+      state = 'rejected';
+      rulesPack.markRejected(reason);
+    },
+  };
+}
 
 /**
  * Env var prefixes to always strip from the inherited process environment.
@@ -258,6 +296,8 @@ export interface ExecutorOptions {
   apiContext?: ApiContext;
   /** Override maxTurns for this execution. */
   maxTurns?: number;
+  /** Override the Claude SDK cost ceiling for this execution. */
+  maxBudgetUsd?: number;
   /** Override model for this execution (e.g. faster model for voice calls). */
   model?: string;
   /** Per-turn Codex reasoning effort override. Ignored by non-Codex executors. */
@@ -270,8 +310,9 @@ export interface ExecutorOptions {
   env?: Record<string, string>;
   /** Additive per-session MCP servers materialized by the bridge. */
   mcpEntries?: McpEntry[];
-  /** Prepared only by MessageBridge's authenticated Codex turn boundary. */
+  /** Prepared only by MessageBridge's authenticated RulesPack turn boundary. */
   rulesPack?: {
+    packDigest?: string;
     injectionText: string;
     markInjected(): void;
     markRejected(reason: unknown): void;
@@ -324,7 +365,7 @@ export interface ExecutionHandle {
   stream: AsyncGenerator<SDKMessage>;
   /** Present only for an authenticated received RulesPack envelope. */
   rulesPackDelivery?: () => {
-    status: 'consumed';
+    status: 'shadowed' | 'consumed';
     envelopeId: string;
     replayId: string;
     packDigest: string;
@@ -438,13 +479,8 @@ export class ClaudeExecutor {
       };
     }
 
-    if (this.config.claude.maxTurns !== undefined) {
-      queryOptions.maxTurns = this.config.claude.maxTurns;
-    }
-
-    if (this.config.claude.maxBudgetUsd !== undefined) {
-      queryOptions.maxBudgetUsd = this.config.claude.maxBudgetUsd;
-    }
+    queryOptions.maxTurns = this.config.claude.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS;
+    queryOptions.maxBudgetUsd = this.config.claude.maxBudgetUsd ?? DEFAULT_CLAUDE_MAX_BUDGET_USD;
 
     if (this.config.claude.model) {
       queryOptions.model = this.config.claude.model;
@@ -488,12 +524,16 @@ export class ClaudeExecutor {
     if (options.maxTurns !== undefined) {
       queryOptions.maxTurns = options.maxTurns;
     }
+    if (options.maxBudgetUsd !== undefined) {
+      queryOptions.maxBudgetUsd = options.maxBudgetUsd;
+    }
     if (options.model) {
       queryOptions.model = options.model;
     }
     if (options.allowedTools !== undefined) {
       queryOptions.allowedTools = options.allowedTools;
     }
+    appendRulesPackSystemPrompt(queryOptions, options.rulesPack);
 
     apply1MContextSettings(queryOptions);
 
@@ -602,10 +642,17 @@ export class ClaudeExecutor {
       TeammateIdle: [{ hooks: [teamObserverHook('teammate_idle') as any] }],
     };
 
-    const stream = query({
-      prompt: inputQueue,
-      options: queryOptions as any,
-    });
+    const acceptance = rulesPackAcceptance(options.rulesPack);
+    let stream: ReturnType<typeof query>;
+    try {
+      stream = query({
+        prompt: inputQueue,
+        options: queryOptions as any,
+      });
+    } catch (error) {
+      acceptance.reject(error);
+      throw error;
+    }
 
     const logger = this.logger;
 
@@ -629,16 +676,22 @@ export class ClaudeExecutor {
             iterator.next(),
             abortPromise,
           ]);
-          if (result.done) break;
+          if (result.done) {
+            acceptance.reject(new Error('Claude stream ended before RulesPack acceptance'));
+            break;
+          }
+          acceptance.accept();
           yield result.value as SDKMessage;
         }
       } catch (err: any) {
         if (err.name === 'AbortError' || abortController.signal.aborted) {
+          acceptance.reject(err);
           logger.info('Claude execution aborted');
           // Clean up the underlying iterator (non-blocking)
           try { iterator.return?.(undefined); } catch { /* ignore */ }
           return;
         }
+        acceptance.reject(err);
         throw err;
       }
     }
@@ -688,6 +741,7 @@ export class ClaudeExecutor {
         }
       },
       finish: () => {
+        acceptance.reject(new Error('Claude execution ended before RulesPack acceptance'));
         inputQueue.finish();
       },
     };
@@ -706,11 +760,23 @@ export class ClaudeExecutor {
       options.apiContext,
       options.env,
     );
+    if (options.maxTurns !== undefined) queryOptions.maxTurns = options.maxTurns;
+    if (options.maxBudgetUsd !== undefined) queryOptions.maxBudgetUsd = options.maxBudgetUsd;
+    if (options.model) queryOptions.model = options.model;
+    if (options.allowedTools !== undefined) queryOptions.allowedTools = options.allowedTools;
+    appendRulesPackSystemPrompt(queryOptions, options.rulesPack);
 
-    const stream = query({
-      prompt,
-      options: queryOptions as any,
-    });
+    const acceptance = rulesPackAcceptance(options.rulesPack);
+    let stream: ReturnType<typeof query>;
+    try {
+      stream = query({
+        prompt,
+        options: queryOptions as any,
+      });
+    } catch (error) {
+      acceptance.reject(error);
+      throw error;
+    }
 
     const abortPromise = new Promise<never>((_, reject) => {
       if (abortController.signal.aborted) {
@@ -730,15 +796,21 @@ export class ClaudeExecutor {
           iterator.next(),
           abortPromise,
         ]);
-        if (result.done) break;
+        if (result.done) {
+          acceptance.reject(new Error('Claude stream ended before RulesPack acceptance'));
+          break;
+        }
+        acceptance.accept();
         yield result.value as SDKMessage;
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || abortController.signal.aborted) {
+        acceptance.reject(err);
         this.logger.info('Claude execution aborted');
         try { iterator.return?.(undefined); } catch { /* ignore */ }
         return;
       }
+      acceptance.reject(err);
       throw err;
     }
   }

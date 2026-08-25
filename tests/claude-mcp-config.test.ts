@@ -64,12 +64,15 @@ describe('Claude additive MCP configuration', () => {
     const args = buildPtyClaudeArgs({
       settingsPath: '/runtime/data/settings.json',
       mcpConfigPath: '/runtime/data/mcp-capabilities/claude-mcp.json',
+      appendSystemPromptFile: '/runtime/data/system-prompt.md',
       model: 'claude-opus-4-8',
     }, 'session-one');
 
     expect(args).toContain('--mcp-config');
     expect(args[args.indexOf('--mcp-config') + 1]).toBe('/runtime/data/mcp-capabilities/claude-mcp.json');
     expect(args).not.toContain('--strict-mcp-config');
+    expect(args).toContain('--append-system-prompt-file');
+    expect(args[args.indexOf('--append-system-prompt-file') + 1]).toBe('/runtime/data/system-prompt.md');
     expect(args.join(' ')).not.toContain('CAPABILITY_TOKEN_SENTINEL');
   });
 

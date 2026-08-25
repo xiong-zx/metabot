@@ -48,9 +48,10 @@ function appendTaskSummary(lines: string[], team: TeamState): void {
   const inProgress = team.tasks.filter((task) => task.status === 'in_progress');
   const completedCount = team.tasks.filter((task) => task.status === 'completed').length;
   const completed = team.tasks.filter((task) => task.status === 'completed').slice(-5);
+  const failed = team.tasks.filter((task) => task.status === 'failed').slice(-5);
 
   lines.push('');
-  lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${completedCount} done`);
+  lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${completedCount} done · ${failed.length} failed`);
   for (const task of pending) {
     const owner = task.teammate ? ` → \`${task.teammate}\`` : '';
     lines.push(`◻️ ${truncate(task.subject, 80)}${owner}`);
@@ -62,5 +63,9 @@ function appendTaskSummary(lines: string[], team: TeamState): void {
   for (const task of completed) {
     const owner = task.teammate ? ` (\`${task.teammate}\`)` : '';
     lines.push(`✅ ${truncate(task.subject, 80)}${owner}`);
+  }
+  for (const task of failed) {
+    const owner = task.teammate ? ` (\`${task.teammate}\`)` : '';
+    lines.push(`❌ ${truncate(task.subject, 80)}${owner}`);
   }
 }

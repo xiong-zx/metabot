@@ -1,7 +1,7 @@
 {
   "name": "@metabot/rulespack",
   "version": "0.1.0",
-  "description": "Standalone deterministic RulesPack engine for Codex integrations",
+  "description": "Standalone deterministic RulesPack engine for Codex and Claude integrations",
   "type": "module",
   "private": true,
   "engines": {

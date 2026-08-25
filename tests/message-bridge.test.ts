@@ -109,6 +109,27 @@ function deferFirstSendCard(sender: ReturnType<typeof makeSender>) {
   return { entered, release };
 }
 
+describe('MessageBridge execution-policy preflight', () => {
+  it('allows audited Claude RulesPack execution and terminally rejects unsupported Kimi', () => {
+    const config = {
+      ...makeConfig(),
+      rulesPack: { mode: 'off' as const, dbPath: ':memory:' },
+      rulesPackPolicy: { state: 'inherited' as const, required: true },
+    };
+    const bridge = new MessageBridge(config, mockLogger, makeSender() as any);
+    expect(bridge.preflightApiTask({ chatId: 'team:test:claude', engine: 'claude' })).toEqual({
+      ok: true,
+      engine: 'claude',
+    });
+    expect(bridge.preflightApiTask({ chatId: 'team:test:kimi', engine: 'kimi' })).toMatchObject({
+      ok: false,
+      engine: 'kimi',
+      failure: { code: 'RULESPACK_ENGINE_UNSUPPORTED', retryable: false },
+    });
+    bridge.destroy();
+  });
+});
+
 describe('MessageBridge deferred Agent activity', () => {
   it('delivers an Agent Team activity card after the foreground turn drains', async () => {
     vi.useFakeTimers();

@@ -1,11 +1,14 @@
 # Vendored provenance
 
-This package is a mechanical in-repository copy of the standalone FIX-009
-RulesPack engine at commit `1d866a994fb1ef8985b9df2f4ef3cb41f0926d81`.
+This package originated as the mechanical in-repository copy of the standalone
+FIX-009 RulesPack engine at commit `1d866a994fb1ef8985b9df2f4ef3cb41f0926d81`.
 It contains the deterministic compiler, renderer, validators, structured
 sources, SQLite store, cache/LKG logic, transport schema, telemetry, and CLI.
-The only source-byte normalization is removal of five trailing spaces in
-`src/store.ts` so MetaBot's `git diff --check` gate passes.
+MetaBot FIX-015 adds the reviewed engine-neutral `codex | claude` execution
+subject adaptation and bumps the compiler version to `rulespack-compiler/1.2.0`;
+the enclosing MetaBot Git history is its provenance. The original source-byte
+normalization removed five trailing spaces in `src/store.ts` so MetaBot's
+`git diff --check` gate passes.
 
 Bounded update procedure:
 

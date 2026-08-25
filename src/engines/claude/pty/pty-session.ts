@@ -28,14 +28,14 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const RING_CAP = 64 * 1024;
 
 export function buildPtyClaudeArgs(
-  opts: Pick<PtyClaudeSessionOptions, 'resume' | 'settingsPath' | 'mcpConfigPath' | 'appendSystemPrompt' | 'model'>,
+  opts: Pick<PtyClaudeSessionOptions, 'resume' | 'settingsPath' | 'mcpConfigPath' | 'appendSystemPromptFile' | 'model'>,
   sessionId: string,
 ): string[] {
   const args: string[] = opts.resume ? ['--resume', opts.resume] : ['--session-id', sessionId];
   args.push('--settings', opts.settingsPath);
   if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
   args.push('--dangerously-skip-permissions');
-  if (opts.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt);
+  if (opts.appendSystemPromptFile) args.push('--append-system-prompt-file', opts.appendSystemPromptFile);
   if (opts.model) args.push('--model', opts.model);
   return args;
 }

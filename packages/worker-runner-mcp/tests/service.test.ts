@@ -184,7 +184,7 @@ describe('WorkerService pinned authority and lifecycle', () => {
     expect(kit.runner.launches).toHaveLength(0);
   });
 
-  it.each(['claude', 'kimi'] as const)('rejects a hidden RulesPack grant for a %s worker before persistence', async (engine) => {
+  it('rejects a hidden RulesPack grant for a Kimi worker before persistence', async () => {
     const { store, dir } = makeStore();
     const runner = new FakeProcessRunner();
     const grant = { schemaVersion: 1, purpose: 'worker' } as RulesPackChildGrantV1;
@@ -192,11 +192,41 @@ describe('WorkerService pinned authority and lifecycle', () => {
       rulesPackGrantVerifier: (value) => value,
     });
     services.push(service);
-    await expect(service.dispatch(input(dir, { engine }), undefined, 'capability', grant)).rejects.toMatchObject({
+    await expect(service.dispatch(input(dir, { engine: 'kimi' }), undefined, 'capability', grant)).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     });
     expect(store.listScope(PM_PRINCIPAL.botName, PM_PRINCIPAL.chatId, 10)).toEqual([]);
     expect(runner.launches).toEqual([]);
+  });
+
+  it('verifies and injects a hidden RulesPack grant for a Claude worker', async () => {
+    const { store, dir } = makeStore();
+    const runner = new FakeProcessRunner();
+    const grant = { schemaVersion: 1, purpose: 'worker' } as RulesPackChildGrantV1;
+    const prepared = {
+      injectionText: 'claude policy',
+      packDigest: 'sha256:claude-policy',
+      markInjected() {},
+      markRejected() {},
+    };
+    const prepare = vi.fn(async () => prepared);
+    const service = new WorkerService(store, runner, new RecordingNotifier(), PM_PRINCIPAL, testConfig(), {
+      rulesPackProvider: { prepare },
+      rulesPackGrantVerifier: (value) => value,
+    });
+    services.push(service);
+    const dispatched = await service.dispatch(
+      input(dir, { engine: 'claude' }),
+      undefined,
+      'capability',
+      grant,
+    );
+    await vi.waitFor(() => expect(runner.launches).toHaveLength(1));
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+      id: dispatched.worker.id,
+      engine: 'claude',
+    }), grant);
+    expect(runner.launches[0]).toMatchObject({ engine: 'claude', rulesPack: prepared });
   });
 
   it('dispatches a protected worker instead of deduplicating to a running plain worker', async () => {

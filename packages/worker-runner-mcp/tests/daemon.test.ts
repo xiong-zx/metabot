@@ -242,7 +242,7 @@ describe('Worker Runner daemon authentication', () => {
       mode: 'enforce' as const,
       configuredMode: 'enforce' as const,
       operatorModeVersion: 0,
-      appliesTo: 'subsequent-codex-policy-preparations' as const,
+      appliesTo: 'subsequent-rulespack-policy-preparations' as const,
       inFlight: 'unchanged' as const,
     }));
     const setControlMode = vi.fn((
@@ -259,7 +259,7 @@ describe('Worker Runner daemon authentication', () => {
       operatorModeVersion: expectedVersion + 1,
       operatorModeOperationId: operationId,
       ...(mode === null ? {} : { operatorModeOverride: { mode, updatedAt: '2026-08-19T00:00:00.000Z' } }),
-      appliesTo: 'subsequent-codex-policy-preparations' as const,
+      appliesTo: 'subsequent-rulespack-policy-preparations' as const,
       inFlight: 'unchanged' as const,
     }));
     const provider: WorkerRulesPackProvider = {
@@ -282,7 +282,7 @@ describe('Worker Runner daemon authentication', () => {
     const status = await fetch(statusUrl, { headers: { authorization: `Bearer ${lifecycle}` } });
     expect(status.status).toBe(200);
     expect(await status.json()).toMatchObject({
-      botName: 'admin', mode: 'enforce', appliesTo: 'subsequent-codex-policy-preparations', inFlight: 'unchanged',
+      botName: 'admin', mode: 'enforce', appliesTo: 'subsequent-rulespack-policy-preparations', inFlight: 'unchanged',
     });
     const changed = await fetch(modeUrl, {
       method: 'PATCH',

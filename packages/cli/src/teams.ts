@@ -109,7 +109,7 @@ Subcommands:
   tasks list <team> [--summary|--plain]
   tasks create <team> <subject> [--description <text>] [--owner <name>]
   tasks get <team> <id>
-  tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+  tasks update <team> <id> [--status pending|in_progress|completed|failed|deleted] [--owner <name>] [--result <text>]
   tasks claim <team> <id> [owner|--owner <name>]
   tasks done <team> <id> <result>
   tasks block <team> <id> <reason> [--blocked-by <id,id>]

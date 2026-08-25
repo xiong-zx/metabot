@@ -87,7 +87,7 @@ export function createWorkerRulesPackProvider(env: NodeJS.ProcessEnv): WorkerRul
         const state = resolve(botName).policy.state;
         throw new WorkerRunnerError(
           state === 'unsupported'
-            ? `Worker RulesPack supports Codex only; bot ${botName} is ${botEngine(entries.get(botName), botName)}`
+            ? `Worker RulesPack supports Codex and Claude only; bot ${botName} is ${botEngine(entries.get(botName), botName)}`
             : `Worker RulesPack is not configured for bot: ${botName}`,
           'CONFLICT',
         );
@@ -178,7 +178,7 @@ function controlStatus(
     ...(configuredMode ? { configuredMode } : {}),
     ...(operatorModeOverride ? { operatorModeOverride } : {}),
     ...(operatorModeOperationId ? { operatorModeOperationId } : {}),
-    appliesTo: 'subsequent-codex-policy-preparations',
+    appliesTo: 'subsequent-rulespack-policy-preparations',
     inFlight: 'unchanged',
   };
 }
@@ -200,6 +200,7 @@ async function prepare(
     ...(childGrant?.constraints.projectId ? { projectId: childGrant.constraints.projectId } : {}),
     dataClasses: [legacyUnknown ? 'legacy-unknown' : worker.executionKind === 'arc' ? 'arc' : 'worker'],
     outputTypes: [worker.outputContract?.format ?? 'text'],
+    ...(worker.engine === 'codex' || worker.engine === 'claude' ? { engine: worker.engine } : {}),
   };
   const prepared = childGrant
     ? await runtime.prepareDelegatedTurn(facts, childGrant)

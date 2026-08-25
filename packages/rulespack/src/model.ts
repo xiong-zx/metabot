@@ -1,6 +1,6 @@
 export const RULE_SCHEMA_VERSION = 1 as const;
 export const PACK_SCHEMA_VERSION = 1 as const;
-export const COMPILER_VERSION = 'rulespack-compiler/1.1.1';
+export const COMPILER_VERSION = 'rulespack-compiler/1.2.0';
 
 export type RuleScope = 'global' | 'user' | 'project' | 'chat' | 'task';
 export type RuleAuthority =
@@ -103,7 +103,7 @@ export interface ExecutionSubject {
   tools: readonly string[];
   dataClasses: readonly string[];
   outputTypes: readonly string[];
-  engine: 'codex';
+  engine: 'codex' | 'claude';
   sessionId?: string;
 }
 

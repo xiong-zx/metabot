@@ -52,7 +52,7 @@ export function buildAgentTeamCardSnapshot(snapshot: AgentTeamStatusSnapshot): P
 }
 
 function isVisibleTask(task: TeamTask): task is TeamTask & { status: CardTeamTask['status'] } {
-  return task.status === 'pending' || task.status === 'in_progress';
+  return task.status === 'pending' || task.status === 'in_progress' || task.status === 'failed';
 }
 
 function isVisibleRun(run: TeamRun, task?: TeamTask): boolean {

@@ -192,6 +192,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     } else {
       await this.initialize();
     }
+    if (preparedMode !== 'off') this.retireExpiredTemporarySources();
     const subject = this.buildSubject(facts);
     if (incoming && preparedMode === 'off') {
       const error = new RulesPackError('TARGET_MISMATCH', 'RulesPack dispatch rejected while target mode is off');
@@ -268,7 +269,10 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
               subject,
               status: 'injected',
               ...transportFields,
-              details: { channelPosition: 'codex-user-prelude', dispatched: receivedEnvelope !== undefined },
+              details: {
+                channelPosition: subject.engine === 'claude' ? 'claude-system-append' : 'codex-user-prelude',
+                dispatched: receivedEnvelope !== undefined,
+              },
             }),
           );
         }
@@ -546,7 +550,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
       tools: exactValues(facts.tools ?? []),
       dataClasses: exactValues(facts.dataClasses ?? []),
       outputTypes: exactValues(facts.outputTypes ?? ['text']),
-      engine: 'codex',
+      engine: facts.engine ?? 'codex',
       ...(facts.sessionId ? { sessionId: nonempty(facts.sessionId, 'authenticated sessionId') } : {}),
     };
   }
@@ -564,6 +568,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
   }
 
   status(): RulesPackOperatorStatus {
+    this.retireExpiredTemporarySources();
     const operatorMode = this.readOperatorModeState();
     const durableMode = operatorMode.override?.mode ?? normalizeMode(this.config.mode);
     if (this.engine.mode !== durableMode) this.engine.setMode(durableMode);
@@ -615,6 +620,7 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
     this.refreshing = true;
     this.refreshPromise = (async () => {
       try {
+        this.retireExpiredTemporarySources();
         const adapters = this.buildSourceAdapters();
         this.retireRemovedSources(adapters);
         await this.engine.refreshSources(adapters);
@@ -1200,6 +1206,53 @@ export class MetaBotRulesPackRuntime implements RulesPackOperator {
         rules: [],
       });
       this.engine.invalidateSource(sourceId);
+    }
+  }
+
+  /**
+   * Expired temporary deliveries are terminal history, not an active source
+   * outage. Replace only their current snapshot with an empty fresh tombstone;
+   * immutable Rule versions, replay rows, audit events and receipts remain.
+   */
+  private retireExpiredTemporarySources(nowText = new Date().toISOString()): void {
+    const now = Date.parse(nowText);
+    if (!Number.isFinite(now)) return;
+    let sources: ReturnType<RulesStore['listSourceGenerations']>;
+    try {
+      sources = this.engine.store.listSourceGenerations();
+    } catch (error) {
+      if (this.engine.mode === 'off') return;
+      throw error;
+    }
+    for (const source of sources) {
+      if (source.kind !== 'temporary' || source.required) continue;
+      const rules = this.engine.store.listRules(source.sourceId);
+      const sourceExpired = source.freshUntil !== undefined && Date.parse(source.freshUntil) <= now;
+      const rulesExpired = rules.length > 0 && rules.every((rule) =>
+        rule.lifecycle.expiresAt !== undefined && Date.parse(rule.lifecycle.expiresAt) <= now,
+      );
+      if (!sourceExpired && !rulesExpired) continue;
+      this.temporaryAdapters.delete(source.sourceId);
+      this.engine.store.replaceSourceSnapshot({
+        source: {
+          sourceId: source.sourceId,
+          kind: source.kind,
+          generation: 'retired-expired',
+          revision: source.revision,
+          snapshotDigest: digestObject([]),
+          observedAt: nowText,
+          required: false,
+          health: 'fresh',
+          ruleCount: 0,
+        },
+        rules: [],
+      });
+      this.engine.store.audit(
+        'source-refresh',
+        { health: 'fresh', retired: 'expired', previousGeneration: source.generation },
+        { sourceId: source.sourceId },
+      );
+      this.engine.invalidateSource(source.sourceId);
     }
   }
 }

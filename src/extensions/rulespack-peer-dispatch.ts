@@ -22,9 +22,9 @@ interface AuthenticatedPeerForwardInput {
 
 /** Downstream-owned normal peer/Agent Bus hook: compile, bind, attach, and account for transport rejection. */
 export async function forwardAuthenticatedPeerTask(input: AuthenticatedPeerForwardInput): Promise<object> {
-  if (input.peerBot.engine !== 'codex') {
+  if (input.peerBot.engine !== 'codex' && input.peerBot.engine !== 'claude') {
     if (input.body.rulesPackDispatch) {
-      throw new Error(`RulesPack dispatch requires a Codex target; ${input.peerBot.engine} is unsupported`);
+      throw new Error(`RulesPack dispatch requires a Codex or Claude target; ${input.peerBot.engine} is unsupported`);
     }
     return input.peerManager.forwardTask(input.peer, input.body);
   }
@@ -58,6 +58,10 @@ function remoteExecutionSubject(
   input: AuthenticatedPeerForwardInput,
   targetIdentity: NonNullable<PeerBotInfo['rulesPackIdentity']>,
 ): ExecutionSubject {
+  const engine = input.peerBot.engine;
+  if (engine !== 'codex' && engine !== 'claude') {
+    throw new Error(`RulesPack target engine ${String(engine)} is unsupported`);
+  }
   const scoped = input.principal.kind === 'scoped' ? input.principal : undefined;
   const derivedAgent = remoteAgentIdentity(input.body.chatId);
   const advertisedProjectId = authenticatedTargetProjectId(input);
@@ -81,7 +85,7 @@ function remoteExecutionSubject(
     tools: exactValues(scoped?.tools ?? input.peerBot.rulesPackTools ?? []),
     dataClasses: exactValues([...(scoped?.dataClasses ?? []), 'agent-bus']),
     outputTypes: exactValues(scoped?.outputTypes ?? ['text']),
-    engine: 'codex',
+    engine,
   };
 }
 

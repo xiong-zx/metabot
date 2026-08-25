@@ -1,4 +1,4 @@
-# Thin Codex adapter integration contract
+# Thin audited-engine adapter integration contract
 
 The later MetaBot adapter should remain a translator and transport binding. It
 must not reimplement matching, precedence, rendering, budgeting, cache, or pack
@@ -8,15 +8,15 @@ digest logic.
 
 1. A background/config event calls the applicable `RuleSourceAdapter` and
    `engine.refreshSources`. Do not scan Markdown or MetaMemory on every turn.
-2. At the unified Codex turn boundary, construct one exact `ExecutionSubject`
+2. At the unified Codex/Claude turn boundary, construct one exact `ExecutionSubject`
    from authenticated runtime facts. Never accept bot/agent/worker/project/chat
    identity from Rule text or an untrusted prompt.
 3. Call `engine.compile` once. Re-evaluate source freshness before cache lookup,
    then record telemetry and a `compiled` or `shadowed` receipt.
 4. In `off`, inject nothing. In `shadow`, compare/observe but inject nothing.
-   In `enforce`, place only `result.injectionText` in Codex's strongest truthful
-   pre-user position. Do not put pack metadata into the model context.
-5. A persistent Codex session compares `packDigest` at a turn boundary. Reuse
+   In `enforce`, place only `result.injectionText` in Codex's truthful pre-user
+   input or Claude's system-prompt appendix. Do not put pack metadata into the model context.
+5. A persistent engine session compares `packDigest` at a turn boundary. Reuse
    the session when unchanged; recycle/resume safely when changed. Never alter
    an in-flight turn.
 6. For Agent Team, Worker, ARC, background, scheduled, restart, or peer work,
@@ -52,6 +52,7 @@ compiled pack. It must not read the dispatcher's MetaMemory namespace.
 | Mode `off`                                                        | Continue with empty injection and `bypass-off` telemetry.                                                                                                                                                                                                           |
 | Cache miss                                                        | Compile deterministically; the store re-runs the canonical compile against complete current input and atomically persists cache provenance plus an LKG link only for a nondegraded pack; report miss.                                                               |
 | Optional advisory source unavailable                              | Use bounded stored generation when available; mark degraded/stale and report.                                                                                                                                                                                       |
+| Expired optional temporary delivery                               | Replace only its current snapshot with an empty fresh tombstone; preserve immutable history, replay, audit, and receipts without degrading unrelated policy.                                                                                                          |
 | No stored optional generation                                     | Continue without it; mark degraded/unavailable and report.                                                                                                                                                                                                          |
 | Required source unavailable                                       | Raise `SOURCE_UNAVAILABLE`; adapter decides task-level fail/rollback policy.                                                                                                                                                                                        |
 | Corrupt/unauthorized Rule, delimiter/credential risk, path escape | Fail closed; do not use LKG to bypass the guard.                                                                                                                                                                                                                    |
@@ -115,7 +116,7 @@ and record its schema/compiler versions. Rollback sequence:
 
 ## Adapter work still required
 
-- MetaBot `ExecuteApiTaskInput`/Codex executor hook and exact injection order;
+- MetaBot `ExecuteApiTaskInput`/Codex and Claude executor hooks and exact injection order;
 - persistent-session digest refresh and restart continuation;
 - concrete config, RuleSet, AGENTS/native-file, structured command, and
   MetaMemory bindings;

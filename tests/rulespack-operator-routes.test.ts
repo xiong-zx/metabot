@@ -792,19 +792,43 @@ describe('RulesPack operator and transport routes', () => {
     expect(forwardTask).not.toHaveBeenCalled();
   });
 
-  it.each(['claude', 'kimi'] as const)('rejects an explicit envelope sent to a %s peer', async (engine) => {
+  it('forwards an explicit envelope to a Claude peer with an exact acknowledgement', async () => {
+    const envelope = {
+      envelopeId: 'e', replayId: 'r', packDigest: 'd', audience: 'metabot-host:savio',
+      target: { hostId: 'savio' },
+    } as any;
+    const forwardTask = vi.fn(async () => ({
+      success: true,
+      rulesPackDelivery: { status: 'consumed', envelopeId: 'e', replayId: 'r', packDigest: 'd' },
+    }));
+    await expect(forwardAuthenticatedPeerTask({
+      registry: { get: () => undefined, listRegistered: () => [] } as any,
+      peerManager: { forwardTask } as any,
+      peer: { name: 'legacy', url: 'http://legacy' },
+      peerBot: {
+        name: 'legacy', engine: 'claude',
+        rulesPackStatus: { state: 'inherited', required: true, mode: 'enforce' },
+        rulesPackIdentity: { hostId: 'savio', audience: 'metabot-host:savio' },
+      } as any,
+      principal: { kind: 'generic', source: 'core-bearer' },
+      body: {
+        botName: 'legacy', chatId: 'chat', prompt: 'work',
+        rulesPackDispatch: envelope,
+      },
+    })).resolves.toMatchObject({ rulesPackDelivery: { status: 'consumed' } });
+    expect(forwardTask).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an explicit envelope sent to a Kimi peer', async () => {
     const forwardTask = vi.fn(async () => ({ success: true }));
     await expect(forwardAuthenticatedPeerTask({
       registry: { get: () => undefined } as any,
       peerManager: { forwardTask } as any,
       peer: { name: 'legacy', url: 'http://legacy' },
-      peerBot: { name: 'legacy', engine } as any,
+      peerBot: { name: 'legacy', engine: 'kimi' } as any,
       principal: { kind: 'generic', source: 'core-bearer' },
-      body: {
-        botName: 'legacy', chatId: 'chat', prompt: 'work',
-        rulesPackDispatch: { envelopeId: 'e' } as any,
-      },
-    })).rejects.toThrow('requires a Codex target');
+      body: { botName: 'legacy', chatId: 'chat', prompt: 'work', rulesPackDispatch: { envelopeId: 'e' } as any },
+    })).rejects.toThrow('requires a Codex or Claude target');
     expect(forwardTask).not.toHaveBeenCalled();
   });
 

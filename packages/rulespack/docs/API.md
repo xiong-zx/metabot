@@ -1,6 +1,6 @@
 # Stable engine API and contract
 
-The v1 Rule/pack schema and `rulespack-compiler/1.1.1` define the adapter boundary.
+The v1 Rule/pack schema and `rulespack-compiler/1.2.0` define the adapter boundary.
 Breaking selection, rendering, digest, or transport semantics require a new
 compiler version. All ordering is explicit and locale-stable; array/set inputs
 are normalized before hashing.
@@ -10,7 +10,7 @@ are normalized before hashing.
 - `RuleV1` / `RuleInputV1`: one approved atomic instruction, precomputed digest
   and token estimate, scope/binding, exact targets, authority, priority,
   conflict/dependency metadata, lifecycle, and source provenance.
-- `ExecutionSubject`: one exact Codex execution identity: host, bot, roles,
+- `ExecutionSubject`: one exact Codex or Claude execution identity: host, bot, roles,
   optional agent/worker/user/project/task/session, chat, tools, data classes,
   and output types.
 - `SourceGeneration` / `SourceSnapshot`: one adapter's immutable structured
@@ -65,8 +65,9 @@ subject/generation produces the same digest.
 
 `renderRules` emits only Rule metadata and concise approved text between
 reserved `RULESPACK DATA v1` and per-Rule delimiters. The truthful delivery
-channel is `user`, because the future Codex adapter must use the strongest
-available pre-user position without claiming system/developer authority.
+channel remains `user` data. Codex places it before the ordinary user body;
+Claude places it in a system-prompt appendix whose delimiters still prevent
+Rule text from promoting its own authority.
 
 Validation rejects reserved delimiters, control/bidirectional override
 characters, privileged-channel impersonation, authority-promotion phrases,

@@ -87,7 +87,9 @@ Agent Team supervisor 是 bridge 侧循环。启用后，它扫描 active teams�
 - 用 `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS` 调整轮询间隔。
 - Supervisor 优先选择本地 `metabot` bridge bot；没有时使用第一个已注册 bot。
 - Supervisor 启动 run 时，会把已分配的 pending 任务改为 `in_progress`。
-- Supervisor 会为队友 chat 设置配置的 session engine，但目前还不会在派发前校验每个引擎的能力。在 runtime capability checks 或 per-engine adapters 落地前，常驻团队应使用本地 bridge 已知可工作的引擎。
+- Bridge 会在创建 durable Run 前执行能力预检。确定性的 policy、schema 或 permission 不兼容会直接把 Task 标为可见的 `failed`，不会启动模型。
+- 可重试失败在相同脱敏指纹重复两次，或同一 Task 累积三个 failed Runs 后熔断；两个阈值都可配置。
+- 每次队友执行都有 turn、cost、wall time、idle time、重复输出和 permission-denial 上限。对应环境变量是 `METABOT_AGENT_TEAM_MAX_TURNS`、`METABOT_AGENT_TEAM_MAX_BUDGET_USD`、`METABOT_AGENT_TEAM_TIMEOUT_MS`、`METABOT_AGENT_TEAM_IDLE_TIMEOUT_MS`、`METABOT_AGENT_TEAM_REPEATED_OUTPUT_LIMIT`、`METABOT_AGENT_TEAM_PERMISSION_DENIAL_LIMIT`、`METABOT_AGENT_TEAM_SAME_FAILURE_LIMIT` 和 `METABOT_AGENT_TEAM_FAILED_RUN_LIMIT`。
 
 ## `bots.json` 中的常驻团队
 
@@ -154,7 +156,7 @@ metabot teams inbox <team> <name> [--unread] [--read]
 metabot teams tasks list <team>
 metabot teams tasks create <team> <subject> [--description <text>] [--owner <name>]
 metabot teams tasks get <team> <id>
-metabot teams tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+metabot teams tasks update <team> <id> [--status pending|in_progress|completed|failed|deleted] [--owner <name>] [--result <text>]
 
 metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]

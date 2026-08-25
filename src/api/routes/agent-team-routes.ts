@@ -443,7 +443,9 @@ function stopActiveRuns(
 }
 
 function taskStatusField(value: unknown): TaskStatus | undefined {
-  return value === 'pending' || value === 'in_progress' || value === 'completed' || value === 'deleted' ? value : undefined;
+  return value === 'pending' || value === 'in_progress' || value === 'completed' || value === 'failed' || value === 'deleted'
+    ? value
+    : undefined;
 }
 
 function agentStatusField(value: unknown): AgentStatus | undefined {

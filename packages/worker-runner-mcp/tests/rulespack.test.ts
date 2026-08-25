@@ -50,6 +50,22 @@ function worker(directory: string, botName: string): WorkerRecord {
   };
 }
 
+function rule(id: string, text: string): RuleInputV1 {
+  return {
+    schemaVersion: 1,
+    id,
+    version: '1',
+    text,
+    scope: 'global',
+    targets: {},
+    authority: 'user-approved',
+    priority: 1,
+    overridable: true,
+    lifecycle: { status: 'approved' },
+    source: { kind: 'config', adapterId: 'ignored', ref: 'test', revision: '1' },
+  };
+}
+
 describe('Worker Runner RulesPack defaults', () => {
   it('rebinds a received parent dispatch into the separate exact Worker database only', async () => {
     const { directory, configPath } = fixture((directory) => ({
@@ -121,6 +137,22 @@ describe('Worker Runner RulesPack defaults', () => {
       expect((await provider.prepare({ ...firstWorker, id: 'worker-other' }))?.injectionText)
         .not.toContain('received detached policy');
       await expect(provider.prepare({ ...firstWorker, chatId: 'other-chat' }, grant)).rejects.toThrow(/exact Worker subject/u);
+
+      const claudeWorker = { ...firstWorker, id: 'worker-claude', engine: 'claude' as const };
+      const claudeParent = await sender.createDispatchEnvelope({
+        targetSubject: { ...parentTarget, engine: 'claude' },
+        audience: 'metabot-host:imac',
+        ttlMs: 60_000,
+      });
+      const claudeGrant: RulesPackChildGrantV1 = {
+        ...grant,
+        grantId: 'grant-claude',
+        parentEnvelopeFingerprint: dispatchEnvelopeFingerprint(claudeParent),
+        parent: claudeParent,
+      };
+      const preparedClaude = await provider.prepare(claudeWorker, claudeGrant);
+      expect(preparedClaude?.injectionText).toContain('received detached policy');
+      preparedClaude?.markInjected();
     } finally {
       provider.close?.();
       sender.close();
@@ -211,7 +243,7 @@ describe('Worker Runner RulesPack defaults', () => {
         operatorModeVersion: 1,
         operatorModeOperationId: 'off-1',
         operatorModeOverride: { mode: 'off', updatedAt: expect.any(String) },
-        appliesTo: 'subsequent-codex-policy-preparations',
+        appliesTo: 'subsequent-rulespack-policy-preparations',
         inFlight: 'unchanged',
       });
       expect((await provider.prepare(worker(directory, 'admin')))?.injectionText).toBe('');
@@ -289,7 +321,35 @@ describe('Worker Runner RulesPack defaults', () => {
     }
   });
 
-  it.each(['claude', 'kimi'] as const)('keeps a %s bot unsupported even when shared defaults exist', async (engine) => {
+  it('configures a Claude bot from shared defaults', async () => {
+    const { directory, configPath } = fixture((directory) => ({
+      rulesPackDefaults: {
+        policy: 'required',
+        config: {
+          mode: 'enforce',
+          dbPath: path.join(directory, '{surface}-{bot}.sqlite'),
+          configRules: {
+            id: 'claude-default', revision: '1',
+            rules: [{ ...rule('claude-default', 'Apply Claude worker policy.') }],
+          },
+        },
+      },
+      webBots: [{ name: 'claude', engine: 'claude' }],
+    }));
+    const provider = createWorkerRulesPackProvider({ BOTS_CONFIG: configPath })!;
+    try {
+      expect(provider.controlStatus?.('claude')).toMatchObject({
+        state: 'configured', botScoped: true, mode: 'enforce', operatorModeVersion: 0,
+      });
+      const claudeWorker = { ...worker(directory, 'claude'), engine: 'claude' as const };
+      expect((await provider.prepare(claudeWorker))?.injectionText).toContain('Claude worker policy');
+    } finally {
+      provider.close?.();
+    }
+  });
+
+  it('keeps a Kimi bot unsupported even when shared defaults exist', async () => {
+    const engine = 'kimi' as const;
     const { directory, configPath } = fixture((directory) => ({
       rulesPackDefaults: {
         policy: 'required',
@@ -302,7 +362,7 @@ describe('Worker Runner RulesPack defaults', () => {
       expect(provider.controlStatus?.(engine)).toMatchObject({
         state: 'unsupported', botScoped: false, mode: 'off', operatorModeVersion: 0,
       });
-      expect(() => provider.setControlMode?.(engine, 'off', 0, 'must-reject')).toThrow('supports Codex only');
+      expect(() => provider.setControlMode?.(engine, 'off', 0, 'must-reject')).toThrow('supports Codex and Claude only');
       expect(await provider.prepare(worker(directory, engine))).toBeUndefined();
     } finally {
       provider.close?.();

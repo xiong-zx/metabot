@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { KIMI_PROMPT_MAX_BYTES, renderWorkerPrompt, renderedPromptBytes } from './prompt.js';
 import type {
   ProcessLaunchHooks,
@@ -43,6 +46,8 @@ export interface NodeCliProcessRunnerConfig {
   codexSandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   codexApprovalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   claudePermissionMode?: 'acceptEdits' | 'auto' | 'bypassPermissions' | 'manual' | 'dontAsk' | 'plan';
+  /** Hard per-process Claude API cost ceiling. Default 3 USD. */
+  claudeMaxBudgetUsd?: number;
   sourceEnv?: NodeJS.ProcessEnv;
   safeEnvAllowlist?: string[];
 }
@@ -51,6 +56,7 @@ export interface CommandSpec {
   command: string;
   args: string[];
   stdin?: string;
+  cleanup?: () => void;
 }
 
 interface ActiveChild {
@@ -66,6 +72,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
   private readonly codexSandbox: NonNullable<NodeCliProcessRunnerConfig['codexSandbox']>;
   private readonly codexApprovalPolicy: NonNullable<NodeCliProcessRunnerConfig['codexApprovalPolicy']>;
   private readonly claudePermissionMode: NonNullable<NodeCliProcessRunnerConfig['claudePermissionMode']>;
+  private readonly claudeMaxBudgetUsd: number;
   private readonly childEnv: NodeJS.ProcessEnv;
 
   constructor(config: NodeCliProcessRunnerConfig = {}) {
@@ -85,19 +92,42 @@ export class NodeCliProcessRunner implements ProcessRunner {
     this.codexSandbox = config.codexSandbox ?? 'workspace-write';
     this.codexApprovalPolicy = config.codexApprovalPolicy ?? 'never';
     this.claudePermissionMode = config.claudePermissionMode ?? 'auto';
+    this.claudeMaxBudgetUsd = config.claudeMaxBudgetUsd ?? 3;
+    if (!Number.isFinite(this.claudeMaxBudgetUsd) || this.claudeMaxBudgetUsd <= 0) {
+      throw new Error('claudeMaxBudgetUsd must be a positive number');
+    }
     this.childEnv = buildSanitizedEnv(config.sourceEnv ?? process.env, config.safeEnvAllowlist ?? []);
   }
 
   async launch(spec: ProcessLaunchSpec, hooks: ProcessLaunchHooks): Promise<RunningProcess> {
-    const command = this.buildCommand(spec);
+    let command: CommandSpec;
+    try {
+      command = this.buildCommand(spec);
+    } catch (error) {
+      spec.rulesPack?.markRejected(error);
+      throw error;
+    }
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      command.cleanup?.();
+    };
     const stdout = new BoundedCollector(this.maxOutputBytes);
     const stderr = new BoundedCollector(this.maxOutputBytes);
-    const child = spawn(command.command, command.args, {
-      cwd: spec.workdir,
-      env: this.childEnv,
-      detached: process.platform !== 'win32',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(command.command, command.args, {
+        cwd: spec.workdir,
+        env: this.childEnv,
+        detached: process.platform !== 'win32',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      cleanup();
+      spec.rulesPack?.markRejected(error);
+      throw error;
+    }
 
     let spawned = false;
     let settled = false;
@@ -108,6 +138,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
     const finish = (result: Pick<ProcessResult, 'exitCode' | 'signal' | 'error'>): void => {
       if (settled) return;
       settled = true;
+      cleanup();
       if (child.pid) this.active.delete(child.pid);
       resolveCompletion({
         ...result,
@@ -128,7 +159,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
     });
     child.stdin.on('error', (error) => {
       stderr.append(Buffer.from(`stdin error: ${error.message}\n`));
-      if (spec.engine === 'codex') spec.rulesPack?.markRejected(error);
+      spec.rulesPack?.markRejected(error);
     });
     child.once('close', (exitCode, signal) => {
       finish({
@@ -142,6 +173,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
         spawned = true;
         const pid = child.pid;
         if (!pid) {
+          cleanup();
           spec.rulesPack?.markRejected(new Error(`CLI process for ${spec.engine} started without a pid`));
           reject(new Error(`CLI process for ${spec.engine} started without a pid`));
           return;
@@ -149,7 +181,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
         this.active.set(pid, { child, completion });
         hooks.onActivity();
         child.stdin.end(command.stdin, (error?: Error | null) => {
-          if (spec.engine !== 'codex') return;
+          if (!spec.rulesPack) return;
           if (error) spec.rulesPack?.markRejected(error);
           else spec.rulesPack?.markInjected();
         });
@@ -157,6 +189,7 @@ export class NodeCliProcessRunner implements ProcessRunner {
       });
       child.once('error', (error) => {
         if (!spawned) {
+          cleanup();
           spec.rulesPack?.markRejected(error);
           settled = true;
           reject(error);
@@ -198,7 +231,18 @@ export class NodeCliProcessRunner implements ProcessRunner {
           ],
           stdin: prompt,
         };
-      case 'claude':
+      case 'claude': {
+        const directory = spec.rulesPack?.injectionText
+          ? mkdtempSync(join(tmpdir(), 'metabot-worker-rulespack-'))
+          : undefined;
+        const systemPromptFile = directory ? join(directory, 'system-prompt.md') : undefined;
+        if (systemPromptFile) {
+          writeFileSync(systemPromptFile, spec.rulesPack!.injectionText, {
+            encoding: 'utf8',
+            mode: 0o600,
+            flag: 'wx',
+          });
+        }
         return {
           command: this.executables.claude,
           args: [
@@ -208,10 +252,17 @@ export class NodeCliProcessRunner implements ProcessRunner {
             '--no-session-persistence',
             '--permission-mode',
             this.claudePermissionMode,
+            '--max-budget-usd',
+            String(this.claudeMaxBudgetUsd),
+            ...(systemPromptFile
+              ? ['--append-system-prompt-file', systemPromptFile]
+              : []),
             ...(spec.model ? ['--model', spec.model] : []),
           ],
           stdin: prompt,
+          ...(directory ? { cleanup: () => rmSync(directory, { recursive: true, force: true }) } : {}),
         };
+      }
       case 'kimi':
         if (renderedPromptBytes(spec.prompt, spec.outputContract) > KIMI_PROMPT_MAX_BYTES) {
           throw new Error(`Kimi rendered prompt exceeds the ${KIMI_PROMPT_MAX_BYTES}-byte argv safety limit`);

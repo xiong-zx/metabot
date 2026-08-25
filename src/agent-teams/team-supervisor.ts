@@ -4,6 +4,16 @@ import type { Logger } from '../utils/logger.js';
 import { buildAgentTeamPromptContext } from './prompt-context.js';
 import type { AgentTeamStore, TeamAgent, TeamMessage, TeamRun, TeamTask } from './team-store.js';
 import type { AgentTeamGovernanceExtension } from './governance-extension.js';
+import {
+  AgentTeamRunBudget,
+  resolveAgentTeamExecutionLimits,
+  type AgentTeamExecutionLimits,
+} from './run-budget.js';
+import {
+  ExecutionPolicyError,
+  executionFailureMetadata,
+  type ExecutionFailureMetadata,
+} from '../services/execution-failure.js';
 
 export interface AgentTeamSupervisorOptions {
   registry: BotRegistry;
@@ -11,6 +21,7 @@ export interface AgentTeamSupervisorOptions {
   governance?: AgentTeamGovernanceExtension;
   logger: Logger;
   intervalMs?: number;
+  executionLimits?: Partial<AgentTeamExecutionLimits>;
 }
 
 interface RunnableAgent {
@@ -28,6 +39,7 @@ export class AgentTeamSupervisor {
   private readonly logger: Logger;
   private readonly intervalMs: number;
   private readonly maxParallelPerAgent: number;
+  private readonly executionLimits: AgentTeamExecutionLimits;
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
   private tickInProgress = false;
@@ -46,6 +58,7 @@ export class AgentTeamSupervisor {
         ? Math.floor(envMaxParallel)
         : DEFAULT_MAX_PARALLEL_PER_AGENT,
     );
+    this.executionLimits = resolveAgentTeamExecutionLimits(options.executionLimits);
   }
 
   start(): void {
@@ -243,6 +256,19 @@ export class AgentTeamSupervisor {
       return;
     }
     if (preparation) this.options.governance!.assertCanStartRun(preparation.instanceId, agent.name);
+    const preflightChatId = preparation?.chatId ?? `team:${teamName}:${agent.name}`;
+    const preflight = tasks.length > 0
+      ? bot.bridge.preflightApiTask?.({ chatId: preflightChatId, engine: agent.engine })
+      : undefined;
+    if (preflight && !preflight.ok) {
+      this.failTasksTerminally(teamName, tasks, preflight.failure, 'Preflight rejected before creating a Run');
+      if (messages.length > 0) {
+        this.options.store.markMessagesReadById(teamName, agent.name, messages.map((message) => message.id));
+      }
+      this.notifyTeamActivity(teamName, agent.name, `Task failed preflight [${preflight.failure.code}]: ${preflight.failure.message}`);
+      this.sendFailureToLead(teamName, agent, undefined, preflight.failure, 'preflight');
+      return;
+    }
     const run = this.options.store.createRun(teamName, {
       agentName: agent.name,
       taskId: tasks[0]?.id,
@@ -275,6 +301,8 @@ export class AgentTeamSupervisor {
         ? []
         : this.options.store.listMessages(teamName, 'lead').map((message) => message.id),
     );
+    const budget = new AgentTeamRunBudget(this.executionLimits);
+    let budgetFailure: ExecutionFailureMetadata | undefined;
 
     try {
       this.applyAgentSession(bot.bridge, chatId, agent, !!preparation || !isolatedSession);
@@ -282,6 +310,10 @@ export class AgentTeamSupervisor {
         chatId,
         userId: 'agent-team-supervisor',
         sendCards: false,
+        maxTurns: this.executionLimits.maxTurns,
+        maxBudgetUsd: this.executionLimits.maxBudgetUsd,
+        timeoutMs: this.executionLimits.timeoutMs,
+        idleTimeoutMs: this.executionLimits.idleTimeoutMs,
         prompt: this.buildPrompt(teamName, agent, messages, tasks, rulesContext),
         rulesPack: {
           principal: {
@@ -304,6 +336,13 @@ export class AgentTeamSupervisor {
           const output = state.responseText?.trim();
           if (output) {
             this.options.store.appendRunOutput(teamName, run.id, output);
+            const terminalReason = budget.observe(output);
+            if (terminalReason && !budgetFailure) {
+              budgetFailure = executionFailureMetadata(
+                new ExecutionPolicyError('EXECUTION_BUDGET_EXCEEDED', terminalReason),
+              );
+              bot.bridge.stopChatTask(chatId);
+            }
           } else {
             this.options.store.updateRun(teamName, run.id, {});
           }
@@ -317,10 +356,14 @@ export class AgentTeamSupervisor {
       if (result.sessionId && (preparation || !isolatedSession)) {
         this.options.store.setAgentSessionId(teamName, agent.name, result.sessionId, agent.engine);
       }
+      const effectiveSuccess = result.success && !budgetFailure;
+      const failure = effectiveSuccess
+        ? undefined
+        : budgetFailure ?? result.failure ?? executionFailureMetadata(result.error ?? 'Execution failed');
       this.options.store.updateRun(teamName, run.id, {
-        status: result.success ? 'completed' : 'failed',
+        status: effectiveSuccess ? 'completed' : 'failed',
         output: result.responseText,
-        error: result.error,
+        error: failure?.message,
       });
       const memberLeadMessage = agent.name === 'lead'
         ? undefined
@@ -332,12 +375,12 @@ export class AgentTeamSupervisor {
         this.notifyTeamActivity(
           teamName,
           agent.name,
-          result.success
+          effectiveSuccess
             ? truncateActivity(result.responseText)
-            : `Run ${run.id} failed${result.error ? `: ${result.error}` : ''}.\n\n${truncateActivity(result.responseText)}`,
+            : `Run ${run.id} failed${failure ? ` [${failure.code}]: ${failure.message}` : ''}.\n\n${truncateActivity(result.responseText)}`,
         );
       }
-      if (result.success) {
+      if (effectiveSuccess) {
         for (const task of tasks) {
           const latest = this.options.store.getTask(teamName, task.id);
           if (latest?.status === 'in_progress') {
@@ -348,16 +391,16 @@ export class AgentTeamSupervisor {
           }
         }
       } else {
-        this.requeueInProgressTasks(teamName, tasks, `Run ${run.id} failed${result.error ? `: ${result.error}` : ''}`);
+        this.settleFailedTasks(teamName, tasks, run.id, failure!);
       }
       if (agent.name !== 'lead' && !memberLeadMessage) {
         this.options.store.sendMessage(teamName, {
           fromName: agent.name,
           toName: 'lead',
-          summary: result.success ? `Completed run ${run.id}` : `Run ${run.id} failed`,
+          summary: effectiveSuccess ? `Completed run ${run.id}` : `Run ${run.id} failed`,
           body: [
             `Agent ${agent.name} finished run ${run.id}.`,
-            result.success ? 'Status: completed' : `Status: failed${result.error ? ` (${result.error})` : ''}`,
+            effectiveSuccess ? 'Status: completed' : `Status: failed${failure ? ` [${failure.code}] (${failure.message})` : ''}`,
             result.responseText ? `\nReport:\n${result.responseText}` : '',
           ].filter(Boolean).join('\n'),
         });
@@ -368,20 +411,14 @@ export class AgentTeamSupervisor {
         this.requeueInProgressTasks(teamName, tasks, `Stopped run ${run.id}; task requeued.`);
         return;
       }
+      const failure = executionFailureMetadata(err);
       this.options.store.updateRun(teamName, run.id, {
         status: 'failed',
-        error: err?.message || String(err),
+        error: failure.message,
       });
-      this.requeueInProgressTasks(teamName, tasks, `Run ${run.id} crashed: ${err?.message || String(err)}`);
-      this.notifyTeamActivity(teamName, agent.name, `Run ${run.id} crashed: ${err?.message || String(err)}`);
-      if (agent.name !== 'lead') {
-        this.options.store.sendMessage(teamName, {
-          fromName: agent.name,
-          toName: 'lead',
-          summary: `Run ${run.id} crashed`,
-          body: `Agent ${agent.name} crashed in run ${run.id}: ${err?.message || String(err)}`,
-        });
-      }
+      this.settleFailedTasks(teamName, tasks, run.id, failure);
+      this.notifyTeamActivity(teamName, agent.name, `Run ${run.id} crashed [${failure.code}]: ${failure.message}`);
+      this.sendFailureToLead(teamName, agent, run.id, failure, 'crashed');
       this.logger.error({ err, teamName, agentName: agent.name, runId: run.id }, 'Agent team member run failed');
     } finally {
       if (preparation) this.options.governance!.touchAgent(preparation.instanceId, agent.name);
@@ -441,6 +478,65 @@ export class AgentTeamSupervisor {
         });
       }
     }
+  }
+
+  private settleFailedTasks(
+    teamName: string,
+    tasks: TeamTask[],
+    runId: string,
+    failure: ExecutionFailureMetadata,
+  ): void {
+    const runs = this.options.store.listRuns(teamName);
+    for (const task of tasks) {
+      const latest = this.options.store.getTask(teamName, task.id);
+      if (latest?.status !== 'in_progress') continue;
+      const failures = runs.filter((run) => run.taskId === task.id && run.status === 'failed');
+      const sameFailures = failures.filter((run) =>
+        executionFailureMetadata(run.error ?? 'Execution failed').fingerprint === failure.fingerprint,
+      ).length;
+      const terminal = !failure.retryable ||
+        sameFailures >= this.executionLimits.sameFailureLimit ||
+        failures.length >= this.executionLimits.failedRunLimit;
+      this.options.store.updateTask(teamName, task.id, {
+        status: terminal ? 'failed' : 'pending',
+        result: terminal
+          ? `Terminal failure [${failure.code}] after run ${runId}: ${failure.message}`
+          : `Run ${runId} failed [${failure.code}] and may retry: ${failure.message}`,
+      });
+    }
+  }
+
+  private failTasksTerminally(
+    teamName: string,
+    tasks: TeamTask[],
+    failure: ExecutionFailureMetadata,
+    prefix: string,
+  ): void {
+    for (const task of tasks) {
+      const latest = this.options.store.getTask(teamName, task.id);
+      if (latest?.status !== 'pending' && latest?.status !== 'in_progress') continue;
+      this.options.store.updateTask(teamName, task.id, {
+        status: 'failed',
+        result: `${prefix} [${failure.code}]: ${failure.message}`,
+      });
+    }
+  }
+
+  private sendFailureToLead(
+    teamName: string,
+    agent: TeamAgent,
+    runId: string | undefined,
+    failure: ExecutionFailureMetadata,
+    phase: string,
+  ): void {
+    if (agent.name === 'lead') return;
+    const label = runId ? `run ${runId}` : 'execution';
+    this.options.store.sendMessage(teamName, {
+      fromName: agent.name,
+      toName: 'lead',
+      summary: `${label} failed`,
+      body: `Agent ${agent.name} ${phase} during ${label}: [${failure.code}] ${failure.message}`,
+    });
   }
 
   private findLatestMemberLeadMessage(teamName: string, agentName: string, idsBeforeRun: Set<number>): TeamMessage | undefined {

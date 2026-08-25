@@ -240,7 +240,7 @@ export class WorkerService {
       botScoped: false,
       mode: 'off',
       operatorModeVersion: 0,
-      appliesTo: 'subsequent-codex-policy-preparations',
+      appliesTo: 'subsequent-rulespack-policy-preparations',
       inFlight: 'unchanged',
     };
   }
@@ -282,7 +282,7 @@ export class WorkerService {
     const launchId = this.makeLaunchId();
     try {
       const childGrant = this.loadRulesPackChildGrant(worker);
-      const rulesPack = worker.engine === 'codex'
+      const rulesPack = worker.engine === 'codex' || worker.engine === 'claude'
         ? await this.rulesPackProvider?.prepare(worker, childGrant)
         : undefined;
       const running = await this.runner.launch(
@@ -547,8 +547,8 @@ export class WorkerService {
     if (!WORKER_ENGINES.includes(input.engine)) {
       throw new WorkerRunnerError(`Unsupported worker engine: ${String(input.engine)}`, 'INVALID_INPUT');
     }
-    if (rulesPackChildGrant && input.engine !== 'codex') {
-      throw new WorkerRunnerError('RulesPack child grants support Codex workers only', 'INVALID_INPUT');
+    if (rulesPackChildGrant && input.engine !== 'codex' && input.engine !== 'claude') {
+      throw new WorkerRunnerError('RulesPack child grants support Codex and Claude workers only', 'INVALID_INPUT');
     }
     if (rulesPackChildGrant && (!authorizingCapability || !this.rulesPackGrantVerifier)) {
       throw new WorkerRunnerError('RulesPack child grant verification is unavailable', 'FORBIDDEN');

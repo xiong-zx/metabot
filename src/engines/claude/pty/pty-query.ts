@@ -185,7 +185,7 @@ export const ptyQuery = (args: {
   let turnInFlight = false;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
-  // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
+  // Map the SDK-style systemPrompt ({type:'preset', append}) to a private file.
   let appendSystemPrompt: string | undefined;
   const sp = options.systemPrompt;
   if (typeof sp === 'string') appendSystemPrompt = sp;
@@ -194,12 +194,15 @@ export const ptyQuery = (args: {
   // ── Boot: write settings, spawn session, start scanner ───────────────────
   const boot = (async () => {
     const settingsPath = await hookBridge.writeSettings();
+    const appendSystemPromptFile = appendSystemPrompt
+      ? await hookBridge.writePrivateFile('system-prompt.md', appendSystemPrompt)
+      : undefined;
 
     session = createPtyClaudeSession({
       cwd: options.cwd,
       resume: options.resume,
       model: options.model,
-      appendSystemPrompt,
+      appendSystemPromptFile,
       settingsPath,
       mcpConfigPath: options.mcpConfigPath,
       env: options.env,

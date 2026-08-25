@@ -56,7 +56,7 @@ export interface TeamMember {
 export interface TeamTask {
   taskId: string;
   subject: string;
-  status: 'pending' | 'in_progress' | 'completed';
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
   teammate?: string;
 }
 

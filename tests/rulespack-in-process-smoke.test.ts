@@ -106,7 +106,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:10,output_
         chatId: 'unsupported-engine',
         sendCards: false,
         engine: 'kimi',
-      })).rejects.toThrow('supports Codex only');
+      })).rejects.toThrow('does not support kimi');
       const dispatchFacts = {
         botName: 'admin',
         chatId: 'dispatch-smoke',

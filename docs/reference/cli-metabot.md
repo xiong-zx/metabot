@@ -229,7 +229,7 @@ metabot teams inbox <team> <name> [--unread] [--read]
 metabot teams tasks list <team>
 metabot teams tasks create <team> <subject> [--description <text>] [--owner <name>]
 metabot teams tasks get <team> <id>
-metabot teams tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+metabot teams tasks update <team> <id> [--status pending|in_progress|completed|failed|deleted] [--owner <name>] [--result <text>]
 
 metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]

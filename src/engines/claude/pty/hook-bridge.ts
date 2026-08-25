@@ -49,7 +49,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
   const bridgeId = randomUUID().slice(0, 8);
   const bridgeDir = join(tmpdir(), `metabot-pty-${bridgeId}`);
-  mkdirSync(bridgeDir, { recursive: true });
+  mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
 
   const sentinelPath = join(bridgeDir, 'stop.flag');
   const teamEventPath = join(bridgeDir, 'team-events.jsonl');
@@ -100,6 +100,18 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
     return settingsPath;
+  }
+
+  async function writePrivateFile(name: string, content: string): Promise<string> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(name)) {
+      throw new Error('PTY private file name is invalid');
+    }
+    if (Buffer.byteLength(content, 'utf8') > 64 * 1024 || content.includes('\0')) {
+      throw new Error('PTY private file content is invalid or too large');
+    }
+    const target = join(bridgeDir, name);
+    writeFileSync(target, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    return target;
   }
 
   // ── onTurnComplete ───────────────────────────────────────────────────────
@@ -214,6 +226,7 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
 
   return {
     writeSettings,
+    writePrivateFile,
     onTurnComplete,
     onTeamEvent,
     dispose,

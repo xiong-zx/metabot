@@ -225,7 +225,7 @@ export interface WorkerRulesPackControlStatus {
   };
   operatorModeVersion: number;
   operatorModeOperationId?: string;
-  appliesTo: 'subsequent-codex-policy-preparations';
+  appliesTo: 'subsequent-rulespack-policy-preparations';
   inFlight: 'unchanged';
 }
 

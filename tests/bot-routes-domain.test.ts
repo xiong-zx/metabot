@@ -223,8 +223,8 @@ describe('bot update Feishu/Lark domain validation', () => {
     );
     expect(output.status).toBe(201);
     const bot = ctx.registry.get('env-claude');
-    expect(bot?.config.rulesPack).toBeUndefined();
-    expect(bot?.config.rulesPackPolicy?.state).toBe('unsupported');
+    expect(bot?.config.rulesPack).toMatchObject({ mode: 'shadow' });
+    expect(bot?.config.rulesPackPolicy?.state).toBe('inherited');
     await bot?.bridge.destroyAsync();
   });
 

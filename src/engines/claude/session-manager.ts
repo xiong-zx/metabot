@@ -23,7 +23,7 @@ export interface UserSession {
   modelEngine?: EngineName;
   /** Per-session Codex reasoning effort override. */
   reasoningEffort?: CodexReasoningEffort;
-  /** RulesPack digest injected into the current Codex session. */
+  /** RulesPack digest injected into the current audited engine session. */
   rulesPackDigest?: string;
   /** Per-session engine override. Falls back to bot default when undefined. */
   engine?: EngineName;
@@ -165,7 +165,7 @@ export class SessionManager {
 
   /**
    * Apply the effective RulesPack digest only at a turn boundary. A changed
-   * digest (including enforce -> off rollback) recycles the Codex session but
+   * digest (including enforce -> off rollback) recycles the engine session but
    * preserves cwd/model/goal preferences. Returns true when recycling occurred.
    */
   applyRulesPackDigest(chatId: string, digest: string | undefined): boolean {

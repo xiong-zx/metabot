@@ -58,7 +58,7 @@ describe('RulesPack multi-bot defaults', () => {
     expect(bots.map((bot) => bot.rulesPack?.dbPath)).toContain('/tmp/rulespack/bridge-web.sqlite');
   });
 
-  it('keeps Claude and Kimi visibly unsupported without creating runtimes', () => {
+  it('configures Claude while keeping Kimi visibly unsupported', () => {
     vi.stubEnv('BOTS_CONFIG', configFile({
       rulesPackDefaults: defaults,
       webBots: [
@@ -67,8 +67,9 @@ describe('RulesPack multi-bot defaults', () => {
       ],
     }));
     const loaded = loadAppConfig();
-    expect(loaded.webBots.map((bot) => bot.rulesPackPolicy?.state)).toEqual(['unsupported', 'unsupported']);
-    expect(loaded.webBots.every((bot) => bot.rulesPack === undefined)).toBe(true);
+    expect(loaded.webBots.map((bot) => bot.rulesPackPolicy?.state)).toEqual(['inherited', 'unsupported']);
+    expect(loaded.webBots[0]?.rulesPack).toMatchObject({ mode: 'shadow' });
+    expect(loaded.webBots[1]?.rulesPack).toBeUndefined();
   });
 
   it('preserves legacy per-bot RulesPack configuration without shared defaults', () => {

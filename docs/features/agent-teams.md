@@ -91,7 +91,9 @@ Operational details:
 - Tune the polling interval with `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS`.
 - The supervisor selects the local `metabot` bridge bot when available, otherwise the first registered bot.
 - Assigned pending tasks are moved to `in_progress` when the supervisor starts the run.
-- The supervisor sets the configured session engine for the teammate chat, but it does not yet validate per-engine capabilities before dispatching work. Keep resident teams on engines known to work in the local bridge until runtime capability checks or per-engine adapters are added.
+- The bridge preflight runs before a durable Run is created. A deterministic policy, schema, or permission incompatibility moves the Task directly to visible `failed` state and never starts a model.
+- Retryable failures open the circuit after the same secret-safe fingerprint repeats twice or a Task accumulates three failed Runs. Both limits are configurable.
+- Every teammate execution receives bounded turns, cost, wall time, idle time, repeated-output, and permission-denial limits. Defaults are controlled by `METABOT_AGENT_TEAM_MAX_TURNS`, `METABOT_AGENT_TEAM_MAX_BUDGET_USD`, `METABOT_AGENT_TEAM_TIMEOUT_MS`, `METABOT_AGENT_TEAM_IDLE_TIMEOUT_MS`, `METABOT_AGENT_TEAM_REPEATED_OUTPUT_LIMIT`, `METABOT_AGENT_TEAM_PERMISSION_DENIAL_LIMIT`, `METABOT_AGENT_TEAM_SAME_FAILURE_LIMIT`, and `METABOT_AGENT_TEAM_FAILED_RUN_LIMIT`.
 
 ## Resident Teams In `bots.json`
 
@@ -160,7 +162,7 @@ metabot teams inbox <team> <name> [--unread] [--read]
 metabot teams tasks list <team>
 metabot teams tasks create <team> <subject> [--description <text>] [--owner <name>]
 metabot teams tasks get <team> <id>
-metabot teams tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+metabot teams tasks update <team> <id> [--status pending|in_progress|completed|failed|deleted] [--owner <name>] [--result <text>]
 
 metabot teams runs list <team>
 metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]

@@ -95,6 +95,64 @@ describe('MetaBot RulesPack runtime', () => {
     runtime.close();
   });
 
+  it('compiles the same policy for Claude and records its system-prompt channel', async () => {
+    const root = temp();
+    const runtime = new MetaBotRulesPackRuntime({
+      mode: 'enforce',
+      hostId: 'imac',
+      dbPath: path.join(root, 'claude.sqlite'),
+      configRules: { id: 'config', revision: '1', rules: [rule('claude-rule', 'Apply to Claude.')] },
+    }, logger);
+    const prepared = await runtime.prepareTurn(facts(root, { engine: 'claude' }));
+    expect(prepared.subject.engine).toBe('claude');
+    expect(prepared.injectionText).toContain('Apply to Claude.');
+    prepared.markInjected();
+    expect(runtime.receipts(prepared.packDigest).find((receipt) => receipt.status === 'injected')).toMatchObject({
+      details: { channelPosition: 'claude-system-append' },
+    });
+    runtime.close();
+  });
+
+  it('retires expired temporary deliveries without degrading unrelated policy', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-25T18:00:00.000Z'));
+    const root = temp();
+    const sender = new MetaBotRulesPackRuntime({
+      mode: 'enforce', hostId: 'imac', dbPath: path.join(root, 'expiry-sender.sqlite'),
+      dispatch: { issuer: 'admin@imac' },
+      configRules: { id: 'sender', revision: '1', rules: [rule('sent', 'Short-lived delivered policy.')] },
+    }, logger);
+    const receiver = new MetaBotRulesPackRuntime({
+      mode: 'enforce', hostId: 'savio', dbPath: path.join(root, 'expiry-receiver.sqlite'),
+      dispatch: { audience: 'metabot-host:savio', allowedIssuers: ['admin@imac'] },
+      configRules: { id: 'local', revision: '1', rules: [rule('local', 'Stable local policy.')] },
+    }, logger);
+    const childFacts = facts(root, { botName: 'pm-savio', chatId: 'expiry-chat' });
+    const envelope = await sender.createDispatchEnvelope({
+      targetSubject: receiver.buildSubject(childFacts),
+      audience: 'metabot-host:savio',
+      ttlMs: 1_000,
+    });
+    const accepted = await receiver.prepareTurn(childFacts, {
+      envelope,
+      transport: { authenticated: true, authenticatedIssuer: 'admin@imac' },
+    });
+    accepted.markInjected();
+    expect(accepted.injectionText).toContain('Short-lived delivered policy.');
+
+    vi.setSystemTime(new Date('2026-08-25T18:00:02.000Z'));
+    const status = receiver.status();
+    const retired = status.sources.find((source) => source.sourceId.startsWith('dispatch-'));
+    expect(retired).toMatchObject({ generation: 'retired-expired', health: 'fresh', ruleCount: 0 });
+    const subsequent = await receiver.prepareTurn(childFacts);
+    expect(subsequent.injectionText).toContain('Stable local policy.');
+    expect(subsequent.injectionText).not.toContain('Short-lived delivered policy.');
+    expect(subsequent.telemetry.degraded).toBe(false);
+    expect(receiver.receipts().some((receipt) => receipt.status === 'consumed')).toBe(true);
+    sender.close();
+    receiver.close();
+  });
+
   it('acknowledges an accepted shadow envelope as shadowed and never consumed', async () => {
     const root = temp();
     const sender = new MetaBotRulesPackRuntime(

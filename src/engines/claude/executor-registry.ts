@@ -54,6 +54,10 @@ export interface RegistryOptions {
   idleTimeoutMs?: number;
   /** Default model for new executors. Per-acquire option overrides this. */
   defaultModel?: string;
+  /** Default process-lifetime Claude turn ceiling. */
+  defaultMaxTurns?: number;
+  /** Default process-lifetime Claude API cost ceiling. */
+  defaultMaxBudgetUsd?: number;
   /** Default API key for new executors. */
   defaultApiKey?: string;
   /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
@@ -89,6 +93,11 @@ export interface AcquireOptions {
   mcpConfigPath?: string;
   /** Releases the materialized file leases if this executor owns them. */
   mcpCleanup?: () => void;
+  /** Stable RulesPack system appendix bound to this persistent process. */
+  rulesPack?: {
+    packDigest: string;
+    injectionText: string;
+  };
 }
 
 interface PoolEntry {
@@ -184,7 +193,8 @@ export class ExecutorRegistry extends EventEmitter {
       const sameMcp =
         equalMcpEntries(existing.acquireOpts.mcpEntries, opts.mcpEntries) &&
         existing.acquireOpts.mcpConfigPath === opts.mcpConfigPath;
-      if (healthy && existing.model === effectiveModel && sameExecutionEnv && sameMcp) {
+      const sameRulesPack = equalRulesPack(existing.acquireOpts.rulesPack, opts.rulesPack);
+      if (healthy && existing.model === effectiveModel && sameExecutionEnv && sameMcp && sameRulesPack) {
         // Healthy + same model — bump LRU position
         this.executors.delete(chatId);
         this.executors.set(chatId, existing);
@@ -200,9 +210,11 @@ export class ExecutorRegistry extends EventEmitter {
         // the conversation is preserved, just continued on the new model.
         const reason = existing.model !== effectiveModel
           ? 'model-change'
-          : sameExecutionEnv
-            ? 'execution-mcp-change'
-            : 'execution-credential-rotation';
+          : !sameExecutionEnv
+            ? 'execution-credential-rotation'
+            : !sameMcp
+              ? 'execution-mcp-change'
+              : 'rulespack-change';
         this.opts.logger.info(
           { chatId, from: existing.model, to: effectiveModel, executionEnvChanged: !sameExecutionEnv, mcpChanged: !sameMcp },
           `ExecutorRegistry: ${reason} — respawning executor`,
@@ -287,6 +299,8 @@ export class ExecutorRegistry extends EventEmitter {
       resumeSessionId,
       apiKey: this.opts.defaultApiKey,
       model: effectiveModel,
+      maxTurns: this.opts.defaultMaxTurns,
+      maxBudgetUsd: this.opts.defaultMaxBudgetUsd,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,
@@ -296,6 +310,7 @@ export class ExecutorRegistry extends EventEmitter {
       mcpEntries: opts.mcpEntries,
       mcpConfigPath: opts.mcpConfigPath,
       mcpCleanup: opts.mcpCleanup,
+      rulesPack: opts.rulesPack,
       backend: this.opts.backend,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
@@ -542,4 +557,11 @@ function equalStringRecords(left?: Record<string, string>, right?: Record<string
 
 function equalMcpEntries(left?: readonly McpEntry[], right?: readonly McpEntry[]): boolean {
   return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
+}
+
+export function equalRulesPack(
+  left?: { packDigest: string; injectionText: string },
+  right?: { packDigest: string; injectionText: string },
+): boolean {
+  return left?.packDigest === right?.packDigest && left?.injectionText === right?.injectionText;
 }

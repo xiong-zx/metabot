@@ -1,9 +1,10 @@
-# RulesPack for Codex
+# RulesPack for Codex and Claude
 
 RulesPack is a downstream-only, deterministic instruction-selection layer for
-Codex. It compiles approved structured Rules once per turn at the central
-Codex boundary, never calls an LLM, and injects only the engine-rendered bytes
-in Codex's user-channel prelude. Claude and Kimi are unchanged.
+Codex and Claude. It compiles approved structured Rules once per turn at the
+central engine boundary, never calls an LLM, and injects only the
+engine-rendered bytes through Codex stdin or Claude's system-prompt appendix.
+Kimi remains unsupported.
 
 The checked-in engine is vendored at
 `packages/rulespack/` from standalone commit
@@ -15,10 +16,10 @@ external FIX-009 checkout.
 
 ## Configuration
 
-For multi-bot installations, configure shared Codex defaults once at the root
-of `bots.json`. Every current or future Codex bot inherits them, including
-hot-added Web bots and detached Worker Runner jobs. Claude and Kimi report
-`unsupported` and never instantiate a RulesPack runtime.
+For multi-bot installations, configure shared audited-engine defaults once at
+the root of `bots.json`. Every current or future Codex or Claude bot inherits
+them, including hot-added Web bots and detached Worker Runner jobs. Kimi
+reports `unsupported` and never instantiates a RulesPack runtime.
 
 ```json
 {
@@ -129,8 +130,8 @@ that auth mode. Use this path only between mutually trusted administrators;
 Agent Bus/Core bearer paths never receive this equivalence.
 
 Worker startup resolves every configured bot using its declared `engine`.
-Claude and Kimi entries remain `unsupported` even when shared defaults exist.
-Every bot-scoped Codex worker database must be durable and distinct from every
+Codex and Claude entries inherit shared defaults; Kimi remains `unsupported`.
+Every bot-scoped RulesPack worker database must be durable and distinct from every
 materialized Bridge or Worker database for every bot by canonical case-folded
 path and, when present, device/inode. This also applies
 to legacy per-bot objects: use `{surface}` or otherwise provide genuinely
@@ -204,10 +205,10 @@ project-bound native source, because project binding would narrow their
 scope.
 
 The shared `rulesPackDefaults` resolver applies this source to every current
-and future Codex bot. A host may obtain the same structured Rules from its
+and future Codex or Claude bot. A host may obtain the same structured Rules from its
 local Meta Memory source or store them as `configRules`; the Rule IDs,
-versions, lifecycle, and text must remain identical. Claude and Kimi remain
-explicitly unsupported rather than pretending to receive these Rules.
+versions, lifecycle, and text must remain identical. Kimi remains explicitly
+unsupported rather than pretending to receive these Rules.
 
 Every Rule uses schema v1 from the engine API. `platform` and `runtime`
 authority are accepted only from a source explicitly marked
@@ -236,15 +237,16 @@ and never passes the bot configuration or Core credential to child processes.
 `METABOT_RULESPACK_CONFIG` remains a backward-compatible standalone override,
 but is mutually exclusive with `BOTS_CONFIG` so required shared policy cannot
 be shadowed by a legacy daemon-only file.
-ARC jobs executed through Worker Runner use the same Codex-only worker boundary.
-When a Codex turn consumed an authenticated remote dispatch, Bridge signs a
+ARC jobs executed through Worker Runner use the same bounded worker boundary.
+When a Codex or Claude turn consumed an authenticated remote dispatch, Bridge signs a
 one-level `RulesPackChildGrantV1` bound to that turn's Worker capability and
 leases it as a private per-turn companion file. It is not a tool argument or a
 model-visible environment value. Worker verifies its signature, capability
 digest, parent envelope, expiry, and exact scope, persists it privately with
 the job for recovery, and rebinds the selected Rules to the server-assigned
-Worker/task ID in the independent worker-surface database. Claude and Kimi
-jobs carrying a grant are rejected.
+Worker/task ID in the independent worker-surface database. Codex injects the
+policy through stdin; Claude uses its system-prompt channel. Kimi jobs carrying
+a grant are rejected.
 
 Native `metabot-arcd`/official AutoResearchClaw execution does not yet have a
 verified Codex stdin boundary for received exact dispatch Rules. The native ARC
@@ -270,33 +272,34 @@ requested bot alone changed.
 
 1. Startup/config/file/Memory events refresh immutable structured source
    generations into the RulesPack-owned database.
-2. `MessageBridge.runOneTurn` constructs the Codex `ExecutionSubject` from the
+2. `MessageBridge.runOneTurn` constructs the Codex or Claude `ExecutionSubject` from the
    configured host, bot registry, authenticated principal/capability,
    authenticated chat/user, configured chat/cwd-to-project bindings, internal child
    task/agent/worker facts, and materialized tools/output declarations. Prompt
    or Rule content is never an identity/authority source.
 3. The adapter calls the engine once. `off` emits no injection and bypass
    telemetry; `shadow` compiles/records but injects nothing; `enforce` passes
-   only `injectionText` to the Codex executor.
-4. The Codex executor prepends those bytes to its single truthful user-channel
-   input, before the actual user prompt and normal MetaBot context. Pack IDs,
-   subjects, decisions, and telemetry do not enter model context.
+   only `injectionText` to the selected audited executor.
+4. Codex prepends those bytes to its single truthful stdin user input. Claude
+   places the same bytes first in the default system-prompt appendix for both
+   legacy and persistent executors. Pack IDs, subjects, decisions, and
+   telemetry do not enter model context.
 5. The session manager compares the effective pack digest at the boundary.
-   An unchanged digest resumes the Codex session. A changed digest—or rollback
+   An unchanged digest resumes the engine session. A changed digest—or rollback
    from enforce to off—clears the provider session ID before spawning the next
    turn. In-flight turns are never mutated.
 6. Agent Team and scheduled calls add authenticated agent/task facts before the
    same hook. Detached Worker/ARC-via-Worker creates a worker/ARC subject from
    its pinned capability principal and durable worker ID, then injects at its
-   direct Codex stdin boundary. A received parent dispatch reaches it only via
+   direct Codex stdin or Claude system-prompt boundary. A received parent dispatch reaches it only via
    the signed child grant; restart relaunches re-verify that private grant and
    repeat the boundary check from durable facts.
 
-Worker mode changes affect the current daemon at the next Codex policy
+Worker mode changes affect the current daemon at the next audited-engine policy
 preparation boundary. They cannot change a launch preparation that already
 captured its mode or remove instructions already delivered to a process, so
-operator responses state `appliesTo: subsequent-codex-policy-preparations` and
-`inFlight: unchanged`; Claude and Kimi remain unsupported and unchanged.
+operator responses state `appliesTo: subsequent-rulespack-policy-preparations` and
+`inFlight: unchanged`; Kimi remains unsupported and unchanged.
 
 For authenticated resident-Bridge peer/Agent Bus work, the dispatcher compiles an exact
 remote-host subject and sends `RulesPackDispatchEnvelopeV1`. The receiver
@@ -356,7 +359,7 @@ forwarding; an authenticated envelope received while local mode is off is also
 rejected rather than executed without policy.
 Envelope-bearing Core inbox relay is explicitly asynchronous: enqueue returns
 a digest-bound `queued` acknowledgement, while the receiver records the later
-exact `consumed` receipt before completing its Codex turn. It is never reported
+exact `consumed` receipt before completing its engine turn. It is never reported
 as already consumed at enqueue time. Core checks that a protected relay's
 envelope target equals the queued bot/chat and that its issuer equals the
 authenticated sending credential before accepting it; the receiver still owns
@@ -386,13 +389,16 @@ selected/excluded counts, characters/token estimate, digest, generation and
 freshness, degraded/LKG state, and bounded reasons. Adapter status also reports
 target-mismatch and replay rejections. Audits and logs exclude Rule bodies and
 redact secret-shaped fields. Receipts say `compiled`/`shadowed` before spawn,
-`injected` only after Codex accepts that prepared input, `consumed` only after
+`injected` only after the selected audited engine accepts that prepared input, `consumed` only after
 the corresponding target acceptance, and `rejected` on failure.
 
 Optional-source failures use a bounded stored generation and report degraded
 state. Required-source, path escape, unsafe Rule text, mandatory budget,
 dependency, target, expiry, tamper, and replay failures fail closed. Only the
-explicit transient `COMPILE_UNAVAILABLE` failure may use engine-verified
+current snapshot of an expired optional temporary delivery is replaced by an
+empty fresh tombstone, so it cannot degrade unrelated policy; immutable Rule
+versions, replay rows, audit events and receipts remain available.
+Only an explicit transient `COMPILE_UNAVAILABLE` failure may use engine-verified
 bounded LKG, and only after the complete current source snapshot passes schema,
 digest, authority, lifecycle, target, text, and store integrity validation and
 its exact compiler/mode/budget/subject/source cache key resolves through a

@@ -7,7 +7,7 @@ import type { Logger } from '../utils/logger.js';
 
 export type TeamStatus = 'active' | 'stopped';
 export type AgentStatus = 'idle' | 'working' | 'stopped';
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'deleted';
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
 export interface AgentTeam {

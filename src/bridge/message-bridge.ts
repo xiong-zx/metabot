@@ -64,6 +64,11 @@ import type {
   AuthenticatedExecutionFacts,
   RulesPackOperator,
 } from '@metabot/rulespack-adapter';
+import {
+  ExecutionPolicyError,
+  executionFailureMetadata,
+  type ExecutionFailureMetadata,
+} from '../services/execution-failure.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -146,6 +151,12 @@ const QUESTION_CARD_REUSE_MS = 30 * 1000;
 const CHATID_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // sweep hourly
 const CHATID_ENTRY_TTL_MS = 24 * 60 * 60 * 1000; // evict entries unused for 24h
 
+function boundedTaskTimeout(requested: number | undefined, ceiling: number): number {
+  return Number.isSafeInteger(requested) && requested! > 0
+    ? Math.min(requested!, ceiling)
+    : ceiling;
+}
+
 /**
  * Default for the persistent-executor pool when no per-bot `persistentExecutor.enabled`
  * is set. Default: ON (since 2026-05-13). Opt out with
@@ -205,6 +216,12 @@ export interface ApiTaskOptions {
   sendCards?: boolean;
   /** Override maxTurns for this task (e.g. 1 for voice mode). */
   maxTurns?: number;
+  /** Override the Claude cost ceiling for this task. Ignored by engines without USD budgets. */
+  maxBudgetUsd?: number;
+  /** Bound this API task below the global 24-hour ceiling. */
+  timeoutMs?: number;
+  /** Bound no-output time below the global idle ceiling. */
+  idleTimeoutMs?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
   model?: string;
   /** Override engine for this API task without changing the chat's IM session default. */
@@ -239,6 +256,8 @@ export interface ApiTaskResult {
   costUsd?: number;
   durationMs?: number;
   error?: string;
+  /** Stable failure classification for supervisors; never contains credentials. */
+  failure?: ExecutionFailureMetadata;
   /** Exact receipt-bound acknowledgement for authenticated peer delivery. */
   rulesPackDelivery?: {
     status: 'shadowed' | 'consumed';
@@ -248,6 +267,10 @@ export interface ApiTaskResult {
     effectivePackDigest: string;
   };
 }
+
+export type ApiTaskPreflightResult =
+  | { ok: true; engine: EngineName }
+  | { ok: false; engine: EngineName; failure: ExecutionFailureMetadata };
 
 export interface ActivityEventData {
   type: 'task_started' | 'task_completed' | 'task_failed';
@@ -680,6 +703,32 @@ export class MessageBridge {
     return this.sessionManager;
   }
 
+  /** Cheap dispatcher hook; downstream policy adapters may return a terminal failure here. */
+  preflightApiTask(options: Pick<ApiTaskOptions, 'chatId' | 'engine'>): ApiTaskPreflightResult {
+    const engine = options.engine ?? this.sessionManager.getSession(options.chatId).engine ?? resolveEngineName(this.config);
+    if (this.config.rulesPackPolicy?.required && engine !== 'codex' && engine !== 'claude') {
+      return {
+        ok: false,
+        engine,
+        failure: executionFailureMetadata(new ExecutionPolicyError(
+          'RULESPACK_ENGINE_UNSUPPORTED',
+          `Required RulesPack does not support ${engine} execution`,
+        )),
+      };
+    }
+    if (this.config.rulesPackPolicy?.required && !this.rulesPackRuntime) {
+      return {
+        ok: false,
+        engine,
+        failure: executionFailureMetadata(new ExecutionPolicyError(
+          'RULESPACK_RUNTIME_UNAVAILABLE',
+          'Required RulesPack runtime is unavailable',
+        )),
+      };
+    }
+    return { ok: true, engine };
+  }
+
   isBusy(chatId: string): boolean {
     return this.isChatBusy(chatId);
   }
@@ -892,6 +941,8 @@ export class MessageBridge {
         maxConcurrent,
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
+        defaultMaxTurns: this.config.claude.maxTurns,
+        defaultMaxBudgetUsd: this.config.claude.maxBudgetUsd,
         backend: this.config.claude.backend,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
@@ -1630,7 +1681,7 @@ export class MessageBridge {
    * were the whole point of Stage 4 quietly disappeared mid-conversation.
    *
    * Per-turn options that the persistent executor cannot rebind (`maxTurns`,
-   * `allowedTools`) automatically fall back to the legacy spawn path here so
+   * `maxBudgetUsd`, `allowedTools`) automatically fall back to the legacy spawn path here so
    * callers don't have to think about it.
    *
    * When `freshSession: true`, in persistent mode we explicitly release the
@@ -1651,6 +1702,7 @@ export class MessageBridge {
       reasoningEffort?: import('../config.js').CodexReasoningEffort;
       onTeamEvent?: (event: TeamEvent) => void;
       maxTurns?: number;
+      maxBudgetUsd?: number;
       allowedTools?: string[];
       freshSession?: boolean;
     },
@@ -1670,40 +1722,58 @@ export class MessageBridge {
     });
     let preparedRulesPack: Awaited<ReturnType<MetaBotRulesPackRuntime['prepareTurn']>> | undefined;
     try {
-      if (this.config.rulesPackPolicy?.required && engineName !== 'codex') {
-        throw new Error(`Required RulesPack supports Codex only; ${engineName} execution was rejected`);
+      if (this.config.rulesPackPolicy?.required && engineName !== 'codex' && engineName !== 'claude') {
+        throw new ExecutionPolicyError(
+          'RULESPACK_ENGINE_UNSUPPORTED',
+          `Required RulesPack does not support ${engineName} execution`,
+        );
       }
-      if (suppliedRulesPack?.dispatch && engineName !== 'codex') {
-        throw new Error(`RulesPack dispatch is unsupported for ${engineName}; Codex is required`);
+      if (suppliedRulesPack?.dispatch && engineName !== 'codex' && engineName !== 'claude') {
+        throw new ExecutionPolicyError(
+          'RULESPACK_ENGINE_UNSUPPORTED',
+          `RulesPack dispatch is unsupported for ${engineName}`,
+        );
       }
-      if (suppliedRulesPack?.dispatch && engineName === 'codex' && !this.rulesPackRuntime) {
-        throw new Error('RulesPack dispatch rejected because the target Codex bot is not configured');
+      if (suppliedRulesPack?.dispatch && !this.rulesPackRuntime) {
+        throw new ExecutionPolicyError(
+          'RULESPACK_RUNTIME_UNAVAILABLE',
+          'RulesPack dispatch rejected because the target bot is not configured',
+        );
       }
-      if (engineName === 'codex' && this.rulesPackRuntime) {
+      if ((engineName === 'codex' || engineName === 'claude') && this.rulesPackRuntime) {
         const principal = this.executionPrincipalProvider?.({ botName: this.config.name, chatId });
         const supplied = suppliedRulesPack;
         const transportPrincipal = supplied?.principal;
         if (!transportPrincipal || transportPrincipal.kind === 'generic') {
           if (this.config.rulesPackPolicy?.required) {
-            throw new Error('Required RulesPack rejected a missing or unscoped transport principal');
+            throw new ExecutionPolicyError(
+              'RULESPACK_PRINCIPAL_REQUIRED',
+              'Required RulesPack rejected a missing or unscoped transport principal',
+            );
           }
           this.sessionManager.applyRulesPackDigest(chatId, undefined);
         } else {
           if (transportPrincipal.botName !== this.config.name || transportPrincipal.chatId !== chatId) {
-            throw new Error('Verified RulesPack principal does not match the Codex turn');
+            throw new ExecutionPolicyError('RULESPACK_PRINCIPAL_MISMATCH', 'Verified RulesPack principal does not match the turn');
           }
           if (principal && (principal.botName !== transportPrincipal.botName || principal.chatId !== transportPrincipal.chatId)) {
-            throw new Error('Authenticated execution principal does not match the Codex turn');
+            throw new ExecutionPolicyError('RULESPACK_PRINCIPAL_MISMATCH', 'Authenticated execution principal does not match the turn');
           }
           if (principal?.agentName && transportPrincipal.agentName && principal.agentName !== transportPrincipal.agentName) {
-            throw new Error('Authenticated Agent identity does not match the child turn');
+            throw new ExecutionPolicyError(
+              'RULESPACK_PRINCIPAL_MISMATCH',
+              'Authenticated Agent identity does not match the child turn',
+            );
           }
           const materializedTools = [
             ...(opts.allowedTools ?? []),
             ...(executionMcp?.entries.map((entry) => entry.name) ?? []),
           ];
           if (transportPrincipal.tools && !sameExactValues(materializedTools, transportPrincipal.tools)) {
-            throw new Error('Verified RulesPack principal tools do not match the Codex turn');
+            throw new ExecutionPolicyError(
+              'RULESPACK_PRINCIPAL_MISMATCH',
+              'Verified RulesPack principal tools do not match the turn',
+            );
           }
           const facts: AuthenticatedExecutionFacts = {
             botName: transportPrincipal.botName,
@@ -1720,6 +1790,7 @@ export class MessageBridge {
             tools: materializedTools,
             dataClasses: transportPrincipal.dataClasses ?? [],
             outputTypes: transportPrincipal.outputTypes ?? ['text'],
+            engine: engineName,
           };
           preparedRulesPack = await this.rulesPackRuntime.prepareTurn(
             facts,
@@ -1744,7 +1815,11 @@ export class MessageBridge {
           const activeDigest = preparedRulesPack.mode === 'enforce' && preparedRulesPack.injectionText
             ? preparedRulesPack.packDigest
             : undefined;
+          const digestChanged = session.rulesPackDigest !== activeDigest;
           const recycled = this.sessionManager.applyRulesPackDigest(chatId, activeDigest);
+          if (engineName === 'claude' && digestChanged) {
+            await this.releaseChatExecutor(chatId, 'rulespack-digest-change');
+          }
           session = this.sessionManager.getSession(chatId);
           this.logger.info({
             mode: preparedRulesPack.mode,
@@ -1756,7 +1831,8 @@ export class MessageBridge {
             characters: preparedRulesPack.telemetry.characterCount,
             degraded: preparedRulesPack.telemetry.degraded,
             recycled,
-          }, 'RulesPack prepared for Codex turn');
+            engine: engineName,
+          }, 'RulesPack prepared for turn');
         }
       }
     } catch (error) {
@@ -1771,6 +1847,7 @@ export class MessageBridge {
       this.isPersistentExecutorEnabled() &&
       engineName === 'claude' &&
       opts.maxTurns === undefined &&
+      opts.maxBudgetUsd === undefined &&
       opts.allowedTools === undefined;
 
     if (usePersistent) {
@@ -1794,6 +1871,12 @@ export class MessageBridge {
           mcpEntries: executionMcp?.entries,
           mcpConfigPath: executionMcp?.claudeMcpConfigPath,
           mcpCleanup: executionMcp?.cleanup,
+          ...(preparedRulesPack ? {
+            rulesPack: {
+              packDigest: preparedRulesPack.packDigest,
+              injectionText: preparedRulesPack.injectionText,
+            },
+          } : {}),
         });
       } catch (error) {
         // acquire() normally transfers the lease to the registry, but this
@@ -1803,7 +1886,15 @@ export class MessageBridge {
       }
       // TurnHandle is structurally compatible with ExecutionHandle (stream,
       // sendAnswer, resolveQuestion, finish) — see persistent-executor.ts.
-      return exec.nextTurn(opts.prompt) as unknown as ExecutionHandle;
+      const result = exec.nextTurn(
+        opts.prompt,
+        preparedRulesPack ? {
+          markInjected: preparedRulesPack.markInjected,
+          markRejected: preparedRulesPack.markRejected,
+        } : undefined,
+      ) as unknown as ExecutionHandle;
+      this.attachRulesPackDelivery(result, preparedRulesPack);
+      return result;
     }
 
     try {
@@ -1818,11 +1909,13 @@ export class MessageBridge {
         reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
         onTeamEvent: opts.onTeamEvent,
         maxTurns: opts.maxTurns,
+        maxBudgetUsd: opts.maxBudgetUsd,
         allowedTools: opts.allowedTools,
         env: executionEnv,
         mcpEntries: executionMcp?.entries,
         ...(preparedRulesPack ? {
           rulesPack: {
+            packDigest: preparedRulesPack.packDigest,
             injectionText: preparedRulesPack.injectionText,
             markInjected: preparedRulesPack.markInjected,
             markRejected: preparedRulesPack.markRejected,
@@ -1830,32 +1923,35 @@ export class MessageBridge {
         } : {}),
       });
       const result = withMcpCleanup(handle, executionMcp?.cleanup);
-      if (preparedRulesPack?.receivedEnvelope) {
-        const envelope = preparedRulesPack.receivedEnvelope;
-        const deliveryHandle = result as unknown as {
-          rulesPackDelivery?: () => ApiTaskResult['rulesPackDelivery'];
-        };
-        deliveryHandle.rulesPackDelivery = () => {
-          const status = preparedRulesPack.mode === 'shadow' ? 'shadowed' : 'consumed';
-          const acknowledged = this.rulesPackRuntime?.receipts(preparedRulesPack.packDigest, 1_000).some((receipt) =>
-            receipt.status === status &&
-            receipt.replayId === envelope.replayId &&
-            receipt.packDigest === preparedRulesPack.packDigest,
-          );
-          return acknowledged ? {
-            status,
-            envelopeId: envelope.envelopeId,
-            replayId: envelope.replayId,
-            packDigest: envelope.packDigest,
-            effectivePackDigest: preparedRulesPack.packDigest,
-          } : undefined;
-        };
-      }
+      this.attachRulesPackDelivery(result, preparedRulesPack);
       return result;
     } catch (error) {
       executionMcp?.cleanup();
       throw error;
     }
+  }
+
+  private attachRulesPackDelivery(
+    handle: ExecutionHandle,
+    prepared: Awaited<ReturnType<MetaBotRulesPackRuntime['prepareTurn']>> | undefined,
+  ): void {
+    if (!prepared?.receivedEnvelope) return;
+    const envelope = prepared.receivedEnvelope;
+    handle.rulesPackDelivery = () => {
+      const status = prepared.mode === 'shadow' ? 'shadowed' : 'consumed';
+      const acknowledged = this.rulesPackRuntime?.receipts(prepared.packDigest, 1_000).some((receipt) =>
+        receipt.status === status &&
+        receipt.replayId === envelope.replayId &&
+        receipt.packDigest === prepared.packDigest,
+      );
+      return acknowledged ? {
+        status,
+        envelopeId: envelope.envelopeId,
+        replayId: envelope.replayId,
+        packDigest: envelope.packDigest,
+        effectivePackDigest: prepared.packDigest,
+      } : undefined;
+    };
   }
 
   /**
@@ -3250,6 +3346,7 @@ export class MessageBridge {
         outputsDir,
         apiContext: buildApiContext(),
         maxTurns: options.maxTurns,
+        maxBudgetUsd: options.maxBudgetUsd,
         model: options.model ?? session.model,
         allowedTools: options.allowedTools,
         onTeamEvent,
@@ -3292,12 +3389,14 @@ export class MessageBridge {
 
     let timedOut = false;
     let idledOut = false;
+    const taskTimeoutMs = boundedTaskTimeout(options.timeoutMs, TASK_TIMEOUT_MS);
+    const taskIdleTimeoutMs = boundedTaskTimeout(options.idleTimeoutMs, IDLE_TIMEOUT_MS);
     const timeoutId = setTimeout(() => {
       this.logger.warn({ chatId, userId }, 'API task timeout, aborting');
       timedOut = true;
       executionHandle.finish();
       abortController.abort();
-    }, TASK_TIMEOUT_MS);
+    }, taskTimeoutMs);
 
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
     const resetIdleTimer = () => {
@@ -3307,7 +3406,7 @@ export class MessageBridge {
         idledOut = true;
         executionHandle.finish();
         abortController.abort();
-      }, IDLE_TIMEOUT_MS);
+      }, taskIdleTimeoutMs);
     };
     resetIdleTimer();
 
@@ -3413,6 +3512,9 @@ export class MessageBridge {
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(),
           model: options.model ?? session.model,
+          maxTurns: options.maxTurns,
+          maxBudgetUsd: options.maxBudgetUsd,
+          allowedTools: options.allowedTools,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -3478,6 +3580,9 @@ export class MessageBridge {
         ...(executionHandle.rulesPackDelivery?.()
           ? { rulesPackDelivery: executionHandle.rulesPackDelivery() }
           : {}),
+        ...(lastState.status === 'error'
+          ? { failure: executionFailureMetadata(lastState.errorMessage ?? 'Task failed') }
+          : {}),
       };
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'API task execution error');
@@ -3497,6 +3602,9 @@ export class MessageBridge {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
             prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(),
             model: options.model ?? session.model,
+            maxTurns: options.maxTurns,
+            maxBudgetUsd: options.maxBudgetUsd,
+            allowedTools: options.allowedTools,
             onTeamEvent, freshSession: true,
           });
           executionHandle.finish();
@@ -3540,6 +3648,9 @@ export class MessageBridge {
             ...(retryHandle.rulesPackDelivery?.()
               ? { rulesPackDelivery: retryHandle.rulesPackDelivery() }
               : {}),
+            ...(lastState.status === 'error'
+              ? { failure: executionFailureMetadata(lastState.errorMessage ?? 'Task failed') }
+              : {}),
           };
         } catch (retryErr: any) {
           this.logger.error({ err: retryErr, chatId }, 'API task retry after stale session also failed');
@@ -3578,6 +3689,7 @@ export class MessageBridge {
         ...(runningTask.cancelled ? { cancelled: true } : {}),
         responseText: lastState.responseText,
         error: err.message || 'Unknown error',
+        failure: executionFailureMetadata(err),
       };
     } finally {
       clearTimeout(timeoutId);

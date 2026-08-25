@@ -113,6 +113,8 @@ export interface AuthenticatedExecutionFacts {
   tools?: readonly string[];
   dataClasses?: readonly string[];
   outputTypes?: readonly string[];
+  /** Engine selected by authenticated runtime code; defaults to codex for older callers. */
+  engine?: 'codex' | 'claude';
 }
 
 export interface AuthenticatedDispatchContext {

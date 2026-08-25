@@ -217,7 +217,7 @@
         "@xvirobotics/arc-worker-runner-adapter",
         "@xvirobotics/arc-researchclaw-adapter"
       ],
-      "reason": "Keep the deterministic vendored RulesPack engine independent of MetaBot runtime and downstream daemon implementations.",
+      "reason": "Keep the deterministic vendored RulesPack engine, including audited Codex/Claude subject identity, independent of MetaBot runtime and downstream daemon implementations.",
       "validationSurface": [
         "packages/rulespack/test/compiler.test.ts",
         "packages/rulespack/test/store-engine.test.ts",
@@ -245,6 +245,12 @@
         "src/bridge/message-bridge.ts",
         "src/engines/prompt-context.ts",
         "src/engines/claude/executor.ts",
+        "src/engines/claude/persistent-executor.ts",
+        "src/engines/claude/executor-registry.ts",
+        "src/engines/claude/pty/contract.ts",
+        "src/engines/claude/pty/hook-bridge.ts",
+        "src/engines/claude/pty/pty-query.ts",
+        "src/engines/claude/pty/pty-session.ts",
         "src/engines/claude/session-manager.ts",
         "src/engines/codex/executor.ts",
         "src/api/http-server.ts",
@@ -275,7 +281,7 @@
         "src/api/routes/task-routes.ts",
         "src/api/routes/types.ts"
       ],
-      "reason": "Keep MetaBot-specific Codex/source/session/transport bindings, including exact authenticated chat-to-project membership, in an isolated downstream package with enumerated thin runtime hooks.",
+      "reason": "Keep MetaBot-specific Codex/Claude source, system-prompt, session, receipt, and transport bindings for FIX-015, including exact authenticated chat-to-project membership, in an isolated downstream package with enumerated thin runtime hooks.",
       "validationSurface": [
         "packages/rulespack-adapter/tests/config.test.ts",
         "packages/rulespack-adapter/tests/runtime.test.ts",
@@ -283,6 +289,8 @@
         "packages/server/tests/agents-store.test.ts",
         "packages/server/tests/auth.test.ts",
         "tests/rulespack-codex-integration.test.ts",
+        "tests/claude-rulespack.test.ts",
+        "tests/agent-team-supervisor.test.ts",
         "tests/rulespack-in-process-smoke.test.ts",
         "tests/rulespack-operator-routes.test.ts",
         "tests/peer-manager.test.ts",
@@ -302,10 +310,11 @@
         "@xvirobotics/arc-worker-runner-adapter",
         "@xvirobotics/arc-researchclaw-adapter"
       ],
-      "reason": "Keep the detached Worker RulesPack binding confined to the Worker package public contracts and the RulesPack adapter.",
+      "reason": "Keep the detached Codex/Claude Worker RulesPack binding and child-grant enforcement confined to the Worker package public contracts and the RulesPack adapter.",
       "validationSurface": [
         "packages/worker-runner-mcp/tests/rulespack.test.ts",
         "packages/worker-runner-mcp/tests/service.test.ts",
+        "packages/worker-runner-mcp/tests/process-runner.test.ts",
         "tests/downstream-boundaries.test.ts"
       ]
     },

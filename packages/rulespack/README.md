@@ -1,6 +1,6 @@
 # RulesPack
 
-Standalone deterministic RulesPack engine for later thin Codex-only MetaBot
+Standalone deterministic RulesPack engine for thin Codex/Claude MetaBot
 integration. It owns structured Rules, exact subject matching, deterministic
 composition, safe rendering, SQLite state, cache/LKG, source interfaces,
 receipts, feedback, telemetry, and operator diagnostics. It does not import or

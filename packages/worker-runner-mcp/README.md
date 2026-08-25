@@ -319,6 +319,7 @@ stable event ID.
 | `METABOT_WORKER_KILL_GRACE_MS`           | `2000`                     | SIGTERM grace period before SIGKILL        |
 | `METABOT_WORKER_CODEX_EXECUTABLE`        | `codex`                    | Codex CLI path                             |
 | `METABOT_WORKER_CLAUDE_EXECUTABLE`       | `claude`                   | Claude CLI path                            |
+| `METABOT_WORKER_CLAUDE_MAX_BUDGET_USD`   | `3`                        | Hard Claude API cost ceiling per process   |
 | `METABOT_WORKER_KIMI_EXECUTABLE`         | `kimi`                     | Kimi CLI path                              |
 | `METABOT_WORKER_CALLBACK_URL`            | unset                      | Terminal callback URL                      |
 | `METABOT_WORKER_CALLBACK_PRIVATE_KEY_FILE` | required with callback URL | Daemon-private Ed25519 callback key file  |

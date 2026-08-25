@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
 import { NodeCliProcessRunner, buildSanitizedEnv } from '../src/process-runner.js';
 
 describe('NodeCliProcessRunner command construction', () => {
@@ -31,8 +32,31 @@ describe('NodeCliProcessRunner command construction', () => {
     });
     expect(command).toMatchObject({ command: '/bin/claude', stdin: 'do work' });
     expect(command.args).toEqual(
-      expect.arrayContaining(['--print', '--output-format', 'text', '--permission-mode', 'auto']),
+      expect.arrayContaining(['--print', '--output-format', 'text', '--permission-mode', 'auto', '--max-budget-usd', '3']),
     );
+  });
+
+  it('places Claude RulesPack policy in the system prompt and keeps the task prompt on stdin', () => {
+    const command = runner.buildCommand({
+      id: 'wrk-claude-rules',
+      launchId: 'launch-claude-rules',
+      engine: 'claude',
+      workdir: '/tmp/project',
+      prompt: 'do work',
+      rulesPack: {
+        injectionText: 'RULESPACK POLICY',
+        markInjected() {},
+        markRejected() {},
+      },
+    });
+    expect(command.stdin).toBe('do work');
+    const flagIndex = command.args.indexOf('--append-system-prompt-file');
+    expect(flagIndex).toBeGreaterThan(-1);
+    const promptFile = command.args[flagIndex + 1]!;
+    expect(command.args).not.toContain('RULESPACK POLICY');
+    expect(readFileSync(promptFile, 'utf8')).toBe('RULESPACK POLICY');
+    command.cleanup?.();
+    expect(existsSync(promptFile)).toBe(false);
   });
 
   it('uses one-shot Kimi prompt mode and forwards only an explicit generic contract', () => {

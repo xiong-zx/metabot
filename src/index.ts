@@ -33,6 +33,10 @@ import {
 import { SessionRegistry } from './session/session-registry.js';
 import { sweepExpiredCapabilityFiles } from './engines/mcp-materialize.js';
 import { assertDistinctMcpServers } from './services/mcp-registry.js';
+import {
+  DEFAULT_CLAUDE_MAX_BUDGET_USD,
+  DEFAULT_CLAUDE_MAX_TURNS,
+} from './engines/claude/executor.js';
 
 interface FeishuBotHandle {
   name: string;
@@ -181,8 +185,8 @@ async function startFeishuBot(
   botLogger.info(
     {
       defaultWorkingDirectory: botConfig.claude.defaultWorkingDirectory,
-      maxTurns: botConfig.claude.maxTurns ?? 'unlimited',
-      maxBudgetUsd: botConfig.claude.maxBudgetUsd ?? 'unlimited',
+      maxTurns: botConfig.claude.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS,
+      maxBudgetUsd: botConfig.claude.maxBudgetUsd ?? DEFAULT_CLAUDE_MAX_BUDGET_USD,
     },
     'Configuration',
   );

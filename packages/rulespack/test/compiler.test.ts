@@ -2,11 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { compileRules } from '../src/compiler.js';
 import { RulesPackError } from '../src/errors.js';
-import { normalizeRule } from '../src/validate.js';
+import { normalizeRule, validateExecutionSubject } from '../src/validate.js';
 import { makeRule, NOW, sourceGeneration, subject } from './fixtures.js';
 
 const compile = (rules: ReturnType<typeof makeRule>[], budget = { maxTokens: 2_000, maxCharacters: 8_000 }) =>
   compileRules({ subject, rules, sourceGenerations: [sourceGeneration()], budget, now: NOW });
+
+test('execution subjects support audited Codex and Claude engines only', () => {
+  assert.equal(validateExecutionSubject(subject).engine, 'codex');
+  assert.equal(validateExecutionSubject({ ...subject, engine: 'claude' }).engine, 'claude');
+  assert.throws(
+    () => validateExecutionSubject({ ...subject, engine: 'kimi' }),
+    /must be codex or claude/u,
+  );
+});
 
 test('authority, scope, specificity, priority, version, and stable ID resolve conflicts deterministically', () => {
   const rules = [

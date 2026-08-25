@@ -82,7 +82,7 @@ export interface PtyQueryOptions {
   model?: string;
   /**
    * System prompt. The SDK uses { type:'preset', preset:'claude_code', append }.
-   * For PTY we map `append` → `--append-system-prompt <text>`. The preset
+   * For PTY we materialize `append` in a private file and pass only its path. The preset
    * (claude_code) is the interactive default, so only `append` is forwarded.
    */
   systemPrompt?: { type: 'preset'; preset: string; append?: string } | string;
@@ -230,7 +230,7 @@ export interface PtyClaudeSessionOptions {
   cwd: string;
   resume?: string;
   model?: string;
-  appendSystemPrompt?: string;
+  appendSystemPromptFile?: string;
   /** Absolute path to a settings.json (contains Stop + team hooks). */
   settingsPath: string;
   /** Private additive MCP config passed as `--mcp-config`; never strict. */
@@ -334,6 +334,8 @@ export type SynthesizeResult = (args: SynthesizeResultArgs) => SDKMessage;
 export interface PtyHookBridge {
   /** Absolute path of the generated settings.json (with command hooks). */
   writeSettings(): Promise<string>;
+  /** Materialize private bounded bytes under the bridge-owned temp directory. */
+  writePrivateFile(name: string, content: string): Promise<string>;
   /** Register the per-turn completion callback (Stop hook sentinel). */
   onTurnComplete(cb: () => void): void;
   /** Register team-event callback (TaskCreated/Completed/TeammateIdle). */

@@ -54,6 +54,7 @@ export function createWorkerRunnerServiceRuntime(
       },
       maxOutputBytes: integerEnv(env, 'METABOT_WORKER_MAX_OUTPUT_BYTES', 1_048_576),
       killGraceMs: integerEnv(env, 'METABOT_WORKER_KILL_GRACE_MS', 2_000),
+      claudeMaxBudgetUsd: integerEnv(env, 'METABOT_WORKER_CLAUDE_MAX_BUDGET_USD', 3),
       sourceEnv: env,
       safeEnvAllowlist: csvEnv(env.METABOT_WORKER_ENV_ALLOWLIST),
     });

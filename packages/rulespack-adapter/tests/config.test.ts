@@ -135,12 +135,15 @@ describe('shared RulesPack bot configuration', () => {
     });
   });
 
-  it('reports other engines as unsupported and rejects pretend injection config', () => {
+  it('supports Claude with the same defaults while keeping Kimi unsupported', () => {
     expect(resolveRulesPackBotConfig({ botName: 'kimi', engine: 'kimi', defaults }).policy.state).toBe('unsupported');
-    expect(resolveRulesPackBotConfig({ botName: 'claude', engine: 'claude', defaults }).rulesPack).toBeUndefined();
+    expect(resolveRulesPackBotConfig({ botName: 'claude', engine: 'claude', defaults })).toMatchObject({
+      policy: { state: 'inherited', required: true },
+      rulesPack: { mode: 'shadow' },
+    });
     expect(() => resolveRulesPackBotConfig({
       botName: 'kimi', engine: 'kimi', defaults, override: { mode: 'enforce' },
-    })).toThrow('supports Codex only');
+    })).toThrow('supports Codex and Claude only');
   });
 
   it('refuses shared default databases that omit bot or surface isolation', () => {

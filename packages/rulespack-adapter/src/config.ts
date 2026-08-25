@@ -29,8 +29,8 @@ export interface ResolvedRulesPackBotConfig {
 
 /**
  * Resolve one bot without interpreting prompt or Rule text. Shared defaults
- * apply only to Codex; explicit RulesPack configuration on another engine is
- * rejected so the runtime never advertises an injection it cannot perform.
+ * apply only to engines with audited injection and receipt support. Kimi stays
+ * unsupported until it has an equivalent transport contract.
  */
 export function resolveRulesPackBotConfig(input: {
   botName: string;
@@ -57,9 +57,9 @@ export function resolveRulesPackBotConfig(input: {
     throw new Error('rulesPackDefaults.policy must be optional or required');
   }
 
-  if (input.engine !== 'codex') {
+  if (input.engine === 'kimi') {
     if (input.override !== undefined && input.override !== false) {
-      throw new Error(`RulesPack supports Codex only; bot "${input.botName}" uses ${input.engine}`);
+      throw new Error(`RulesPack supports Codex and Claude only; bot "${input.botName}" uses ${input.engine}`);
     }
     return { policy: { state: 'unsupported', required: false } };
   }

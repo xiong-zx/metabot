@@ -9,6 +9,7 @@ import {
   AgentTeamGovernanceExtension,
   createAgentTeamGovernanceHost,
 } from '../src/agent-teams/governance-extension.js';
+import { ExecutionPolicyError, executionFailureMetadata } from '../src/services/execution-failure.js';
 
 const logger = {
   child: () => logger,
@@ -23,11 +24,17 @@ function makeStore() {
   return new AgentTeamStore(logger, join(dir, 'teams.db'));
 }
 
-function makeRegistry(executeApiTask: any, stopChatTask = vi.fn(), sendAgentActivityCard = vi.fn()) {
+function makeRegistry(
+  executeApiTask: any,
+  stopChatTask = vi.fn(),
+  sendAgentActivityCard = vi.fn(),
+  preflightApiTask = vi.fn(() => ({ ok: true, engine: 'codex' })),
+) {
   const setSessionEngine = vi.fn();
   const setSessionId = vi.fn();
   const bridge = {
     getSessionManager: () => ({ setSessionEngine, setSessionId }),
+    preflightApiTask,
     executeApiTask,
     stopChatTask,
     sendAgentActivityCard,
@@ -44,7 +51,7 @@ function makeRegistry(executeApiTask: any, stopChatTask = vi.fn(), sendAgentActi
       claude: { defaultWorkingDirectory: process.cwd() },
     },
   } as any);
-  return { registry, bridge, setSessionEngine, setSessionId, stopChatTask, sendAgentActivityCard };
+  return { registry, bridge, setSessionEngine, setSessionId, stopChatTask, sendAgentActivityCard, preflightApiTask };
 }
 
 async function waitFor(assertion: () => void): Promise<void> {
@@ -771,6 +778,107 @@ describe('AgentTeamSupervisor', () => {
     });
     crashedSupervisor.destroy();
     crashedStore.close();
+  });
+
+  it('fails a deterministic preflight once without creating a Run', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'claude' });
+    store.createTask('demo', { subject: 'Unsupported task', owner: 'worker' });
+    const failure = executionFailureMetadata(new ExecutionPolicyError(
+      'ENGINE_POLICY_INCOMPATIBLE',
+      'Required execution policy does not support this engine',
+    ));
+    const executeApiTask = vi.fn();
+    const preflightApiTask = vi.fn(() => ({ ok: false, engine: 'claude', failure }));
+    const { registry } = makeRegistry(executeApiTask, vi.fn(), vi.fn(), preflightApiTask);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    expect(executeApiTask).not.toHaveBeenCalled();
+    expect(store.listRuns('demo')).toHaveLength(0);
+    expect(store.getTask('demo', 1)).toMatchObject({
+      status: 'failed',
+      result: expect.stringContaining('ENGINE_POLICY_INCOMPATIBLE'),
+    });
+    await supervisor.tick();
+    expect(store.listRuns('demo')).toHaveLength(0);
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('opens the circuit after the same retryable failure repeats', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'Flaky task', owner: 'worker' });
+    const executeApiTask = vi.fn(async () => ({ success: false, responseText: '', error: 'connection reset by peer' }));
+    const { registry } = makeRegistry(executeApiTask);
+    const supervisor = new AgentTeamSupervisor({
+      registry,
+      store,
+      logger,
+      intervalMs: 60_000,
+      executionLimits: { sameFailureLimit: 2, failedRunLimit: 5 },
+    });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(store.getTask('demo', 1)?.status).toBe('pending');
+      expect(store.getAgent('demo', 'worker')?.status).toBe('idle');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await supervisor.tick();
+    await waitFor(() => expect(store.getTask('demo', 1)?.status).toBe('failed'));
+    expect(store.listRuns('demo')).toHaveLength(2);
+    await supervisor.tick();
+    expect(store.listRuns('demo')).toHaveLength(2);
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('passes bounded turn, cost, wall, and idle limits and terminally stops no-progress output', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo');
+    store.createAgent('demo', { name: 'worker', engine: 'claude' });
+    store.createTask('demo', { subject: 'Bounded task', owner: 'worker' });
+    const executeApiTask = vi.fn(async ({ onUpdate }: any) => {
+      const state = { status: 'running', userPrompt: 'p', responseText: 'unchanged', toolCalls: [] };
+      onUpdate(state, 'msg', false);
+      onUpdate(state, 'msg', false);
+      return { success: true, responseText: 'late success', sessionId: 'sid' };
+    });
+    const stopChatTask = vi.fn();
+    const { registry } = makeRegistry(executeApiTask, stopChatTask);
+    const supervisor = new AgentTeamSupervisor({
+      registry,
+      store,
+      logger,
+      intervalMs: 60_000,
+      executionLimits: {
+        maxTurns: 7,
+        maxBudgetUsd: 1.5,
+        timeoutMs: 12_000,
+        idleTimeoutMs: 3_000,
+        repeatedOutputLimit: 2,
+      },
+    });
+
+    await supervisor.tick();
+    await waitFor(() => expect(store.getTask('demo', 1)?.status).toBe('failed'));
+    expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
+      maxTurns: 7,
+      maxBudgetUsd: 1.5,
+      timeoutMs: 12_000,
+      idleTimeoutMs: 3_000,
+    }));
+    expect(stopChatTask).toHaveBeenCalledWith('team:demo:worker');
+    expect(store.listRuns('demo')[0]).toMatchObject({
+      status: 'failed',
+      error: expect.stringContaining('No-progress budget exceeded'),
+    });
+    supervisor.destroy();
+    store.close();
   });
 
   it('stops in-flight runs and suppresses late executor results', async () => {

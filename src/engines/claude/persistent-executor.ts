@@ -37,7 +37,12 @@ import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import { toSdkMcpServers, type McpEntry } from '../mcp-entries.js';
-import { apply1MContextSettings } from './executor.js';
+import {
+  apply1MContextSettings,
+  composeClaudeSystemAppend,
+  DEFAULT_CLAUDE_MAX_BUDGET_USD,
+  DEFAULT_CLAUDE_MAX_TURNS,
+} from './executor.js';
 import { removeMetaBotRuntimeSecrets, stripBridgeLocalAdminCredentials } from '../execution-env.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
@@ -140,6 +145,10 @@ export interface PersistentExecutorOptions {
   /** Optional explicit API key, otherwise OAuth credentials file is used. */
   apiKey?: string;
   model?: string;
+  /** Optional process-lifetime Claude turn ceiling. */
+  maxTurns?: number;
+  /** Optional process-lifetime Claude API cost ceiling. */
+  maxBudgetUsd?: number;
   logger: Logger;
   /**
    * MetaBot bot/chat context. Stable for the lifetime of the executor
@@ -161,6 +170,11 @@ export interface PersistentExecutorOptions {
   mcpConfigPath?: string;
   /** Releases capability/config file leases when this executor closes. */
   mcpCleanup?: () => void;
+  /** Stable RulesPack system appendix for this executor lifetime. */
+  rulesPack?: {
+    packDigest: string;
+    injectionText: string;
+  };
   /** Auto-shutdown after this many ms of silence (no turn, no spontaneous msg). 0 disables. Default 30 min. */
   idleTimeoutMs?: number;
   /** Max consecutive restart attempts before giving up. Default 3. */
@@ -245,6 +259,11 @@ interface ActiveTurn {
   detached: boolean;
   /** SDK observed terminal result for this turn (cleanly OR after interrupt). */
   completed: boolean;
+  rulesPackDelivery?: {
+    state: 'pending' | 'injected' | 'rejected';
+    markInjected(): void;
+    markRejected(reason: unknown): void;
+  };
   /** abort() promise resolves when the SDK actually drains this turn's result. */
   drainPromise?: Promise<void>;
   drainResolve?: () => void;
@@ -439,6 +458,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
       ...(this.options.mcpEntries?.length ? { mcpServers: toSdkMcpServers(this.options.mcpEntries) } : {}),
     };
     if (this.options.model) queryOptions.model = this.options.model;
+    queryOptions.maxTurns = this.options.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS;
+    queryOptions.maxBudgetUsd = this.options.maxBudgetUsd ?? DEFAULT_CLAUDE_MAX_BUDGET_USD;
     // resume: prefer the most-recent observed sessionId; fall back to the
     // one supplied at construction. This way, a restart picks up the live
     // session even if the SDK forked sessionId mid-life.
@@ -483,11 +504,12 @@ export class PersistentClaudeExecutor extends EventEmitter {
         ].join('\n'),
       );
     }
-    if (appendSections.length > 0) {
+    if (appendSections.length > 0 || this.options.rulesPack?.injectionText) {
+      const ordinaryAppend = appendSections.length > 0 ? `\n\n${appendSections.join('\n\n')}` : '';
       queryOptions.systemPrompt = {
         type: 'preset',
         preset: 'claude_code',
-        append: '\n\n' + appendSections.join('\n\n'),
+        append: composeClaudeSystemAppend(this.options.rulesPack?.injectionText, ordinaryAppend),
       };
     }
     apply1MContextSettings(queryOptions);
@@ -552,6 +574,9 @@ export class PersistentClaudeExecutor extends EventEmitter {
   async shutdown(reason: string = 'caller'): Promise<void> {
     if (this.state === 'closed' || this.state === 'shutting_down') return;
     this.options.logger.info({ reason }, 'PersistentExecutor.shutdown');
+    if (this.activeTurn) {
+      this.rejectTurnRulesPack(this.activeTurn, new Error('Persistent Claude executor shut down before RulesPack acceptance'));
+    }
     this.transition('shutting_down');
     this.clearIdleTimer();
     this.inputQueue.finish();
@@ -573,7 +598,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
    * Start a new user turn. Enqueues the prompt and returns a TurnHandle
    * whose stream yields only messages belonging to this turn.
    */
-  nextTurn(prompt: string): TurnHandle {
+  nextTurn(
+    prompt: string,
+    rulesPackDelivery?: { markInjected(): void; markRejected(reason: unknown): void },
+  ): TurnHandle {
     if (this.state !== 'ready') {
       throw new Error(`PersistentExecutor.nextTurn: not ready (state=${this.state})`);
     }
@@ -586,7 +614,15 @@ export class PersistentClaudeExecutor extends EventEmitter {
     this.touchActivity();
     const turnId = `t${++this.turnCounter}-${Date.now().toString(36)}`;
     const queue = new AsyncQueue<SDKMessage>();
-    const turn: ActiveTurn = { id: turnId, queue, detached: false, completed: false };
+    const turn: ActiveTurn = {
+      id: turnId,
+      queue,
+      detached: false,
+      completed: false,
+      ...(rulesPackDelivery
+        ? { rulesPackDelivery: { state: 'pending', ...rulesPackDelivery } }
+        : {}),
+    };
     this.activeTurn = turn;
 
     const userMsg: SDKUserMessage = {
@@ -605,6 +641,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
     const abort = async (): Promise<void> => {
       if (turn.completed) return;
       if (this.activeTurn !== turn) return; // already cleared by completion / restart
+      this.rejectTurnRulesPack(turn, new Error('Claude turn aborted before RulesPack acceptance'));
       if (turn.detached) {
         // already aborting; just await the existing drainPromise
         if (turn.drainPromise) await turn.drainPromise;
@@ -1076,6 +1113,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
 
         const turn = this.activeTurn;
         if (turn) {
+          this.acceptTurnRulesPack(turn);
           if (!turn.detached) {
             // Normal in-flight turn: forward the message to the listener.
             turn.queue.enqueue(msg);
@@ -1139,6 +1177,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
         return;
       }
       this.options.logger.error({ err: err?.message || err }, 'PersistentExecutor: stream errored, attempting restart');
+      if (this.activeTurn) this.rejectTurnRulesPack(this.activeTurn, err);
       this.emit('crashed', err);
       // Notify any active turn that it was lost
       if (this.activeTurn) {
@@ -1150,6 +1189,18 @@ export class PersistentClaudeExecutor extends EventEmitter {
       }
       await this.maybeRestart();
     }
+  }
+
+  private acceptTurnRulesPack(turn: ActiveTurn): void {
+    if (turn.rulesPackDelivery?.state !== 'pending') return;
+    turn.rulesPackDelivery.state = 'injected';
+    turn.rulesPackDelivery.markInjected();
+  }
+
+  private rejectTurnRulesPack(turn: ActiveTurn, reason: unknown): void {
+    if (turn.rulesPackDelivery?.state !== 'pending') return;
+    turn.rulesPackDelivery.state = 'rejected';
+    turn.rulesPackDelivery.markRejected(reason);
   }
 
   private async maybeRestart(): Promise<void> {

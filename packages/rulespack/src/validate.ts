@@ -311,7 +311,9 @@ export function validateExecutionSubject(value: unknown): ExecutionSubject {
     ],
     'subject',
   );
-  if (value.engine !== 'codex') fail('subject.engine must be codex');
+  if (value.engine !== 'codex' && value.engine !== 'claude') {
+    fail('subject.engine must be codex or claude');
+  }
   const roles = stringArray(value.roles, 'subject.roles') ?? [];
   const tools = stringArray(value.tools, 'subject.tools') ?? [];
   const dataClasses = stringArray(value.dataClasses, 'subject.dataClasses') ?? [];
@@ -337,7 +339,7 @@ export function validateExecutionSubject(value: unknown): ExecutionSubject {
     tools,
     dataClasses,
     outputTypes,
-    engine: 'codex',
+    engine: value.engine,
     ...(value.sessionId === undefined
       ? {}
       : { sessionId: requiredString(value.sessionId, 'subject.sessionId', ID_PATTERN) }),

@@ -146,7 +146,7 @@ export interface BotConfigBase {
   };
   /** Codex-specific overrides. Populated only when engine === 'codex'. */
   codex?: CodexBotConfig;
-  /** Downstream Codex-only deterministic RulesPack integration. Default mode is off. */
+  /** Downstream Codex/Claude deterministic RulesPack integration. Default mode is off. */
   rulesPack?: RulesPackConfig;
   /** Non-secret provenance for inherited, overridden, opted-out, or unsupported RulesPack state. */
   rulesPackPolicy?: RulesPackBotPolicy;
@@ -844,7 +844,7 @@ export interface PeerJsonEntry {
 }
 
 export interface BotsJsonNewFormat {
-  /** Shared Codex-only RulesPack defaults for current and future bot entries. */
+  /** Shared audited Codex/Claude RulesPack defaults for current and future bot entries. */
   rulesPackDefaults?: RulesPackDefaultsConfig;
   feishuBots?: FeishuBotJsonEntry[];
   telegramBots?: TelegramBotJsonEntry[];
@@ -1094,6 +1094,7 @@ function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
               ...(task.status === 'pending' ||
               task.status === 'in_progress' ||
               task.status === 'completed' ||
+              task.status === 'failed' ||
               task.status === 'deleted'
                 ? { status: task.status }
                 : {}),
