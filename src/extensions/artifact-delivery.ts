@@ -37,7 +37,7 @@ export class ArtifactDeliveryError extends Error {
 }
 
 const CANONICAL_FILENAME =
-  /^[a-z0-9][a-z0-9-]*_[a-z0-9]+-[a-z0-9-]+_[a-z0-9][a-z0-9-]*(?:_[a-z]+-[a-z0-9-]+)*_[0-9]{8}_v[0-9]{2}\.[a-z0-9]+(?:\.[a-z0-9]+)?$/u;
+  /^[a-z0-9][a-z0-9-]*_[a-z0-9]+(?:-[a-z0-9-]+)?_[a-z0-9][a-z0-9-]*(?:_[a-z]+-[a-z0-9-]+)*_[0-9]{8}_v[0-9]{2}\.[a-z0-9]+(?:\.[a-z0-9]+)?$/u;
 
 export function normalizeArtifactDeliveryConfig(config: ArtifactDeliveryConfig): ArtifactDeliveryConfig {
   if (config.mode !== undefined && config.mode !== 'off' && config.mode !== 'enforce') {

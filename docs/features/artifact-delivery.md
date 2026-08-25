@@ -49,6 +49,10 @@ requires a new `vNN`. Successful archival is silent; archival failures remain
 user-visible so the retained temporary file can be retried. Unbound chats and
 `mode: off` retain the normal output path.
 
+The kind field may use either a registered standalone kind or the established
+`family-subtype` form. The workspace naming registry remains the vocabulary
+authority; this downstream transport check enforces only filename structure.
+
 ## Strict mirror CLI
 
 Start from [`config/artifact-mirror.example.json`](../../config/artifact-mirror.example.json).

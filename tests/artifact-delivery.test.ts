@@ -37,9 +37,13 @@ describe('ArtifactDeliveryPublisher', () => {
     );
     const first = publisher.prepare('chat-aam', source, path.basename(source));
     const second = publisher.prepare('chat-aam', source, path.basename(source));
+    const standalone = 'aam_figures_sync-overview_20260821_v01.md';
+    const standaloneKind = publisher.prepare('chat-aam', source, standalone);
     expect(first?.filePath).toBe(path.join(fs.realpathSync(root), 'deliverables', path.basename(source)));
     expect(fs.readFileSync(first!.filePath, 'utf8')).toBe('durable bytes');
     expect(second?.sha256).toBe(first?.sha256);
+    expect(standaloneKind?.filePath).toBe(path.join(fs.realpathSync(root), 'deliverables', standalone));
+    expect(fs.readFileSync(standaloneKind!.filePath, 'utf8')).toBe('durable bytes');
   });
 
   it('rejects in-place version conflicts and noncanonical filenames', () => {

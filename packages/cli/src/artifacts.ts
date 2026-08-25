@@ -9,7 +9,7 @@ const SAFE_HOST = /^[a-zA-Z0-9._-]+$/u;
 const SAFE_PROJECT = /^[a-z0-9][a-z0-9-]*$/u;
 const SAFE_REMOTE_PATH = /^\/[a-zA-Z0-9._/-]+$/u;
 const CANONICAL_FILENAME =
-  /^[a-z0-9][a-z0-9-]*_[a-z0-9]+-[a-z0-9-]+_[a-z0-9][a-z0-9-]*(?:_[a-z]+-[a-z0-9-]+)*_[0-9]{8}_v[0-9]{2}\.[a-z0-9]+(?:\.[a-z0-9]+)?$/u;
+  /^[a-z0-9][a-z0-9-]*_[a-z0-9]+(?:-[a-z0-9-]+)?_[a-z0-9][a-z0-9-]*(?:_[a-z]+-[a-z0-9-]+)*_[0-9]{8}_v[0-9]{2}\.[a-z0-9]+(?:\.[a-z0-9]+)?$/u;
 
 export interface ArtifactMirrorProjectConfig {
   projectId: string;

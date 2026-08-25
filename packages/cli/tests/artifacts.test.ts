@@ -110,9 +110,13 @@ describe('metabot artifacts mirror', () => {
     const name = 'aam_review-tech_sync-annotations_lang-zh_20260821_v01.pdf';
     const first = publishAnnotation(config, project, input, name);
     const second = publishAnnotation(config, project, input, name);
+    const standalone = 'aam_figures_sync-overview_20260821_v01.pdf';
+    const standaloneKind = publishAnnotation(config, project, input, standalone);
     expect(first.reused).toBe(false);
     expect(second.reused).toBe(true);
+    expect(standaloneKind.reused).toBe(false);
     expect(fs.readFileSync(path.join(project.sourceRoot, name), 'utf8')).toBe('annotation');
+    expect(fs.readFileSync(path.join(project.sourceRoot, standalone), 'utf8')).toBe('annotation');
     expect(() => publishAnnotation(config, project, input, 'notes.pdf')).toThrow(/canonical/u);
   });
 });
