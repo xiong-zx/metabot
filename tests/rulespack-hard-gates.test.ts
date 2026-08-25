@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { findSecretFindings } from '../scripts/check-added-secrets.mjs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  findSecretFindings,
+  readGitDiff,
+  SECRET_SCAN_MAX_DIFF_BYTES,
+} from '../scripts/check-added-secrets.mjs';
 import { checkFeatureHistory } from '../scripts/check-feature-history.mjs';
 
 describe('FIX-012 mechanical policy gates', () => {
@@ -22,6 +29,25 @@ describe('FIX-012 mechanical policy gates', () => {
         { file: '.env', kind: 'environment-secret-literal' },
       ]);
       expect(findSecretFindings(`+++ b/src/config.ts\n+const ${field} = process.env.${field};`)).toEqual([]);
+    }
+  });
+
+  it('reads a large promotion diff without the execFileSync default-buffer failure', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'metabot-secret-scan-buffer-'));
+    try {
+      const fakeGit = join(directory, 'git');
+      writeFileSync(fakeGit, [
+        '#!/bin/sh',
+        "printf '+++ b/large.txt\\n'",
+        "yes '+ordinary non-secret line' | head -n 60000",
+      ].join('\n'), { mode: 0o755 });
+      chmodSync(fakeGit, 0o755);
+      const diff = readGitDiff('base', 'head', fakeGit);
+      expect(Buffer.byteLength(diff)).toBeGreaterThan(1024 * 1024);
+      expect(Buffer.byteLength(diff)).toBeLessThan(SECRET_SCAN_MAX_DIFF_BYTES);
+      expect(findSecretFindings(diff)).toEqual([]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 

@@ -2,6 +2,8 @@
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
+export const SECRET_SCAN_MAX_DIFF_BYTES = 128 * 1024 * 1024;
+
 const PATTERNS = [
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u],
   ['aws-access-key', /\bAKIA[0-9A-Z]{16}\b/u],
@@ -38,6 +40,14 @@ export function findSecretFindings(diff) {
   return findings;
 }
 
+export function readGitDiff(base, head = 'HEAD', git = 'git') {
+  return execFileSync(
+    git,
+    ['diff', '--no-ext-diff', '--unified=0', `${base}...${head}`],
+    { encoding: 'utf8', maxBuffer: SECRET_SCAN_MAX_DIFF_BYTES },
+  );
+}
+
 function flag(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
@@ -47,7 +57,7 @@ function main() {
   const base = flag('--base');
   const head = flag('--head') ?? 'HEAD';
   if (!base) throw new Error('Usage: check-added-secrets.mjs --base <sha> [--head <sha>]');
-  const diff = execFileSync('git', ['diff', '--no-ext-diff', '--unified=0', `${base}...${head}`], { encoding: 'utf8' });
+  const diff = readGitDiff(base, head);
   const findings = findSecretFindings(diff);
   if (findings.length) {
     for (const finding of findings) process.stderr.write(`${finding.file}: added ${finding.kind}\n`);
