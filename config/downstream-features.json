@@ -67,11 +67,39 @@
         "tests/agent-team-talk-capability.test.ts",
         "tests/agent-team-http-auth.test.ts",
         "tests/agent-team-cli-capability.test.ts",
+        "tests/agent-team-governance-routes.test.ts",
         "packages/cli/tests/agents.test.ts",
         "tests/http-server-cross-verify.test.ts",
         "tests/message-bridge.test.ts",
         "tests/peer-task-idempotency.test.ts",
         "tests/rulespack-operator-routes.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
+      "id": "agent-team-model-selection-upstream-gap",
+      "status": "required",
+      "roots": [
+        "src/agent-teams/team-store.ts",
+        "src/agent-teams/prompt-context.ts",
+        "src/agent-teams/team-supervisor.ts",
+        "src/api/routes/agent-team-routes.ts",
+        "src/config.ts",
+        "packages/cli/src/teams.ts"
+      ],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Track generic per-Agent Team model persistence, selection, and execution forwarding as a downstream-retained upstreamable patch; model authorization remains outside RulesPack.",
+      "validationSurface": [
+        "tests/agent-team-store.test.ts",
+        "tests/agent-team-supervisor.test.ts",
+        "tests/agent-team-prompt-context.test.ts",
+        "tests/agent-team-governance-routes.test.ts",
+        "packages/cli/tests/teams.test.ts",
         "tests/downstream-boundaries.test.ts"
       ]
     },

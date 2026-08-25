@@ -76,13 +76,13 @@ describe('metabot teams CLI ergonomics', () => {
     });
   });
 
-  it('agents spawn defaults new teammates to Codex', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ name: 'worker', engine: 'codex' })) as unknown as typeof fetch;
+  it('agents spawn defaults new teammates to Codex and forwards an explicit model', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ name: 'worker', engine: 'codex', model: 'gpt-5.5' })) as unknown as typeof fetch;
     vi.stubGlobal('fetch', fetchMock);
     vi.spyOn(process.stdout, 'write').mockReturnValue(true);
 
     const mod = await importFresh();
-    await mod.run(['agents', 'spawn', 'demo', 'worker', '--role', 'runtime']);
+    await mod.run(['agents', 'spawn', 'demo', 'worker', '--role', 'runtime', '--model', 'gpt-5.5']);
 
     const [url, init] = calls(fetchMock)[0]!;
     expect(url).toBe('http://localhost:9100/api/agent-teams/demo/agents');
@@ -92,6 +92,7 @@ describe('metabot teams CLI ergonomics', () => {
       name: 'worker',
       role: 'runtime',
       engine: 'codex',
+      model: 'gpt-5.5',
     });
   });
 
@@ -188,7 +189,7 @@ describe('metabot teams CLI ergonomics', () => {
       if (url === 'http://localhost:9100/api/agent-teams/demo') {
         return jsonResponse({
           team: { name: 'demo', status: 'active', description: 'Demo team' },
-          agents: [{ name: 'worker', status: 'idle', engine: 'codex' }],
+          agents: [{ name: 'worker', status: 'idle', engine: 'claude', model: 'claude-test-model' }],
           tasks: [{ id: 1, owner: 'worker', status: 'pending', subject: 'Ship CLI' }],
           unreadMessages: 2,
           runs: [{ id: 'run-1', agentName: 'worker', status: 'completed', output: 'done' }],
@@ -216,6 +217,7 @@ describe('metabot teams CLI ergonomics', () => {
 
     const printed = stdout.mock.calls.map((c) => String(c[0])).join('\n');
     expect(printed).toContain('Team: demo [active]');
+    expect(printed).toContain('worker:idle/claude/claude-test-model');
     expect(printed).toContain('Tasks: 1 total, 1 open');
     expect(printed).toContain('Runs: 1 total, 0 running');
     expect(printed).toContain('Inbox: 1 messages');

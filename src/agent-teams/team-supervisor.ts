@@ -314,6 +314,7 @@ export class AgentTeamSupervisor {
         maxBudgetUsd: this.executionLimits.maxBudgetUsd,
         timeoutMs: this.executionLimits.timeoutMs,
         idleTimeoutMs: this.executionLimits.idleTimeoutMs,
+        model: agent.model,
         prompt: this.buildPrompt(teamName, agent, messages, tasks, rulesContext),
         rulesPack: {
           principal: {

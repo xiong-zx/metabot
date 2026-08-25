@@ -1,6 +1,6 @@
 # Agent Teams
 
-MetaBot Agent Teams let a lead agent coordinate persistent specialist teammates through the local bridge. The coordination model is engine-neutral: teams can declare Claude, Codex, or Kimi teammates, and all coordination is stored in the bridge database instead of being hidden inside one model session. Execution still runs through the current bridge and session-engine path, so each configured engine must be supported by that bridge runtime.
+MetaBot Agent Teams let a lead agent coordinate persistent specialist teammates through the local bridge. The coordination model is engine-neutral: teams can declare Claude, Codex, or Kimi teammates, optionally pin a model for each teammate, and store all coordination in the bridge database instead of hiding it inside one model session. Execution still runs through the current bridge and session-engine path, so each configured engine and model must be available to that bridge runtime.
 
 ## What It Does
 
@@ -20,6 +20,7 @@ Use `metabot teams` for all coordination:
 ```bash
 metabot teams create metabot-dev --description "MetaBot implementation team"
 metabot teams agents spawn metabot-dev cli-engineer --role implementation --engine codex --prompt "Own CLI UX, tests, and docs."
+metabot teams agents spawn metabot-dev claude-reviewer --role review --engine claude --model claude-model-id --prompt "Review the bounded change."
 metabot teams tasks create metabot-dev "Add runs CLI" --description "Expose runs create/update in bash and TS CLIs." --owner cli-engineer
 metabot teams send metabot-dev cli-engineer "Start task 4." --from lead --summary "assign task 4"
 ```
@@ -94,6 +95,7 @@ Operational details:
 - The bridge preflight runs before a durable Run is created. A deterministic policy, schema, or permission incompatibility moves the Task directly to visible `failed` state and never starts a model.
 - Retryable failures open the circuit after the same secret-safe fingerprint repeats twice or a Task accumulates three failed Runs. Both limits are configurable.
 - Every teammate execution receives bounded turns, cost, wall time, idle time, repeated-output, and permission-denial limits. Defaults are controlled by `METABOT_AGENT_TEAM_MAX_TURNS`, `METABOT_AGENT_TEAM_MAX_BUDGET_USD`, `METABOT_AGENT_TEAM_TIMEOUT_MS`, `METABOT_AGENT_TEAM_IDLE_TIMEOUT_MS`, `METABOT_AGENT_TEAM_REPEATED_OUTPUT_LIMIT`, `METABOT_AGENT_TEAM_PERMISSION_DENIAL_LIMIT`, `METABOT_AGENT_TEAM_SAME_FAILURE_LIMIT`, and `METABOT_AGENT_TEAM_FAILED_RUN_LIMIT`.
+- The supervisor sets the configured session engine and forwards the optional teammate `model` on every run. Model availability and authorization remain execution concerns; Agent Teams do not ask RulesPack to authorize a model.
 
 ## Resident Teams In `bots.json`
 
@@ -113,7 +115,7 @@ CLI-only setup is useful for ad-hoc teams. Resident teams are declared in `bots.
       "displayChatIds": ["oc_feishu_chat_id"],
       "agents": [
         { "name": "cli-engineer", "role": "implementation", "engine": "codex", "prompt": "Own teams CLI, command UX, tests, and docs." },
-        { "name": "runtime-engineer", "role": "runtime", "engine": "codex", "prompt": "Own bridge runtime, store, supervisor, and cards." }
+        { "name": "runtime-engineer", "role": "runtime", "engine": "codex", "model": "gpt-5.5", "prompt": "Own bridge runtime, store, supervisor, and cards." }
       ],
       "tasks": [
         { "id": 8, "subject": "Document Agent Teams workflow", "owner": "cli-engineer", "status": "pending" }
@@ -139,7 +141,7 @@ Reconciliation behavior:
 - Teams previously seen in `agentTeams` are marked `managedByConfig`; if they later disappear from config, reconcile marks them `stopped`.
 - Manual CLI-created teams are left alone unless they share a configured team name.
 
-Rollout caveat for existing databases: the `managed_by_config` column defaults to false when it is added to an existing Agent Teams DB. Pre-existing resident/config-created teams are not treated as config-managed until the bridge reconciles them once from `bots.json`. After deploying this change, restart the bridge or trigger one hot reload with the desired `bots.json` `agentTeams` still present. Only after that first reconcile should you rely on removing a team from `agentTeams` as a rollback mechanism to stop an old resident team.
+Rollout caveat for existing databases: the optional `model` column is added in place and existing agents keep their engine default until a model is configured. The `managed_by_config` column defaults to false when it is added to an existing Agent Teams DB. Pre-existing resident/config-created teams are not treated as config-managed until the bridge reconciles them once from `bots.json`. After deploying this change, restart the bridge or trigger one hot reload with the desired `bots.json` `agentTeams` still present. Only after that first reconcile should you rely on removing a team from `agentTeams` as a rollback mechanism to stop an old resident team.
 
 ## Command Reference
 
@@ -152,7 +154,7 @@ metabot teams start <team>
 metabot teams stop <team>
 
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--model <model>] [--prompt <text>]
 metabot teams agents stop <team> <name>
 metabot teams agents delete <team> <name>
 

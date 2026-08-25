@@ -19,6 +19,7 @@ interface TeamAgent {
   name: string;
   role?: string;
   engine?: string;
+  model?: string;
   status?: string;
 }
 
@@ -99,7 +100,7 @@ Subcommands:
   watch <team> [--interval <sec>] [--count <n>] [--summary|--plain]
 
   agents list <team>
-  agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+  agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--model <model>] [--prompt <text>]
   agents stop <team> <name>
   agents delete <team> <name>
 
@@ -487,7 +488,7 @@ function formatStatus(body: unknown): string {
   const lines = [
     `Team: ${value.team?.name || '?'} [${value.team?.status || '?'}]`,
     value.team?.description ? compact(value.team.description, 160) : undefined,
-    `Agents: ${agents.length}${agents.length ? ` (${agents.map((agent) => `${agent.name}:${agent.status || 'unknown'}${agent.engine ? `/${agent.engine}` : ''}`).join(', ')})` : ''}`,
+    `Agents: ${agents.length}${agents.length ? ` (${agents.map((agent) => `${agent.name}:${agent.status || 'unknown'}${agent.engine ? `/${agent.engine}` : ''}${agent.model ? `/${agent.model}` : ''}`).join(', ')})` : ''}`,
     `Tasks: ${tasks.length} total, ${openTasks.length} open`,
     ...openTasks.slice(0, 8).map((task) => `- ${taskLine(task)}`),
     `Unread messages: ${value.unreadMessages ?? 0}`,
@@ -514,6 +515,7 @@ async function runAgents(cfg: BridgeConfig, argv: string[]): Promise<void> {
       name,
       role: stringFlag(flags, 'role'),
       engine: stringFlag(flags, 'engine') ?? 'codex',
+      model: stringFlag(flags, 'model'),
       prompt: stringFlag(flags, 'prompt'),
     }));
     return;

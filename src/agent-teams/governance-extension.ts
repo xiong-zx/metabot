@@ -75,6 +75,7 @@ export interface GovernanceTemplateAgent {
   name: string;
   role?: string;
   engine?: EngineName;
+  model?: string;
   prompt?: string;
   sessionId?: string;
 }
@@ -183,6 +184,7 @@ export interface AgentTeamGovernanceHost {
       name: string;
       role?: string;
       engine?: EngineName;
+      model?: string;
       prompt?: string;
       sessionId?: string;
       status?: AgentStatus;
@@ -815,6 +817,7 @@ export class AgentTeamGovernanceExtension {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
     prompt?: string;
     sessionId?: string;
     kind?: Exclude<GovernedAgentKind, 'template'>;
@@ -867,6 +870,7 @@ export class AgentTeamGovernanceExtension {
       name,
       role: input.role,
       engine: input.engine,
+      model: input.model,
       prompt: input.prompt,
       sessionId: input.sessionId,
       status: 'idle',
@@ -1617,7 +1621,14 @@ function isTeamGovernanceActorRole(value: unknown): value is TeamGovernanceActor
 }
 
 function normalizeTemplateBody(input: AgentTeamGovernanceTemplateBody): AgentTeamGovernanceTemplateBody {
-  const agents = input.agents?.map((agent) => ({ ...agent, name: requireName(agent.name, 'agent') }));
+  const agents = input.agents?.map((agent) => {
+    const { model, ...rest } = agent;
+    return {
+      ...rest,
+      name: requireName(agent.name, 'agent'),
+      ...(model?.trim() ? { model: model.trim() } : {}),
+    };
+  });
   if (agents && new Set(agents.map((agent) => agent.name)).size !== agents.length) {
     throw new AgentTeamGovernanceError('Template Agent names must be unique', 400, 'DUPLICATE_AGENT_NAME');
   }

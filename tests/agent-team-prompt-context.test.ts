@@ -43,6 +43,7 @@ describe('Agent Team prompt context', () => {
       name: 'kimi-frontend',
       role: 'frontend',
       engine: 'kimi',
+      model: 'kimi-code/k3',
       prompt: 'SECRET member instructions',
     });
     store.createAgent('metabot-dev', { name: 'reviewer-codex', role: 'reviewer', engine: 'codex' });
@@ -63,7 +64,7 @@ describe('Agent Team prompt context', () => {
 
     const context = buildAgentTeamPromptContext(store, 'metabot-dev');
     expect(context).toContain('## Team Context');
-    expect(context).toContain('- kimi-frontend — frontend · kimi · working');
+    expect(context).toContain('- kimi-frontend — frontend · kimi/kimi-code/k3 · working');
     expect(context).toContain('- reviewer-codex — reviewer · codex · idle');
     expect(context).toContain('metabot teams dispatch metabot-dev <member> "<subject>" --description "..."');
     expect(context).not.toContain('retired');

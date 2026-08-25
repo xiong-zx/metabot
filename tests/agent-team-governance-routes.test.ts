@@ -56,8 +56,12 @@ describe('Agent Team governed HTTP routes', () => {
     const legacyAgent = await invoke(handleAgentTeamRoutes, ctx, 'POST', '/api/agent-teams/legacy-compatible/agents', {
       name: 'worker',
       engine: 'codex',
+      model: 'gpt-5.5',
     });
-    expect(legacyAgent).toMatchObject({ status: 201, body: { name: 'worker', engine: 'codex' } });
+    expect(legacyAgent).toMatchObject({
+      status: 201,
+      body: { name: 'worker', engine: 'codex', model: 'gpt-5.5' },
+    });
     const created = await invoke(handleAgentTeamGovernanceRoutes, ctx, 'POST', '/api/agent-team-governance/instances', {
       templateName: 'bounded',
       chatId: 'oc_route',

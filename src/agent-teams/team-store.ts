@@ -26,6 +26,7 @@ export interface TeamAgent {
   name: string;
   role?: string;
   engine?: EngineName;
+  model?: string;
   prompt?: string;
   status: AgentStatus;
   sessionId?: string;
@@ -79,6 +80,7 @@ export interface AgentTeamConfig {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
     prompt?: string;
     sessionId?: string;
     status?: AgentStatus;
@@ -126,6 +128,7 @@ export class AgentTeamStore {
         name TEXT NOT NULL,
         role TEXT,
         engine TEXT,
+        model TEXT,
         prompt TEXT,
         status TEXT NOT NULL,
         session_id TEXT,
@@ -180,6 +183,7 @@ export class AgentTeamStore {
     this.addColumnIfMissing('agent_teams', 'chat_ids', "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing('agent_teams', 'display_chat_ids', "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing('agent_teams', 'managed_by_config', 'INTEGER NOT NULL DEFAULT 0');
+    this.addColumnIfMissing('agent_team_agents', 'model', 'TEXT');
   }
 
   createTeam(name: string, description?: string, options?: { chatIds?: string[]; displayChatIds?: string[]; status?: TeamStatus }): AgentTeam {
@@ -308,6 +312,7 @@ export class AgentTeamStore {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
     prompt?: string;
     sessionId?: string;
   }): TeamAgent {
@@ -315,13 +320,14 @@ export class AgentTeamStore {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO agent_team_agents
-        (team_name, name, role, engine, prompt, status, session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?)
+        (team_name, name, role, engine, model, prompt, status, session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?)
     `).run(
       teamName,
       input.name,
       input.role ?? null,
       input.engine ?? null,
+      input.model ?? null,
       input.prompt ?? null,
       input.sessionId ?? null,
       now,
@@ -332,6 +338,7 @@ export class AgentTeamStore {
       name: input.name,
       ...(input.role ? { role: input.role } : {}),
       ...(input.engine ? { engine: input.engine } : {}),
+      ...(input.model ? { model: input.model } : {}),
       ...(input.prompt ? { prompt: input.prompt } : {}),
       status: 'idle',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -344,6 +351,7 @@ export class AgentTeamStore {
     name: string;
     role?: string;
     engine?: EngineName;
+    model?: string;
     prompt?: string;
     sessionId?: string;
     status?: AgentStatus;
@@ -354,13 +362,14 @@ export class AgentTeamStore {
     if (!existing) {
       this.db.prepare(`
         INSERT INTO agent_team_agents
-          (team_name, name, role, engine, prompt, status, session_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (team_name, name, role, engine, model, prompt, status, session_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         teamName,
         input.name,
         input.role ?? null,
         input.engine ?? null,
+        input.model ?? null,
         input.prompt ?? null,
         input.status ?? 'idle',
         input.sessionId ?? null,
@@ -370,11 +379,12 @@ export class AgentTeamStore {
     } else {
       this.db.prepare(`
         UPDATE agent_team_agents
-        SET role = ?, engine = ?, prompt = ?, status = ?, session_id = ?, updated_at = ?
+        SET role = ?, engine = ?, model = ?, prompt = ?, status = ?, session_id = ?, updated_at = ?
         WHERE team_name = ? AND name = ?
       `).run(
         input.role ?? existing.role ?? null,
         input.engine ?? existing.engine ?? null,
+        input.model ?? existing.model ?? null,
         input.prompt ?? existing.prompt ?? null,
         input.status ?? (existing.status === 'stopped' ? 'idle' : existing.status),
         input.sessionId ?? existing.sessionId ?? null,
@@ -722,6 +732,7 @@ export class AgentTeamStore {
       name: row.name,
       ...(row.role ? { role: row.role } : {}),
       ...(row.engine ? { engine: row.engine } : {}),
+      ...(row.model ? { model: row.model } : {}),
       ...(row.prompt ? { prompt: row.prompt } : {}),
       status: row.status,
       ...(row.session_id ? { sessionId: row.session_id } : {}),

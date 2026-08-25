@@ -209,7 +209,7 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
       name: 'implementation',
       body: {
         description: 'Implementation team v1',
-        agents: [{ name: 'coder', engine: 'codex', prompt: 'Implement approved changes.' }],
+        agents: [{ name: 'coder', engine: 'codex', model: '  gpt-5.5  ', prompt: 'Implement approved changes.' }],
         ruleSetRefs: [{ name: 'implementation-policy' }],
       },
     });
@@ -228,7 +228,11 @@ describe('AgentTeamGovernanceExtension templates and scope', () => {
       ruleSetRefs: [{ name: 'implementation-policy', version: rulesV1.version, digest: rulesV1.digest }],
     });
     expect(store.getTeam(chat.teamName)?.displayChatIds).toEqual(['oc_chat_a']);
-    expect(store.getAgent(chat.teamName, 'coder')).toMatchObject({ status: 'idle', engine: 'codex' });
+    expect(store.getAgent(chat.teamName, 'coder')).toMatchObject({
+      status: 'idle',
+      engine: 'codex',
+      model: 'gpt-5.5',
+    });
     expect(governance.prepareRun(chat.teamName, 'coder', 'run-1')).toEqual({
       instanceId: chat.id,
       chatId: `teaminst:${chat.id}:coder`,
