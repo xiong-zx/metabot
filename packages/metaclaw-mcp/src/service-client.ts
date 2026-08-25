@@ -87,7 +87,7 @@ export interface HttpServiceClientOptions {
   readonly now?: () => number;
 }
 
-export const HEALTH_PATH = '/health';
+export const HEALTH_PATH = '/healthz';
 export const COMPLETION_PATH = '/v1/chat/completions';
 const COMPLETION_HEADER_ALLOWLIST = new Set(['content-type', 'x-session-id', 'x-turn-type']);
 const COMPLETION_BODY_ALLOWLIST = new Set(['model', 'messages', 'stream', 'max_tokens', 'temperature']);
