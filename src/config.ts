@@ -900,6 +900,9 @@ function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
               ...(agent.engine === 'claude' || agent.engine === 'codex' || agent.engine === 'kimi'
                 ? { engine: agent.engine }
                 : {}),
+              ...(typeof agent.model === 'string' && agent.model.trim()
+                ? { model: agent.model.trim() }
+                : {}),
               ...(agent.prompt ? { prompt: agent.prompt } : {}),
               ...(agent.sessionId ? { sessionId: agent.sessionId } : {}),
               ...(agent.status === 'idle' || agent.status === 'working' || agent.status === 'stopped'

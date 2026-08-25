@@ -94,7 +94,7 @@ describe('AgentTeamSupervisor', () => {
   it('runs a member in an independent team chat session and reports to lead', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo');
-    store.createAgent('demo', { name: 'worker', engine: 'kimi', role: 'Worker' });
+    store.createAgent('demo', { name: 'worker', engine: 'kimi', model: 'kimi-code/k3', role: 'Worker' });
     store.createTask('demo', { subject: 'Inspect supervisor', owner: 'worker' });
     store.sendMessage('demo', { fromName: 'lead', toName: 'worker', body: 'Please inspect task 1' });
 
@@ -113,6 +113,7 @@ describe('AgentTeamSupervisor', () => {
         chatId: 'team:demo:worker',
         userId: 'agent-team-supervisor',
         sendCards: false,
+        model: 'kimi-code/k3',
       }));
     });
     expect(setSessionEngine).toHaveBeenCalledWith('team:demo:worker', 'kimi');

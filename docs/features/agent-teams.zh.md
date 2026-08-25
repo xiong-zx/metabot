@@ -1,6 +1,6 @@
 # Agent 团队
 
-MetaBot Agent 团队让主导 Agent 通过本地 bridge 协调一组持久化专家队友。协调模型是引擎中立的：团队可以声明 Claude、Codex 或 Kimi 队友，所有协调状态都落在 bridge 数据库里，而不是藏在单个模型会话中。实际执行仍走当前 bridge 和 session-engine 路径，因此每个配置的引擎都必须被该 bridge 运行时支持。
+MetaBot Agent 团队让主导 Agent 通过本地 bridge 协调一组持久化专家队友。协调模型是引擎中立的：团队可以声明 Claude、Codex 或 Kimi 队友，也可以为每个队友固定具体模型；所有协调状态都落在 bridge 数据库里，而不是藏在单个模型会话中。实际执行仍走当前 bridge 和 session-engine 路径，因此每个配置的引擎和模型都必须在该 bridge 运行时可用。
 
 ## 功能
 
@@ -20,6 +20,7 @@ Agent 团队用于更大的运行时协作：
 ```bash
 metabot teams create metabot-dev --description "MetaBot implementation team"
 metabot teams agents spawn metabot-dev cli-engineer --role implementation --engine codex --prompt "Own CLI UX, tests, and docs."
+metabot teams agents spawn metabot-dev claude-reviewer --role review --engine claude --model claude-model-id --prompt "Review the bounded change."
 metabot teams tasks create metabot-dev "Add runs CLI" --description "Expose runs create/update in bash and TS CLIs." --owner cli-engineer
 metabot teams send metabot-dev cli-engineer "Start task 4." --from lead --summary "assign task 4"
 ```
@@ -82,7 +83,7 @@ Agent Team supervisor 是 bridge 侧循环。启用后，它扫描 active teams�
 - 用 `METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS` 调整轮询间隔。
 - Supervisor 优先选择本地 `metabot` bridge bot；没有时使用第一个已注册 bot。
 - Supervisor 启动 run 时，会把已分配的 pending 任务改为 `in_progress`。
-- Supervisor 会为队友 chat 设置配置的 session engine，但目前还不会在派发前校验每个引擎的能力。在 runtime capability checks 或 per-engine adapters 落地前，常驻团队应使用本地 bridge 已知可工作的引擎。
+- Supervisor 会为队友 chat 设置配置的 session engine，并在每次运行时透传可选的队友 `model`。模型可用性和授权仍属于执行层职责；Agent Teams 不要求 RulesPack 授权模型。
 
 ## `bots.json` 中的常驻团队
 
@@ -102,7 +103,7 @@ CLI-only 设置适合临时团队。常驻团队在 `bots.json` 的 `agentTeams`
       "displayChatIds": ["oc_feishu_chat_id"],
       "agents": [
         { "name": "cli-engineer", "role": "implementation", "engine": "codex", "prompt": "Own teams CLI, command UX, tests, and docs." },
-        { "name": "runtime-engineer", "role": "runtime", "engine": "codex", "prompt": "Own bridge runtime, store, supervisor, and cards." }
+        { "name": "runtime-engineer", "role": "runtime", "engine": "codex", "model": "gpt-5.5", "prompt": "Own bridge runtime, store, supervisor, and cards." }
       ],
       "tasks": [
         { "id": 8, "subject": "Document Agent Teams workflow", "owner": "cli-engineer", "status": "pending" }
@@ -126,7 +127,7 @@ Reconcile 行为：
 - 曾经出现在 `agentTeams` 中的团队会标记为 `managedByConfig`；后续如果从配置中移除，reconcile 会把它标记为 `stopped`。
 - 手动 CLI 创建的团队会保留，除非它和已配置团队同名。
 
-既有数据库的 rollout 注意事项：`managed_by_config` 列添加到既有 Agent Teams DB 时默认是 false。之前已经存在的 resident/config-created teams 只有在 bridge 从 `bots.json` reconcile 过一次后，才会被视为配置托管。部署这个变更后，请在保留期望 `bots.json` `agentTeams` 的情况下重启 bridge，或触发一次热加载。只有完成这次 reconcile 后，才应依赖“从 `agentTeams` 移除团队”作为 rollback 机制来停止旧 resident team。
+既有数据库的 rollout 注意事项：可选 `model` 列会原地添加；未配置 model 的既有 agent 继续使用对应 engine 的默认模型。`managed_by_config` 列添加到既有 Agent Teams DB 时默认是 false。之前已经存在的 resident/config-created teams 只有在 bridge 从 `bots.json` reconcile 过一次后，才会被视为配置托管。部署这个变更后，请在保留期望 `bots.json` `agentTeams` 的情况下重启 bridge，或触发一次热加载。只有完成这次 reconcile 后，才应依赖“从 `agentTeams` 移除团队”作为 rollback 机制来停止旧 resident team。
 
 ## 命令参考
 
@@ -139,7 +140,7 @@ metabot teams start <team>
 metabot teams stop <team>
 
 metabot teams agents list <team>
-metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--model <model>] [--prompt <text>]
 metabot teams agents stop <team> <name>
 metabot teams agents delete <team> <name>
 

@@ -240,6 +240,7 @@ export class AgentTeamSupervisor {
         chatId,
         userId: 'agent-team-supervisor',
         sendCards: false,
+        model: agent.model,
         prompt: this.buildPrompt(teamName, agent, messages, tasks),
         onUpdate: (state) => {
           const current = this.options.store.getRun(teamName, run.id);

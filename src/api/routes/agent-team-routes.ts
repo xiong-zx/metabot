@@ -91,6 +91,7 @@ export async function handleAgentTeamRoutes(
           name,
           role: stringField(body.role),
           engine: engineField(body.engine),
+          model: stringField(body.model),
           prompt: stringField(body.prompt),
           sessionId: stringField(body.sessionId),
         }));

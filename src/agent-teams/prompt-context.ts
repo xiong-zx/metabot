@@ -19,7 +19,7 @@ export function buildAgentTeamPromptContext(store: AgentTeamStore, teamName: str
     .filter((agent) => agent.status !== 'stopped')
     .map(
       (agent) =>
-        `- ${compact(agent.name, 'member')} — ${compact(agent.role, 'member')} · ${agent.engine ?? 'codex'} · ${agent.status}`,
+        `- ${compact(agent.name, 'member')} — ${compact(agent.role, 'member')} · ${agent.engine ?? 'codex'}${agent.model ? `/${compact(agent.model, 'default')}` : ''} · ${agent.status}`,
     );
 
   return [

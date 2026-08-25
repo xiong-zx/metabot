@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,9 +22,16 @@ describe('AgentTeamStore', () => {
       name: 'reviewer',
       role: 'review',
       engine: 'codex',
+      model: 'gpt-5.5',
       prompt: 'Review changes',
     });
-    expect(agent).toMatchObject({ teamName: 'demo', name: 'reviewer', status: 'idle', engine: 'codex' });
+    expect(agent).toMatchObject({
+      teamName: 'demo',
+      name: 'reviewer',
+      status: 'idle',
+      engine: 'codex',
+      model: 'gpt-5.5',
+    });
     expect(store.deleteAgent('demo', 'missing')).toBe(false);
 
     const task = store.createTask('demo', {
@@ -60,6 +68,56 @@ describe('AgentTeamStore', () => {
     expect(store.deleteAgent('demo', 'reviewer')).toBe(true);
     expect(store.listAgents('demo')).toHaveLength(0);
 
+    store.close();
+  });
+
+  it('adds the optional model column to an existing agent database without losing rows', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-agent-teams-model-migration-'));
+    const dbPath = join(dir, 'teams.db');
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE agent_teams (
+        name TEXT PRIMARY KEY,
+        description TEXT,
+        status TEXT NOT NULL,
+        chat_ids TEXT NOT NULL DEFAULT '[]',
+        display_chat_ids TEXT NOT NULL DEFAULT '[]',
+        managed_by_config INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE agent_team_agents (
+        team_name TEXT NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT,
+        engine TEXT,
+        prompt TEXT,
+        status TEXT NOT NULL,
+        session_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (team_name, name),
+        FOREIGN KEY (team_name) REFERENCES agent_teams(name) ON DELETE CASCADE
+      );
+      INSERT INTO agent_teams
+        (name, status, created_at, updated_at)
+      VALUES ('legacy', 'active', 1, 1);
+      INSERT INTO agent_team_agents
+        (team_name, name, engine, status, created_at, updated_at)
+      VALUES ('legacy', 'reviewer', 'claude', 'idle', 1, 1);
+    `);
+    legacy.close();
+
+    const store = new AgentTeamStore(logger, dbPath);
+    expect(store.getAgent('legacy', 'reviewer')).toMatchObject({
+      name: 'reviewer',
+      engine: 'claude',
+      status: 'idle',
+    });
+    expect(store.getAgent('legacy', 'reviewer')).not.toHaveProperty('model');
+    expect(store.upsertAgent('legacy', { name: 'reviewer', model: 'claude-test-model' })).toMatchObject({
+      model: 'claude-test-model',
+    });
     store.close();
   });
 
@@ -138,7 +196,7 @@ describe('AgentTeamStore', () => {
       displayChatIds: ['oc_chat_123'],
       agents: [
         { name: 'lead', role: 'lead', engine: 'codex' },
-        { name: 'runtime-engineer', role: 'runtime', engine: 'codex', prompt: 'Own runtime' },
+        { name: 'runtime-engineer', role: 'runtime', engine: 'codex', model: 'gpt-5.5', prompt: 'Own runtime' },
       ],
       tasks: [
         { id: 5, subject: 'Implement supervisor', owner: 'runtime-engineer' },
@@ -151,7 +209,11 @@ describe('AgentTeamStore', () => {
       displayChatIds: ['oc_chat_123'],
       managedByConfig: true,
     });
-    expect(store.getAgent('metabot-dev', 'runtime-engineer')).toMatchObject({ role: 'runtime', engine: 'codex' });
+    expect(store.getAgent('metabot-dev', 'runtime-engineer')).toMatchObject({
+      role: 'runtime',
+      engine: 'codex',
+      model: 'gpt-5.5',
+    });
     expect(store.getAgent('metabot-dev', 'lead')).toMatchObject({ role: 'lead', engine: 'codex' });
     expect(store.getTask('metabot-dev', 5)).toMatchObject({ subject: 'Implement supervisor', owner: 'runtime-engineer' });
     expect(store.findTeamForChat('oc_chat_123')).toMatchObject({ name: 'metabot-dev' });
