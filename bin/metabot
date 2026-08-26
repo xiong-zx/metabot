@@ -2022,7 +2022,7 @@ def usage():
   metabot teams next <team> <agent> [--read] [--summary|--plain]
   metabot teams watch <team> [--interval sec] [--count n] [--summary|--plain]
   metabot teams agents list <team>
-  metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--prompt p]
+  metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--model m] [--prompt p]
   metabot teams agents stop <team> <name>
   metabot teams agents delete <team> <name>
   metabot teams send <team> <to> <message> [--from name] [--summary text]
@@ -2215,7 +2215,7 @@ def format_status(body):
     open_tasks = [task for task in tasks if task.get("status") in ("pending", "in_progress")]
     running_runs = [run for run in runs if run.get("status") == "running"]
     agent_text = ", ".join(
-        f"{agent.get('name')}:{agent.get('status', 'unknown')}{('/' + agent.get('engine')) if agent.get('engine') else ''}"
+        f"{agent.get('name')}:{agent.get('status', 'unknown')}{('/' + agent.get('engine')) if agent.get('engine') else ''}{('/' + agent.get('model')) if agent.get('model') else ''}"
         for agent in agents
     )
     lines = [
@@ -2339,7 +2339,7 @@ elif cmd == "agents":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams agents spawn <team> <name>")
         req("POST", f"/api/agent-teams/{enc(pos[0])}/agents", {
-            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine") or "codex", "prompt": flags.get("prompt")
+            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine") or "codex", "model": flags.get("model"), "prompt": flags.get("prompt")
         })
     elif sub == "stop":
         if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")

@@ -104,6 +104,23 @@
       ]
     },
     {
+      "id": "agent-team-model-cli-adapter",
+      "status": "required",
+      "roots": ["bin/metabot", "tests/agent-team-cli-capability.test.ts"],
+      "forbiddenImports": [
+        "src/memory-core",
+        "src/workers",
+        "@xvirobotics/arc-mcp",
+        "@xvirobotics/worker-runner-mcp"
+      ],
+      "reason": "Keep the downstream single-file operator CLI in behavioral parity with the upstreamable TypeScript Agent Team model-selection surface.",
+      "validationSurface": [
+        "tests/agent-team-cli-capability.test.ts",
+        "packages/cli/tests/teams.test.ts",
+        "tests/downstream-boundaries.test.ts"
+      ]
+    },
+    {
       "id": "agent-team-compact-card-upstream-gap",
       "status": "required",
       "roots": ["src/feishu/team-panel.ts"],
