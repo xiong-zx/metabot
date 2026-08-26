@@ -84,6 +84,15 @@ export const METACLAW_GATES: readonly GateDefinition[] = Object.freeze([
       'ARC requests collapse into a shared tui-<model> main session, so this server cannot claim its side turns stay isolated from ARC.',
     gates: ['metaclaw_infer'],
   },
+  {
+    id: 'MCLAW-015',
+    requirement:
+      'A disposable candidate profile, exact provider/model, call/token/cost ceilings, and explicit billable-call authorization must be accepted before inference can form.',
+    consequence:
+      'Closing the ARC isolation gate would otherwise make a non-activated placeholder profile capable of forming provider traffic before the bounded acceptance decision.',
+    gates: ['metaclaw_infer'],
+    profileEvidenceAccepted: false,
+  },
 ]);
 
 export interface GateEvidence {

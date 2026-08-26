@@ -48,13 +48,54 @@ class ManagedProfileTests(unittest.TestCase):
                 "provenance": {"seriesSha256": "c" * 64},
             },
         }
+        arc_commit = "b" * 40
+        arc_tree = "c" * 40
+        arc_series = "d" * 64
+        self.arc_manifest_path = self.temporary / "arc-mclaw014-manifest.json"
+        self.arc_manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": profile_lib.ARC_RELEASE_SCHEMA,
+                    "release_id": "unofficial-0.5.0-bbbbbbbbbbbb-hard-budget-mclaw014",
+                    "state": "candidate",
+                    "role": "mcp-execution",
+                    "commit": arc_commit,
+                    "source_tree": arc_tree,
+                    "provenance": {
+                        "official": False,
+                        "class": "downstream-patched-candidate",
+                        "series_sha256": arc_series,
+                    },
+                    "immutability": {"mode": "recursive-read-only", "sealed": ["source", "venv"]},
+                    "assurances": [
+                        {
+                            "schema_version": profile_lib.ARC_ASSURANCE_SCHEMA,
+                            "id": "MCLAW-014",
+                            "commit": arc_commit,
+                            "source_tree": arc_tree,
+                            "patch_series_sha256": arc_series,
+                        }
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.arc_manifest_path.chmod(0o444)
 
     def tearDown(self) -> None:
         import shutil
 
         shutil.rmtree(self.temporary)
 
-    def _create(self, profile_id: str = "mclaw-inactive", port: int = 19412) -> dict[str, object]:
+    def _create(
+        self,
+        profile_id: str = "mclaw-inactive",
+        port: int = 19412,
+        bind_mclaw014: bool = False,
+    ) -> dict[str, object]:
         with patch.object(profile_lib, "doctor_release", return_value=self.release_report):
             return profile_lib.create_profile(
                 profiles_root_arg=str(self.profiles.resolve()),
@@ -63,6 +104,7 @@ class ManagedProfileTests(unittest.TestCase):
                 port=port,
                 model_arg="inactive-placeholder",
                 provider_arg="inactive-placeholder",
+                arc_manifest_arg=str(self.arc_manifest_path.resolve()) if bind_mclaw014 else None,
             )
 
     def _doctor(self, profile_path: Path) -> dict[str, object]:
@@ -128,6 +170,26 @@ class ManagedProfileTests(unittest.TestCase):
         self.assertEqual(before, profile_path.read_bytes())
         self.assertEqual(before_stat.st_mtime_ns, profile_path.stat().st_mtime_ns)
         self.assertFalse(Path(second["profile"]["service"]["process"]["pidFile"]).exists())
+
+    def test_binds_mclaw014_only_to_one_sealed_arc_manifest(self) -> None:
+        report = self._create("mclaw014-bound", 19414, bind_mclaw014=True)
+        profile = report["profile"]
+        evidence = profile["externalEvidence"]["MCLAW-014"]
+
+        self.assertEqual(evidence["manifestPath"], str(self.arc_manifest_path.resolve()))
+        self.assertEqual(profile["gates"]["MCLAW-014"], {
+            "satisfied": True,
+            "evidence": evidence["manifestSha256"],
+        })
+        self.assertEqual(report["externalEvidence"], {"MCLAW-014": evidence})
+
+        body = json.loads(self.arc_manifest_path.read_text(encoding="utf-8"))
+        body["assurances"][0]["source_tree"] = "e" * 40
+        self.arc_manifest_path.chmod(0o644)
+        self.arc_manifest_path.write_text(json.dumps(body), encoding="utf-8")
+        self.arc_manifest_path.chmod(0o444)
+        with self.assertRaisesRegex(profile_lib.ReleaseError, "not tied"):
+            self._doctor(Path(report["profilePath"]))
 
     def test_skills_snapshot_is_complete_idempotent_and_rejects_inflight_writes(self) -> None:
         created = self._create()

@@ -46,6 +46,7 @@ export interface Fixture {
   readonly skillsRoot: string;
   readonly releaseRoot: string;
   readonly releaseFile: string;
+  readonly arcManifestPath: string;
   readonly env: NodeJS.ProcessEnv;
 }
 
@@ -64,6 +65,7 @@ function exactFixtureGates(
   declared: Record<string, GateEvidence>,
   manifest: Record<string, any>,
   manifestPath: string,
+  arcManifestSha256: string,
 ): Record<string, GateEvidence> {
   return Object.fromEntries(
     Object.entries(declared).map(([id, evidence]) => {
@@ -75,7 +77,9 @@ function exactFixtureGates(
             ? manifest.provenance.seriesSha256
             : id === 'MCLAW-012'
               ? manifest.releaseId
-              : `fixture evidence for ${id}`;
+              : id === 'MCLAW-014'
+                ? arcManifestSha256
+                : `fixture evidence for ${id}`;
       return [id, { ...evidence, evidence: exact }];
     }),
   );
@@ -229,6 +233,50 @@ export function createFixture(options: FixtureOptions = {}): Fixture {
   const manifestPath = path.join(root, 'release-manifest.json');
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), { mode: 0o444 });
 
+  const arcCommit = 'b'.repeat(40);
+  const arcSourceTree = 'c'.repeat(40);
+  const arcPatchSeries = 'd'.repeat(64);
+  const arcReleaseId = 'unofficial-0.5.0-bbbbbbbbbbbb-hard-budget-mclaw014';
+  const arcManifestPath = path.join(root, 'arc-mclaw014-manifest.json');
+  const arcManifest = {
+    schema_version: 'metabot.autoresearchclaw.release.v1',
+    release_id: arcReleaseId,
+    state: 'candidate',
+    role: 'mcp-execution',
+    commit: arcCommit,
+    source_tree: arcSourceTree,
+    provenance: {
+      official: false,
+      class: 'downstream-patched-candidate',
+      series_sha256: arcPatchSeries,
+    },
+    immutability: { mode: 'recursive-read-only', sealed: ['source', 'venv'] },
+    assurances: [
+      {
+        schema_version: 'metabot.autoresearchclaw.assurance.v1',
+        id: 'MCLAW-014',
+        commit: arcCommit,
+        source_tree: arcSourceTree,
+        patch_series_sha256: arcPatchSeries,
+      },
+    ],
+  };
+  const arcManifestBody = `${JSON.stringify(arcManifest, null, 2)}\n`;
+  writeFileSync(arcManifestPath, arcManifestBody, { mode: 0o444 });
+  const arcManifestSha256 = createHash('sha256').update(arcManifestBody).digest('hex');
+  const exactMclaw014 = options.gates?.['MCLAW-014']?.evidence === '__EXACT_FIXTURE_MCLAW-014__';
+  const externalEvidence = {
+    'MCLAW-014': {
+      manifestPath: arcManifestPath,
+      manifestSha256: arcManifestSha256,
+      releaseId: arcReleaseId,
+      commit: arcCommit,
+      sourceTree: arcSourceTree,
+      patchSeriesSha256: arcPatchSeries,
+      assuranceSchema: 'metabot.autoresearchclaw.assurance.v1',
+    },
+  };
+
   const profile = (options.profileOverrides ?? ((value) => value))({
     schemaVersion: 1,
     profileId: 'metaclaw-managed-fixture',
@@ -307,7 +355,8 @@ export function createFixture(options: FixtureOptions = {}): Fixture {
       initialSnapshot: snapshotPath,
       initialSnapshotSha256: createHash('sha256').update(snapshotBody).digest('hex'),
     },
-    gates: exactFixtureGates(options.gates ?? {}, manifest, manifestPath),
+    ...(exactMclaw014 ? { externalEvidence } : {}),
+    gates: exactFixtureGates(options.gates ?? {}, manifest, manifestPath, arcManifestSha256),
   });
   const profilePath = path.join(profileRoot, 'profile.json');
   writeFileSync(profilePath, JSON.stringify(profile, null, 2), { mode: 0o600 });
@@ -320,6 +369,7 @@ export function createFixture(options: FixtureOptions = {}): Fixture {
     skillsRoot,
     releaseRoot,
     releaseFile,
+    arcManifestPath,
     env: {
       METACLAW_MCP_PROFILE_FILE: profilePath,
       METACLAW_MCP_RELEASE_MANIFEST: manifestPath,

@@ -60,6 +60,8 @@ REQUIRED_PINS: dict[str, str | bool] = {
     "proxy.expose_admin_routes": False,
     "proxy.expose_memory_routes": False,
 }
+ARC_RELEASE_SCHEMA = "metabot.autoresearchclaw.release.v1"
+ARC_ASSURANCE_SCHEMA = "metabot.autoresearchclaw.assurance.v1"
 
 
 def _private_json(path: Path, value: Any) -> bytes:
@@ -130,6 +132,86 @@ def _read_private_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseError(f"{label} must contain an object")
     return value
+
+
+def _read_sealed_json(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_absolute():
+        raise ReleaseError(f"{label} path must be absolute")
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise ReleaseError(f"{label} is missing or unreadable") from error
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise ReleaseError(f"{label} must be a regular non-symlink file")
+    if hasattr(os, "getuid") and before.st_uid != os.getuid():
+        raise ReleaseError(f"{label} must be owned by the current user")
+    if stat.S_IMODE(before.st_mode) & 0o022:
+        raise ReleaseError(f"{label} must not be group- or other-writable")
+    if before.st_size < 2 or before.st_size > 1024 * 1024:
+        raise ReleaseError(f"{label} has an invalid size")
+    try:
+        body = path.read_bytes()
+        value = json.loads(body)
+        after = path.lstat()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError(f"{label} is invalid JSON") from error
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise ReleaseError(f"{label} changed during read")
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{label} must contain an object")
+    return value
+
+
+def _mclaw014_evidence(manifest_arg: str) -> dict[str, str]:
+    manifest_path = Path(manifest_arg)
+    manifest = _read_sealed_json(manifest_path, "ARC MCLAW-014 release manifest")
+    provenance = manifest.get("provenance")
+    immutability = manifest.get("immutability")
+    assurances = manifest.get("assurances")
+    if (
+        manifest.get("schema_version") != ARC_RELEASE_SCHEMA
+        or manifest.get("state") != "candidate"
+        or manifest.get("role") != "mcp-execution"
+        or not isinstance(provenance, dict)
+        or provenance.get("official") is not False
+        or provenance.get("class") != "downstream-patched-candidate"
+        or not isinstance(immutability, dict)
+        or immutability.get("mode") != "recursive-read-only"
+        or set(immutability.get("sealed", [])) != {"source", "venv"}
+        or not isinstance(assurances, list)
+    ):
+        raise ReleaseError("ARC manifest is not a sealed official=false MCP execution candidate")
+    matches = [entry for entry in assurances if isinstance(entry, dict) and entry.get("id") == "MCLAW-014"]
+    if len(matches) != 1:
+        raise ReleaseError("ARC manifest must carry exactly one MCLAW-014 assurance")
+    assurance = matches[0]
+    commit = str(manifest.get("commit", ""))
+    source_tree = str(manifest.get("source_tree", ""))
+    series_sha256 = str(provenance.get("series_sha256", ""))
+    if (
+        assurance.get("schema_version") != ARC_ASSURANCE_SCHEMA
+        or assurance.get("commit") != commit
+        or assurance.get("source_tree") != source_tree
+        or assurance.get("patch_series_sha256") != series_sha256
+        or not re.fullmatch(r"[0-9a-f]{40}", commit)
+        or not re.fullmatch(r"[0-9a-f]{40}", source_tree)
+        or not re.fullmatch(r"[0-9a-f]{64}", series_sha256)
+    ):
+        raise ReleaseError("ARC MCLAW-014 assurance is not tied to the sealed commit, tree, and patch series")
+    return {
+        "manifestPath": str(manifest_path.resolve(strict=True)),
+        "manifestSha256": sha256_file(manifest_path),
+        "releaseId": str(manifest.get("release_id", "")),
+        "commit": commit,
+        "sourceTree": source_tree,
+        "patchSeriesSha256": series_sha256,
+        "assuranceSchema": ARC_ASSURANCE_SCHEMA,
+    }
 
 
 def _assert_private_file(path: Path, label: str) -> None:
@@ -225,6 +307,7 @@ def create_profile(
     port: int,
     model_arg: str,
     provider_arg: str,
+    arc_manifest_arg: str | None = None,
 ) -> dict[str, Any]:
     release = doctor_release(manifest_arg)
     profile_id = _validate_text_pin(profile_id_arg, "profile id")
@@ -232,6 +315,7 @@ def create_profile(
         raise ReleaseError("profile id contains unsafe characters")
     model = _validate_text_pin(model_arg, "model")
     provider = _validate_text_pin(provider_arg, "provider")
+    mclaw014 = _mclaw014_evidence(arc_manifest_arg) if arc_manifest_arg else None
     profiles_root = Path(profiles_root_arg)
     if not profiles_root.is_absolute():
         raise ReleaseError("profiles root must be absolute")
@@ -250,7 +334,9 @@ def create_profile(
             "provider": report["model"]["provider"],
             "port": report["port"],
         }
-        if actual != expected:
+        if actual != expected or report.get("externalEvidence") != (
+            {"MCLAW-014": mclaw014} if mclaw014 else None
+        ):
             raise ReleaseError("existing profile has different immutable pins")
         return {**report, "created": False, "reused": True}
 
@@ -315,6 +401,7 @@ def create_profile(
         "selectorMutation": False,
         "directCliMutation": False,
         "runtimeStarted": False,
+        **({"externalEvidence": {"MCLAW-014": mclaw014}} if mclaw014 else {}),
     }
     snapshot_body = _private_json(snapshot_path, snapshot)
 
@@ -365,10 +452,16 @@ def create_profile(
             "initialSnapshot": str(snapshot_path),
             "initialSnapshotSha256": hashlib.sha256(snapshot_body).hexdigest(),
         },
+        **({"externalEvidence": {"MCLAW-014": mclaw014}} if mclaw014 else {}),
         "gates": {
             "MCLAW-010": {"satisfied": True, "evidence": release["manifestSha256"]},
             "MCLAW-011": {"satisfied": True, "evidence": release_manifest["provenance"]["seriesSha256"]},
             "MCLAW-012": {"satisfied": True, "evidence": release["releaseId"]},
+            **(
+                {"MCLAW-014": {"satisfied": True, "evidence": mclaw014["manifestSha256"]}}
+                if mclaw014
+                else {}
+            ),
         },
     }
     _private_json(profile_path, profile)
@@ -567,8 +660,28 @@ def doctor_profile(profile_arg: str, manifest_arg: str) -> dict[str, Any]:
         "rollback",
         "gates",
     }
-    if set(profile) != required or profile.get("schemaVersion") != PROFILE_SCHEMA:
+    allowed_fields = (required, required | {"externalEvidence"})
+    if set(profile) not in allowed_fields or profile.get("schemaVersion") != PROFILE_SCHEMA:
         raise ReleaseError("managed profile fields do not match the exact schema")
+    external_evidence = profile.get("externalEvidence")
+    mclaw014 = None
+    if external_evidence is not None:
+        if not isinstance(external_evidence, dict) or set(external_evidence) != {"MCLAW-014"}:
+            raise ReleaseError("managed profile external evidence has an unknown or missing field")
+        claimed = external_evidence.get("MCLAW-014")
+        if not isinstance(claimed, dict) or set(claimed) != {
+            "manifestPath",
+            "manifestSha256",
+            "releaseId",
+            "commit",
+            "sourceTree",
+            "patchSeriesSha256",
+            "assuranceSchema",
+        }:
+            raise ReleaseError("managed profile MCLAW-014 evidence is malformed")
+        mclaw014 = _mclaw014_evidence(str(claimed.get("manifestPath", "")))
+        if claimed != mclaw014:
+            raise ReleaseError("managed profile MCLAW-014 evidence drifted from the sealed ARC manifest")
     profile_root = Path(str(profile["profileRoot"]))
     if profile_path.parent != profile_root or not profile_root.is_absolute():
         raise ReleaseError("profile root is not the profile file parent")
@@ -687,9 +800,14 @@ def doctor_profile(profile_arg: str, manifest_arg: str) -> dict[str, Any]:
             "evidence": release["manifest"]["provenance"]["seriesSha256"],
         },
         "MCLAW-012": {"satisfied": True, "evidence": release["releaseId"]},
+        **(
+            {"MCLAW-014": {"satisfied": True, "evidence": mclaw014["manifestSha256"]}}
+            if mclaw014
+            else {}
+        ),
     }
     if profile.get("gates") != expected_gates:
-        raise ReleaseError("profile MCLAW-010/011/012 evidence drifted")
+        raise ReleaseError("profile dependency-gate evidence drifted")
     paths = {
         "managed HOME": Path(profile["managedHome"]),
         "state root": Path(profile["stateRoot"]),
@@ -742,6 +860,7 @@ def doctor_profile(profile_arg: str, manifest_arg: str) -> dict[str, Any]:
         "selectorMutation": False,
         "directCliMutation": False,
         "runtimeStarted": False,
+        **({"externalEvidence": {"MCLAW-014": mclaw014}} if mclaw014 else {}),
     }
     if snapshot != expected_snapshot:
         raise ReleaseError("rollback snapshot drifted from the exact inactive/no-mutation evidence")
@@ -755,6 +874,7 @@ def doctor_profile(profile_arg: str, manifest_arg: str) -> dict[str, Any]:
         "official": False,
         "releaseId": release["releaseId"],
         "releaseDoctor": {"ok": True, "manifestSha256": release["manifestSha256"]},
+        "externalEvidence": {"MCLAW-014": mclaw014} if mclaw014 else None,
         "homeIsolated": True,
         "stateIsolated": True,
         "permissions": {"directories": "0700", "sensitiveFiles": "0600"},

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -8,6 +8,14 @@ import { cleanupFixtures, createFixture } from './helpers.js';
 afterEach(cleanupFixtures);
 
 describe('mechanical inference cost ledger', () => {
+  it('does not create state until the first accepted reservation', () => {
+    const fixture = createFixture();
+    const cost = fixtureProfile(fixture).cost;
+    new MetaClawCostLedger(cost);
+
+    expect(existsSync(cost.ledgerFile)).toBe(false);
+  });
+
   it('reserves worst-case tokens and USD before dispatch and records settlement', () => {
     const fixture = createFixture();
     const ledger = new MetaClawCostLedger(fixtureProfile(fixture).cost);

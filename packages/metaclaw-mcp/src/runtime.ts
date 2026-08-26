@@ -76,13 +76,14 @@ function buildRuntime(options: CreateRuntimeOptions, secrets: SecretRegistry): M
   const manifest = loadReleaseManifest(manifestPath);
   assertRuntimeReleasePairing(profile, manifest, manifestPath);
   assertRuntimeRootsDistinct(profile, manifest);
+  const externalEvidenceFiles = assertMclaw014Evidence(profile, manifest);
 
   const bearer = readProtectedSecret(profile.service.bearerFile, { label: 'MetaClaw service bearer' });
   secrets.register(bearer);
   const costLedger = new MetaClawCostLedger(profile.cost);
-  const gates = evaluateGates(profile.gates).map((gate) => gate.id === 'MCLAW-COST-LEDGER'
-    ? { ...gate, satisfied: true, evidence: 'mechanical:cost-ledger-v1' }
-    : gate);
+  const gates = evaluateGates(profile.gates).map((gate) =>
+    gate.id === 'MCLAW-COST-LEDGER' ? { ...gate, satisfied: true, evidence: 'mechanical:cost-ledger-v1' } : gate,
+  );
   const configurationDigests = new Map(
     [
       profile.sourcePath,
@@ -90,6 +91,7 @@ function buildRuntime(options: CreateRuntimeOptions, secrets: SecretRegistry): M
       profile.service.authFile,
       profile.service.bearerFile,
       profile.rollback.initialSnapshot,
+      ...externalEvidenceFiles,
     ].map((target) => [target, stableFileDigest(target)]),
   );
 
@@ -120,6 +122,13 @@ function buildRuntime(options: CreateRuntimeOptions, secrets: SecretRegistry): M
       if (profileDocument(currentProfile) !== profileDocument(profile)) {
         throw new MetaClawError('Managed profile changed after MCP startup', 'integrity_drift');
       }
+      try {
+        assertMclaw014Evidence(currentProfile, manifest);
+      } catch (error) {
+        throw new MetaClawError('Sealed ARC evidence failed re-validation after MCP startup', 'integrity_drift', {
+          cause: error instanceof MetaClawError ? error.code : 'evidence_unreadable',
+        });
+      }
       for (const [target, expected] of configurationDigests) {
         let actual: string;
         try {
@@ -144,7 +153,6 @@ function buildRuntime(options: CreateRuntimeOptions, secrets: SecretRegistry): M
   };
   return runtime;
 }
-
 
 /** Integrity is re-read per call; the interesting drift happens while we run. */
 export function currentIntegrity(
@@ -185,6 +193,108 @@ function assertRuntimeRootsDistinct(profile: MetaClawProfile, manifest: ReleaseM
   if (pathsOverlap(canonicalOrLiteral(manifest.root), bearer)) {
     throw new MetaClawError('Service bearer must not live inside the release root', 'profile_invalid');
   }
+  const arcManifest = profile.externalEvidence?.['MCLAW-014']?.manifestPath;
+  if (arcManifest) {
+    const evidence = canonicalOrLiteral(arcManifest);
+    for (const [label, root] of roots) {
+      if (pathsOverlap(root, evidence)) {
+        throw new MetaClawError(`ARC evidence manifest must not live inside the ${label}`, 'profile_invalid');
+      }
+    }
+  }
+}
+
+function assertMclaw014Evidence(profile: MetaClawProfile, manifest: ReleaseManifest): string[] {
+  const evidence = profile.externalEvidence?.['MCLAW-014'];
+  const gate = profile.gates?.['MCLAW-014'];
+  if (!evidence) {
+    if (gate?.satisfied === true) {
+      throw new MetaClawError(
+        'MCLAW-014 cannot be satisfied without a sealed ARC evidence manifest',
+        'profile_invalid',
+      );
+    }
+    return [];
+  }
+  if (gate?.satisfied !== true || gate.evidence !== evidence.manifestSha256) {
+    throw new MetaClawError('MCLAW-014 gate evidence does not match the pinned ARC manifest digest', 'profile_invalid');
+  }
+
+  const { digest, value } = readStableExternalEvidence(evidence.manifestPath);
+  if (digest !== evidence.manifestSha256) {
+    throw new MetaClawError('MCLAW-014 ARC manifest digest drifted', 'profile_invalid');
+  }
+  const provenance = object(value.provenance);
+  const immutability = object(value.immutability);
+  const assurances = Array.isArray(value.assurances) ? value.assurances.map(object) : [];
+  const matches = assurances.filter((entry) => entry.id === 'MCLAW-014');
+  const assurance = matches[0];
+  if (
+    value.schema_version !== 'metabot.autoresearchclaw.release.v1' ||
+    value.state !== 'candidate' ||
+    value.role !== 'mcp-execution' ||
+    value.release_id !== evidence.releaseId ||
+    value.commit !== evidence.commit ||
+    value.source_tree !== evidence.sourceTree ||
+    provenance.official !== false ||
+    provenance.class !== 'downstream-patched-candidate' ||
+    provenance.series_sha256 !== evidence.patchSeriesSha256 ||
+    immutability.mode !== 'recursive-read-only' ||
+    !Array.isArray(immutability.sealed) ||
+    new Set(immutability.sealed).size !== 2 ||
+    !immutability.sealed.includes('source') ||
+    !immutability.sealed.includes('venv') ||
+    matches.length !== 1 ||
+    assurance?.schema_version !== evidence.assuranceSchema ||
+    assurance.commit !== evidence.commit ||
+    assurance.source_tree !== evidence.sourceTree ||
+    assurance.patch_series_sha256 !== evidence.patchSeriesSha256
+  ) {
+    throw new MetaClawError(
+      'MCLAW-014 evidence is not tied to one sealed official=false ARC commit, tree, and patch series',
+      'profile_invalid',
+    );
+  }
+  if (pathsOverlap(canonicalOrLiteral(manifest.root), canonicalOrLiteral(evidence.manifestPath))) {
+    throw new MetaClawError('ARC evidence must remain outside the MetaClaw release root', 'profile_invalid');
+  }
+  return [evidence.manifestPath];
+}
+
+function readStableExternalEvidence(target: string): { digest: string; value: Record<string, unknown> } {
+  const before = lstatSync(target);
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    before.size < 2 ||
+    before.size > 1024 * 1024 ||
+    (process.getuid && before.uid !== process.getuid()) ||
+    (before.mode & 0o022) !== 0
+  ) {
+    throw new MetaClawError('ARC evidence manifest is not a protected regular file', 'profile_invalid');
+  }
+  const body = readFileSync(target);
+  const after = lstatSync(target);
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs
+  ) {
+    throw new MetaClawError('ARC evidence manifest changed during read', 'profile_invalid');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    throw new MetaClawError('ARC evidence manifest is not valid JSON', 'profile_invalid');
+  }
+  return { digest: createHash('sha256').update(body).digest('hex'), value: object(parsed) };
+}
+
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
 }
 
 function assertRuntimeReleasePairing(profile: MetaClawProfile, manifest: ReleaseManifest, manifestPath: string): void {

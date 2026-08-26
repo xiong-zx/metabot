@@ -8,6 +8,7 @@ import {
   type SealedTreeName,
 } from './immutability.js';
 import {
+  ARC_RELEASE_ASSURANCE_IDS,
   ARC_MCP_PACKAGE,
   ARC_MCP_VERSION,
   DEFAULT_EXTERNAL_RELEASE_ROLE,
@@ -15,10 +16,20 @@ import {
   type DownstreamPatchProvenance,
   type ExternalReleaseProvenanceClass,
   type ExternalReleaseRole,
+  type ExternalReleaseAssuranceId,
   type OfficialArcProduct,
 } from './spec.js';
 
 export const ARC_RELEASE_MANIFEST_VERSION = 'metabot.autoresearchclaw.release.v1' as const;
+export const ARC_RELEASE_ASSURANCE_VERSION = 'metabot.autoresearchclaw.assurance.v1' as const;
+
+export interface ExternalReleaseAssurance {
+  schema_version: typeof ARC_RELEASE_ASSURANCE_VERSION;
+  id: ExternalReleaseAssuranceId;
+  commit: string;
+  source_tree: string;
+  patch_series_sha256: string;
+}
 
 /**
  * Sealed manifests are append-only evidence.
@@ -97,6 +108,11 @@ export interface ExternalReleaseManifest {
    * a claim this driver checks before every launch.
    */
   immutability?: ReleaseImmutabilityRecord;
+  /**
+   * Optional reviewed behavior claims tied to this exact sealed candidate.
+   * Older manifests remain valid without this additive field.
+   */
+  assurances?: ExternalReleaseAssurance[];
   origin: string;
   base_tag: string;
   base_tag_commit: string;
@@ -233,7 +249,35 @@ export function parseReleaseManifest(file: string): ExternalReleaseManifest {
   if (value.provenance !== undefined) assertProvenanceBlock(value.provenance, file);
   if (value.supersedes !== undefined) assertSupersessionBlock(value.supersedes, value.release_id, file);
   if (value.immutability !== undefined) assertImmutabilityBlock(value.immutability, file);
+  if (value.assurances !== undefined) assertAssurancesBlock(value, file);
   return value;
+}
+
+function assertAssurancesBlock(manifest: ExternalReleaseManifest, file: string): void {
+  const invalid = (reason: string): never => {
+    throw new Error(`Official release manifest has invalid assurances (${reason}): ${file}`);
+  };
+  const assurances = manifest.assurances;
+  const provenance = manifest.provenance;
+  if (!Array.isArray(assurances) || assurances.length === 0) invalid('not a non-empty array');
+  if (!provenance) invalid('an official release cannot carry downstream assurances');
+  const entries = assurances as ExternalReleaseAssurance[];
+  const patch = provenance as ExternalReleaseProvenance;
+  const seen = new Set<string>();
+  for (const assurance of entries) {
+    if (!assurance || typeof assurance !== 'object' || Array.isArray(assurance)) invalid('malformed entry');
+    if (assurance.schema_version !== ARC_RELEASE_ASSURANCE_VERSION) invalid('unknown assurance schema');
+    if (!ARC_RELEASE_ASSURANCE_IDS.includes(assurance.id)) invalid(`unknown assurance ${String(assurance.id)}`);
+    if (seen.has(assurance.id)) invalid(`duplicate assurance ${assurance.id}`);
+    seen.add(assurance.id);
+    if (
+      assurance.commit !== manifest.commit ||
+      assurance.source_tree !== manifest.source_tree ||
+      assurance.patch_series_sha256 !== patch.series_sha256
+    ) {
+      invalid(`${assurance.id} is not tied to the sealed commit, tree, and patch series`);
+    }
+  }
 }
 
 function assertSupersessionBlock(

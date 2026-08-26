@@ -82,7 +82,7 @@ describe('package boundaries', () => {
 
   it('declares every upstream dependency this integration is waiting on', () => {
     expect(METACLAW_GATES.map((gate) => gate.id)).toEqual([
-      'MCLAW-COST-LEDGER', 'MCLAW-011', 'MCLAW-010', 'MCLAW-012', 'MCLAW-014',
+      'MCLAW-COST-LEDGER', 'MCLAW-011', 'MCLAW-010', 'MCLAW-012', 'MCLAW-014', 'MCLAW-015',
     ]);
     for (const gate of METACLAW_GATES) {
       expect(gate.requirement.length, gate.id).toBeGreaterThan(20);
