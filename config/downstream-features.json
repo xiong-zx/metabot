@@ -614,7 +614,7 @@
       "id": "ci-runtime-prerequisites",
       "status": "required",
       "roots": [".github/workflows/ci.yml", "tests/ci-workflow.test.ts"],
-      "reason": "Build retained downstream runtime packages before root tests exercise the production restart artifact preflight.",
+      "reason": "Build retained downstream compiled dependencies before workspace tests load their package exports, and build runtime packages before root tests exercise the production restart artifact preflight.",
       "validationSurface": [
         "tests/ci-workflow.test.ts",
         "tests/metabot-controlled-restart-cli.test.ts",

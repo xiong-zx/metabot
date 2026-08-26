@@ -38,7 +38,7 @@ describe('CI runtime prerequisites', () => {
     expect(pushScan.indexOf('git fetch')).toBeLessThan(pushScan.indexOf('npm run check:added-secrets'));
   });
 
-  it('builds every compiled package required by the restart preflight before tests', () => {
+  it('builds every compiled package required by workspace tests and restart preflight', () => {
     const rulesPackBuildStep = ciWorkflow.slice(
       ciWorkflow.indexOf('Build RulesPack entrypoints'),
       ciWorkflow.indexOf('- name: Type check'),
@@ -51,6 +51,7 @@ describe('CI runtime prerequisites', () => {
     expect(rulesPackBuildStep).toContain('-w @metabot/rulespack');
     expect(rulesPackBuildStep).toContain('-w @metabot/rulespack-adapter');
     expect(restartCli).not.toContain('packages/arc-mcp/dist/daemon-cli.js');
+    expect(buildStep).toContain('-w @xvirobotics/mcp-connector');
     expect(buildStep).toContain('-w @xvirobotics/worker-runner-mcp');
     expect(buildStep).not.toContain('arc-researchclaw-adapter');
     expect(buildStep).not.toContain('arc-worker-runner-adapter');

@@ -67,12 +67,12 @@ jobs:
           npm run typecheck -w @xvirobotics/arc-mcp
           npm run typecheck -w @xvirobotics/worker-runner-mcp
 
-      # Workspace test suites (packages/cli, metamemory, skill-hub) import the
-      # compiled entry of these thin libraries (@xvirobotics/cli-core etc.,
-      # exports -> dist/). `tsc --noEmit` above does not emit, so build them
-      # before running tests or the imports fail to resolve. Build the retained
-      # runtime packages here too so their independently shipped binaries and
-      # restart preflight are covered.
+      # Workspace test suites import the compiled entry of thin libraries
+      # (exports -> dist/), including MetaClaw MCP's dependency on the shared
+      # MCP connector. `tsc --noEmit` above does not emit, so build those
+      # dependencies before running tests or package resolution fails. Build
+      # the retained runtime packages here too so their independently shipped
+      # binaries and restart preflight are covered.
       # The controlled-restart CLI tests run the production runtime-artifact
       # preflight, which requires the compiled ARC and Worker Runner daemons.
       # RulesPack's adapter also imports the engine's compiled public entry
@@ -83,6 +83,7 @@ jobs:
           -w @xvirobotics/cli-core
           -w @xvirobotics/metamemory
           -w @xvirobotics/skill-hub
+          -w @xvirobotics/mcp-connector
           -w @xvirobotics/arc-mcp
           -w @xvirobotics/worker-runner-mcp
 
