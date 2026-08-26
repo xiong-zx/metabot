@@ -22,6 +22,88 @@ afterEach(async () => {
 });
 
 describe('bin/metabot execution capability', () => {
+  it('forwards an exact Agent Team model and shows it in compact status', async () => {
+    const requests: Array<{ method?: string; url?: string; body: string }> = [];
+    const server = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      requests.push({ method: req.method, url: req.url, body });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (req.method === 'POST') {
+        res.end(
+          JSON.stringify({
+            teamName: 'demo',
+            name: 'worker',
+            role: 'acceptance',
+            engine: 'claude',
+            model: 'claude-sonnet-4-6',
+            status: 'idle',
+          }),
+        );
+        return;
+      }
+      res.end(
+        JSON.stringify({
+          team: { name: 'demo', status: 'active' },
+          agents: [
+            { name: 'worker', status: 'idle', engine: 'claude', model: 'claude-sonnet-4-6' },
+          ],
+          tasks: [],
+          runs: [],
+          unreadMessages: 0,
+        }),
+      );
+    });
+    openServers.add(server);
+    await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected TCP server address');
+
+    const env = {
+      ...process.env,
+      METABOT_HOME: repoRoot,
+      METABOT_URL: `http://127.0.0.1:${address.port}`,
+      API_SECRET: 'cli-adapter-test-value',
+    };
+    const spawned = await execFileAsync(
+      'bash',
+      [
+        'bin/metabot',
+        'teams',
+        'agents',
+        'spawn',
+        'demo',
+        'worker',
+        '--role',
+        'acceptance',
+        '--engine',
+        'claude',
+        '--model',
+        'claude-sonnet-4-6',
+      ],
+      { cwd: repoRoot, env },
+    );
+    const status = await execFileAsync('bash', ['bin/metabot', 'teams', 'status', 'demo', '--summary'], {
+      cwd: repoRoot,
+      env,
+    });
+    const help = await execFileAsync('bash', ['bin/metabot', 'teams', '--help'], { cwd: repoRoot, env });
+
+    expect(JSON.parse(spawned.stdout)).toMatchObject({ model: 'claude-sonnet-4-6' });
+    expect(requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/api/agent-teams/demo/agents',
+    });
+    expect(JSON.parse(requests[0].body)).toMatchObject({
+      name: 'worker',
+      role: 'acceptance',
+      engine: 'claude',
+      model: 'claude-sonnet-4-6',
+    });
+    expect(status.stdout).toContain('worker:idle/claude/claude-sonnet-4-6');
+    expect(help.stdout).toContain('[--model m]');
+  });
+
   it('forwards the scoped capability and never forwards the bridge admin secret', async () => {
     let request:
       | {
