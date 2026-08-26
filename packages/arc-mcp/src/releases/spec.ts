@@ -40,6 +40,10 @@ export const DEFAULT_EXTERNAL_RELEASE_ROLE: ExternalReleaseRole = 'mcp-execution
 export type ExternalReleaseProvenanceClass = 'official' | 'downstream-patched-candidate';
 export const DOWNSTREAM_PATCHED_CANDIDATE = 'downstream-patched-candidate' as const;
 
+/** Machine-checkable behavior claims that a sealed ARC release may carry. */
+export const ARC_RELEASE_ASSURANCE_IDS = ['MCLAW-014'] as const;
+export type ExternalReleaseAssuranceId = (typeof ARC_RELEASE_ASSURANCE_IDS)[number];
+
 /** One commit applied on top of the upstream base, pinned by commit and tree. */
 export interface DownstreamPatchCommit {
   commit: string;
@@ -158,6 +162,14 @@ export interface ExternalReleaseSpec extends ExternalReleaseIdentity {
    * MCP execution pins must match both these hashes and the files on disk.
    */
   driverHashes?: ExternalReleaseDriverHashes;
+  /**
+   * Reviewed behavior claims copied into the append-only release manifest.
+   *
+   * The manifest record is tied to the observed commit, source tree, and patch
+   * series. A downstream consumer can therefore verify exact code evidence
+   * instead of accepting free-form profile prose.
+   */
+  assurances?: readonly ExternalReleaseAssuranceId[];
   /**
    * Set when a later pin replaced this one. Verification still works, so the
    * release remains usable rollback evidence; launching and bounded selection
@@ -344,11 +356,44 @@ export const ARC_HARD_BUDGET_CANDIDATE_SPEC: ExternalReleaseSpec = {
   supersededBy: undefined,
 };
 
+/**
+ * ARC-011 plus the independently reviewed MCLAW-014 bridge contract.
+ *
+ * This remains an explicit official=false candidate. It does not replace the
+ * ordinary hard-budget candidate, because ARC runs that do not use MetaClaw
+ * have no reason to inherit a cross-product acceptance claim.
+ */
+export const ARC_MCLAW014_CANDIDATE_SPEC: ExternalReleaseSpec = {
+  ...ARC_HARD_BUDGET_CANDIDATE_SPEC,
+  revision: 'bd01d84bbe30084fad6fc9b1f39d6a881ae9b92c',
+  sourceTree: '7bf4606974ab50b3c71686f28288e2ca4afc592c',
+  releaseIdSuffix: 'hard-budget-mclaw014',
+  patch: {
+    ...ARC_HARD_BUDGET_CANDIDATE_SPEC.patch!,
+    patchCommits: [
+      ...ARC_HARD_BUDGET_CANDIDATE_SPEC.patch!.patchCommits,
+      {
+        commit: 'bd01d84bbe30084fad6fc9b1f39d6a881ae9b92c',
+        tree: '7bf4606974ab50b3c71686f28288e2ca4afc592c',
+        subject: 'fix(metaclaw): harden ARC bridge sessions (MCLAW-014)',
+      },
+    ],
+    seriesSha256: '6ffebffc277184962a9206f4ddb89cb9c7510a6a0662734cf7a7795d6a86db6b',
+    reason:
+      'ARC-011 hard budget enforcement plus the reviewed MCLAW-014 authenticated side-turn isolation contract. ' +
+      'The branch is not an upstream tag and remains an explicitly labelled downstream-patched candidate.',
+  },
+  assurances: ['MCLAW-014'],
+  supersedes: undefined,
+  supersededBy: undefined,
+};
+
 /** Every spec an operator may name, keyed by the release-CLI argument. */
 export const EXTERNAL_RELEASE_SPECS = {
   'direct-cli': OFFICIAL_RESEARCHCLAW_TAG_SPEC,
   'mcp-execution': OFFICIAL_RESEARCHCLAW_COMPAT_SPEC,
   'hard-budget-candidate': ARC_HARD_BUDGET_CANDIDATE_SPEC,
+  'mclaw014-candidate': ARC_MCLAW014_CANDIDATE_SPEC,
   'mcp-execution-v1': OFFICIAL_RESEARCHCLAW_COMPAT_V1_SPEC,
   'hard-budget-candidate-v1': ARC_HARD_BUDGET_CANDIDATE_V1_SPEC,
 } as const satisfies Record<string, ExternalReleaseSpec>;

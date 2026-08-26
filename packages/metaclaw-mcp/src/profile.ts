@@ -83,6 +83,18 @@ const gateEvidenceSchema = z
   })
   .strict();
 
+const mclaw014ExternalEvidenceSchema = z
+  .object({
+    manifestPath: absolutePath,
+    manifestSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    releaseId: z.string().min(1).max(200),
+    commit: z.string().regex(/^[0-9a-f]{40}$/),
+    sourceTree: z.string().regex(/^[0-9a-f]{40}$/),
+    patchSeriesSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    assuranceSchema: z.literal('metabot.autoresearchclaw.assurance.v1'),
+  })
+  .strict();
+
 export const metaClawProfileSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -184,6 +196,12 @@ export const metaClawProfileSchema = z
         initialSnapshotSha256: z.string().regex(/^[0-9a-f]{64}$/),
       })
       .strict(),
+    externalEvidence: z
+      .object({
+        'MCLAW-014': mclaw014ExternalEvidenceSchema,
+      })
+      .strict()
+      .optional(),
     gates: z.record(z.string(), gateEvidenceSchema).optional(),
   })
   .strict();

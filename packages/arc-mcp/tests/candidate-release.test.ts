@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  ARC_RELEASE_ASSURANCE_VERSION,
   parseReleaseManifest,
   patchSeriesDigest,
   releaseIsOfficial,
@@ -27,6 +28,7 @@ import { resolveSelectorRelease } from '../src/releases/selector.js';
 import {
   ARC_HARD_BUDGET_CANDIDATE_SPEC,
   ARC_HARD_BUDGET_CANDIDATE_V1_SPEC,
+  ARC_MCLAW014_CANDIDATE_SPEC,
   ARC_MCP_PACKAGE,
   ARC_MCP_VERSION,
   EXTERNAL_RELEASE_SPECS,
@@ -50,6 +52,11 @@ const CANDIDATE = {
   releaseIdSuffix: 'hard-budget-test-fixture',
   requiresSealedTrees: false,
   supersedes: undefined,
+  driverHashes: undefined,
+};
+const MCLAW014_CANDIDATE = {
+  ...ARC_MCLAW014_CANDIDATE_SPEC,
+  requiresSealedTrees: false,
   driverHashes: undefined,
 };
 const PATCH = CANDIDATE.patch as DownstreamPatchProvenance;
@@ -80,21 +87,24 @@ function fail(stderr = 'no'): CommandResult {
   return { status: 1, stdout: '', stderr };
 }
 
-function provenanceBlock(overrides: Partial<ExternalReleaseProvenance> = {}): ExternalReleaseProvenance {
+function provenanceBlock(
+  overrides: Partial<ExternalReleaseProvenance> = {},
+  patch: DownstreamPatchProvenance = PATCH,
+): ExternalReleaseProvenance {
   return {
     official: false,
     class: 'downstream-patched-candidate',
     patch_source: PATCH_SOURCE,
     upstream: {
-      repository: PATCH.upstream.repository,
-      tag: PATCH.upstream.tag,
-      tag_commit: PATCH.upstream.tagCommit,
-      base_revision: PATCH.upstream.baseRevision,
-      base_source_tree: PATCH.upstream.baseSourceTree,
+      repository: patch.upstream.repository,
+      tag: patch.upstream.tag,
+      tag_commit: patch.upstream.tagCommit,
+      base_revision: patch.upstream.baseRevision,
+      base_source_tree: patch.upstream.baseSourceTree,
     },
-    patch_commits: PATCH.patchCommits.map((entry) => ({ ...entry })),
-    series_sha256: PATCH.seriesSha256,
-    reason: PATCH.reason,
+    patch_commits: patch.patchCommits.map((entry) => ({ ...entry })),
+    series_sha256: patch.seriesSha256,
+    reason: patch.reason,
     ...overrides,
   };
 }
@@ -125,13 +135,24 @@ function buildRelease(spec = CANDIDATE, overrides: Partial<ExternalReleaseManife
     product: 'AutoResearchClaw',
     state: 'candidate',
     role: 'mcp-execution',
-    ...(patched ? { provenance: provenanceBlock() } : {}),
+    ...(patched ? { provenance: provenanceBlock({}, spec.patch!) } : {}),
+    ...(spec.assurances?.length
+      ? {
+          assurances: spec.assurances.map((id) => ({
+            schema_version: ARC_RELEASE_ASSURANCE_VERSION,
+            id,
+            commit: spec.revision,
+            source_tree: spec.sourceTree!,
+            patch_series_sha256: spec.patch!.seriesSha256,
+          })),
+        }
+      : {}),
     origin: patched ? PATCH_SOURCE : spec.repository,
     base_tag: spec.tag,
-    base_tag_commit: TAG_COMMIT,
+    base_tag_commit: spec.patch?.upstream.tagCommit ?? TAG_COMMIT,
     describe: patched ? 'v0.5.0-48-g8fa6d66' : 'v0.5.0-45-ge2e23c9',
     commit: spec.revision,
-    source_tree: patched ? CANDIDATE_TREE : OFFICIAL_TREE,
+    source_tree: patched ? spec.sourceTree! : OFFICIAL_TREE,
     version: spec.version,
     stage_count: spec.stageCount,
     source_dir: paths.source,
@@ -192,7 +213,7 @@ function candidateGit(overrides: Record<string, CommandResult> = {}, spec = CAND
     'remote get-url origin': ok(patch ? PATCH_SOURCE : spec.repository),
     'rev-parse HEAD': ok(spec.revision),
     'status --porcelain --untracked-files=all': ok(''),
-    'rev-parse HEAD^{tree}': ok(patch ? CANDIDATE_TREE : OFFICIAL_TREE),
+    'rev-parse HEAD^{tree}': ok(patch ? spec.sourceTree! : OFFICIAL_TREE),
   };
   if (patch) {
     defaults[`merge-base --is-ancestor ${base} ${spec.revision}`] = ok();
@@ -234,9 +255,7 @@ describe('candidate identity', () => {
     const id = externalReleaseId(PRODUCTION_CANDIDATE);
     expect(id.startsWith(UNOFFICIAL_RELEASE_ID_PREFIX)).toBe(true);
     expect(id).toBe('unofficial-0.5.0-8fa6d66d1b8f-hard-budget-guard-v2');
-    expect(PRODUCTION_CANDIDATE.supersedes?.releaseId).toBe(
-      'unofficial-0.5.0-8fa6d66d1b8f-hard-budget-guard',
-    );
+    expect(PRODUCTION_CANDIDATE.supersedes?.releaseId).toBe('unofficial-0.5.0-8fa6d66d1b8f-hard-budget-guard');
     // No official release acquires the prefix, and no id collides.
     expect(externalReleaseId(PRODUCTION_OFFICIAL)).toBe('0.5.0-e2e23c93b494-arc-mcp-0.3.0-v2');
     expect(externalReleaseId(OFFICIAL_RESEARCHCLAW_TAG_SPEC)).toBe('0.5.0-12d3fd809fa9');
@@ -269,6 +288,7 @@ describe('candidate identity', () => {
     expect(releaseSpecByName('hard-budget-candidate')).toBe(PRODUCTION_CANDIDATE);
     expect(releaseSpecByName('mcp-execution')).toBe(PRODUCTION_OFFICIAL);
     expect(releaseSpecByName('direct-cli')).toBe(OFFICIAL_RESEARCHCLAW_TAG_SPEC);
+    expect(releaseSpecByName('mclaw014-candidate')).toBe(ARC_MCLAW014_CANDIDATE_SPEC);
     expect(releaseSpecByName('nope')).toBeUndefined();
     // Inherited keys are not releases; resolving them would hand release
     // identity an object with no revision instead of rejecting the name.
@@ -279,9 +299,38 @@ describe('candidate identity', () => {
       'direct-cli',
       'mcp-execution',
       'hard-budget-candidate',
+      'mclaw014-candidate',
       'mcp-execution-v1',
       'hard-budget-candidate-v1',
     ]);
+  });
+
+  it('binds MCLAW-014 to one exact candidate commit, tree, and patch series', () => {
+    const patch = ARC_MCLAW014_CANDIDATE_SPEC.patch!;
+    expect(ARC_MCLAW014_CANDIDATE_SPEC.assurances).toEqual(['MCLAW-014']);
+    expect(patchSeriesDigest(patch.patchCommits)).toBe(patch.seriesSha256);
+    expect(patch.patchCommits).toHaveLength(4);
+    expect(patch.patchCommits.at(-1)).toMatchObject({
+      commit: ARC_MCLAW014_CANDIDATE_SPEC.revision,
+      tree: ARC_MCLAW014_CANDIDATE_SPEC.sourceTree,
+    });
+
+    const layout = buildRelease(ARC_MCLAW014_CANDIDATE_SPEC);
+    const manifest = parseReleaseManifest(layout.manifestPath);
+    expect(manifest.assurances).toEqual([
+      {
+        schema_version: ARC_RELEASE_ASSURANCE_VERSION,
+        id: 'MCLAW-014',
+        commit: ARC_MCLAW014_CANDIDATE_SPEC.revision,
+        source_tree: ARC_MCLAW014_CANDIDATE_SPEC.sourceTree,
+        patch_series_sha256: patch.seriesSha256,
+      },
+    ]);
+
+    const tampered = JSON.parse(readFileSync(layout.manifestPath, 'utf8')) as Record<string, any>;
+    tampered.assurances[0].source_tree = 'f'.repeat(40);
+    writeFileSync(layout.manifestPath, `${JSON.stringify(tampered, null, 2)}\n`, 'utf8');
+    expect(() => parseReleaseManifest(layout.manifestPath)).toThrow(/not tied to the sealed commit/i);
   });
 });
 
@@ -298,9 +347,9 @@ describe('patch series re-derivation', () => {
   });
 
   it('refuses a checkout the upstream base does not lead to', () => {
-    expect(() => run({ [`merge-base --is-ancestor ${PATCH.upstream.baseRevision} ${CANDIDATE.revision}`]: fail() })).toThrow(
-      /ancestry failed/i,
-    );
+    expect(() =>
+      run({ [`merge-base --is-ancestor ${PATCH.upstream.baseRevision} ${CANDIDATE.revision}`]: fail() }),
+    ).toThrow(/ancestry failed/i);
   });
 
   it('refuses an upstream base that is not the tree upstream published', () => {
@@ -404,6 +453,22 @@ describe('sealed provenance block', () => {
 });
 
 describe('candidate runtime pairing', () => {
+  it('re-verifies the MCLAW-014 assurance on every launch', () => {
+    const layout = buildRelease(MCLAW014_CANDIDATE);
+    const result = verifyExternalRuntimePairing(
+      pairingOptions(layout, MCLAW014_CANDIDATE),
+      candidateGit({}, MCLAW014_CANDIDATE),
+    );
+    expect(result.revision).toBe(ARC_MCLAW014_CANDIDATE_SPEC.revision);
+
+    const manifest = JSON.parse(readFileSync(layout.manifestPath, 'utf8')) as Record<string, any>;
+    delete manifest.assurances;
+    writeFileSync(layout.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    expect(() =>
+      verifyExternalRuntimePairing(pairingOptions(layout, MCLAW014_CANDIDATE), candidateGit({}, MCLAW014_CANDIDATE)),
+    ).toThrow(/does not carry the pinned behavior assurances/i);
+  });
+
   it('launches as a verified release that reports it is not official', () => {
     const layout = buildRelease();
     const result = verifyExternalRuntimePairing(pairingOptions(layout), candidateGit());
@@ -417,7 +482,7 @@ describe('candidate runtime pairing', () => {
 
   it('leaves the official release reporting exactly what it always did', () => {
     const layout = buildRelease(OFFICIAL);
-    const result = verifyExternalRuntimePairing(pairingOptions(layout, OFFICIAL), candidateGit({}, OFFICIAL), );
+    const result = verifyExternalRuntimePairing(pairingOptions(layout, OFFICIAL), candidateGit({}, OFFICIAL));
     expect(result.official).toBe(true);
     expect(result.provenance_class).toBe('official');
     expect(result.origin).toBe(OFFICIAL.repository);
@@ -436,7 +501,10 @@ describe('candidate runtime pairing', () => {
   it('refuses a pinned tree the checkout does not have', () => {
     const layout = buildRelease();
     expect(() =>
-      verifyExternalRuntimePairing(pairingOptions(layout), candidateGit({ 'rev-parse HEAD^{tree}': ok('e'.repeat(40)) })),
+      verifyExternalRuntimePairing(
+        pairingOptions(layout),
+        candidateGit({ 'rev-parse HEAD^{tree}': ok('e'.repeat(40)) }),
+      ),
     ).toThrow(/tree mismatch/i);
   });
 

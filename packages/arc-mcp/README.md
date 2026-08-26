@@ -96,6 +96,13 @@ a sealed release and an explicit budget policy.
 Release installation and service startup are operator actions. MCP tools never
 install, select, activate, or mutate a release.
 
+The explicit `mclaw014-candidate` release pin is an `official=false` candidate
+that combines the hard budget guard with the reviewed ARC-to-MetaClaw session
+contract. Its append-only manifest records a `MCLAW-014` assurance tied to the
+exact commit, source tree, and patch-series digest. It is not the direct CLI
+release, does not become the production `current` selector, and is installed
+only from the named local patch source.
+
 ## Contracts and artifacts
 
 - input: `autoresearchclaw.input.v1`

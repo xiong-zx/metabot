@@ -62,9 +62,11 @@ export class MetaClawCostLedger {
         throw new MetaClawError(`Cost policy ${name} must be a positive integer`, 'profile_invalid');
       }
     }
-    mkdirSync(path.dirname(policy.ledgerFile), { recursive: true, mode: 0o700 });
-    if (!existsSync(policy.ledgerFile)) this.write(emptyLedger());
-    this.read();
+    const parent = lstatSync(path.dirname(policy.ledgerFile));
+    if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o777) !== 0o700) {
+      throw new MetaClawError('Cost ledger directory must be a 0700 plain directory', 'profile_invalid');
+    }
+    if (existsSync(policy.ledgerFile)) this.read();
   }
 
   reserve(inputTokens: number, outputTokens: number): CostReservation {
@@ -148,6 +150,7 @@ export class MetaClawCostLedger {
   }
 
   private read(): Ledger {
+    if (!existsSync(this.policy.ledgerFile)) return emptyLedger();
     const info = lstatSync(this.policy.ledgerFile);
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) {
       throw new MetaClawError('Cost ledger must be a 0600 regular non-symlink file', 'profile_invalid');

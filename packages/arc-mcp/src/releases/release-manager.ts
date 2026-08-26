@@ -24,6 +24,7 @@ import {
   type ReleaseImmutabilityRecord,
 } from './immutability.js';
 import {
+  ARC_RELEASE_ASSURANCE_VERSION,
   ARC_RELEASE_MANIFEST_VERSION,
   classifyDriverPairing,
   normalizeRepository,
@@ -528,6 +529,7 @@ export function verifyExternalRuntimePairing(
 
   const manifest = parseReleaseManifest(manifestPath);
   assertProvenanceMatchesSpec(manifest, options.spec);
+  assertAssurancesMatchSpec(manifest, options.spec);
   assertSupersessionMatchesSpec(manifest, options.spec);
   assertPinnedDriverHashes(manifest, options.spec);
   // Sealed as "a human may run this exact tag" is not the same claim as "the
@@ -842,6 +844,7 @@ function manifestFromVerified(
   createdAt: Date,
   immutability: ReleaseImmutabilityRecord | undefined,
 ): ExternalReleaseManifest {
+  const assurances = assuranceRecords(options.spec, verified);
   return {
     schema_version: ARC_RELEASE_MANIFEST_VERSION,
     release_id: externalReleaseId(options.spec),
@@ -864,6 +867,7 @@ function manifestFromVerified(
     // Present only when this call actually sealed the trees, so the manifest
     // never claims an immutability it did not perform.
     ...(immutability ? { immutability } : {}),
+    ...(assurances.length > 0 ? { assurances } : {}),
     // The observed remote, which for a patched candidate is the local staging
     // repository rather than the upstream URL its provenance block records.
     origin: normalizeRepository(options.spec.patch ? verified.origin : options.spec.repository),
@@ -908,6 +912,7 @@ function assertManifestPairing(
 ): void {
   classifyDriverPairing(manifest, options.driverPackage ?? ARC_MCP_PACKAGE, options.driverVersion ?? ARC_MCP_VERSION);
   assertProvenanceMatchesSpec(manifest, options.spec);
+  assertAssurancesMatchSpec(manifest, options.spec);
   assertSupersessionMatchesSpec(manifest, options.spec);
   if (releaseRole(manifest) !== (options.role ?? DEFAULT_EXTERNAL_RELEASE_ROLE)) {
     throw new Error(
@@ -1014,6 +1019,31 @@ function assertProvenanceMatchesSpec(manifest: ExternalReleaseManifest, spec: Ex
     throw new Error(
       `Sealed release ${manifest.release_id} records a different patch series than the pinned candidate spec`,
     );
+  }
+}
+
+function assuranceRecords(
+  spec: ExternalReleaseSpec,
+  verified: Pick<VerifiedRelease, 'revision' | 'sourceTree'>,
+): NonNullable<ExternalReleaseManifest['assurances']> {
+  const ids = spec.assurances ?? [];
+  if (ids.length === 0) return [];
+  if (!spec.patch) throw new Error('Only an explicit downstream candidate may carry release assurances');
+  if (new Set(ids).size !== ids.length) throw new Error('Pinned release assurances must be unique');
+  return ids.map((id) => ({
+    schema_version: ARC_RELEASE_ASSURANCE_VERSION,
+    id,
+    commit: verified.revision,
+    source_tree: verified.sourceTree,
+    patch_series_sha256: spec.patch!.seriesSha256,
+  }));
+}
+
+function assertAssurancesMatchSpec(manifest: ExternalReleaseManifest, spec: ExternalReleaseSpec): void {
+  const expected = spec.assurances ?? [];
+  const actual = manifest.assurances ?? [];
+  if (actual.length !== expected.length || actual.some((entry, index) => entry.id !== expected[index])) {
+    throw new Error(`Sealed release ${manifest.release_id} does not carry the pinned behavior assurances`);
   }
 }
 

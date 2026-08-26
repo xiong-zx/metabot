@@ -36,6 +36,10 @@ def _parser() -> argparse.ArgumentParser:
     profile.add_argument("--port", type=int, required=True, help="loopback port to reserve without binding")
     profile.add_argument("--model", required=True, help="exact pinned model id")
     profile.add_argument("--provider", required=True, help="exact pinned provider id")
+    profile.add_argument(
+        "--arc-manifest",
+        help="absolute sealed ARC manifest carrying the MCLAW-014 assurance",
+    )
 
     profile_doctor = subcommands.add_parser(
         "profile-doctor", help="re-verify release, isolation, permissions, process identity, and rollback"
@@ -70,6 +74,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             port=args.port,
             model_arg=args.model,
             provider_arg=args.provider,
+            arc_manifest_arg=args.arc_manifest,
         )
     if args.command == "profile-doctor":
         return doctor_profile(args.profile, args.manifest)

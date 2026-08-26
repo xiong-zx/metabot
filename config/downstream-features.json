@@ -233,7 +233,7 @@
         "@xvirobotics/metamemory",
         "@xvirobotics/skill-hub"
       ],
-      "reason": "Independent MetaClaw MCP product: every client uses the same metaclaw-mcp command with no MetaBot-issued inbound credential. Five fixed read-or-infer tools enforce the product-owned service bearer, loopback endpoint, exact model/provider, immutable release, isolated profile, and atomic worst-case cost ledger without lifecycle control or coupling to ARC, Worker Runner, or MetaBot.",
+      "reason": "Independent MetaClaw MCP product: every client uses the same metaclaw-mcp command with no MetaBot-issued inbound credential. Five fixed read-or-infer tools enforce the product-owned service bearer, loopback endpoint, exact model/provider, immutable release, isolated profile, atomic worst-case cost ledger, and a read-only digest-bound ARC MCLAW-014 release assurance without importing or controlling ARC, Worker Runner, or MetaBot.",
       "validationSurface": [
         "packages/metaclaw-mcp/tests/server.test.ts",
         "packages/metaclaw-mcp/tests/profile.test.ts",
@@ -250,7 +250,7 @@
     {
       "id": "arc-mcp",
       "status": "required",
-      "reason": "Independent ARC MCP product: every client uses the same arc-mcp command against the product-owned loopback service, protected product bearer, sole SQLite writer, exact project-root scope, sealed release verifier, detached supervisor, HITL bridge, recovery, and provenance manifest. MetaBot is only an optional external MCP client.",
+      "reason": "Independent ARC MCP product: every client uses the same arc-mcp command against the product-owned loopback service, protected product bearer, sole SQLite writer, exact project-root scope, sealed release verifier, detached supervisor, HITL bridge, recovery, and provenance manifest. Explicit official=false candidates may add reviewed behavior assurances tied to the sealed commit, tree, and patch series; MetaBot remains only an optional external MCP client.",
       "validation": "npm run test -w @xvirobotics/arc-mcp; npm run typecheck -w @xvirobotics/arc-mcp; npm run lint -w @xvirobotics/arc-mcp",
       "roots": ["packages/arc-mcp"],
       "importRoots": ["packages/arc-mcp/src"],
@@ -275,7 +275,8 @@
         "packages/arc-mcp/tests/recovery-races.test.ts",
         "packages/arc-mcp/tests/official-supervisor.test.ts",
         "packages/arc-mcp/tests/releases.test.ts",
-        "packages/arc-mcp/tests/provenance.test.ts"
+        "packages/arc-mcp/tests/provenance.test.ts",
+        "packages/arc-mcp/tests/candidate-release.test.ts"
       ]
     },
     {

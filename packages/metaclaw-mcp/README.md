@@ -62,6 +62,16 @@ starts, stops, restarts, repairs, installs, selects, or activates it.
 5. Required upstream security and ARC side-turn gates carry exact evidence tied
    to the sealed release rather than free-form profile claims.
 
+An inactive profile may bind MCLAW-014 by passing the append-only ARC candidate
+manifest to `metaclaw-release profile-create --arc-manifest ...`. The profile
+stores its digest and exact release/commit/tree/series identity; startup and
+every network-capable call re-read the protected manifest and require its
+single machine-readable MCLAW-014 assurance. A hand-written gate string is
+rejected. Binding creates a new inactive profile and does not start either
+product or form provider traffic. Closing MCLAW-014 also leaves MCLAW-015
+mechanically open; profile text cannot authorize the bounded billable-call
+acceptance.
+
 The response must echo the pinned model and provider. Missing or mismatched
 identity is a contract violation. Streaming and upstream cancellation are
 reported as unsupported; a deadline never claims that provider work or cost was

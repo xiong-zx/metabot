@@ -32,10 +32,25 @@ function harness(
 ): Harness {
   const fixture = createFixture(options);
   const service = fakeService(respond);
+  const runtime = acceptMclaw015Fixture(
+    createMetaClawRuntime({ env: fixture.env, fetchImpl: service.fetchImpl }),
+    options,
+  );
   return {
     fixture,
     requests: service.requests,
-    runtime: createMetaClawRuntime({ env: fixture.env, fetchImpl: service.fetchImpl }),
+    runtime,
+  };
+}
+
+/** Exercise downstream inference mechanics without adding a production bypass. */
+function acceptMclaw015Fixture(runtime: MetaClawRuntime, options: FixtureOptions): MetaClawRuntime {
+  if (options.gates?.['MCLAW-015']?.evidence !== '__EXACT_FIXTURE_MCLAW-015__') return runtime;
+  return {
+    ...runtime,
+    gates: runtime.gates.map((gate) => gate.id === 'MCLAW-015'
+      ? { ...gate, satisfied: true, evidence: 'fixture-only bounded acceptance' }
+      : gate),
   };
 }
 
@@ -218,24 +233,29 @@ describe('metaclaw_infer', () => {
       'MCLAW-010',
       'MCLAW-012',
       'MCLAW-014',
+      'MCLAW-015',
     ]);
     expect(requests).toHaveLength(0);
   });
 
-  it('refuses when a gate claims satisfaction with no evidence behind it', async () => {
-    const { runtime } = harness(completion, {
-      gates: {
-        'MCLAW-011': { satisfied: true },
-        'MCLAW-010': { satisfied: true, evidence: '   ' },
-        'MCLAW-012': { satisfied: true, evidence: '__EXACT_FIXTURE_MCLAW-012__' },
-        'MCLAW-014': { satisfied: true, evidence: 'wired' },
-      },
-    });
+  it('refuses startup when MCLAW-014 claims satisfaction without sealed ARC evidence', () => {
+    expect(() =>
+      harness(completion, {
+        gates: {
+          'MCLAW-014': { satisfied: true, evidence: 'wired' },
+        },
+      }),
+    ).toThrow(/MCLAW-014 cannot be satisfied without a sealed ARC evidence manifest/);
+  });
+
+  it('keeps MCLAW-015 mechanically open despite profile text claiming acceptance', async () => {
+    const fixture = createFixture({ gates: ALL_GATES_SATISFIED });
+    const service = fakeService(completion);
+    const runtime = createMetaClawRuntime({ env: fixture.env, fetchImpl: service.fetchImpl });
     const failure = await failureOf(() => runInfer(runtime, { messages: [{ role: 'user', content: 'hi' }] }));
-    expect((failure.details as any).openGates.map((gate: { id: string }) => gate.id)).toEqual([
-      'MCLAW-011',
-      'MCLAW-010',
-    ]);
+
+    expect((failure.details as any).openGates.map((gate: { id: string }) => gate.id)).toEqual(['MCLAW-015']);
+    expect(service.requests).toHaveLength(0);
   });
 
   it('atomically reserves cost before constructing the pinned non-streaming request', async () => {
@@ -306,7 +326,10 @@ describe('metaclaw_infer', () => {
       profileOverrides: (profile) => ({ ...profile, limits: { ...profile.limits, deadlineMs: 20 } }),
     });
     const service = fakeService(() => new Promise<Response>(() => undefined));
-    const runtime = createMetaClawRuntime({ env: fixture.env, fetchImpl: service.fetchImpl });
+    const runtime = acceptMclaw015Fixture(
+      createMetaClawRuntime({ env: fixture.env, fetchImpl: service.fetchImpl }),
+      { gates: ALL_GATES_SATISFIED },
+    );
 
     const failure = await failureOf(() => dispatch(runtime));
     expect(failure.code).toBe('deadline_exceeded');
@@ -390,6 +413,16 @@ describe('managed-state drift', () => {
       (await failureOf(() => runInfer(configDrift.runtime, { messages: [{ role: 'user', content: 'hi' }] }))).code,
     ).toBe('integrity_drift');
     expect(configDrift.requests).toHaveLength(0);
+
+    const arcEvidenceDrift = harness(completion, { gates: ALL_GATES_SATISFIED });
+    const originalArcManifest = readFileSync(arcEvidenceDrift.fixture.arcManifestPath, 'utf8');
+    chmodSync(arcEvidenceDrift.fixture.arcManifestPath, 0o644);
+    writeFileSync(arcEvidenceDrift.fixture.arcManifestPath, `${originalArcManifest} `, { mode: 0o444 });
+    chmodSync(arcEvidenceDrift.fixture.arcManifestPath, 0o444);
+    expect(
+      (await failureOf(() => runInfer(arcEvidenceDrift.runtime, { messages: [{ role: 'user', content: 'hi' }] }))).code,
+    ).toBe('integrity_drift');
+    expect(arcEvidenceDrift.requests).toHaveLength(0);
   });
 
   it('fails status closed when linked superseded evidence changes', async () => {
