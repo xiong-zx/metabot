@@ -12,6 +12,7 @@ import type { Logger } from '../utils/logger.js';
 import type { MemoryClient, FolderTreeNode } from '../memory/memory-client.js';
 import { SyncStore } from './sync-store.js';
 import { markdownToBlocks, batchBlocks, contentHash } from './markdown-to-blocks.js';
+import { SILENT_LARK_REST_LOGGER } from '../feishu/sdk-logger.js';
 
 /** Full document with content (returned by GET /api/documents/:id). */
 export interface FullDocument {
@@ -92,6 +93,7 @@ export class DocSync {
       appId: config.feishuAppId,
       appSecret: config.feishuAppSecret,
       disableTokenCache: false,
+      logger: SILENT_LARK_REST_LOGGER,
     });
     this.store = new SyncStore(config.databaseDir, logger);
     this.throttleMs = config.throttleMs ?? DEFAULT_THROTTLE_MS;

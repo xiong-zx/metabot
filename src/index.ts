@@ -7,6 +7,7 @@ import { createEventDispatcher } from './feishu/event-handler.js';
 import { FeishuGroupReplyModeStore } from './feishu/group-reply-mode-store.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
+import { SILENT_LARK_REST_LOGGER } from './feishu/sdk-logger.js';
 import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
 import { createFeishuRestClient, createFeishuWsClient } from './feishu/client-factory.js';
 import { MessageBridge } from './bridge/message-bridge.js';
@@ -111,6 +112,7 @@ async function startFeishuBot(
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     disableTokenCache: false,
+    logger: SILENT_LARK_REST_LOGGER,
   });
 
   // Fetch bot info to get bot's open_id for accurate @mention detection
@@ -429,6 +431,7 @@ async function main() {
       appId: appConfig.feishuService.appId,
       appSecret: appConfig.feishuService.appSecret,
       disableTokenCache: false,
+      logger: SILENT_LARK_REST_LOGGER,
     });
     logger.info('Feishu service client initialized (for wiki sync & doc reader)');
   }
