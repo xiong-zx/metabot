@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": "user-defaults-2026-08-20.1",
+  "revision": "user-defaults-2026-08-28.1",
   "rules": [
     {
       "schemaVersion": 1,
@@ -18,7 +18,7 @@
         "kind": "config",
         "adapterId": "personal-user-defaults",
         "ref": "config/rulespack/user-defaults.rules.json",
-        "revision": "user-defaults-2026-08-20.1"
+        "revision": "user-defaults-2026-08-28.1"
       },
       "metadata": {
         "approvedBy": "user",
@@ -29,8 +29,8 @@
     {
       "schemaVersion": 1,
       "id": "user.language-defaults",
-      "version": "1.0.0",
-      "text": "Use Chinese when conversing with the user. Write documents in English by default unless the user explicitly requests another language.",
+      "version": "1.1.0",
+      "text": "Use English when conversing with the user and for user-facing deliverables by default. Use another language only when the user explicitly requests it.",
       "scope": "global",
       "targets": {},
       "authority": "user-approved",
@@ -42,13 +42,15 @@
         "kind": "config",
         "adapterId": "personal-user-defaults",
         "ref": "config/rulespack/user-defaults.rules.json",
-        "revision": "user-defaults-2026-08-20.1"
+        "revision": "user-defaults-2026-08-28.1"
       },
       "metadata": {
         "approvedBy": "user",
-        "approvedIn": "admin chat 2026-08-20",
-        "conversationLanguage": "zh",
-        "documentDefaultLanguage": "en"
+        "approvedIn": "admin chat 2026-08-28",
+        "conversationLanguage": "en",
+        "documentDefaultLanguage": "en",
+        "deliverableDefaultLanguage": "en",
+        "supersedesVersion": "1.0.0"
       }
     },
     {
@@ -67,7 +69,7 @@
         "kind": "config",
         "adapterId": "personal-user-defaults",
         "ref": "config/rulespack/user-defaults.rules.json",
-        "revision": "user-defaults-2026-08-20.1"
+        "revision": "user-defaults-2026-08-28.1"
       },
       "metadata": {
         "approvedBy": "user",
